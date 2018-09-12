@@ -258,8 +258,6 @@ if (length(StockSymbols)==0) {
   StockUpDw <- StockUpDw %>% replace(., is.na(.), 0)
   
   #### Iterate through all genarated sets
-  #### tests of branch
-  a<-1
   GeneratedSets$Err <- 0.0
   for (i in 1:nrow(GeneratedSets)){
     #### Set column to predict
