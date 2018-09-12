@@ -6,7 +6,7 @@
 #    The day after, log the real outcome.
 # 4. Keep Open and Close values in order to keep track record of performance.
 
-
+a <- 5
 
 ####
 #### The objective of this script is to identify which symbols are related to others in order to predict the next day variation.
