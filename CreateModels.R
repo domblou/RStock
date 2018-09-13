@@ -282,6 +282,7 @@ if (length(StockSymbols)==0) {
       CombNames <-"(xxxxxxxxxxxxx)"
     }
    
+    ModelFileName <- GeneratedSets[i,1]
     #### Filter predictor column (-1 to remove extra column Err and Model)
     for (j in 2:(ncol(GeneratedSets)-1)){
 
@@ -292,6 +293,9 @@ if (length(StockSymbols)==0) {
           CombNames <- paste(CombNames, "|(",GeneratedSets[i,j],".DAY_MINUS_1_UPDW",")", sep="")
         #}
       }
+      
+      #### Set model file name 
+      ModelFileName <- paste(ModelFileName, GeneratedSets[i,j], sep="-")
     }
    
     predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
@@ -318,19 +322,20 @@ if (length(StockSymbols)==0) {
     # xgb.plot.multi.trees(model = bst, feature_names = predictorNames)
     # xgb.plot.deepness(model = bst)
     
+    #### Predict from the model
     predictions = predict(bst, as.matrix(test[,predictorNames]))
     
+    #### 
     binary_predictions <- as.numeric(predictions > 0.5)
     
+    #### Calculate the percentage of error
     err <- mean(binary_predictions != as.matrix(test[,predictorNames]))
     
     GeneratedSets[i,"Err"] <- err
     
-    as.character(GeneratedSets[2,1:(ncol(GeneratedSets)-1)])
-    
     #### Save the model to file for daily scan
     if (err < keepPredictorUnder) {
-      save(bst, file = paste(ModelsDirectory, "/", GeneratedSets[i,1], ".rda", sep =""))
+      save(bst, file = paste(ModelsDirectory, "/", ModelFileName, ".rda", sep =""))
     }
 
     #print(paste(paste(paste("Symbol: ", GeneratedSets[i,1], collapse=" "), paste(predictorNames, collapse=" ")), paste("Error pct:", err, collapse=" ")))
