@@ -1,11 +1,3 @@
-# TODO : add evaluate mode
-
-# 1. In this mode, only get 2 days of history and only fetch symbols with precision under, say 10%.
-# 2. Do not create the model, instead load it from file.
-# 3. For each sets (using today's values), predict the outcome for tomorrow, and log buy orders only.
-#    The day after, log the real outcome.
-# 4. Keep Open and Close values in order to keep track record of performance.
-
 ####
 #### The objective of this script is to identify which symbols are related to others in order to predict the next day variation.
 #### It iterates through all symbols, finds the right number of observation in order to predict each symbols. Each symbol has 
