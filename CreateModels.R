@@ -53,7 +53,9 @@ testModeMaxSymbols <- 15 #### Only use X symbols
 testModeStockSymbols <- NULL #c("AAAAA","AAV","ABT", "ABX") #### c("AAAA.AAA", "AAV","ABT") or NULL to use StockSymbolsFile
 
 WorkingDirectory <- "/Users/dominicblouin/Documents/R Stock ML project"
-StockSymbolsFile <- "StockSymbolsTMX.csv"
+ModelsDirectory <- "/Users/dominicblouin/Documents/R Stock ML project/Models"
+SymbolsFile <- "Symbols.csv"
+SymbolsToSurveyFile <- "SymbolsToSurvey.csv"
 maxNumberOfSymbolsPerCall <- 1 #### Maximum number of symbols per call (15 for yahoo), SET TO 1 TO HANDLE ERROR PER SYMBOL
 nbDaysHistory <- 365 #### Number of days of historical data
 UPDW_threshold <- 0.005 #### Significative variation, ignore lower than that
@@ -65,15 +67,24 @@ xBoost.max.depth <- 6
 xBoost.eta <- 1 
 xBoost.nthread <- 2 
 xBoost.nround <- 4
-
-#### SetWorkingDirectory
-setwd(WorkingDirectory)
+keepPredictorUnder <- 0.1 #### Predictor to keep for daily scan and for which a model is saved on disk. The lower the better 
+                          #### when dealing with a large number of permutation.
 
 startTime <- Sys.time()
 print(paste("Start time:", startTime))
 
+#### SetWorkingDirectory
+setwd(WorkingDirectory)
+
+#### If directory doesn't exists, create it, else delete files (models) in it
+if (!dir.exists(ModelsDirectory)){
+  dir.create(ModelsDirectory, showWarnings = FALSE)
+} else {
+  do.call(file.remove, list(list.files(ModelsDirectory, full.names = TRUE)))
+}
+
 #### Set symbols to fetch
-StockSymbols <- read.csv(file=StockSymbolsFile, sep=";", header=TRUE, colClasses = "character")$x
+StockSymbols <- read.csv(file=SymbolsFile, sep=";", header=TRUE, colClasses = "character")$x
 
 if (testMode){
   if (length(testModeStockSymbols)==0){
@@ -257,6 +268,7 @@ if (length(StockSymbols)==0) {
   
   #### Iterate through all genarated sets
   GeneratedSets$Err <- 0.0
+  #GeneratedSets$Model <- as.raw(0)
   for (i in 1:nrow(GeneratedSets)){
     #### Set column to predict
     StockUpDw$outcome <- select(StockUpDw, matches(gsub("\\s", "", paste(GeneratedSets[i,1], ".UPDW"))))
@@ -270,13 +282,18 @@ if (length(StockSymbols)==0) {
       CombNames <-"(xxxxxxxxxxxxx)"
     }
    
-    for (j in 2:ncol(GeneratedSets)){
-      #### Filter <NA>
-      if (!is.na(GeneratedSets[i,j])) {
-        #### append symbols
-        CombNames <- paste(CombNames, "|(",GeneratedSets[i,j],".DAY_MINUS_1_UPDW",")", sep="")
+    #### Filter predictor column (-1 to remove extra column Err and Model)
+    for (j in 2:(ncol(GeneratedSets)-1)){
+
+      #### Filter <NA> and outcome column
+      if (!is.na(GeneratedSets[i,j]) & GeneratedSets[i,1] != GeneratedSets[i,j]) {
+        #if(GeneratedSets[i,1] != GeneratedSets[i,j]){
+          #### append symbols
+          CombNames <- paste(CombNames, "|(",GeneratedSets[i,j],".DAY_MINUS_1_UPDW",")", sep="")
+        #}
       }
     }
+   
     predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
   
     set.seed(1234)
@@ -309,8 +326,13 @@ if (length(StockSymbols)==0) {
     
     GeneratedSets[i,"Err"] <- err
     
-
+    as.character(GeneratedSets[2,1:(ncol(GeneratedSets)-1)])
     
+    #### Save the model to file for daily scan
+    if (err < keepPredictorUnder) {
+      save(bst, file = paste(ModelsDirectory, "/", GeneratedSets[i,1], ".rda", sep =""))
+    }
+
     #print(paste(paste(paste("Symbol: ", GeneratedSets[i,1], collapse=" "), paste(predictorNames, collapse=" ")), paste("Error pct:", err, collapse=" ")))
     
     # cv.res <- xgb.cv(data = as.matrix(train[,predictorNames]), 
@@ -323,9 +345,9 @@ if (length(StockSymbols)==0) {
     
   }
   
-  print(tail(arrange(GeneratedSets,desc(Err)), n = 10))
+  print(subset(GeneratedSets, Err < keepPredictorUnder))
   
-  write.csv(GeneratedSets, "Resultat.csv")
+  write.csv(subset(GeneratedSets, Err < keepPredictorUnder), SymbolsToSurveyFile)
 
 }
 

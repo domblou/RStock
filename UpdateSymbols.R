@@ -6,7 +6,7 @@
 library(XML)
 
 #### Parameters
-StockSymbolsFile <- "StockSymbolsTMX.csv"
+StockSymbolsFile <- "Symbols.csv"
 
 Symbols <- NULL
 for (i in LETTERS){
