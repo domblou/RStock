@@ -39,6 +39,9 @@ library(igraph)
 library(DiagrammeR)
 library(arrangements)
 
+#### Load Functions.R
+source("Functions.R")
+
 #### Parameters
 testMode <- TRUE #### Limit the number of symbols according to testModeMaxSymbols
 testModeMaxSymbols <- 15 #### Only use X symbols
@@ -51,6 +54,7 @@ SymbolsToSurveyFile <- "SymbolsToSurvey.csv"
 
 maxNumberOfSymbolsPerCall <- 1 #### Maximum number of symbols per call (15 for yahoo), SET TO 1 TO HANDLE ERROR PER SYMBOL
 nbDaysHistory <- 365 #### Number of days of historical data
+
 UPDW_threshold <- 0.005 #### Significative variation, ignore lower than that
 nbPermutation <- 2 #### Number of permutations to generate (a, b and c with a permutation of 1 would generate a+b, a+c, b+a, b+c, c+a and c+b.
                    #### A permutation of 3 with this set would generate the permutation 2 and a+b+c, a+c+b, c+a+c, b+c+a, c+a+b, and c+b+a)
@@ -90,267 +94,110 @@ if (testMode){
     StockSymbols <- testModeStockSymbols[1:length(testModeStockSymbols)]
   }
 }
+#### Call RStock.GetSymbols wrapper to get stock prices
+StockAndSymbols <- RStock.GetSymbols(StockSymbols)
+Stock <- as.data.frame(StockAndSymbols[1])
+StockSymbols <- StockAndSymbols[[2]]
 
-#### Merge data frame of each stock together
-Stock <- NULL
+#### Get the prepared dataset for prediction
+StockUpDw <- RStock.PrepareDataSet(Stock)
 
-startDate = Sys.Date() - nbDaysHistory
+#### Shuffle the data
+StockUpDw <- StockUpDw[sample(nrow(StockUpDw)),]
 
-# sapply(StockSymbols, function(x){
-#   try(
-#     getSymbols(
-#       x,
-#       from=startDate),
-#     silent=TRUE)
-# 
-#    # try(
-#    #   print(get(x, envir=WoW)),
-#    #   Stock <- cbind(Stock, get(x, envir=WoW)),
-#    #   silent=TRUE)
-# 
-# })
+#### For each symbols, try to predict outcome based on others
+GeneratedSets <- RStock.GenerateSets(StockSymbols, nbPermutation)
 
-ErrorStockSymbols <- NULL
+#### Deal with NAs to each column, TODO, validate the approches... 
+StockUpDw <- StockUpDw %>% replace(., is.na(.), 0)
 
-#### Get symbols info by batch of maxNumberOfSymbolsPerCall
-for (i in 1:ceiling(length(StockSymbols)/maxNumberOfSymbolsPerCall)){
-  if (i > length(StockSymbols)/maxNumberOfSymbolsPerCall){
-    #### last iteration for incomplete maxNumberOfSymbolsPerCall
-    x <- i
-    y <- length(StockSymbols) %% maxNumberOfSymbolsPerCall
-  } else {
-    #### Iterate for full sets of maxNumberOfSymbolsPerCall
-    x <- (i*maxNumberOfSymbolsPerCall)-(maxNumberOfSymbolsPerCall-1)
-    y <- i*maxNumberOfSymbolsPerCall
-  }
+#### Iterate through all genarated sets
+GeneratedSets$Err <- 0.0
+
+#### For each generated set, build a model
+for (i in 1:nrow(GeneratedSets)){
+  #### Set column to predict
+  StockUpDw$outcome <- select(StockUpDw, matches(gsub("\\s", "", paste(GeneratedSets[i,1], ".UPDW"))))
   
-  try(
-    getSymbols(StockSymbols[x:y], from=startDate),
-    silent=TRUE)
-
-  for (j in StockSymbols[x:y]){
-    
-      result <- tryCatch({
-          Stock <- cbind(Stock, get(j))
-          dummy <- "" #### silent the result
-        }, error=function(err) {
-                  return(j)
-        })
-
-      #### Catch symbols that could not be fetch
-      if (result!="") {
-        ErrorStockSymbols = cbind(ErrorStockSymbols, result)
-      }
-    
-      #### Remove the object from environnement
-    try(
-      rm(list=j),
-      silent=TRUE)
-    
+  #### set NAs to 0 TODO, validate the approches...
+  StockUpDw$outcome[is.na(StockUpDw$outcome)] <- 0
+  
+  #### Preparation to filter the column names for the generatedSet
+  CombNames <- useDateInfoToPredict
+  if (CombNames=="") {
+    CombNames <-"(xxxxxxxxxxxxx)"
   }
+ 
+  ModelFileName <- GeneratedSets[i,1]
+  #### Filter predictor column (-1 to remove extra column Err and Model)
+  for (j in 2:(ncol(GeneratedSets)-1)){
+
+    #### Filter <NA> and outcome column
+    if (!is.na(GeneratedSets[i,j]) & GeneratedSets[i,1] != GeneratedSets[i,j]) {
+      #### append symbols
+      CombNames <- paste(CombNames, "|(",GeneratedSets[i,j],".DAY_MINUS_1_UPDW",")", sep="")
+    }
+    
+    #### Set model file name 
+    ModelFileName <- paste(ModelFileName, GeneratedSets[i,j], sep="-")
+  }
+ 
+  predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
+
+  set.seed(1234)
+  split <- sample(nrow(StockUpDw), floor(0.7*nrow(StockUpDw)))
+  train <-StockUpDw[split,]
+  test <- StockUpDw[-split,]
+  
+  bst <- xgboost(data = as.matrix(train[,predictorNames]), 
+                 label = as.matrix(train$outcome), 
+                 verbose = 0,
+                 max.depth = xBoost.max.depth,
+                 eta = xBoost.eta, 
+                 nthread = xBoost.nthread, 
+                 nround = xBoost.nround,
+                 objective = "binary:logistic",
+                 missing = NA)
+  
+  # importance_matrix <- xgb.importance(predictorNames, model = bst)
+  # 
+  # xgb.plot.importance(importance_matrix)
+  # xgb.plot.tree(feature_names = predictorNames, model = bst)
+  # xgb.plot.multi.trees(model = bst, feature_names = predictorNames)
+  # xgb.plot.deepness(model = bst)
+  
+  #### Predict from the model
+  predictions = predict(bst, as.matrix(test[,predictorNames]))
+  
+  #### 
+  binary_predictions <- as.numeric(predictions > 0.5)
+  
+  #### Calculate the percentage of error
+  err <- mean(binary_predictions != as.matrix(test[,predictorNames]))
+  
+  GeneratedSets[i,"Err"] <- err
+  
+  #### Save the model to file for daily scan
+  if (err < keepPredictorUnder) {
+    save(bst, file = paste(ModelsDirectory, "/", ModelFileName, ".rda", sep =""))
+  }
+
+  #print(paste(paste(paste("Symbol: ", GeneratedSets[i,1], collapse=" "), paste(predictorNames, collapse=" ")), paste("Error pct:", err, collapse=" ")))
+  
+  # cv.res <- xgb.cv(data = as.matrix(train[,predictorNames]), 
+  #                  label = as.matrix(train$outcome), 
+  #                  nfold = 5,
+  #                  nrounds = 20, 
+  #                  objective = "binary:logistic",
+  #                  early_stopping_rounds = 10, 
+  #                  maximize = FALSE)
+  
 }
 
-#### Filter StockSymbols to remove unfetched symbols
-if (!is.null(ErrorStockSymbols)) {
-  StockSymbols <- StockSymbols[!grepl(paste(ErrorStockSymbols, collapse="|"), StockSymbols)]
-}
+print(subset(GeneratedSets, Err < keepPredictorUnder))
 
-#### Stop execution when no symbols fetched
-if (length(StockSymbols)==0) {
-  stop("No symbols fetched")
-} else {
-  
-  Stock <- data.frame(as.xts(Stock))
-  
-  Stock <- xts(Stock,order.by=as.Date(rownames(Stock)))
-  Stock <- as.data.frame(Stock)
-  
-  #### Only select Open and Close column
-  StockOpClUpDw <- cbind(select(Stock, ends_with(".Open")), select(Stock, ends_with(".Close")))
-  
-  #### Iterate through all symbols and add OPCL and UDDW (flag)
-  for (i in StockSymbols){
-  
-    opcl <- 1 - select(Stock, matches(gsub("\\s", "", paste(i, ".Open")))) / select(Stock, matches(gsub("\\s", "", paste(i, ".Close"))))
-    colnames(opcl) <- gsub("\\s", "", paste(i, ".OPCL"))
-  
-    StockOpClUpDw <- cbind(StockOpClUpDw, opcl)
-    
-    updw <- ifelse(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))) >= UPDW_threshold, 1, 0)
-    colnames(updw) <- gsub("\\s", "", paste(i, ".UPDW"))
-    
-    StockOpClUpDw <- cbind(StockOpClUpDw, updw)
-    
-    opcl_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))),1)
-    colnames(opcl_minus_1) <- gsub("\\s", "", paste(i, ".DAY_MINUS_1_OPCL"))
-    
-    StockOpClUpDw <- cbind(StockOpClUpDw, opcl_minus_1)
-    
-    updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),1)
-    colnames(updw_minus_1) <- gsub("\\s", "", paste(i, ".DAY_MINUS_1_UPDW"))
-    
-    StockOpClUpDw <- cbind(StockOpClUpDw, updw_minus_1)  
-  }
-  
-  #### Remove Stock from environnement
-  rm(list="Stock")
-  
-  #### Filter to keep only OPL and UDDW columns
-  StockOpClUpDw <- cbind(select(StockOpClUpDw, ends_with("OPCL")), select(StockOpClUpDw, ends_with("UPDW")))
-  
-  #### Reorder Columns
-  StockOpClUpDw <- StockOpClUpDw[,order(names(StockOpClUpDw))]
-  
-  #### Remove OPCL for the first attemp at predicting (want to try predicting UPDW first, then may be categorize UPDW increment)
-  StockUpDw <- select(StockOpClUpDw, ends_with("UPDW"))
-  
-  #### Cast date to date type and sort
-  StockUpDw$date <- as.Date(row.names(StockUpDw))
-  StockUpDw <- StockUpDw[order(as.Date(StockUpDw$date, "%m/%d/%Y"), decreasing = TRUE),]
-  
-  #### Add significant date elements to the data frame
-  StockUpDw$wday <- as.POSIXlt(StockUpDw$date)$wday
-  StockUpDw$yday <- as.POSIXlt(StockUpDw$date)$yday
-  StockUpDw$mon <- as.POSIXlt(StockUpDw$date)$mon
-  
-  #### Remove first rows with NAs
-  StockUpDw <- StockUpDw[1:nrow(StockUpDw)-1,]
-  
-  #### Remove Date column
-  StockUpDw <- subset(StockUpDw, select=-c(date))
-  
-  #### Shuffle the data
-  StockUpDw <- StockUpDw[sample(nrow(StockUpDw)),]
-  
-  #### For each symbols, try to predict outcome based on others
-  ####
-  #### IMPROVEMENT : 1- Find the right symbols to predict outcome (for instance only 3 might be better than all).
-  ####                  For this, we need to save the setting for all symbols to predict.
-  ####
-  
-  #### Warning when nbPermutation is greater than then number of symbols
-  if (nbPermutation>=length(StockSymbols)){
-    stop("The number of permutation must be lower than the number of symbols")
-    
-  } else {
-    for (j in 1:nbPermutation){
-      if (j == 1){
-        #### Generate pertumations instead of combinaison in order to have firts level combinaison a compared to b, b compared to a, etc.
-        GeneratedSets <- as.data.frame(permutations(StockSymbols, 2))
-        colnamesSet <- c("V0","V1")
-        colnames(GeneratedSets) <- colnamesSet
-      } else {
-        #### Generate combinaison for each symbols (generate b+c for a, a+c for b and a+b for c, do not c+b for a... since it the same)
-        
-        #### Add a third column to normalize de data frame and rename it so that it fits the next data frame
-        GeneratedSets[,j+1] <- NA
-        colnamesSet <- append(colnamesSet, c(paste("V",j, sep="")))
-        colnames(GeneratedSets) <- colnamesSet
-        
-        for (i in StockSymbols){
-          Symbol <- as.data.frame(i)
-          colnames(Symbol) <- "V0"
-          Combs <- as.data.frame(combinations(StockSymbols[StockSymbols!=i], j))
-          Combs <- cbind(Symbol, Combs)
-          GeneratedSets <- rbind(GeneratedSets,Combs)
-        }
-        
-      }
-    }
-  }
-  
-  #### Deal with NAs to each column, TODO, validate the approches... 
-  StockUpDw <- StockUpDw %>% replace(., is.na(.), 0)
-  
-  #### Iterate through all genarated sets
-  GeneratedSets$Err <- 0.0
-  #GeneratedSets$Model <- as.raw(0)
-  for (i in 1:nrow(GeneratedSets)){
-    #### Set column to predict
-    StockUpDw$outcome <- select(StockUpDw, matches(gsub("\\s", "", paste(GeneratedSets[i,1], ".UPDW"))))
-    
-    #### set NAs to 0 TODO, validate the approches...
-    StockUpDw$outcome[is.na(StockUpDw$outcome)] <- 0
-    
-    #### Preparation to filter the column names for the generatedSet
-    CombNames <- useDateInfoToPredict
-    if (CombNames=="") {
-      CombNames <-"(xxxxxxxxxxxxx)"
-    }
-   
-    ModelFileName <- GeneratedSets[i,1]
-    #### Filter predictor column (-1 to remove extra column Err and Model)
-    for (j in 2:(ncol(GeneratedSets)-1)){
+write.csv(subset(GeneratedSets, Err < keepPredictorUnder), SymbolsToSurveyFile)
 
-      #### Filter <NA> and outcome column
-      if (!is.na(GeneratedSets[i,j]) & GeneratedSets[i,1] != GeneratedSets[i,j]) {
-        #if(GeneratedSets[i,1] != GeneratedSets[i,j]){
-          #### append symbols
-          CombNames <- paste(CombNames, "|(",GeneratedSets[i,j],".DAY_MINUS_1_UPDW",")", sep="")
-        #}
-      }
-      
-      #### Set model file name 
-      ModelFileName <- paste(ModelFileName, GeneratedSets[i,j], sep="-")
-    }
-   
-    predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
-  
-    set.seed(1234)
-    split <- sample(nrow(StockUpDw), floor(0.7*nrow(StockUpDw)))
-    train <-StockUpDw[split,]
-    test <- StockUpDw[-split,]
-    
-    bst <- xgboost(data = as.matrix(train[,predictorNames]), 
-                   label = as.matrix(train$outcome), 
-                   verbose = 0,
-                   max.depth = xBoost.max.depth,
-                   eta = xBoost.eta, 
-                   nthread = xBoost.nthread, 
-                   nround = xBoost.nround,
-                   objective = "binary:logistic",
-                   missing = NA)
-    
-    # importance_matrix <- xgb.importance(predictorNames, model = bst)
-    # 
-    # xgb.plot.importance(importance_matrix)
-    # xgb.plot.tree(feature_names = predictorNames, model = bst)
-    # xgb.plot.multi.trees(model = bst, feature_names = predictorNames)
-    # xgb.plot.deepness(model = bst)
-    
-    #### Predict from the model
-    predictions = predict(bst, as.matrix(test[,predictorNames]))
-    
-    #### 
-    binary_predictions <- as.numeric(predictions > 0.5)
-    
-    #### Calculate the percentage of error
-    err <- mean(binary_predictions != as.matrix(test[,predictorNames]))
-    
-    GeneratedSets[i,"Err"] <- err
-    
-    #### Save the model to file for daily scan
-    if (err < keepPredictorUnder) {
-      save(bst, file = paste(ModelsDirectory, "/", ModelFileName, ".rda", sep =""))
-    }
-
-    #print(paste(paste(paste("Symbol: ", GeneratedSets[i,1], collapse=" "), paste(predictorNames, collapse=" ")), paste("Error pct:", err, collapse=" ")))
-    
-    # cv.res <- xgb.cv(data = as.matrix(train[,predictorNames]), 
-    #                  label = as.matrix(train$outcome), 
-    #                  nfold = 5,
-    #                  nrounds = 20, 
-    #                  objective = "binary:logistic",
-    #                  early_stopping_rounds = 10, 
-    #                  maximize = FALSE)
-    
-  }
-  
-  print(subset(GeneratedSets, Err < keepPredictorUnder))
-  
-  write.csv(subset(GeneratedSets, Err < keepPredictorUnder), SymbolsToSurveyFile)
-
-}
 
 # library(pROC)
 # auc <- roc(test$outcome, predictions)
