@@ -170,7 +170,7 @@ for (i in 1:nrow(GeneratedSets)){
   predictions = predict(bst, as.matrix(test[,predictorNames]))
   
   #### 
-  binary_predictions <- as.numeric(predictions > 0.5)
+  binary_predictions <- as.numeric(predictions > 0.5) 
   
   #### Calculate the percentage of error
   err <- mean(binary_predictions != as.matrix(test[,predictorNames]))

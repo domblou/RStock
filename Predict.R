@@ -78,6 +78,12 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
   }
   
   predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
+  
+  #### Predict from the model
+  predictions = predict(bst, as.matrix(StockUpDw[rowToPredict,predictorNames]))
+  
+  #### 
+  binary_predictions <- as.numeric(predictions > 0.5)
 }
 
 endTime <- Sys.time()
