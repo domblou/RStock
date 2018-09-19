@@ -39,36 +39,9 @@ library(igraph)
 library(DiagrammeR)
 library(arrangements)
 
-#### Load Functions.R
+#### Load R files of RStock
+source("Settings.R")
 source("Functions.R")
-
-#### Parameters
-testMode <- TRUE #### Limit the number of symbols according to testModeMaxSymbols
-testModeMaxSymbols <- 15 #### Only use X symbols
-testModeStockSymbols <- NULL #c("AAAAA","AAV","ABT", "ABX") #### c("AAAA.AAA", "AAV","ABT") or NULL to use StockSymbolsFile
-
-WorkingDirectory <- "/Users/dominicblouin/Documents/R Stock ML project"
-ModelsDirectory <- "/Users/dominicblouin/Documents/R Stock ML project/Models"
-SymbolsFile <- "Symbols.csv"
-SymbolsToSurveyFile <- "SymbolsToSurvey.csv"
-
-maxNumberOfSymbolsPerCall <- 1 #### Maximum number of symbols per call (15 for yahoo), SET TO 1 TO HANDLE ERROR PER SYMBOL
-nbDaysHistory <- 365 #### Number of days of historical data
-
-UPDW_threshold <- 0.005 #### Significative variation, ignore lower than that
-nbPermutation <- 2 #### Number of permutations to generate (a, b and c with a permutation of 1 would generate a+b, a+c, b+a, b+c, c+a and c+b.
-                   #### A permutation of 3 with this set would generate the permutation 2 and a+b+c, a+c+b, c+a+c, b+c+a, c+a+b, and c+b+a)
-                   #### Max 4 to get things under control (meaning sets of 2 to 5).
-useDateInfoToPredict <- "" #### set the regex to "(wday|yday|mon)|" in order to use date info to predict
-
-#### xBoost parameter to calibrate the models
-xBoost.max.depth <- 6
-xBoost.eta <- 1 
-xBoost.nthread <- 2 
-xBoost.nround <- 4
-
-keepPredictorUnder <- 0.1 #### Predictor to keep for daily survey, also indicating which a model must be saved on disk. The lower the better 
-                          #### when dealing with a large number of permutation.
 
 startTime <- Sys.time()
 print(paste("Start time:", startTime))
@@ -94,6 +67,7 @@ if (testMode){
     StockSymbols <- testModeStockSymbols[1:length(testModeStockSymbols)]
   }
 }
+
 #### Call RStock.GetSymbols wrapper to get stock prices
 StockAndSymbols <- RStock.GetSymbols(StockSymbols)
 Stock <- as.data.frame(StockAndSymbols[1])
@@ -180,6 +154,7 @@ for (i in 1:nrow(GeneratedSets)){
   #### Save the model to file for daily scan
   if (err < keepPredictorUnder) {
     save(bst, file = paste(ModelsDirectory, "/", ModelFileName, ".rda", sep =""))
+    rm(bst)
   }
 
   #print(paste(paste(paste("Symbol: ", GeneratedSets[i,1], collapse=" "), paste(predictorNames, collapse=" ")), paste("Error pct:", err, collapse=" ")))

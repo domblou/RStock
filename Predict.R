@@ -13,21 +13,14 @@
 #### Remove object from environnement 
 rm(list=ls())
 
-
 #### Load libraries
 library(data.table)
 library(dplyr)
+library(stringr)
 
-#### Load Functions.R
+#### Load R files of RStock
+source("Settings.R")
 source("Functions.R")
-
-#### Parameters
-WorkingDirectory <- "/Users/dominicblouin/Documents/R Stock ML project"
-ModelsDirectory <- "/Users/dominicblouin/Documents/R Stock ML project/Models"
-SymbolsFile <- "Symbols.csv"
-SymbolsToSurveyFile <- "SymbolsToSurvey.csv"
-
-useDateInfoToPredict <- "" #### set the regex to "(wday|yday|mon)|" in order to use date info to predict
 
 startTime <- Sys.time()
 print(paste("Start time:", startTime))
@@ -50,40 +43,64 @@ for (i in 2:ncol(SymbolsToSurvey)){
 StockSymbols <- as.character(unique(StockSymbols %>% dplyr::filter(V0 != "<NA>"))[[1]])
 
 #### Call RStock.GetSymbols wrapper to get stock prices
-StockAndSymbols <- RStock.GetSymbols(StockSymbols, nbDaysHistory=1)
+StockAndSymbols <- RStock.GetSymbols(StockSymbols, nbDaysHistory=nbDaysHistoryPredict)
 Stock <- as.data.frame(StockAndSymbols[1])
 StockSymbols <- StockAndSymbols[[2]]
 
 #### Get the prepared dataset
 StockUpDw <- RStock.PrepareDataSet(Stock)
 
+#### Only take the last to day (done like that to reuse RStock.PrepareDateSet. Otherwize just create an other function) 
+StockUpDw <- head(RStock.PrepareDataSet(Stock),1)
+
+#### Remove UPDW columns and rename to DAY_MINUS_1_UPDW
+StockUpDw2 <- StockUpDw[,-which(names(StockUpDw) %like% c("DAY_MINUS_1_UPDW"))]
+StockUpDw2 %>% 
+  rename_at(.vars = vars(ends_with(".UPDW")),
+            .funs = funs(sub("[.]UPDW$", ".DAY_MINUS_1_UPDW", .)))
+
 for (i in list.files(ModelsDirectory, full.names = FALSE)){
-  print(as.data.frame(strsplit(i, "-")[[1]]), stringAsFactor=FALSE)
   
+  print(paste("Model :", i))
+  
+  SplitedSymbols <- strsplit(str_sub(i, 1, str_length(i)-4), "-")[[1]]
+  SplitedSymbols <- SplitedSymbols[SplitedSymbols!="NA"]
+  
+  GeneratedSets <- t(as.data.frame(SplitedSymbols, stringAsFactor=FALSE))
+
   #### Preparation to filter the column names for the generatedSet
   CombNames <- useDateInfoToPredict
   if (CombNames=="") {
-    CombNames <-"(xxxxxxxxxxxxx)"
-  }
-  
-  ModelFileName <- GeneratedSets[i,1]
+     CombNames <-"(xxxxxxxxxxxxx)"
+   }
+   
   #### Filter predictor column (-1 to remove extra column Err and Model)
-  for (j in 2:(ncol(GeneratedSets)-1)){
+  for (j in 1:ncol(GeneratedSets)){
     
     #### Filter <NA> and outcome column
-    if (!is.na(GeneratedSets[i,j]) & GeneratedSets[i,1] != GeneratedSets[i,j]) {
-      #### append symbols
-      CombNames <- paste(CombNames, "|(",GeneratedSets[i,j],".DAY_MINUS_1_UPDW",")", sep="")
+    if (!is.na(GeneratedSets[1,j]) & GeneratedSets[1,1] != GeneratedSets[1,j]) {
+      #### append symbols. Use current day value (not previous day like when we are creating models)
+      CombNames <- paste(CombNames, "|(",GeneratedSets[1,j],".DAY_MINUS_1_UPDW",")", sep="")
     }
   }
   
+  #### Load the saved model
+  load(paste(ModelsDirectory, "/", i, sep =""))
+  
   predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
   
-  #### Predict from the model
-  predictions = predict(bst, as.matrix(StockUpDw[rowToPredict,predictorNames]))
+  #### If symbols were correctly fetch and columns have been found, predict
+  if (length(predictorNames) > 0) {
+    #### Predict from the model
+    predictions = predict(bst, as.matrix(StockUpDw[1,predictorNames]))
+    
+    #### Calculate de binary prediction (0 or 1, with 1 being positive)
+    binary_predictions <- as.numeric(predictions > 0.5)
+
+  }
   
-  #### 
-  binary_predictions <- as.numeric(predictions > 0.5)
+  rm(bst)
+
 }
 
 endTime <- Sys.time()

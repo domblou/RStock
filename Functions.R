@@ -2,12 +2,18 @@
 #### This script contains the function of the project
 ####
 
-RStock.GetSymbols <- function(StockSymbols, maxNumberOfSymbolsPerCall=1, nbDaysHistory=365) {
+#### Load R files of RStock
+source("Settings.R")
+
+RStock.GetSymbols <- function(StockSymbols, maxNumberOfSymbolsPerCall=1, nbDaysHistory=nbDaysHistoryModel) {
   
   #### Load libraries
   library(xts)
   
   startDate = Sys.Date() - nbDaysHistory
+  
+  #print(paste("nbDaysHistory", nbDaysHistory, sep = " "))
+  #print(paste("startDate", startDate, sep = " "))
   
   # sapply(StockSymbols, function(x){
   #   try(
@@ -69,12 +75,15 @@ RStock.GetSymbols <- function(StockSymbols, maxNumberOfSymbolsPerCall=1, nbDaysH
     StockSymbols <- StockSymbols[!grepl(paste(ErrorStockSymbols, collapse="|"), StockSymbols)]
   }
 
-  print(StockSymbols)
-  print(data.frame(as.xts(Stock)))
+  #print(StockSymbols)
+  #print(data.frame(as.xts(Stock)))
   list(data.frame(as.xts(Stock)),StockSymbols)
   
 }
 
+#### 
+#### Function to prepare data set in order to create models and predict
+####
 RStock.PrepareDataSet <- function(Stock) {
   
   Stock <- data.frame(as.xts(Stock))
@@ -98,12 +107,37 @@ RStock.PrepareDataSet <- function(Stock) {
     
     StockOpClUpDw <- cbind(StockOpClUpDw, updw)
     
+    #### TODO : Adjust to take into account days off (weekends and public holidays)
     opcl_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))),1)
+    if (is.null(opcl_minus_1)) {
+      opcl_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))),2)
+    } 
+    if (is.null(opcl_minus_1)) {
+      opcl_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))),3)
+    }
+    if (is.null(opcl_minus_1)) {
+      opcl_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))),4)
+    }
+    if (is.null(opcl_minus_1)) {
+      opcl_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".OPCL")))),5)
+    }
     colnames(opcl_minus_1) <- gsub("\\s", "", paste(i, ".DAY_MINUS_1_OPCL"))
     
     StockOpClUpDw <- cbind(StockOpClUpDw, opcl_minus_1)
     
     updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),1)
+    if (is.null(updw_minus_1)) {
+      updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),2)
+    } 
+    if (is.null(updw_minus_1)) {
+      updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),3)
+    }
+    if (is.null(updw_minus_1)) {
+      updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),4)
+    }
+    if (is.null(updw_minus_1)) {
+      updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),5)
+    }
     colnames(updw_minus_1) <- gsub("\\s", "", paste(i, ".DAY_MINUS_1_UPDW"))
     
     StockOpClUpDw <- cbind(StockOpClUpDw, updw_minus_1)  
@@ -144,7 +178,9 @@ RStock.PrepareDataSet <- function(Stock) {
   
 }
 
-
+####
+#### Function to generate sets in order to create models (combinaisons and permutations)
+####
 RStock.GenerateSets <- function(StockSymbols, nbPermutation = 1) {
 
   #### Warning when nbPermutation is greater than then number of symbols
@@ -159,7 +195,7 @@ RStock.GenerateSets <- function(StockSymbols, nbPermutation = 1) {
         colnamesSet <- c("V0","V1")
         colnames(GeneratedSets) <- colnamesSet
       } else {
-        #### Generate combinaison for each symbols (generate b+c for a, a+c for b and a+b for c, do not c+b for a... since it the same)
+        #### Generate combinaison for each symbols (generate b+c for a, a+c for b and a+b for c, but not c+b for a... since it the same)
         
         #### Add a third column to normalize de data frame and rename it so that it fits the next data frame
         GeneratedSets[,j+1] <- NA

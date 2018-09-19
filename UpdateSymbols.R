@@ -4,15 +4,21 @@
 
 #### Get symbols from http://eoddata.com/stocklist/TSX/A.htm
 library(XML)
+library(quantmod)
 
 #### Parameters
 StockSymbolsFile <- "Symbols.csv"
 
-Symbols <- NULL
-for (i in LETTERS){
-  
-  url = paste("http://eoddata.com/stocklist/TSX/", i, ".htm", sep = "")
-  Symbols = append(Symbols, readHTMLTable(url, header=F, which=6, stringsAsFactors=F)[,1])
-}
+# Symbols <- NULL
+# for (i in LETTERS){
+#   
+#   url = paste("http://eoddata.com/stocklist/TSX/", i, ".htm", sep = "")
+#   Symbols = append(Symbols, readHTMLTable(url, header=F, which=6, stringsAsFactors=F)[,1])
+# }
+# 
+# write.csv(Symbols[2:length(Symbols)], StockSymbolsFile, row.names = FALSE)
 
-write.csv(Symbols[2:length(Symbols)], StockSymbolsFile, row.names = FALSE)
+symbols <- stockSymbols()
+symbols <- symbols[,1]
+
+write.csv(symbols, StockSymbolsFile, row.names = FALSE)
