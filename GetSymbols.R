@@ -6,8 +6,8 @@
 library(XML)
 library(quantmod)
 
-#### Parameters
-StockSymbolsFile <- "Symbols.csv"
+#### Load R files of RStock
+source("Settings.R")
 
 # Symbols <- NULL
 # for (i in LETTERS){
@@ -21,4 +21,4 @@ StockSymbolsFile <- "Symbols.csv"
 symbols <- stockSymbols()
 symbols <- symbols[,1]
 
-write.csv(symbols, StockSymbolsFile, row.names = FALSE)
+write.csv(symbols, SymbolsFile, row.names = FALSE)

@@ -54,20 +54,48 @@ StockUpDw <- RStock.PrepareDataSet(Stock)
 StockUpDw <- head(RStock.PrepareDataSet(Stock),1)
 
 #### Remove UPDW columns and rename to DAY_MINUS_1_UPDW
-StockUpDw2 <- StockUpDw[,-which(names(StockUpDw) %like% c("DAY_MINUS_1_UPDW"))]
-StockUpDw2 %>% 
+StockUpDw <- StockUpDw[,-which(names(StockUpDw) %like% c("DAY_MINUS_1_UPDW"))]
+StockUpDw <- StockUpDw %>% 
   rename_at(.vars = vars(ends_with(".UPDW")),
             .funs = funs(sub("[.]UPDW$", ".DAY_MINUS_1_UPDW", .)))
 
+
+flag <- 1
 for (i in list.files(ModelsDirectory, full.names = FALSE)){
-  
-  print(paste("Model :", i))
+
+#i <- list.files(ModelsDirectory, full.names = FALSE)[1]
+  colnamesSet <- c()
   
   SplitedSymbols <- strsplit(str_sub(i, 1, str_length(i)-4), "-")[[1]]
   SplitedSymbols <- SplitedSymbols[SplitedSymbols!="NA"]
   
-  GeneratedSets <- t(as.data.frame(SplitedSymbols, stringAsFactor=FALSE))
+  Set <- as.data.frame(t(as.data.frame(strsplit(str_sub(i, 1, str_length(i)-4), "-")[[1]])))
+  
+  for (j in 1:(nbPermutation+1)){
+    if  (j==1) {
+      colnamesSet <- append(colnamesSet, c("Observation"))
+    } else {
+      colnamesSet <- append(colnamesSet, c(paste("Feature",j-1, sep="")))
+    }
+  }
+  colnames(Set) <- colnamesSet
+  #rownames(Set) <- rownames(StockUpDw[1,])
 
+  Set$Date <- as.Date.character(rownames(StockUpDw[1,]))
+  Set$Set <- str_sub(i, 1, str_length(i)-4)
+  
+  #### Order columns
+  Set <- Set[c(c("Date", "Set"), colnamesSet)]
+  
+  Set$BinaryPrediction <- 0
+  
+  if (flag==1) {
+    Sets <- Set[1,-which(1!=1)]
+  }
+  flag <- 0
+  
+  GeneratedSets <- t(as.data.frame(SplitedSymbols, stringAsFactor=FALSE))
+  
   #### Preparation to filter the column names for the generatedSet
   CombNames <- useDateInfoToPredict
   if (CombNames=="") {
@@ -96,11 +124,20 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
     
     #### Calculate de binary prediction (0 or 1, with 1 being positive)
     binary_predictions <- as.numeric(predictions > 0.5)
+    
+    Set[1,"BinaryPrediction"] <- binary_predictions
 
+    Sets <- rbind(Sets, Set)
   }
   
   rm(bst)
 
+}
+
+if(file.exists(PredictionResultFile)){
+  write.table(Sets, PredictionResultFile, append=T, row.names=F, col.names=F, sep = ",")
+} else {
+  write.csv(Sets, PredictionResultFile, row.names=F)
 }
 
 endTime <- Sys.time()

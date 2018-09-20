@@ -8,9 +8,10 @@ testModeMaxSymbols <- 15 #### Only use X symbols
 testModeStockSymbols <- NULL #c("AAAAA","AAV","ABT", "ABX") #### c("AAAA.AAA", "AAV","ABT") or NULL to use StockSymbolsFile
 
 WorkingDirectory <- "/Users/dominicblouin/Documents/R Stock ML project"
-ModelsDirectory <- "/Users/dominicblouin/Documents/R Stock ML project/Models"
+ModelsDirectory <- "./Models"
 SymbolsFile <- "Symbols.csv"
 SymbolsToSurveyFile <- "SymbolsToSurvey.csv"
+PredictionResultFile <- "Prediction.csv"
 
 maxNumberOfSymbolsPerCall <- 1 #### Maximum number of symbols per call (15 for yahoo), SET TO 1 TO HANDLE ERROR PER SYMBOL
 nbDaysHistoryModel <- 365 #### Number of days of historical data
