@@ -12,6 +12,7 @@ ModelsDirectory <- "./Models"
 SymbolsFile <- "Symbols.csv"
 SymbolsToSurveyFile <- "SymbolsToSurvey.csv"
 PredictionResultFile <- "Prediction.csv"
+SymbolsHistoryFile <- "SymbolsHistory.csv"
 
 maxNumberOfSymbolsPerCall <- 1 #### Maximum number of symbols per call (15 for yahoo), SET TO 1 TO HANDLE ERROR PER SYMBOL
 nbDaysHistoryModel <- 365 #### Number of days of historical data

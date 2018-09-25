@@ -42,6 +42,15 @@ for (i in 2:ncol(SymbolsToSurvey)){
 #### Extract unique symbols to fetch for daily survey
 StockSymbols <- as.character(unique(StockSymbols %>% dplyr::filter(V0 != "<NA>"))[[1]])
 
+#### Get the last days the stock prices were downloaded
+# if(file.exists(SymbolsHistoryFile)){
+#   SymbolsHistory <- read.csv(file=SymbolsHistoryFile, sep=",", header=TRUE, colClasses = "character")
+#   LastDataDownloaded <- max(SymbolsHistory$)
+#   nbDaysHistoryPredict <- 1
+# } else {
+#   SymbolsHistory <- as.data.frame(NULL)
+# }
+
 #### Call RStock.GetSymbols wrapper to get stock prices
 StockAndSymbols <- RStock.GetSymbols(StockSymbols, nbDaysHistory=nbDaysHistoryPredict)
 Stock <- as.data.frame(StockAndSymbols[1])
@@ -58,7 +67,6 @@ StockUpDw <- StockUpDw[,-which(names(StockUpDw) %like% c("DAY_MINUS_1_UPDW"))]
 StockUpDw <- StockUpDw %>% 
   rename_at(.vars = vars(ends_with(".UPDW")),
             .funs = funs(sub("[.]UPDW$", ".DAY_MINUS_1_UPDW", .)))
-
 
 flag <- 1
 for (i in list.files(ModelsDirectory, full.names = FALSE)){
@@ -81,13 +89,14 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
   colnames(Set) <- colnamesSet
   #rownames(Set) <- rownames(StockUpDw[1,])
 
-  Set$Date <- as.Date.character(rownames(StockUpDw[1,]))
+  Set$Date <- as.Date.character(rownames(StockUpDw[1,])) + 1
   Set$Set <- str_sub(i, 1, str_length(i)-4)
   
   #### Order columns
   Set <- Set[c(c("Date", "Set"), colnamesSet)]
   
   Set$BinaryPrediction <- 0
+  Set$BinaryResult <- 0
   
   if (flag==1) {
     Sets <- Set[1,-which(1!=1)]
@@ -127,12 +136,26 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
     
     Set[1,"BinaryPrediction"] <- binary_predictions
 
-    Sets <- rbind(Sets, Set)
+    if (exists("Sets")) {
+      Sets <- rbind(Sets, Set)
+    }else {
+      Sets <- Set
+    }
+    
   }
   
   rm(bst)
 
 }
+
+#### Read SymbolsToSurvey in order save the error margin for this prediction
+SetsErr <- as.data.frame(sapply(Sets$Set, function(x){
+ 
+  SymbolsToSurvey[SymbolsToSurvey$Set==x,"Err"]
+}), stringsAsFactors = FALSE)
+
+colnames(SetsErr) <- c("Err")
+Sets <- cbind(Sets, SetsErr)
 
 if(file.exists(PredictionResultFile)){
   write.table(Sets, PredictionResultFile, append=T, row.names=F, col.names=F, sep = ",")
@@ -144,3 +167,7 @@ endTime <- Sys.time()
 print(paste("End time:", endTime))
 executionTime <- round(difftime(endTime, startTime, units="mins"), 2)
 print(paste("Execution time (mins):", executionTime))
+
+
+#### Remove object from environnement 
+rm(list=ls())

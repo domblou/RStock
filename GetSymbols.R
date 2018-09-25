@@ -22,3 +22,7 @@ symbols <- stockSymbols()
 symbols <- symbols[,1]
 
 write.csv(symbols, SymbolsFile, row.names = FALSE)
+
+#### Remove object from environnement 
+rm(list=ls())
+

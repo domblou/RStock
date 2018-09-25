@@ -87,6 +87,7 @@ StockUpDw <- StockUpDw %>% replace(., is.na(.), 0)
 
 #### Iterate through all genarated sets
 GeneratedSets$Err <- 0.0
+GeneratedSets$Set <- ""
 
 #### For each generated set, build a model
 for (i in 1:nrow(GeneratedSets)){
@@ -104,7 +105,7 @@ for (i in 1:nrow(GeneratedSets)){
  
   ModelFileName <- GeneratedSets[i,1]
   #### Filter predictor column (-1 to remove extra column Err and Model)
-  for (j in 2:(ncol(GeneratedSets)-1)){
+  for (j in 2:(ncol(GeneratedSets)-2)){
 
     #### Filter <NA> and outcome column
     if (!is.na(GeneratedSets[i,j]) & GeneratedSets[i,1] != GeneratedSets[i,j]) {
@@ -115,6 +116,9 @@ for (i in 1:nrow(GeneratedSets)){
     #### Set model file name 
     ModelFileName <- paste(ModelFileName, GeneratedSets[i,j], sep="-")
   }
+  
+  ####
+  GeneratedSets[i, "Set"] <- ModelFileName
  
   predictorNames <- names(StockUpDw)[grep(CombNames, names(StockUpDw))]
 
@@ -182,3 +186,6 @@ endTime <- Sys.time()
 print(paste("End time:", endTime))
 executionTime <- round(difftime(endTime, startTime, units="mins"), 2)
 print(paste("Execution time (mins):", executionTime))
+
+#### Remove object from environnement 
+rm(list=ls())
