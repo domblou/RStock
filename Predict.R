@@ -42,19 +42,13 @@ for (i in 2:ncol(SymbolsToSurvey)){
 #### Extract unique symbols to fetch for daily survey
 StockSymbols <- as.character(unique(StockSymbols %>% dplyr::filter(V0 != "<NA>"))[[1]])
 
-#### Get the last days the stock prices were downloaded
-# if(file.exists(SymbolsHistoryFile)){
-#   SymbolsHistory <- read.csv(file=SymbolsHistoryFile, sep=",", header=TRUE, colClasses = "character")
-#   LastDataDownloaded <- max(SymbolsHistory$)
-#   nbDaysHistoryPredict <- 1
-# } else {
-#   SymbolsHistory <- as.data.frame(NULL)
-# }
-
 #### Call RStock.GetSymbols wrapper to get stock prices
 StockAndSymbols <- RStock.GetSymbols(StockSymbols, nbDaysHistory=nbDaysHistoryPredict)
 Stock <- as.data.frame(StockAndSymbols[1])
 StockSymbols <- StockAndSymbols[[2]]
+
+#### Save symbol data to history file
+SymbolsHistory <- RStock.WriteSymbolHistory(Stock, SymbolsHistoryFile)
 
 #### Get the prepared dataset
 StockUpDw <- RStock.PrepareDataSet(Stock)
@@ -95,8 +89,9 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
   #### Order columns
   Set <- Set[c(c("Date", "Set"), colnamesSet)]
   
+  #### Add prediction and result colummn (Binary result initiated to -1 to keep track of which prediction needs the result be set)
   Set$BinaryPrediction <- 0
-  Set$BinaryResult <- 0
+  Set$BinaryResult <- -1
   
   if (flag==1) {
     Sets <- Set[1,-which(1!=1)]
@@ -111,7 +106,7 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
      CombNames <-"(xxxxxxxxxxxxx)"
    }
    
-  #### Filter predictor column (-1 to remove extra column Err and Model)
+  #### Filter predictor column 
   for (j in 1:ncol(GeneratedSets)){
     
     #### Filter <NA> and outcome column
@@ -162,6 +157,13 @@ if(file.exists(PredictionResultFile)){
 } else {
   write.csv(Sets, PredictionResultFile, row.names=F)
 }
+
+#### Set result for previous days
+PredictionResult <- read.csv(file=PredictionResultFile, sep=",", header=TRUE, colClasses = "character")
+
+# for (i in )
+# 
+# PredictionResult <- PredictionResult[PredictionResult$BinaryResult == 0, ]
 
 endTime <- Sys.time()
 print(paste("End time:", endTime))

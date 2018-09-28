@@ -125,6 +125,7 @@ RStock.PrepareDataSet <- function(Stock) {
     
     StockOpClUpDw <- cbind(StockOpClUpDw, opcl_minus_1)
     
+    #### Lag more than one day to deal with close days (we and holidays)
     updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),1)
     if (is.null(updw_minus_1)) {
       updw_minus_1 <- quantmod::Lag(select(StockOpClUpDw, matches(gsub("\\s", "", paste(i, ".UPDW")))),2)
@@ -216,4 +217,40 @@ RStock.GenerateSets <- function(StockSymbols, nbPermutation = 1) {
   
   GeneratedSets
   
+}
+
+RStock.WriteSymbolHistory <- function(Stock, SymbolsHistoryFile){
+
+#### Get the last days the stock prices were downloaded to update the BinaryResult for previous predictions
+#### Only, update predictions that were made. In other words, don't bother if day aren't existing.
+if(file.exists(SymbolsHistoryFile)){
+  SymbolsHistory <- read.csv(file=SymbolsHistoryFile, sep=",", header=TRUE, colClasses = "character")
+}
+
+#### Add Open Close variation
+StockOpCL <- 1 - (select(Stock, ends_with(".Open")) / select(Stock, ends_with(".Close")))
+colnames(StockOpCL) <- str_replace(colnames(StockOpCL),".Open", ".OpCl")
+StockOpenCloseOpCl <- cbind(Stock, StockOpCL)
+StockOpenCloseOpCl <- StockOpenCloseOpCl[, order(names(StockOpenCloseOpCl))]
+
+#### Pivot the data to prevent error when some symbols won't be fetched successfully
+StockOpenCloseOpCl <- cbind(as.data.frame(rownames(StockOpenCloseOpCl), stringsAsFactors = FALSE), StockOpenCloseOpCl)
+colnames(StockOpenCloseOpCl)[1] <- "Date"
+StockOpenCloseOpCl <- melt(StockOpenCloseOpCl, id = c("Date"))
+StockOpenCloseOpCl <- cbind(StockOpenCloseOpCl, str_split_fixed(StockOpenCloseOpCl$variable, "\\.", 2))
+StockOpenCloseOpCl <- StockOpenCloseOpCl[,c(1,4,5,3)]
+colnames(StockOpenCloseOpCl) <- c("Date","Symbol","Field","Value")
+StockOpenCloseOpCl <- StockOpenCloseOpCl[order(StockOpenCloseOpCl[,1]), ]
+
+if (exists("SymbolsHistory")){
+  SymbolsHistory <- rbind(SymbolsHistory, StockOpenCloseOpCl[StockOpenCloseOpCl$Date > max(SymbolsHistory$Date),])
+} else {
+  SymbolsHistory <- StockOpenCloseOpCl
+}
+write.csv(SymbolsHistory, SymbolsHistoryFile, row.names=F)
+
+rm("StockOpenCloseOpCl")
+
+SymbolsHistory
+
 }
