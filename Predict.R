@@ -92,7 +92,7 @@ for (i in list.files(ModelsDirectory, full.names = FALSE)){
   #### Add prediction and result colummn (Binary result initiated to -1 to keep track of which prediction needs the result be set)
   Set$BinaryPrediction <- 0
   Set$BinaryResult <- -1
-  Set$SuccessRate <- 0
+  Set$SuccessfulPrediction <- 0
   
   if (flag==1) {
     Sets <- Set[1,-which(1!=1)]
@@ -165,18 +165,19 @@ PredictionResult <- read.csv(file=PredictionResultFile, sep=",", header=TRUE, co
 for (i in 1:max(row(PredictionResult))) {
 
   #### For all BinaryResult unassigned 
-  #if (PredictionResult[i, "BinaryResult"]==-1){
+  if (PredictionResult[i, "BinaryResult"]==-1){
     RealOpCl <- SymbolsHistory[SymbolsHistory$Date == PredictionResult[i, "Date"] & SymbolsHistory$Symbol==PredictionResult[i, "Observation"] & SymbolsHistory$Field=="OpCl",]
     if (nrow(RealOpCl)==1){
-      print(RealOpCl[1,4])
-      print(as.numeric(RealOpCl[1,"Value"] > UPDW_threshold))
-      print(PredictionResult[i, "BinaryPrediction"])
-      PredictionResult[i, "BinaryResult"] <- as.numeric(RealOpCl[1,4] > UPDW_threshold)
-      #print(RealOpCl[1,4])
+      PredictionResult[i, "BinaryResult"] <- as.numeric(RealOpCl[1,"Value"] > UPDW_threshold)
+      if (PredictionResult[i, "BinaryResult"] == PredictionResult[i, "BinaryPrediction"] & PredictionResult[i, "BinaryPrediction"] == 1){
+        PredictionResult[i, "SuccessfulPrediction"] <- 1
+      } else{
+        PredictionResult[i, "SuccessfulPrediction"] <- 0
+      }
     } else if (nrow(RealOpCl)>1){
       warning("More than one result found while setting the BinaryResult column for previous days.")
     } 
-  #} 
+  } 
   
 }
 

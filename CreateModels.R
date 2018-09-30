@@ -59,13 +59,11 @@ if (!dir.exists(ModelsDirectory)){
 #### Set symbols to fetch
 StockSymbols <- read.csv(file=SymbolsFile, sep=";", header=TRUE, colClasses = "character")$x
 
-if (testMode){
-  if (length(testModeStockSymbols)==0){
-    StockSymbols <- StockSymbols[1:testModeMaxSymbols]
-  }
-  else {
-    StockSymbols <- testModeStockSymbols[1:length(testModeStockSymbols)]
-  }
+#### Test mode
+if (length(testModeStockSymbols)==0){
+  StockSymbols <- StockSymbols[1:testModeMaxSymbols]
+} else {
+  StockSymbols <- testModeStockSymbols[1:length(testModeStockSymbols)]
 }
 
 #### Call RStock.GetSymbols wrapper to get stock prices
