@@ -13,9 +13,12 @@ Symbols.csv
 SymbolsToSurvey.csv
 SymbolsHistory.csv
 
+
+
 # Python-generated files
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
 *.egg-info/
 .venv/
