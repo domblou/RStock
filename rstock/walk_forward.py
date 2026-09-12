@@ -24,6 +24,13 @@ from .features import (
     predictor_columns,
 )
 from .modeling import fit_booster, predict_probabilities
+from .parallel import process_cancellation_requested, run_combination_tasks
+from .progress import (
+    CancellationCheck,
+    ProgressCallback,
+    check_cancellation,
+    report_progress,
+)
 from .qualification import qualification_parameters, qualify_combinations
 from .risk import conditional_signal_metrics, intraday_risk_metrics
 
@@ -51,6 +58,145 @@ class WalkForwardResult:
     risk_global: pd.DataFrame
     final_holdout_risk: pd.DataFrame
     run_configuration: dict[str, object]
+
+
+@dataclass(slots=True)
+class _WalkForwardCombinationResult:
+    window_records: list[dict[str, object]]
+    prediction_records: list[dict[str, object]]
+
+
+_WALK_FORWARD_TASK_CONTEXT: tuple[
+    pd.DataFrame,
+    RStockConfig,
+    pd.Timestamp,
+    Mapping[str, str],
+    int,
+    int,
+    int,
+] | None = None
+
+
+def _set_walk_forward_task_context(
+    context: tuple[
+        pd.DataFrame,
+        RStockConfig,
+        pd.Timestamp,
+        Mapping[str, str],
+        int,
+        int,
+        int,
+    ]
+) -> None:
+    global _WALK_FORWARD_TASK_CONTEXT
+    _WALK_FORWARD_TASK_CONTEXT = context
+
+
+def _walk_forward_combination(
+    row_values: dict[str, object],
+    context: tuple[
+        pd.DataFrame,
+        RStockConfig,
+        pd.Timestamp,
+        Mapping[str, str],
+        int,
+        int,
+        int,
+    ],
+    cancellation_check: CancellationCheck | None,
+) -> _WalkForwardCombinationResult:
+    """Evaluate one combination; its chronological windows remain sequential."""
+
+    ordered, config, holdout_start, market_calendars, min_train, test_window, step = context
+    row = pd.Series(row_values)
+    observation, feature_symbols = symbols_from_set(row)
+    up_outcome_name = intraday_target_column(observation)
+    down_outcome_name = intraday_down_target_column(observation)
+    names = predictor_columns(
+        ordered,
+        feature_symbols,
+        config.lag_depth,
+        config.date_feature_regex,
+    )
+    if up_outcome_name not in ordered or down_outcome_name not in ordered or not names:
+        raise ValueError(f"Incomplete columns for set targeting {observation}")
+    model_data = ordered[[*names, up_outcome_name, down_outcome_name]].dropna()
+    rows_lost_to_lags = int(ordered[up_outcome_name].notna().sum() - len(model_data))
+    set_name = symbol_set_id(row)
+    predictors_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
+    development_data = model_data.loc[model_data.index < holdout_start]
+    window_records: list[dict[str, object]] = []
+    prediction_records: list[dict[str, object]] = []
+    for window in expanding_windows(len(development_data), min_train, test_window, step):
+        check_cancellation(cancellation_check)
+        train = development_data.iloc[window.train_slice]
+        test = development_data.iloc[window.test_slice]
+        if train.index.max() >= test.index.min():
+            raise AssertionError("Walk-forward window leaked future test data")
+        up_booster = fit_booster(train, names, up_outcome_name, config)
+        down_booster = fit_booster(train, names, down_outcome_name, config)
+        up_probabilities = predict_probabilities(up_booster, test, names)
+        down_probabilities = predict_probabilities(down_booster, test, names)
+        up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
+        down_predicted = binary_predictions(down_probabilities, config.prediction_threshold)
+        up_actual = test[up_outcome_name].astype(int).to_numpy()
+        down_actual = test[down_outcome_name].astype(int).to_numpy()
+        window_record: dict[str, object] = {
+            "Set": set_name,
+            "Observation": observation,
+            "Predictors": predictors_json,
+            "MarketCalendar": market_calendars.get(observation),
+            "Window": window.number,
+            "TrainStart": train.index.min(),
+            "TrainEnd": train.index.max(),
+            "TestStart": test.index.min(),
+            "TestEnd": test.index.max(),
+            "TrainObservations": len(train),
+            "TestObservations": len(test),
+            "Predictions": len(up_predicted),
+            "UpPositiveOutcomes": int(up_actual.sum()),
+            "DownPositiveOutcomes": int(down_actual.sum()),
+            "RowsLostToLags": rows_lost_to_lags,
+        }
+        window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
+        window_record.update(_prefixed_metric_record("Down", down_actual, down_predicted, down_probabilities))
+        window_records.append(window_record)
+        prediction_records.extend(
+            {
+                "Set": set_name,
+                "Observation": observation,
+                "Predictors": predictors_json,
+                "MarketCalendar": market_calendars.get(observation),
+                "Window": window.number,
+                "Date": date,
+                **_return_diagnostics(ordered, observation, date),
+                "UpPrediction": int(up_prediction),
+                "UpProbability": float(up_probability),
+                "DownPrediction": int(down_prediction),
+                "DownProbability": float(down_probability),
+            }
+            for date, up_prediction, up_probability, down_prediction, down_probability in zip(
+                test.index,
+                up_predicted,
+                up_probabilities,
+                down_predicted,
+                down_probabilities,
+                strict=True,
+            )
+        )
+    return _WalkForwardCombinationResult(window_records, prediction_records)
+
+
+def _walk_forward_process_task(
+    row_values: dict[str, object],
+) -> _WalkForwardCombinationResult:
+    if _WALK_FORWARD_TASK_CONTEXT is None:  # pragma: no cover - process invariant
+        raise RuntimeError("Walk-forward worker context is unavailable")
+    return _walk_forward_combination(
+        row_values,
+        _WALK_FORWARD_TASK_CONTEXT,
+        process_cancellation_requested,
+    )
 
 
 def expanding_windows(
@@ -339,6 +485,8 @@ def _evaluate_final_holdout(
     config: RStockConfig,
     holdout_start: pd.Timestamp,
     market_calendars: Mapping[str, str],
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Fit eligible sets on development only, then evaluate the untouched holdout."""
 
@@ -352,7 +500,8 @@ def _evaluate_final_holdout(
     records: list[dict[str, object]] = []
     prediction_records: list[dict[str, object]] = []
     eligible = qualification[qualification["Eligible"]].sort_values("EligibleRank")
-    for _, qualified in eligible.iterrows():
+    for completed, (_, qualified) in enumerate(eligible.iterrows(), start=1):
+        check_cancellation(cancellation_check)
         set_name = str(qualified["Set"])
         row = generated_lookup[set_name]
         observation, feature_symbols = symbols_from_set(row)
@@ -459,6 +608,13 @@ def _evaluate_final_holdout(
                 strict=True,
             )
         )
+        report_progress(
+            progress_callback,
+            "final_holdout",
+            substage=set_name,
+            completed_units=completed,
+            total_units=len(eligible),
+        )
 
     columns = [
         "Set", "Observation", "Predictors", "MarketCalendar",
@@ -511,6 +667,8 @@ def evaluate_walk_forward(
     test_size: int | None = None,
     step_size: int | None = None,
     final_holdout_size: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
 ) -> WalkForwardResult:
     """Qualify on development windows, then confirm on an untouched final holdout."""
 
@@ -535,109 +693,41 @@ def evaluate_walk_forward(
         raise ValueError("final_holdout_size must leave non-empty development history")
     holdout_start = ordered.index[-holdout_size]
     development_end = ordered.index[-holdout_size - 1]
-    window_records: list[dict[str, object]] = []
-    prediction_records: list[dict[str, object]] = []
+    task_context = (
+        ordered,
+        config,
+        holdout_start,
+        market_calendars or {},
+        min_train,
+        test_window,
+        step,
+    )
+    task_rows = [row.to_dict() for _, row in generated_sets.iterrows()]
+    report_progress(
+        progress_callback, "walk_forward", substage="started", details={"phase_event": "started", "combinations": len(task_rows)}
+    )
+    combination_results = run_combination_tasks(
+        task_rows,
+        combination_workers=config.combination_workers,
+        worker_context=task_context,
+        context_initializer=_set_walk_forward_task_context,
+        process_task=_walk_forward_process_task,
+        serial_task=_walk_forward_combination,
+        item_label=lambda values: symbol_set_id(pd.Series(values)),
+        stage="walk_forward",
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        details={"combination_workers": config.combination_workers},
+    )
+    window_records = [
+        record for result in combination_results for record in result.window_records
+    ]
+    prediction_records = [
+        record for result in combination_results for record in result.prediction_records
+    ]
+    report_progress(progress_callback, "walk_forward", substage="completed", details={"phase_event": "completed", "combinations": len(task_rows), "windows": len(window_records)})
 
-    for _, row in generated_sets.iterrows():
-        observation, feature_symbols = symbols_from_set(row)
-        up_outcome_name = intraday_target_column(observation)
-        down_outcome_name = intraday_down_target_column(observation)
-        names = predictor_columns(
-            ordered,
-            feature_symbols,
-            config.lag_depth,
-            config.date_feature_regex,
-        )
-        if (
-            up_outcome_name not in ordered
-            or down_outcome_name not in ordered
-            or not names
-        ):
-            raise ValueError(f"Incomplete columns for set targeting {observation}")
-        model_data = ordered[
-            [*names, up_outcome_name, down_outcome_name]
-        ].dropna()
-        rows_lost_to_lags = int(
-            ordered[up_outcome_name].notna().sum() - len(model_data)
-        )
-        set_name = symbol_set_id(row)
-        predictors_json = json.dumps(
-            feature_symbols, ensure_ascii=False, separators=(",", ":")
-        )
-        development_data = model_data.loc[model_data.index < holdout_start]
-        for window in expanding_windows(
-            len(development_data), min_train, test_window, step
-        ):
-            train = development_data.iloc[window.train_slice]
-            test = development_data.iloc[window.test_slice]
-            if train.index.max() >= test.index.min():
-                raise AssertionError("Walk-forward window leaked future test data")
-
-            up_booster = fit_booster(train, names, up_outcome_name, config)
-            down_booster = fit_booster(train, names, down_outcome_name, config)
-            up_probabilities = predict_probabilities(up_booster, test, names)
-            down_probabilities = predict_probabilities(down_booster, test, names)
-            up_predicted = binary_predictions(
-                up_probabilities, config.prediction_threshold
-            )
-            down_predicted = binary_predictions(
-                down_probabilities, config.prediction_threshold
-            )
-            up_actual = test[up_outcome_name].astype(int).to_numpy()
-            down_actual = test[down_outcome_name].astype(int).to_numpy()
-            window_record: dict[str, object] = {
-                "Set": set_name,
-                "Observation": observation,
-                "Predictors": predictors_json,
-                "MarketCalendar": (market_calendars or {}).get(observation),
-                "Window": window.number,
-                "TrainStart": train.index.min(),
-                "TrainEnd": train.index.max(),
-                "TestStart": test.index.min(),
-                "TestEnd": test.index.max(),
-                "TrainObservations": len(train),
-                "TestObservations": len(test),
-                "Predictions": len(up_predicted),
-                "UpPositiveOutcomes": int(up_actual.sum()),
-                "DownPositiveOutcomes": int(down_actual.sum()),
-                "RowsLostToLags": rows_lost_to_lags,
-            }
-            window_record.update(
-                _prefixed_metric_record(
-                    "Up", up_actual, up_predicted, up_probabilities
-                )
-            )
-            window_record.update(
-                _prefixed_metric_record(
-                    "Down", down_actual, down_predicted, down_probabilities
-                )
-            )
-            window_records.append(window_record)
-
-            prediction_records.extend(
-                {
-                    "Set": set_name,
-                    "Observation": observation,
-                    "Predictors": predictors_json,
-                    "MarketCalendar": (market_calendars or {}).get(observation),
-                    "Window": window.number,
-                    "Date": date,
-                    **_return_diagnostics(ordered, observation, date),
-                    "UpPrediction": int(up_prediction),
-                    "UpProbability": float(up_probability),
-                    "DownPrediction": int(down_prediction),
-                    "DownProbability": float(down_probability),
-                }
-                for date, up_prediction, up_probability, down_prediction, down_probability in zip(
-                    test.index,
-                    up_predicted,
-                    up_probabilities,
-                    down_predicted,
-                    down_probabilities,
-                    strict=True,
-                )
-            )
-
+    report_progress(progress_callback, "aggregation", substage="started", details={"phase_event": "started"})
     windows_frame = pd.DataFrame(window_records)
     predictions_frame = pd.DataFrame(prediction_records)
     if predictions_frame.empty:
@@ -649,10 +739,14 @@ def evaluate_walk_forward(
     risk_by_window, risk_by_set, risk_global = _aggregate_risk(
         predictions_frame, config
     )
+    report_progress(progress_callback, "aggregation", substage="completed", details={"phase_event": "completed", "windows": len(windows_frame)})
+    report_progress(progress_callback, "qualification", substage="started", details={"phase_event": "started"})
     qualification = qualify_combinations(windows_frame, predictions_frame, config)
     eligibility = qualification[["Set", "Eligible", "EligibleRank"]]
     risk_by_window = risk_by_window.merge(eligibility, on="Set", how="left")
     risk_by_set = risk_by_set.merge(eligibility, on="Set", how="left")
+    report_progress(progress_callback, "qualification", substage="completed", details={"phase_event": "completed", "eligible_combinations": int(qualification["Eligible"].sum())})
+    report_progress(progress_callback, "final_holdout", substage="started", details={"phase_event": "started"})
     final_holdout, final_predictions = _evaluate_final_holdout(
         ordered,
         generated_sets,
@@ -660,7 +754,11 @@ def evaluate_walk_forward(
         config,
         holdout_start,
         market_calendars or {},
+        progress_callback,
+        cancellation_check,
     )
+    report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed", "evaluated_combinations": len(final_holdout)})
+    report_progress(progress_callback, "metrics", substage="started", details={"phase_event": "started"})
     final_holdout_risk = _aggregate_final_risk(final_predictions, config)
     if not final_holdout_risk.empty:
         final_holdout_risk = final_holdout_risk.merge(
@@ -672,6 +770,7 @@ def evaluate_walk_forward(
     aggregate_global["FinalConfirmedSets"] = int(
         final_holdout["FinalConfirmed"].sum()
     )
+    report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     run_configuration: dict[str, object] = {
         "target": "intraday_return >= intraday_target_threshold",
         "down_target": "intraday_return <= -intraday_down_threshold",
@@ -683,6 +782,7 @@ def evaluate_walk_forward(
         "walk_forward_min_train_size": min_train,
         "walk_forward_test_size": test_window,
         "walk_forward_step_size": step,
+        "combination_workers": config.combination_workers,
         "final_holdout_size": holdout_size,
         "development_end": development_end.isoformat(),
         "final_holdout_start": holdout_start.isoformat(),

@@ -141,3 +141,39 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
         final_holdout_size=5,
     )
     pd.testing.assert_frame_equal(result.qualification, altered_result.qualification)
+
+
+def test_combination_process_workers_preserve_walk_forward_results_and_seed(tmp_path):
+    index = pd.bdate_range("2024-01-01", periods=30)
+    signal = np.arange(len(index)) % 2
+    stock = pd.DataFrame(index=index)
+    for offset, symbol in enumerate(("AAA", "BBB", "CCC")):
+        shifted = np.roll(signal, offset)
+        stock[f"{symbol}.Open"] = 100.0
+        stock[f"{symbol}.Close"] = np.where(shifted, 102.0, 100.0)
+        stock[f"{symbol}.High"] = np.maximum(stock[f"{symbol}.Close"], 100.0) + 1.0
+        stock[f"{symbol}.Low"] = np.minimum(stock[f"{symbol}.Close"], 100.0) - 1.0
+    base = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        xgb_rounds=1,
+        xgb_nthread=1,
+        xgb_seed=17,
+        qualification_min_windows=1,
+        qualification_min_median_auc=0.0,
+        qualification_min_pct_windows_above_random=0.0,
+        qualification_min_worst_window_auc=0.0,
+        qualification_min_positive_observations=1,
+        qualification_max_auc_std=1.0,
+    )
+    prepared = prepare_dataset(stock, ["AAA", "BBB", "CCC"])
+    generated = generate_symbol_sets(["AAA", "BBB", "CCC"], 1)
+    arguments = dict(min_train_size=10, test_size=5, step_size=5, final_holdout_size=5)
+    serial = evaluate_walk_forward(
+        prepared, generated, replace(base, combination_workers=1), **arguments
+    )
+    parallel = evaluate_walk_forward(
+        prepared, generated, replace(base, combination_workers=2), **arguments
+    )
+    for name in ("windows", "predictions", "qualification", "final_holdout"):
+        pd.testing.assert_frame_equal(getattr(serial, name), getattr(parallel, name))

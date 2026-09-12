@@ -53,6 +53,9 @@ def _parser() -> argparse.ArgumentParser:
         "--final-holdout-size", type=int, default=DEFAULT_CONFIG.final_holdout_size
     )
     parser.add_argument(
+        "--combination-workers", type=int, default=DEFAULT_CONFIG.combination_workers
+    )
+    parser.add_argument(
         "--min-windows", type=int, default=DEFAULT_CONFIG.qualification_min_windows
     )
     parser.add_argument(
@@ -101,6 +104,7 @@ def main() -> None:
         qualification_min_worst_window_auc=args.min_worst_window_auc,
         qualification_min_positive_observations=args.min_positive_observations,
         qualification_max_auc_std=args.max_auc_std,
+        combination_workers=args.combination_workers,
     )
 
     if args.symbols:

@@ -142,3 +142,58 @@ Les lectures et mises à jour sont isolées par symbole et exécutées avec au p
 et n'annule pas les autres téléchargements. Le backend est exposé par l'interface
 `MarketDataStore`, afin de pouvoir adopter DuckDB ultérieurement sans modifier les
 workflows.
+
+## Calibration contrôlée XGBoost
+
+La calibration des hyperparamètres est un workflow séparé qui lit exclusivement
+les fichiers Parquet déjà présents dans le cache et ne remplace aucun modèle actif :
+
+```powershell
+python scripts/calibrate_xgboost.py
+```
+
+Par défaut, elle conserve les 63 dernières séances comme holdout final, utilise
+les mêmes fenêtres expansives et les mêmes cibles/features que le walk-forward,
+et teste une grille réduite de 12 configurations. Pour borner le calcul sur
+l'univers de 15 symboles, trois combinaisons de profondeur 1 sont retenues par
+cible. Leur choix est reproductible : tri par SHA-256 de la graine XGBoost et de
+l'identifiant de combinaison, avec un quota identique pour chaque cible.
+
+La hausse et la baisse sont classées séparément. Le score documenté combine les
+médianes ROC-AUC, PR-AUC et F1, les pires ROC-AUC/PR-AUC, la dispersion entre
+fenêtres, les fenêtres catastrophiques, la variabilité des probabilités et la
+production de classes positives. La configuration retenue est figée et hachée
+avant l'unique évaluation du holdout. Les critères de qualification des
+combinaisons existants sont seulement consignés et ne sont pas recalibrés.
+
+Les sorties destinées à l'analyse ou à une future interface sont écrites dans
+`WalkForward/Calibration/` : paramètres testés, métriques par configuration et
+par fenêtre, comparaison baseline/calibrée, configurations retenues, prédictions
+et métriques finales sur holdout, échantillon de combinaisons et protocole complet.
+
+## RStock Laboratory
+
+L'interface locale repose sur une couche applicative indépendante de Streamlit.
+Elle soumet les expériences à des workers Python séparés et persiste chaque run
+dans `runs/<run_id>/`. Pour la démarrer :
+
+```powershell
+python -m streamlit run rstock/application/streamlit_app.py
+```
+
+Les jobs walk-forward, calibration XGBoost et calibration des seuils sont
+disponibles. La navigation prépare aussi les futures fonctions de surveillance,
+modèles, prédictions quotidiennes et signaux, sans exécution d'ordres.
+
+La CLI utilise les mêmes services applicatifs :
+
+```powershell
+python scripts/laboratory_cli.py create-config --job-type walk_forward --symbols AAPL MSFT --output experiment.json
+python scripts/laboratory_cli.py submit --config experiment.json
+python scripts/laboratory_cli.py list
+```
+
+Les processus en attente partagent des slots locaux atomiques; un seul job lourd
+s'exécute par défaut. Une annulation crée une demande persistante vérifiée entre
+les grandes unités de travail. Les résultats restent dans `_working` en cas
+d'échec ou d'annulation et ne sont publiés sous `results/` qu'après réussite.

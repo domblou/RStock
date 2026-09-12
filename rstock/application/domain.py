@@ -1,0 +1,112 @@
+"""Serializable application-domain objects."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass, fields
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+from rstock.config import RStockConfig
+
+
+class JobType(str, Enum):
+    WALK_FORWARD = "walk_forward"
+    XGBOOST_CALIBRATION = "xgboost_calibration"
+    THRESHOLD_CALIBRATION = "threshold_calibration"
+    FULL_TRAINING = "full_training"
+    DAILY_PREDICTION = "daily_prediction"
+    DATA_UPDATE = "data_update"
+    DAILY_SCREENING = "daily_screening"
+
+    @property
+    def implemented(self) -> bool:
+        return self in {
+            JobType.WALK_FORWARD,
+            JobType.XGBOOST_CALIBRATION,
+            JobType.THRESHOLD_CALIBRATION,
+        }
+
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+
+
+def _config_to_dict(config: RStockConfig) -> dict[str, Any]:
+    values = asdict(config)
+    values["project_root"] = str(config.project_root)
+    return values
+
+
+def _config_from_dict(values: dict[str, Any]) -> RStockConfig:
+    allowed = {field.name for field in fields(RStockConfig)}
+    unknown = set(values) - allowed
+    if unknown:
+        raise ValueError(f"Unknown RStock configuration fields: {sorted(unknown)}")
+    restored = dict(values)
+    restored["project_root"] = Path(restored["project_root"])
+    for field_name in ("selected_symbols", "threshold_calibration_quantiles"):
+        if restored.get(field_name) is not None:
+            restored[field_name] = tuple(restored[field_name])
+    return RStockConfig(**restored)
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentSpec:
+    """Complete reproducible configuration saved before a worker is launched."""
+
+    job_type: JobType
+    config: RStockConfig
+    symbols: tuple[str, ...]
+    calendar: str = "XNYS"
+    combinations_per_target: int = 3
+    evaluate_final_holdout: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.job_type.implemented:
+            raise ValueError(f"Job type is reserved but not implemented: {self.job_type.value}")
+        if len(self.symbols) < 2:
+            raise ValueError("At least two symbols are required")
+        if len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("Symbols must be unique")
+        if self.combinations_per_target < 1:
+            raise ValueError("combinations_per_target must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "job_type": self.job_type.value,
+            "symbols": list(self.symbols),
+            "calendar": self.calendar,
+            "combinations_per_target": self.combinations_per_target,
+            "evaluate_final_holdout": self.evaluate_final_holdout,
+            "rstock_config": _config_to_dict(self.config),
+        }
+
+    @classmethod
+    def from_dict(cls, values: dict[str, Any]) -> "ExperimentSpec":
+        if values.get("schema_version") != 1:
+            raise ValueError("Unsupported experiment configuration schema")
+        return cls(
+            job_type=JobType(values["job_type"]),
+            config=_config_from_dict(values["rstock_config"]),
+            symbols=tuple(str(symbol) for symbol in values["symbols"]),
+            calendar=str(values.get("calendar", "XNYS")),
+            combinations_per_target=int(values.get("combinations_per_target", 3)),
+            evaluate_final_holdout=bool(values.get("evaluate_final_holdout", True)),
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        canonical = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()

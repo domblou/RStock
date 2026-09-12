@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=1.26",
   "pandas>=2.1",
   "pyarrow>=15",
+  "streamlit>=1.37",
   "xgboost>=2.0",
   "yfinance>=0.2.40",
 ]

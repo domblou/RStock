@@ -17,6 +17,12 @@ import pandas as pd
 
 from .config import RStockConfig
 from .data import MarketDataProvider, YahooFinanceProvider, prefix_symbol_columns
+from .progress import (
+    CancellationCheck,
+    ProgressCallback,
+    check_cancellation,
+    report_progress,
+)
 from .symbols import validate_symbol_universe
 
 
@@ -318,6 +324,8 @@ class MarketDataService:
         as_of: date | None = None,
         force_refresh: bool = False,
         force_symbols: set[str] | None = None,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_check: CancellationCheck | None = None,
     ) -> MarketDataResult:
         if history_days < 1:
             raise ValueError("history_days must be positive")
@@ -335,6 +343,13 @@ class MarketDataService:
         symbol_metadata = dict(manifest.get("symbols", {}))
         refreshed_at = datetime.now(timezone.utc)
         results_by_symbol: dict[str, _SymbolResult] = {}
+        report_progress(
+            progress_callback,
+            "market_data",
+            substage="symbols",
+            completed_units=0,
+            total_units=len(requested),
+        )
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(requested))) as executor:
             futures = {
                 executor.submit(
@@ -348,7 +363,8 @@ class MarketDataService:
                 ): str(row["Symbol"])
                 for _, row in requested.iterrows()
             }
-            for future in as_completed(futures):
+            for completed, future in enumerate(as_completed(futures), start=1):
+                check_cancellation(cancellation_check)
                 symbol = futures[future]
                 try:
                     result = future.result()
@@ -363,6 +379,14 @@ class MarketDataService:
                 results_by_symbol[result.symbol] = result
                 log = LOGGER.error if result.failed else LOGGER.info
                 log("market-cache %s: %s", result.symbol, result.event.message)
+                report_progress(
+                    progress_callback,
+                    "market_data",
+                    substage=result.symbol,
+                    completed_units=completed,
+                    total_units=len(requested),
+                    details={"status": result.event.status},
+                )
 
         ordered_results = [results_by_symbol[symbol] for symbol in requested["Symbol"]]
         for result in ordered_results:

@@ -26,6 +26,7 @@ class RStockConfig:
     max_symbols: int = 25
     selected_symbols: tuple[str, ...] | None = None
     market_cache_workers: int = 8
+    combination_workers: int = 3
     model_history_days: int = 730
     prediction_history_days: int = 10
 
@@ -39,6 +40,12 @@ class RStockConfig:
     xgb_eta: float = 1.0
     xgb_nthread: int = 2
     xgb_rounds: int = 4
+    xgb_min_child_weight: float = 1.0
+    xgb_subsample: float = 1.0
+    xgb_colsample_bytree: float = 1.0
+    xgb_gamma: float = 0.0
+    xgb_reg_alpha: float = 0.0
+    xgb_reg_lambda: float = 1.0
     keep_predictor_under: float = 0.2
     max_generated_sets: int = 100_000
 
@@ -60,6 +67,24 @@ class RStockConfig:
     qualification_min_positive_observations: int = 20
     qualification_max_auc_std: float = 0.10
     final_confirmation_min_auc: float = 0.50
+
+    # Decision-threshold calibration is performed only on development predictions.
+    threshold_calibration_min_signals_per_window: int = 20
+    threshold_calibration_min_window_fraction: float = 1.0
+    threshold_calibration_quantiles: tuple[float, ...] = (
+        0.50,
+        0.60,
+        0.70,
+        0.75,
+        0.80,
+        0.85,
+        0.90,
+        0.925,
+        0.95,
+        0.975,
+        0.99,
+    )
+    threshold_calibration_grid_decimals: int = 6
 
     def path(self, relative_name: str) -> Path:
         return self.project_root / relative_name
