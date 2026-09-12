@@ -13,7 +13,7 @@ import pandas as pd
 from .combinations import symbol_set_id, symbols_from_set
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics, outcome_error
-from .features import predictor_columns
+from .features import intraday_target_column, predictor_columns
 from .modeling import fit_booster, predict_probabilities
 from .persistence import ModelMetadata, model_store_transaction, save_model_bundle
 
@@ -45,7 +45,10 @@ def train_models(
     evaluated["Set"] = ""
     for column in ("TN", "FP", "FN", "TP"):
         evaluated[column] = 0
-    for column in ("Accuracy", "Precision", "Recall", "F1", "ROCAUC"):
+    for column in (
+        "Accuracy", "Precision", "Recall", "F1", "ROCAUC", "PRAUC",
+        "Prevalence",
+    ):
         evaluated[column] = np.nan
     for column in ("TrainStart", "TrainEnd", "TestStart", "TestEnd"):
         evaluated[column] = pd.NaT
@@ -55,12 +58,17 @@ def train_models(
     with model_store_transaction(directory) as staging_directory:
         for ordinal, (row_index, row) in enumerate(evaluated.iterrows()):
             observation, feature_symbols = symbols_from_set(row)
-            outcome_name = f"{observation}.UPDW"
+            outcome_name = intraday_target_column(observation)
             if outcome_name not in ordered:
                 raise KeyError(f"Missing outcome column: {outcome_name}")
             if observation not in market_calendars:
                 raise ValueError(f"No market calendar declared for {observation}")
-            names = predictor_columns(ordered, feature_symbols, config.date_feature_regex)
+            names = predictor_columns(
+                ordered,
+                feature_symbols,
+                config.lag_depth,
+                config.date_feature_regex,
+            )
             if not names:
                 raise ValueError(f"No predictors available for set targeting {observation}")
 
@@ -96,7 +104,7 @@ def train_models(
 
             if error < config.keep_predictor_under:
                 metadata = ModelMetadata(
-                    schema_version=3,
+                    schema_version=4,
                     set_name=set_name,
                     observation=observation,
                     features=feature_symbols,
@@ -108,6 +116,10 @@ def train_models(
                     train_end=train.index.max().date().isoformat(),
                     test_start=test.index.min().date().isoformat(),
                     test_end=test.index.max().date().isoformat(),
+                    target_column=outcome_name,
+                    target_definition="(Close_J / Open_J) - 1",
+                    target_threshold=config.intraday_target_threshold,
+                    lag_depth=config.lag_depth,
                     classification_metrics=metrics.as_dict(),
                 )
                 save_model_bundle(

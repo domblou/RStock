@@ -29,7 +29,9 @@ class RStockConfig:
     model_history_days: int = 730
     prediction_history_days: int = 10
 
-    up_down_threshold: float = 0.01
+    intraday_target_threshold: float = 0.01
+    intraday_down_threshold: float = 0.01
+    lag_depth: int = 3
     permutation_depth: int = 3
     date_feature_regex: str = ""
 
@@ -47,6 +49,17 @@ class RStockConfig:
     walk_forward_test_size: int = 63
     walk_forward_step_size: int = 63
     walk_forward_max_symbols: int = 4
+    final_holdout_size: int = 63
+
+    # Calibration parameters for stability qualification. They are fixed before
+    # the final holdout is evaluated and must not be tuned from holdout results.
+    qualification_min_windows: int = 3
+    qualification_min_median_auc: float = 0.55
+    qualification_min_pct_windows_above_random: float = 2 / 3
+    qualification_min_worst_window_auc: float = 0.45
+    qualification_min_positive_observations: int = 20
+    qualification_max_auc_std: float = 0.10
+    final_confirmation_min_auc: float = 0.50
 
     def path(self, relative_name: str) -> Path:
         return self.project_root / relative_name

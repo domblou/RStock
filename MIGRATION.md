@@ -57,10 +57,13 @@ Aucun workflow Python actif ne charge ces fichiers. Le fichier
 
 ## Contrat fonctionnel actuel
 
-- La variation est toujours `1 - Open / Close` et le seuil UPDW vaut `0.01`.
+- La cible Python active est le rendement intraday exploitable
+  `(Close_J / Open_J) - 1`, classé positif lorsqu'il est supérieur ou égal au
+  seuil `intraday_target_threshold` (0,01 par défaut).
 - Les valeurs absentes restent manquantes; chaque modèle exclut uniquement les
   lignes incomplètes pour sa cible et ses predictors.
-- `DAY_MINUS_1` est l'observation boursière précédente.
+- Les predictors intraday utilisent les observations boursières strictement
+  antérieures J-1 à J-`lag_depth` (3 par défaut), sans jour civil intermédiaire.
 - Les données préparées et les partitions d'entraînement sont ordonnées par une
   vraie date croissante.
 - Les paires de titres sont ordonnées; les ensembles plus grands utilisent des

@@ -23,6 +23,8 @@ class BinaryClassificationMetrics:
     recall: float
     f1: float
     roc_auc: float | None
+    pr_auc: float | None
+    prevalence: float
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -38,6 +40,8 @@ class BinaryClassificationMetrics:
             "Recall": self.recall,
             "F1": self.f1,
             "ROCAUC": self.roc_auc,
+            "PRAUC": self.pr_auc,
+            "Prevalence": self.prevalence,
         }
 
 
@@ -71,6 +75,26 @@ def _roc_auc(outcome: np.ndarray, probabilities: np.ndarray) -> float | None:
         positive_rank_sum - positive_count * (positive_count + 1) / 2
     ) / (positive_count * negative_count)
     return float(auc)
+
+
+def _pr_auc(outcome: np.ndarray, probabilities: np.ndarray) -> float | None:
+    """Return average precision, a step-wise area under the precision-recall curve."""
+
+    positive_count = int((outcome == 1).sum())
+    if positive_count == 0:
+        return None
+    order = np.argsort(-probabilities, kind="stable")
+    sorted_outcome = outcome[order]
+    sorted_scores = probabilities[order]
+    true_positives = np.cumsum(sorted_outcome == 1)
+    false_positives = np.cumsum(sorted_outcome == 0)
+    distinct_ends = np.r_[sorted_scores[1:] != sorted_scores[:-1], True]
+    precision = true_positives[distinct_ends] / (
+        true_positives[distinct_ends] + false_positives[distinct_ends]
+    )
+    recall = true_positives[distinct_ends] / positive_count
+    recall_increments = np.diff(np.r_[0.0, recall])
+    return float(np.sum(recall_increments * precision))
 
 
 def classification_metrics(
@@ -113,4 +137,6 @@ def classification_metrics(
         recall=float(recall),
         f1=float(f1),
         roc_auc=_roc_auc(actual, scores),
+        pr_auc=_pr_auc(actual, scores),
+        prevalence=float(actual.mean()) if len(actual) else 0.0,
     )

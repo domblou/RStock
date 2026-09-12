@@ -31,6 +31,8 @@ def test_classification_metrics_include_confusion_matrix_and_auc():
         "Recall": 0.5,
         "F1": 0.5,
         "ROCAUC": 0.75,
+        "PRAUC": 0.8333333333333333,
+        "Prevalence": 0.5,
     }
 
 
@@ -44,3 +46,5 @@ def test_undefined_rates_are_zero_and_single_class_auc_is_none():
     assert metrics.recall == 0.0
     assert metrics.f1 == 0.0
     assert metrics.roc_auc is None
+    assert metrics.pr_auc is None
+    assert metrics.prevalence == 0.0

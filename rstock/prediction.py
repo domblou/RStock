@@ -10,7 +10,7 @@ import pandas as pd
 from .calendars import next_market_session
 from .config import RStockConfig
 from .evaluation import binary_predictions
-from .features import prepare_prediction_row
+from .features import intraday_target_column, prepare_prediction_row
 from .persistence import iter_model_metadata, load_booster
 
 
@@ -39,7 +39,7 @@ def predict_saved_models(
     max_features = config.permutation_depth
 
     for model_path, metadata in iter_model_metadata(models_directory or config.models_path):
-        outcome_column = f"{metadata.observation}.UPDW"
+        outcome_column = intraday_target_column(metadata.observation)
         if outcome_column not in prepared:
             warnings.warn(
                 f"Skipping {metadata.set_name}; no observations for {metadata.observation}",
@@ -57,7 +57,10 @@ def predict_saved_models(
             observed_dates=(observed_dates_by_symbol or {}).get(metadata.observation, ()),
         )
         current = prepare_prediction_row(
-            prepared, as_of_date=as_of_date, target_date=target_date
+            prepared,
+            as_of_date=as_of_date,
+            target_date=target_date,
+            lag_depth=metadata.lag_depth,
         )
         missing = [name for name in metadata.predictor_columns if name not in current]
         incomplete = current[metadata.predictor_columns].isna().any(axis=None) if not missing else True
@@ -80,6 +83,9 @@ def predict_saved_models(
             "MarketCalendar": metadata.market_calendar,
             "Set": metadata.set_name,
             "Observation": metadata.observation,
+            "TargetDefinition": metadata.target_definition,
+            "TargetThreshold": metadata.target_threshold,
+            "LagDepth": metadata.lag_depth,
         }
         for index in range(max_features):
             row[f"Feature{index + 1}"] = (
@@ -100,6 +106,13 @@ def predict_saved_models(
 def append_predictions(current: pd.DataFrame, path: Path) -> pd.DataFrame:
     if path.exists():
         previous = pd.read_csv(path)
+        required = {"TargetDefinition", "TargetThreshold", "LagDepth"}
+        missing = sorted(required - set(previous.columns))
+        if missing:
+            raise ValueError(
+                "Existing predictions use an obsolete target definition; archive "
+                f"or replace {path} before continuing (missing: {missing})"
+            )
         for column in ("Date", "AsOfDate"):
             previous[column] = pd.to_datetime(previous[column], errors="raise").dt.normalize()
         return pd.concat([previous, current], ignore_index=True)

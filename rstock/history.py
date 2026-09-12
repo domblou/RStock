@@ -6,23 +6,37 @@ from pathlib import Path
 
 import pandas as pd
 
+from .returns import calculate_returns
+
 
 HISTORY_COLUMNS = ["Date", "Symbol", "Field", "Value"]
 
 
 def market_data_to_history(stock: pd.DataFrame) -> pd.DataFrame:
-    """Add OpCl and pivot prices to typed Date/Symbol/Field/Value rows."""
+    """Add distinct return diagnostics and pivot to typed long history."""
 
     wide = stock.copy()
+    wide.index = pd.to_datetime(wide.index, errors="raise").normalize()
+    wide.index.name = "Date"
     open_columns = [name for name in wide.columns if name.endswith(".Open")]
     for open_name in open_columns:
         symbol = open_name.removesuffix(".Open")
         close_name = f"{symbol}.Close"
         if close_name in wide:
-            wide[f"{symbol}.OpCl"] = 1.0 - wide[open_name] / wide[close_name]
+            high_name = f"{symbol}.High"
+            low_name = f"{symbol}.Low"
+            high = wide[high_name] if high_name in wide else None
+            low = wide[low_name] if low_name in wide else None
+            returns = calculate_returns(wide[open_name], wide[close_name], high, low)
+            wide[f"{symbol}.OvernightReturn"] = returns["overnight_return"]
+            wide[f"{symbol}.IntradayReturn"] = returns["intraday_return"]
+            wide[f"{symbol}.CloseToCloseReturn"] = returns[
+                "close_to_close_return"
+            ]
+            if "mfe" in returns:
+                wide[f"{symbol}.MFE"] = returns["mfe"]
+                wide[f"{symbol}.MAE"] = returns["mae"]
     wide = wide.reindex(sorted(wide.columns), axis=1)
-    wide.index = pd.to_datetime(wide.index, errors="raise").normalize()
-    wide.index.name = "Date"
     long = wide.reset_index().melt(id_vars="Date", var_name="variable", value_name="Value")
 
     parts = long["variable"].str.rsplit(".", n=1, expand=True)

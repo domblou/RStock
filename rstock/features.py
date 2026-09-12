@@ -8,6 +8,40 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
+from .returns import calculate_returns, previous_observed_values
+
+
+def intraday_target_column(symbol: str) -> str:
+    return f"{symbol}.intraday_target"
+
+
+def intraday_down_target_column(symbol: str) -> str:
+    return f"{symbol}.intraday_down_target"
+
+
+def intraday_return_column(symbol: str) -> str:
+    return f"{symbol}.intraday_return"
+
+
+def overnight_return_column(symbol: str) -> str:
+    return f"{symbol}.overnight_return"
+
+
+def close_to_close_return_column(symbol: str) -> str:
+    return f"{symbol}.close_to_close_return"
+
+
+def mfe_column(symbol: str) -> str:
+    return f"{symbol}.mfe"
+
+
+def mae_column(symbol: str) -> str:
+    return f"{symbol}.mae"
+
+
+def intraday_lag_column(symbol: str, lag: int) -> str:
+    return f"{symbol}_intraday_J-{lag}"
+
 
 def _normalise_datetime_index(stock: pd.DataFrame) -> pd.DataFrame:
     stock = stock.copy()
@@ -27,29 +61,68 @@ def _normalise_datetime_index(stock: pd.DataFrame) -> pd.DataFrame:
 def prepare_dataset(
     stock: pd.DataFrame,
     stock_symbols: Sequence[str],
-    up_down_threshold: float = 0.01,
+    intraday_target_threshold: float = 0.01,
+    lag_depth: int = 3,
+    intraday_down_threshold: float = 0.01,
 ) -> pd.DataFrame:
-    """Create outcomes and previous real-observation features without imputation."""
+    """Create intraday targets, diagnostics and strictly pre-open lag features."""
 
+    if lag_depth < 1:
+        raise ValueError("lag_depth must be positive")
+    if intraday_target_threshold < 0 or intraday_down_threshold < 0:
+        raise ValueError("Intraday target thresholds cannot be negative")
     stock = _normalise_datetime_index(stock)
     columns: dict[str, pd.Series] = {}
 
     for symbol in stock_symbols:
         open_name = f"{symbol}.Open"
+        high_name = f"{symbol}.High"
+        low_name = f"{symbol}.Low"
         close_name = f"{symbol}.Close"
-        missing = [name for name in (open_name, close_name) if name not in stock.columns]
+        missing = [
+            name
+            for name in (open_name, high_name, low_name, close_name)
+            if name not in stock.columns
+        ]
         if missing:
             raise KeyError(f"Missing price columns for {symbol}: {', '.join(missing)}")
 
-        opcl = (1.0 - stock[open_name] / stock[close_name]).replace(
-            [np.inf, -np.inf], np.nan
+        returns = calculate_returns(
+            stock[open_name],
+            stock[close_name],
+            stock[high_name],
+            stock[low_name],
         )
-        updw = pd.Series(
-            np.where(opcl.isna(), np.nan, (opcl >= up_down_threshold).astype(float)),
+        intraday = returns["intraday_return"]
+        target = pd.Series(
+            np.where(
+                intraday.isna(),
+                np.nan,
+                (intraday >= intraday_target_threshold).astype(float),
+            ),
             index=stock.index,
         )
-        columns[f"{symbol}.UPDW"] = updw
-        columns[f"{symbol}.DAY_MINUS_1_UPDW"] = updw.dropna().shift(1).reindex(stock.index)
+        down_target = pd.Series(
+            np.where(
+                intraday.isna(),
+                np.nan,
+                (intraday <= -intraday_down_threshold).astype(float),
+            ),
+            index=stock.index,
+        )
+        columns[overnight_return_column(symbol)] = returns["overnight_return"]
+        columns[intraday_return_column(symbol)] = intraday
+        columns[close_to_close_return_column(symbol)] = returns[
+            "close_to_close_return"
+        ]
+        columns[intraday_target_column(symbol)] = target
+        columns[intraday_down_target_column(symbol)] = down_target
+        columns[mfe_column(symbol)] = returns["mfe"]
+        columns[mae_column(symbol)] = returns["mae"]
+        for lag in range(1, lag_depth + 1):
+            columns[intraday_lag_column(symbol, lag)] = previous_observed_values(
+                intraday, stock.index, lag
+            )
 
     prepared = pd.DataFrame(columns, index=stock.index)
     prepared = prepared.reindex(sorted(prepared.columns), axis=1)
@@ -68,9 +141,12 @@ def prepare_prediction_row(
     *,
     as_of_date: object | None = None,
     target_date: object | None = None,
+    lag_depth: int = 3,
 ) -> pd.DataFrame:
     """Build future predictors from the latest values known at ``as_of_date``."""
 
+    if lag_depth < 1:
+        raise ValueError("lag_depth must be positive")
     if prepared.empty:
         raise ValueError("At least two market observations are required for prediction")
     ordered = _normalise_datetime_index(prepared)
@@ -81,11 +157,14 @@ def prepare_prediction_row(
     target = pd.Timestamp(target_date).normalize() if target_date is not None else as_of
 
     values: dict[str, float] = {}
-    for name in (column for column in eligible if column.endswith(".UPDW")):
+    suffix = ".intraday_return"
+    for name in (column for column in eligible if column.endswith(suffix)):
+        symbol = name.removesuffix(suffix)
         known = eligible[name].dropna()
-        values[name.removesuffix(".UPDW") + ".DAY_MINUS_1_UPDW"] = (
-            float(known.iloc[-1]) if not known.empty else np.nan
-        )
+        for lag in range(1, lag_depth + 1):
+            values[intraday_lag_column(symbol, lag)] = (
+                float(known.iloc[-lag]) if len(known) >= lag else np.nan
+            )
     values["wday"] = (target.dayofweek + 1) % 7
     values["yday"] = target.dayofyear - 1
     values["mon"] = target.month - 1
@@ -95,14 +174,26 @@ def prepare_prediction_row(
 def predictor_columns(
     dataset: pd.DataFrame,
     feature_symbols: Sequence[str],
+    lag_depth: int = 3,
     date_feature_regex: str = "",
 ) -> list[str]:
-    """Select predictors in dataset order, matching the intent of the R regex."""
+    """Select only lagged intraday and explicitly allowed calendar features."""
 
-    requested = {f"{symbol}.DAY_MINUS_1_UPDW" for symbol in feature_symbols}
+    if lag_depth < 1:
+        raise ValueError("lag_depth must be positive")
+    requested = {
+        intraday_lag_column(symbol, lag)
+        for symbol in feature_symbols
+        for lag in range(1, lag_depth + 1)
+    }
     date_pattern = re.compile(date_feature_regex) if date_feature_regex else None
     return [
         name
         for name in dataset.columns
-        if name in requested or (date_pattern is not None and date_pattern.search(name))
+        if name in requested
+        or (
+            name in {"wday", "yday", "mon"}
+            and date_pattern is not None
+            and date_pattern.search(name)
+        )
     ]

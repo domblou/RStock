@@ -26,6 +26,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--force-symbol", action="append", default=[])
     parser.add_argument("--history-days", type=int, default=DEFAULT_CONFIG.model_history_days)
+    parser.add_argument("--lag-depth", type=int, default=DEFAULT_CONFIG.lag_depth)
+    parser.add_argument(
+        "--intraday-target-threshold",
+        type=float,
+        default=DEFAULT_CONFIG.intraday_target_threshold,
+    )
+    parser.add_argument(
+        "--intraday-down-threshold",
+        type=float,
+        default=DEFAULT_CONFIG.intraday_down_threshold,
+    )
     parser.add_argument(
         "--permutation-depth", type=int, default=DEFAULT_CONFIG.permutation_depth
     )
@@ -38,6 +49,37 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--step-size", type=int, default=DEFAULT_CONFIG.walk_forward_step_size
     )
+    parser.add_argument(
+        "--final-holdout-size", type=int, default=DEFAULT_CONFIG.final_holdout_size
+    )
+    parser.add_argument(
+        "--min-windows", type=int, default=DEFAULT_CONFIG.qualification_min_windows
+    )
+    parser.add_argument(
+        "--min-median-auc",
+        type=float,
+        default=DEFAULT_CONFIG.qualification_min_median_auc,
+    )
+    parser.add_argument(
+        "--min-pct-windows-above-random",
+        type=float,
+        default=DEFAULT_CONFIG.qualification_min_pct_windows_above_random,
+    )
+    parser.add_argument(
+        "--min-worst-window-auc",
+        type=float,
+        default=DEFAULT_CONFIG.qualification_min_worst_window_auc,
+    )
+    parser.add_argument(
+        "--min-positive-observations",
+        type=int,
+        default=DEFAULT_CONFIG.qualification_min_positive_observations,
+    )
+    parser.add_argument(
+        "--max-auc-std",
+        type=float,
+        default=DEFAULT_CONFIG.qualification_max_auc_std,
+    )
     return parser
 
 
@@ -45,7 +87,21 @@ def main() -> None:
     parser = _parser()
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    config = replace(DEFAULT_CONFIG, project_root=args.project_root.resolve())
+    config = replace(
+        DEFAULT_CONFIG,
+        project_root=args.project_root.resolve(),
+        lag_depth=args.lag_depth,
+        intraday_target_threshold=args.intraday_target_threshold,
+        intraday_down_threshold=args.intraday_down_threshold,
+        qualification_min_windows=args.min_windows,
+        qualification_min_median_auc=args.min_median_auc,
+        qualification_min_pct_windows_above_random=(
+            args.min_pct_windows_above_random
+        ),
+        qualification_min_worst_window_auc=args.min_worst_window_auc,
+        qualification_min_positive_observations=args.min_positive_observations,
+        qualification_max_auc_std=args.max_auc_std,
+    )
 
     if args.symbols:
         if not args.calendar:
@@ -80,7 +136,11 @@ def main() -> None:
         print(f"Cache/download issues for: {', '.join(downloaded.failed_symbols)}")
 
     prepared = prepare_dataset(
-        downloaded.prices, downloaded.symbols, config.up_down_threshold
+        downloaded.prices,
+        downloaded.symbols,
+        config.intraday_target_threshold,
+        config.lag_depth,
+        config.intraday_down_threshold,
     )
     generated = generate_symbol_sets(
         downloaded.symbols,
@@ -95,9 +155,14 @@ def main() -> None:
         min_train_size=args.min_train_size,
         test_size=args.test_size,
         step_size=args.step_size,
+        final_holdout_size=args.final_holdout_size,
     )
     write_walk_forward_results(result, config.walk_forward_path)
     print(result.aggregate_global.to_string(index=False))
+    print(
+        f"Eligible combinations: {int(result.qualification['Eligible'].sum())}/"
+        f"{len(result.qualification)}"
+    )
     print(f"Results written to {config.walk_forward_path}")
 
 

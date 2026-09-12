@@ -7,13 +7,14 @@ from rstock.validation import validate_pending_predictions
 
 def _prediction(symbol: str, binary: int) -> pd.DataFrame:
     return pd.DataFrame(
-        [["2024-01-03", "2024-01-02", "XNYS", "set", symbol, binary, -1, 0]],
+        [["2024-01-03", "2024-01-02", "XNYS", "set", symbol, 0.01, binary, -1, 0]],
         columns=[
             "Date",
             "AsOfDate",
             "MarketCalendar",
             "Set",
             "Observation",
+            "TargetThreshold",
             "BinaryPrediction",
             "BinaryResult",
             "SuccessfulPrediction",
@@ -23,14 +24,21 @@ def _prediction(symbol: str, binary: int) -> pd.DataFrame:
 
 def test_history_preserves_punctuated_ticker_and_typed_date():
     stock = pd.DataFrame(
-        {"BRK.B.Open": [100.0], "BRK.B.Close": [102.0]},
+        {
+            "BRK.B.Open": [100.0],
+            "BRK.B.High": [103.0],
+            "BRK.B.Low": [99.0],
+            "BRK.B.Close": [102.0],
+        },
         index=pd.to_datetime(["2024-01-02"]),
     )
 
     history = market_data_to_history(stock)
 
     assert set(history["Symbol"]) == {"BRK.B"}
-    assert "OpCl" in set(history["Field"])
+    assert {
+        "OvernightReturn", "IntradayReturn", "CloseToCloseReturn", "MFE", "MAE"
+    } <= set(history["Field"])
     assert pd.api.types.is_datetime64_any_dtype(history["Date"])
 
 
@@ -57,11 +65,11 @@ def test_history_merge_fills_old_gaps_and_refreshes_existing_values():
 def test_validation_uses_first_actual_session_after_as_of_and_counts_true_negative():
     predictions = _prediction("AAA", binary=0)
     history = pd.DataFrame(
-        [["2024-01-04", "AAA", "OpCl", -0.02]],
+        [["2024-01-04", "AAA", "IntradayReturn", -0.02]],
         columns=["Date", "Symbol", "Field", "Value"],
     )
 
-    result = validate_pending_predictions(predictions, history, 0.01)
+    result = validate_pending_predictions(predictions, history)
 
     assert result.iloc[0]["Date"] == pd.Timestamp("2024-01-04")
     assert result.iloc[0]["BinaryResult"] == 0
@@ -71,11 +79,11 @@ def test_validation_uses_first_actual_session_after_as_of_and_counts_true_negati
 def test_numeric_threshold_comparison_is_not_lexicographic():
     predictions = _prediction("AAA", binary=0)
     history = pd.DataFrame(
-        [["2024-01-03", "AAA", "OpCl", "1e-3"]],
+        [["2024-01-03", "AAA", "IntradayReturn", "1e-3"]],
         columns=["Date", "Symbol", "Field", "Value"],
     )
 
-    result = validate_pending_predictions(predictions, history, 0.01)
+    result = validate_pending_predictions(predictions, history)
 
     assert result.iloc[0]["BinaryResult"] == 0
 
@@ -83,10 +91,23 @@ def test_numeric_threshold_comparison_is_not_lexicographic():
 def test_duplicate_actual_result_is_left_pending():
     predictions = _prediction("AAA", binary=1)
     history = pd.DataFrame(
-        [["2024-01-03", "AAA", "OpCl", 0.02]] * 2,
+        [["2024-01-03", "AAA", "IntradayReturn", 0.02]] * 2,
         columns=["Date", "Symbol", "Field", "Value"],
     )
 
     with pytest.warns(RuntimeWarning):
         result = validate_pending_predictions(predictions, history)
     assert result.iloc[0]["BinaryResult"] == -1
+
+
+def test_validation_includes_return_exactly_at_configured_threshold():
+    predictions = _prediction("AAA", binary=1)
+    history = pd.DataFrame(
+        [["2024-01-03", "AAA", "IntradayReturn", 0.01]],
+        columns=["Date", "Symbol", "Field", "Value"],
+    )
+
+    result = validate_pending_predictions(predictions, history)
+
+    assert result.iloc[0]["BinaryResult"] == 1
+    assert result.iloc[0]["SuccessfulPrediction"] == 1

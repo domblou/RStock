@@ -29,6 +29,10 @@ class ModelMetadata:
     train_end: str
     test_start: str
     test_end: str
+    target_column: str
+    target_definition: str
+    target_threshold: float
+    lag_depth: int
     classification_metrics: dict[str, Any] = field(default_factory=dict)
 
 
@@ -103,7 +107,7 @@ def iter_model_metadata(directory: Path) -> list[tuple[Path, ModelMetadata]]:
     bundles: list[tuple[Path, ModelMetadata]] = []
     for path in sorted(directory.glob("*.metadata.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("schema_version") != 3:
+        if data.get("schema_version") != 4:
             raise ValueError(
                 f"Unsupported model metadata schema in {path}; retrain the models"
             )

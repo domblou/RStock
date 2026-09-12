@@ -10,13 +10,17 @@ import pandas as pd
 def validate_pending_predictions(
     predictions: pd.DataFrame,
     history: pd.DataFrame,
-    up_down_threshold: float = 0.01,
 ) -> pd.DataFrame:
-    """Validate pending predictions on the next actually observed market session."""
+    """Validate predictions against the next session's exploitable Open-to-Close return."""
 
     result = predictions.copy()
     result["Date"] = pd.to_datetime(result["Date"], errors="raise").dt.normalize()
     result["AsOfDate"] = pd.to_datetime(result["AsOfDate"], errors="raise").dt.normalize()
+    if "TargetThreshold" not in result:
+        raise ValueError("Predictions are missing their intraday TargetThreshold")
+    result["TargetThreshold"] = pd.to_numeric(
+        result["TargetThreshold"], errors="raise"
+    )
     market_history = history.copy()
     market_history["Date"] = pd.to_datetime(
         market_history["Date"], errors="raise"
@@ -28,7 +32,7 @@ def validate_pending_predictions(
         matches = market_history[
             (market_history["Date"] > prediction["AsOfDate"])
             & (market_history["Symbol"] == str(prediction["Observation"]))
-            & (market_history["Field"] == "OpCl")
+            & (market_history["Field"] == "IntradayReturn")
         ].sort_values("Date")
         if len(matches):
             matches = matches[matches["Date"] == matches.iloc[0]["Date"]]
@@ -37,7 +41,7 @@ def validate_pending_predictions(
             if pd.isna(value):
                 continue
             result.at[index, "Date"] = matches.iloc[0]["Date"]
-            binary_result = int(float(value) > up_down_threshold)
+            binary_result = int(float(value) >= float(prediction["TargetThreshold"]))
             binary_prediction = int(prediction["BinaryPrediction"])
             result.at[index, "BinaryResult"] = binary_result
             result.at[index, "SuccessfulPrediction"] = int(

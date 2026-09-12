@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .combinations import symbol_set_id, symbols_from_set
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics
-from .features import predictor_columns
+from .features import (
+    close_to_close_return_column,
+    intraday_down_target_column,
+    intraday_return_column,
+    intraday_target_column,
+    mae_column,
+    mfe_column,
+    overnight_return_column,
+    predictor_columns,
+)
 from .modeling import fit_booster, predict_probabilities
+from .qualification import qualification_parameters, qualify_combinations
+from .risk import conditional_signal_metrics, intraday_risk_metrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +42,15 @@ class WalkForwardResult:
     aggregate_by_window: pd.DataFrame
     aggregate_by_set: pd.DataFrame
     aggregate_global: pd.DataFrame
+    qualification: pd.DataFrame
+    final_holdout: pd.DataFrame
+    final_holdout_predictions: pd.DataFrame
+    selection_results: pd.DataFrame
+    risk_by_window: pd.DataFrame
+    risk_by_set: pd.DataFrame
+    risk_global: pd.DataFrame
+    final_holdout_risk: pd.DataFrame
+    run_configuration: dict[str, object]
 
 
 def expanding_windows(
@@ -61,6 +83,38 @@ def _metric_record(actual, predicted, probabilities) -> dict[str, object]:
     return classification_metrics(actual, predicted, probabilities).as_columns()
 
 
+def _prefixed_metric_record(
+    prefix: str, actual, predicted, probabilities
+) -> dict[str, object]:
+    return {
+        f"{prefix}{name}": value
+        for name, value in _metric_record(actual, predicted, probabilities).items()
+    }
+
+
+def _return_diagnostics(
+    prepared: pd.DataFrame, observation: str, date: pd.Timestamp
+) -> dict[str, float | int]:
+    intraday_target = prepared.at[date, intraday_target_column(observation)]
+    down_target = prepared.at[date, intraday_down_target_column(observation)]
+    return {
+        "OvernightReturn": float(
+            prepared.at[date, overnight_return_column(observation)]
+        ),
+        "IntradayReturn": float(
+            prepared.at[date, intraday_return_column(observation)]
+        ),
+        "CloseToCloseReturn": float(
+            prepared.at[date, close_to_close_return_column(observation)]
+        ),
+        "IntradayTarget": int(intraday_target),
+        "UpTarget": int(intraday_target),
+        "DownTarget": int(down_target),
+        "MFE": float(prepared.at[date, mfe_column(observation)]),
+        "MAE": float(prepared.at[date, mae_column(observation)]),
+    }
+
+
 def _aggregate_predictions(
     predictions: pd.DataFrame,
     windows: pd.DataFrame,
@@ -75,14 +129,32 @@ def _aggregate_predictions(
             "TestObservations": len(group),
             "UniqueTestDates": int(group["Date"].nunique()),
             "Predictions": len(group),
-            "PositiveOutcomes": int(group["Outcome"].sum()),
+            "UpPositiveOutcomes": int(group["UpTarget"].sum()),
+            "DownPositiveOutcomes": int(group["DownTarget"].sum()),
         }
         record.update(
-            _metric_record(group["Outcome"], group["Prediction"], group["Probability"])
+            _prefixed_metric_record(
+                "Up", group["UpTarget"], group["UpPrediction"], group["UpProbability"]
+            )
         )
-        record["AccuracyStd"] = float(window_group["Accuracy"].std(ddof=0))
-        record["AccuracyMin"] = float(window_group["Accuracy"].min())
-        record["AccuracyMax"] = float(window_group["Accuracy"].max())
+        record.update(
+            _prefixed_metric_record(
+                "Down",
+                group["DownTarget"],
+                group["DownPrediction"],
+                group["DownProbability"],
+            )
+        )
+        for prefix in ("Up", "Down"):
+            record[f"{prefix}AccuracyStd"] = float(
+                window_group[f"{prefix}Accuracy"].std(ddof=0)
+            )
+            record[f"{prefix}AccuracyMin"] = float(
+                window_group[f"{prefix}Accuracy"].min()
+            )
+            record[f"{prefix}AccuracyMax"] = float(
+                window_group[f"{prefix}Accuracy"].max()
+            )
         by_set.append(record)
 
     aggregate_by_set = pd.DataFrame(by_set)
@@ -92,13 +164,23 @@ def _aggregate_predictions(
         "TestObservations": len(predictions),
         "UniqueTestDates": int(predictions["Date"].nunique()),
         "Predictions": len(predictions),
-        "PositiveOutcomes": int(predictions["Outcome"].sum()),
+        "UpPositiveOutcomes": int(predictions["UpTarget"].sum()),
+        "DownPositiveOutcomes": int(predictions["DownTarget"].sum()),
     }
     global_record.update(
-        _metric_record(
-            predictions["Outcome"],
-            predictions["Prediction"],
-            predictions["Probability"],
+        _prefixed_metric_record(
+            "Up",
+            predictions["UpTarget"],
+            predictions["UpPrediction"],
+            predictions["UpProbability"],
+        )
+    )
+    global_record.update(
+        _prefixed_metric_record(
+            "Down",
+            predictions["DownTarget"],
+            predictions["DownPrediction"],
+            predictions["DownProbability"],
         )
     )
     return aggregate_by_set, pd.DataFrame([global_record])
@@ -120,13 +202,303 @@ def _aggregate_windows(
             "TestObservations": len(group),
             "UniqueTestDates": int(group["Date"].nunique()),
             "Predictions": len(group),
-            "PositiveOutcomes": int(group["Outcome"].sum()),
+            "UpPositiveOutcomes": int(group["UpTarget"].sum()),
+            "DownPositiveOutcomes": int(group["DownTarget"].sum()),
         }
         record.update(
-            _metric_record(group["Outcome"], group["Prediction"], group["Probability"])
+            _prefixed_metric_record(
+                "Up", group["UpTarget"], group["UpPrediction"], group["UpProbability"]
+            )
+        )
+        record.update(
+            _prefixed_metric_record(
+                "Down",
+                group["DownTarget"],
+                group["DownPrediction"],
+                group["DownProbability"],
+            )
         )
         records.append(record)
     return pd.DataFrame(records)
+
+
+def _risk_record(group: pd.DataFrame, config: RStockConfig) -> dict[str, object]:
+    record: dict[str, object] = {}
+    record.update(
+        intraday_risk_metrics(
+            group,
+            config.intraday_target_threshold,
+            config.intraday_down_threshold,
+        )
+    )
+    record.update(
+        conditional_signal_metrics(
+            group,
+            "UpPrediction",
+            "UpSignal",
+            config.intraday_target_threshold,
+            config.intraday_down_threshold,
+        )
+    )
+    record.update(
+        conditional_signal_metrics(
+            group,
+            "DownPrediction",
+            "DownSignal",
+            config.intraday_target_threshold,
+            config.intraday_down_threshold,
+        )
+    )
+    return record
+
+
+def _aggregate_risk(
+    predictions: pd.DataFrame, config: RStockConfig
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    by_window: list[dict[str, object]] = []
+    for (set_name, window), group in predictions.groupby(
+        ["Set", "Window"], sort=False
+    ):
+        record: dict[str, object] = {
+            "Set": set_name,
+            "Observation": group.iloc[0]["Observation"],
+            "Predictors": group.iloc[0]["Predictors"],
+            "Window": int(window),
+            "Start": group["Date"].min(),
+            "End": group["Date"].max(),
+        }
+        record.update(_risk_record(group, config))
+        by_window.append(record)
+
+    by_set: list[dict[str, object]] = []
+    for set_name, group in predictions.groupby("Set", sort=False):
+        record = {
+            "Set": set_name,
+            "Observation": group.iloc[0]["Observation"],
+            "Predictors": group.iloc[0]["Predictors"],
+        }
+        record.update(_risk_record(group, config))
+        by_set.append(record)
+
+    unique_market_observations = predictions.drop_duplicates(
+        ["Observation", "Date"]
+    )
+    global_record: dict[str, object] = {
+        "Sets": int(predictions["Set"].nunique()),
+        "UniqueMarketObservations": len(unique_market_observations),
+    }
+    global_record.update(
+        intraday_risk_metrics(
+            unique_market_observations,
+            config.intraday_target_threshold,
+            config.intraday_down_threshold,
+        )
+    )
+    global_record.update(
+        conditional_signal_metrics(
+            predictions,
+            "UpPrediction",
+            "UpSignal",
+            config.intraday_target_threshold,
+            config.intraday_down_threshold,
+        )
+    )
+    global_record.update(
+        conditional_signal_metrics(
+            predictions,
+            "DownPrediction",
+            "DownSignal",
+            config.intraday_target_threshold,
+            config.intraday_down_threshold,
+        )
+    )
+    return pd.DataFrame(by_window), pd.DataFrame(by_set), pd.DataFrame([global_record])
+
+
+def _aggregate_final_risk(
+    predictions: pd.DataFrame, config: RStockConfig
+) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for set_name, group in predictions.groupby("Set", sort=False):
+        record: dict[str, object] = {
+            "Set": set_name,
+            "Observation": group.iloc[0]["Observation"],
+            "Predictors": group.iloc[0]["Predictors"],
+            "Start": group["Date"].min(),
+            "End": group["Date"].max(),
+        }
+        record.update(_risk_record(group, config))
+        records.append(record)
+    return pd.DataFrame(records)
+
+
+def _evaluate_final_holdout(
+    ordered: pd.DataFrame,
+    generated_sets: pd.DataFrame,
+    qualification: pd.DataFrame,
+    config: RStockConfig,
+    holdout_start: pd.Timestamp,
+    market_calendars: Mapping[str, str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fit eligible sets on development only, then evaluate the untouched holdout."""
+
+    generated_lookup = {
+        symbol_set_id(row): row for _, row in generated_sets.iterrows()
+    }
+    metric_names = [
+        "TN", "FP", "FN", "TP", "Accuracy", "Precision", "Recall", "F1",
+        "ROCAUC", "PRAUC", "Prevalence",
+    ]
+    records: list[dict[str, object]] = []
+    prediction_records: list[dict[str, object]] = []
+    eligible = qualification[qualification["Eligible"]].sort_values("EligibleRank")
+    for _, qualified in eligible.iterrows():
+        set_name = str(qualified["Set"])
+        row = generated_lookup[set_name]
+        observation, feature_symbols = symbols_from_set(row)
+        up_outcome_name = intraday_target_column(observation)
+        down_outcome_name = intraday_down_target_column(observation)
+        names = predictor_columns(
+            ordered,
+            feature_symbols,
+            config.lag_depth,
+            config.date_feature_regex,
+        )
+        model_data = ordered[[*names, up_outcome_name, down_outcome_name]].dropna()
+        development = model_data.loc[model_data.index < holdout_start]
+        holdout = model_data.loc[model_data.index >= holdout_start]
+        record: dict[str, object] = {
+            "Set": set_name,
+            "Observation": observation,
+            "Predictors": json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":")),
+            "MarketCalendar": market_calendars.get(observation),
+            "FinalTrainStart": development.index.min() if not development.empty else pd.NaT,
+            "FinalTrainEnd": development.index.max() if not development.empty else pd.NaT,
+            "FinalTestStart": holdout.index.min() if not holdout.empty else pd.NaT,
+            "FinalTestEnd": holdout.index.max() if not holdout.empty else pd.NaT,
+            "FinalTrainObservations": len(development),
+            "FinalTestObservations": len(holdout),
+            "FinalPredictions": 0,
+            "FinalUpPositiveOutcomes": (
+                int(holdout[up_outcome_name].sum()) if not holdout.empty else 0
+            ),
+            "FinalDownPositiveOutcomes": (
+                int(holdout[down_outcome_name].sum()) if not holdout.empty else 0
+            ),
+            "FinalAvailable": False,
+            "FinalConfirmed": False,
+        }
+        record.update(
+            {
+                f"Final{direction}{name}": np.nan
+                for direction in ("Up", "Down")
+                for name in metric_names
+            }
+        )
+        if development.empty or holdout.empty:
+            records.append(record)
+            continue
+        if development.index.max() >= holdout.index.min():
+            raise AssertionError("Final holdout leaked into model development data")
+
+        up_booster = fit_booster(development, names, up_outcome_name, config)
+        down_booster = fit_booster(development, names, down_outcome_name, config)
+        up_probabilities = predict_probabilities(up_booster, holdout, names)
+        down_probabilities = predict_probabilities(down_booster, holdout, names)
+        up_predicted = binary_predictions(
+            up_probabilities, config.prediction_threshold
+        )
+        down_predicted = binary_predictions(
+            down_probabilities, config.prediction_threshold
+        )
+        up_actual = holdout[up_outcome_name].astype(int).to_numpy()
+        down_actual = holdout[down_outcome_name].astype(int).to_numpy()
+        up_metrics = classification_metrics(
+            up_actual, up_predicted, up_probabilities
+        )
+        down_metrics = classification_metrics(
+            down_actual, down_predicted, down_probabilities
+        )
+        record.update(
+            {
+                f"FinalUp{name}": value
+                for name, value in up_metrics.as_columns().items()
+            }
+        )
+        record.update(
+            {
+                f"FinalDown{name}": value
+                for name, value in down_metrics.as_columns().items()
+            }
+        )
+        record["FinalPredictions"] = len(up_predicted)
+        record["FinalAvailable"] = True
+        record["FinalConfirmed"] = bool(
+            up_metrics.roc_auc is not None
+            and up_metrics.roc_auc > config.final_confirmation_min_auc
+        )
+        records.append(record)
+        prediction_records.extend(
+            {
+                "Set": set_name,
+                "Observation": observation,
+                "Predictors": record["Predictors"],
+                "Date": date,
+                **_return_diagnostics(ordered, observation, date),
+                "UpPrediction": int(up_prediction),
+                "UpProbability": float(up_probability),
+                "DownPrediction": int(down_prediction),
+                "DownProbability": float(down_probability),
+            }
+            for date, up_prediction, up_probability, down_prediction, down_probability in zip(
+                holdout.index,
+                up_predicted,
+                up_probabilities,
+                down_predicted,
+                down_probabilities,
+                strict=True,
+            )
+        )
+
+    columns = [
+        "Set", "Observation", "Predictors", "MarketCalendar",
+        "FinalTrainStart", "FinalTrainEnd", "FinalTestStart", "FinalTestEnd",
+        "FinalTrainObservations", "FinalTestObservations", "FinalPredictions",
+        "FinalUpPositiveOutcomes", "FinalDownPositiveOutcomes",
+        "FinalAvailable", "FinalConfirmed",
+        *[
+            f"Final{direction}{name}"
+            for direction in ("Up", "Down")
+            for name in metric_names
+        ],
+    ]
+    prediction_columns = [
+        "Set", "Observation", "Predictors", "Date", "OvernightReturn",
+        "IntradayReturn", "CloseToCloseReturn", "IntradayTarget", "UpTarget",
+        "DownTarget", "MFE", "MAE", "UpPrediction", "UpProbability",
+        "DownPrediction", "DownProbability",
+    ]
+    return (
+        pd.DataFrame(records, columns=columns),
+        pd.DataFrame(prediction_records, columns=prediction_columns),
+    )
+
+
+def _combine_selection_results(
+    qualification: pd.DataFrame, final_holdout: pd.DataFrame
+) -> pd.DataFrame:
+    final_metrics = final_holdout.drop(
+        columns=["Observation", "Predictors"], errors="ignore"
+    )
+    combined = qualification.merge(final_metrics, on="Set", how="left")
+    combined["FinalStatus"] = "not_evaluated_ineligible"
+    eligible = combined["Eligible"]
+    unavailable = eligible & ~combined["FinalAvailable"].fillna(False).astype(bool)
+    confirmed = eligible & combined["FinalConfirmed"].fillna(False).astype(bool)
+    combined.loc[unavailable, "FinalStatus"] = "not_confirmed_unavailable"
+    combined.loc[eligible & ~unavailable, "FinalStatus"] = "not_confirmed"
+    combined.loc[confirmed, "FinalStatus"] = "confirmed"
+    return combined
 
 
 def evaluate_walk_forward(
@@ -138,8 +510,9 @@ def evaluate_walk_forward(
     min_train_size: int | None = None,
     test_size: int | None = None,
     step_size: int | None = None,
+    final_holdout_size: int | None = None,
 ) -> WalkForwardResult:
-    """Evaluate every symbol set on successive, strictly future windows."""
+    """Qualify on development windows, then confirm on an untouched final holdout."""
 
     if not isinstance(prepared.index, pd.DatetimeIndex):
         raise TypeError("Prepared data must use a DatetimeIndex")
@@ -153,31 +526,69 @@ def evaluate_walk_forward(
     )
     test_window = config.walk_forward_test_size if test_size is None else test_size
     step = config.walk_forward_step_size if step_size is None else step_size
+    holdout_size = (
+        config.final_holdout_size
+        if final_holdout_size is None
+        else final_holdout_size
+    )
+    if holdout_size < 1 or holdout_size >= len(ordered):
+        raise ValueError("final_holdout_size must leave non-empty development history")
+    holdout_start = ordered.index[-holdout_size]
+    development_end = ordered.index[-holdout_size - 1]
     window_records: list[dict[str, object]] = []
     prediction_records: list[dict[str, object]] = []
 
     for _, row in generated_sets.iterrows():
         observation, feature_symbols = symbols_from_set(row)
-        outcome_name = f"{observation}.UPDW"
-        names = predictor_columns(ordered, feature_symbols, config.date_feature_regex)
-        if outcome_name not in ordered or not names:
+        up_outcome_name = intraday_target_column(observation)
+        down_outcome_name = intraday_down_target_column(observation)
+        names = predictor_columns(
+            ordered,
+            feature_symbols,
+            config.lag_depth,
+            config.date_feature_regex,
+        )
+        if (
+            up_outcome_name not in ordered
+            or down_outcome_name not in ordered
+            or not names
+        ):
             raise ValueError(f"Incomplete columns for set targeting {observation}")
-        model_data = ordered[[*names, outcome_name]].dropna()
+        model_data = ordered[
+            [*names, up_outcome_name, down_outcome_name]
+        ].dropna()
+        rows_lost_to_lags = int(
+            ordered[up_outcome_name].notna().sum() - len(model_data)
+        )
         set_name = symbol_set_id(row)
-        for window in expanding_windows(len(model_data), min_train, test_window, step):
-            train = model_data.iloc[window.train_slice]
-            test = model_data.iloc[window.test_slice]
+        predictors_json = json.dumps(
+            feature_symbols, ensure_ascii=False, separators=(",", ":")
+        )
+        development_data = model_data.loc[model_data.index < holdout_start]
+        for window in expanding_windows(
+            len(development_data), min_train, test_window, step
+        ):
+            train = development_data.iloc[window.train_slice]
+            test = development_data.iloc[window.test_slice]
             if train.index.max() >= test.index.min():
                 raise AssertionError("Walk-forward window leaked future test data")
 
-            booster = fit_booster(train, names, outcome_name, config)
-            probabilities = predict_probabilities(booster, test, names)
-            predicted = binary_predictions(probabilities, config.prediction_threshold)
-            actual = test[outcome_name].astype(int).to_numpy()
-            metrics = _metric_record(actual, predicted, probabilities)
+            up_booster = fit_booster(train, names, up_outcome_name, config)
+            down_booster = fit_booster(train, names, down_outcome_name, config)
+            up_probabilities = predict_probabilities(up_booster, test, names)
+            down_probabilities = predict_probabilities(down_booster, test, names)
+            up_predicted = binary_predictions(
+                up_probabilities, config.prediction_threshold
+            )
+            down_predicted = binary_predictions(
+                down_probabilities, config.prediction_threshold
+            )
+            up_actual = test[up_outcome_name].astype(int).to_numpy()
+            down_actual = test[down_outcome_name].astype(int).to_numpy()
             window_record: dict[str, object] = {
                 "Set": set_name,
                 "Observation": observation,
+                "Predictors": predictors_json,
                 "MarketCalendar": (market_calendars or {}).get(observation),
                 "Window": window.number,
                 "TrainStart": train.index.min(),
@@ -186,25 +597,44 @@ def evaluate_walk_forward(
                 "TestEnd": test.index.max(),
                 "TrainObservations": len(train),
                 "TestObservations": len(test),
-                "Predictions": len(predicted),
-                "PositiveOutcomes": int(actual.sum()),
+                "Predictions": len(up_predicted),
+                "UpPositiveOutcomes": int(up_actual.sum()),
+                "DownPositiveOutcomes": int(down_actual.sum()),
+                "RowsLostToLags": rows_lost_to_lags,
             }
-            window_record.update(metrics)
+            window_record.update(
+                _prefixed_metric_record(
+                    "Up", up_actual, up_predicted, up_probabilities
+                )
+            )
+            window_record.update(
+                _prefixed_metric_record(
+                    "Down", down_actual, down_predicted, down_probabilities
+                )
+            )
             window_records.append(window_record)
 
             prediction_records.extend(
                 {
                     "Set": set_name,
                     "Observation": observation,
+                    "Predictors": predictors_json,
                     "MarketCalendar": (market_calendars or {}).get(observation),
                     "Window": window.number,
                     "Date": date,
-                    "Outcome": int(outcome),
-                    "Prediction": int(prediction),
-                    "Probability": float(probability),
+                    **_return_diagnostics(ordered, observation, date),
+                    "UpPrediction": int(up_prediction),
+                    "UpProbability": float(up_probability),
+                    "DownPrediction": int(down_prediction),
+                    "DownProbability": float(down_probability),
                 }
-                for date, outcome, prediction, probability in zip(
-                    test.index, actual, predicted, probabilities, strict=True
+                for date, up_prediction, up_probability, down_prediction, down_probability in zip(
+                    test.index,
+                    up_predicted,
+                    up_probabilities,
+                    down_predicted,
+                    down_probabilities,
+                    strict=True,
                 )
             )
 
@@ -216,12 +646,70 @@ def evaluate_walk_forward(
         predictions_frame, windows_frame
     )
     aggregate_by_window = _aggregate_windows(predictions_frame, windows_frame)
+    risk_by_window, risk_by_set, risk_global = _aggregate_risk(
+        predictions_frame, config
+    )
+    qualification = qualify_combinations(windows_frame, predictions_frame, config)
+    eligibility = qualification[["Set", "Eligible", "EligibleRank"]]
+    risk_by_window = risk_by_window.merge(eligibility, on="Set", how="left")
+    risk_by_set = risk_by_set.merge(eligibility, on="Set", how="left")
+    final_holdout, final_predictions = _evaluate_final_holdout(
+        ordered,
+        generated_sets,
+        qualification,
+        config,
+        holdout_start,
+        market_calendars or {},
+    )
+    final_holdout_risk = _aggregate_final_risk(final_predictions, config)
+    if not final_holdout_risk.empty:
+        final_holdout_risk = final_holdout_risk.merge(
+            eligibility, on="Set", how="left"
+        )
+    selection_results = _combine_selection_results(qualification, final_holdout)
+    aggregate_global["EligibleSets"] = int(qualification["Eligible"].sum())
+    aggregate_global["EligiblePct"] = float(qualification["Eligible"].mean())
+    aggregate_global["FinalConfirmedSets"] = int(
+        final_holdout["FinalConfirmed"].sum()
+    )
+    run_configuration: dict[str, object] = {
+        "target": "intraday_return >= intraday_target_threshold",
+        "down_target": "intraday_return <= -intraday_down_threshold",
+        "intraday_target_threshold": config.intraday_target_threshold,
+        "intraday_down_threshold": config.intraday_down_threshold,
+        "conditional_signal": "predicted class == 1 (probability > 0.5)",
+        "lag_depth": config.lag_depth,
+        "lag_features": [f"intraday_J-{lag}" for lag in range(1, config.lag_depth + 1)],
+        "walk_forward_min_train_size": min_train,
+        "walk_forward_test_size": test_window,
+        "walk_forward_step_size": step,
+        "final_holdout_size": holdout_size,
+        "development_end": development_end.isoformat(),
+        "final_holdout_start": holdout_start.isoformat(),
+        "qualification": qualification_parameters(config),
+        "ranking_order": [
+            "PctWindowsAboveRandom desc",
+            "ROCAUCMedian desc",
+            "ROCAUCWorst desc",
+            "ROCAUCStd asc",
+            "PRAUCMedian desc",
+        ],
+    }
     return WalkForwardResult(
         windows=windows_frame,
         predictions=predictions_frame,
         aggregate_by_window=aggregate_by_window,
         aggregate_by_set=aggregate_by_set,
         aggregate_global=aggregate_global,
+        qualification=qualification,
+        final_holdout=final_holdout,
+        final_holdout_predictions=final_predictions,
+        selection_results=selection_results,
+        risk_by_window=risk_by_window,
+        risk_by_set=risk_by_set,
+        risk_global=risk_global,
+        final_holdout_risk=final_holdout_risk,
+        run_configuration=run_configuration,
     )
 
 
@@ -232,3 +720,19 @@ def write_walk_forward_results(result: WalkForwardResult, directory: Path) -> No
     result.aggregate_by_window.to_csv(directory / "aggregate_by_window.csv", index=False)
     result.aggregate_by_set.to_csv(directory / "aggregate_by_set.csv", index=False)
     result.aggregate_global.to_csv(directory / "aggregate_global.csv", index=False)
+    result.qualification.to_csv(directory / "qualification.csv", index=False)
+    result.final_holdout.to_csv(directory / "final_holdout.csv", index=False)
+    result.final_holdout_predictions.to_csv(
+        directory / "final_holdout_predictions.csv", index=False
+    )
+    result.selection_results.to_csv(directory / "selection_results.csv", index=False)
+    result.risk_by_window.to_csv(directory / "risk_by_window.csv", index=False)
+    result.risk_by_set.to_csv(directory / "risk_by_set.csv", index=False)
+    result.risk_global.to_csv(directory / "risk_global.csv", index=False)
+    result.final_holdout_risk.to_csv(
+        directory / "final_holdout_risk.csv", index=False
+    )
+    (directory / "run_configuration.json").write_text(
+        json.dumps(result.run_configuration, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )

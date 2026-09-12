@@ -51,9 +51,10 @@ def test_unmanaged_files_prevent_model_store_replacement(tmp_path):
     assert (destination / "notes.txt").read_text(encoding="utf-8") == "keep me"
 
 
-def test_obsolete_model_metadata_requires_retraining(tmp_path):
+@pytest.mark.parametrize("schema_version", [2, 3])
+def test_obsolete_model_metadata_requires_retraining(tmp_path, schema_version):
     (tmp_path / "old.metadata.json").write_text(
-        json.dumps({"schema_version": 2}), encoding="utf-8"
+        json.dumps({"schema_version": schema_version}), encoding="utf-8"
     )
 
     with pytest.raises(ValueError, match="retrain"):

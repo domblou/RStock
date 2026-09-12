@@ -20,9 +20,26 @@ def main() -> None:
     parser.add_argument("--project-root", type=Path, default=DEFAULT_CONFIG.project_root)
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--force-symbol", action="append", default=[])
+    parser.add_argument("--lag-depth", type=int, default=DEFAULT_CONFIG.lag_depth)
+    parser.add_argument(
+        "--intraday-target-threshold",
+        type=float,
+        default=DEFAULT_CONFIG.intraday_target_threshold,
+    )
+    parser.add_argument(
+        "--intraday-down-threshold",
+        type=float,
+        default=DEFAULT_CONFIG.intraday_down_threshold,
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    config = replace(DEFAULT_CONFIG, project_root=args.project_root.resolve())
+    config = replace(
+        DEFAULT_CONFIG,
+        project_root=args.project_root.resolve(),
+        lag_depth=args.lag_depth,
+        intraday_target_threshold=args.intraday_target_threshold,
+        intraday_down_threshold=args.intraday_down_threshold,
+    )
 
     universe = read_symbol_universe(config.symbols_path)
     if config.selected_symbols:
@@ -45,7 +62,11 @@ def main() -> None:
         )
 
     prepared = prepare_dataset(
-        downloaded.prices, downloaded.symbols, config.up_down_threshold
+        downloaded.prices,
+        downloaded.symbols,
+        config.intraday_target_threshold,
+        config.lag_depth,
+        config.intraday_down_threshold,
     )
     generated = generate_symbol_sets(
         downloaded.symbols,

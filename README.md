@@ -42,6 +42,26 @@ Les modèles ne remplacent le dossier actif qu'après la réussite complète de
 l'entraînement. Les anciens bundles doivent être régénérés afin d'inclure leur
 calendrier et leurs bornes temporelles.
 
+## Cible et features temporelles
+
+La cible binaire est basée sur le rendement exploitable entre l'ouverture et la
+clôture de la séance cible : `(Close_J / Open_J) - 1`. Elle vaut 1 lorsque ce
+rendement est supérieur ou égal à `intraday_target_threshold` (0,01 par défaut).
+Les rendements overnight et close-to-close sont conservés uniquement comme
+diagnostics.
+
+Une cible baissière indépendante vaut 1 lorsque le rendement intraday est
+inférieur ou égal à `-intraday_down_threshold` (-1 % par défaut). Le walk-forward
+entraîne séparément les modèles haussier et baissier; aucune classe directionnelle
+unique ni règle de trading n'est créée. L'option `--intraday-down-threshold` est
+disponible sur les trois workflows.
+
+Chaque symbole predictor fournit par défaut ses rendements intraday observés à
+J-1, J-2 et J-3. Les retards avancent selon les séances réellement observées et
+non selon les jours civils. `--lag-depth` et `--intraday-target-threshold` sont
+disponibles sur les commandes d'entraînement, de prédiction et de walk-forward.
+Les modèles créés avant ce changement doivent être réentraînés.
+
 ## Évaluation walk-forward
 
 Le walk-forward utilise une fenêtre d'entraînement expansive et plusieurs fenêtres
@@ -55,8 +75,31 @@ Pour évaluer explicitement un petit univers américain :
 python scripts/walk_forward_evaluate.py --symbols AAPL MSFT JPM XOM --calendar XNYS --permutation-depth 1
 ```
 
-Les résultats détaillés et agrégés sont écrits dans `WalkForward/`. Cette commande
-n'enregistre ni ne remplace les modèles de prédiction quotidienne.
+Les 63 dernières séances sont réservées par défaut comme holdout final et ne
+participent ni aux fenêtres walk-forward, ni à la qualification, ni au classement.
+La taille est configurable avec `--final-holdout-size`.
+
+La qualification de stabilité utilise des seuils de calibration déclarés avant
+l'évaluation finale : nombre minimal de fenêtres, AUC médian, proportion des
+fenêtres au-dessus de 0,50, pire AUC, nombre de résultats positifs et écart-type
+maximal. Ils sont configurés dans `rstock/config.py` et exposés par
+`--min-windows`, `--min-median-auc`, `--min-pct-windows-above-random`,
+`--min-worst-window-auc`, `--min-positive-observations` et `--max-auc-std`.
+Le rang des modèles admissibles privilégie successivement la répétabilité, l'AUC
+médian, le pire AUC, la faible dispersion puis le PR-AUC médian.
+
+Les résultats détaillés sont écrits dans `WalkForward/`, notamment
+`qualification.csv`, `final_holdout.csv`, `final_holdout_predictions.csv`,
+`selection_results.csv` et `run_configuration.json`. Cette commande n'enregistre
+ni ne remplace les modèles de prédiction quotidienne.
+
+L'analyse de risque est séparée des métriques de classification dans
+`risk_by_window.csv`, `risk_by_set.csv`, `risk_global.csv` et
+`final_holdout_risk.csv`. Elle contient la distribution des rendements, leur
+espérance, les gains et pertes moyens, ainsi que MFE (`High / Open - 1`) et MAE
+(`Low / Open - 1`). Le ratio gain/perte divise le gain moyen par la valeur absolue
+de la perte moyenne. Les statistiques conditionnelles utilisent uniquement les
+prédictions positives au seuil de classification inchangé de 0,5.
 
 ## Cache local des données de marché
 
