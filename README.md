@@ -1,7 +1,7 @@
 # RStock
 
-Le dépôt contient le projet R historique et son portage Python phase 1. Le contrat
-de compatibilité et les problèmes méthodologiques sont détaillés dans
+Le dépôt contient le portage Python actif et, dans `legacy_r/`, le projet R
+historique archivé sans modification. Le contrat de compatibilité et les problèmes méthodologiques sont détaillés dans
 [`MIGRATION.md`](MIGRATION.md).
 
 ## Installation
@@ -27,6 +27,10 @@ python scripts/predict_daily.py
 ```
 
 Les paramètres et chemins sont centralisés dans `rstock/config.py`. Le portage
-utilise volontairement la métrique d'erreur legacy par défaut. L'option
-`--correct-error-metric` est un changement méthodologique explicite.
+évalue désormais les prédictions contre leur cible réelle et publie matrice de
+confusion, accuracy, precision, recall, F1 et ROC-AUC. Le calcul R historique reste
+disponible uniquement en mode de compatibilité explicite :
 
+```powershell
+python scripts/train_models.py --legacy-error-metric
+```
