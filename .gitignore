@@ -11,3 +11,11 @@ Models
 Prediction.csv
 Symbols.csv
 SymbolsToSurvey.csv
+SymbolsHistory.csv
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
