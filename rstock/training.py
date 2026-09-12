@@ -14,6 +14,7 @@ from .combinations import symbol_set_id, symbols_from_set
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics, outcome_error
 from .features import predictor_columns
+from .modeling import fit_booster, predict_probabilities
 from .persistence import ModelMetadata, model_store_transaction, save_model_bundle
 
 
@@ -21,14 +22,6 @@ from .persistence import ModelMetadata, model_store_transaction, save_model_bund
 class TrainingResult:
     evaluated_sets: pd.DataFrame
     survey_sets: pd.DataFrame
-
-
-def _xgboost_module():
-    try:
-        import xgboost as xgb
-    except ImportError as exc:  # pragma: no cover - depends on runtime install
-        raise RuntimeError("Install xgboost to train RStock models") from exc
-    return xgb
 
 
 def train_models(
@@ -41,7 +34,6 @@ def train_models(
 ) -> TrainingResult:
     """Train on the oldest 70% and evaluate on the newest 30% of valid rows."""
 
-    xgb = _xgboost_module()
     directory = models_directory or config.models_path
     if not isinstance(prepared.index, pd.DatetimeIndex):
         raise TypeError("Prepared data must use a DatetimeIndex")
@@ -83,20 +75,8 @@ def train_models(
             if train.index.max() >= test.index.min():
                 raise AssertionError("Temporal split leaked test dates into training")
 
-            dtrain = xgb.DMatrix(train[names], label=train[outcome_name], feature_names=names)
-            booster = xgb.train(
-                {
-                    "objective": "binary:logistic",
-                    "max_depth": config.xgb_max_depth,
-                    "eta": config.xgb_eta,
-                    "nthread": config.xgb_nthread,
-                    "seed": config.xgb_seed,
-                },
-                dtrain,
-                num_boost_round=config.xgb_rounds,
-                verbose_eval=False,
-            )
-            probabilities = booster.predict(xgb.DMatrix(test[names], feature_names=names))
+            booster = fit_booster(train, names, outcome_name, config)
+            probabilities = predict_probabilities(booster, test, names)
             predicted = binary_predictions(probabilities, config.prediction_threshold)
             error = outcome_error(predicted, test[outcome_name].to_numpy())
             metrics = classification_metrics(

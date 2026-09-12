@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 
 from rstock.config import DEFAULT_CONFIG
-from rstock.data import download_market_data
 from rstock.features import prepare_dataset
 from rstock.history import append_symbol_history, read_symbol_history, write_symbol_history
 from rstock.prediction import (
@@ -18,6 +18,7 @@ from rstock.prediction import (
     survey_symbols,
     write_predictions,
 )
+from rstock.market_cache import market_data_service
 from rstock.symbols import read_symbol_universe
 from rstock.validation import validate_pending_predictions
 
@@ -25,7 +26,10 @@ from rstock.validation import validate_pending_predictions
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=DEFAULT_CONFIG.project_root)
+    parser.add_argument("--force-refresh", action="store_true")
+    parser.add_argument("--force-symbol", action="append", default=[])
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     config = replace(DEFAULT_CONFIG, project_root=args.project_root.resolve())
 
     survey = pd.read_csv(config.survey_path)
@@ -34,11 +38,12 @@ def main() -> None:
     missing_symbols = sorted(set(symbols) - set(universe.index))
     if missing_symbols:
         raise ValueError(f"Survey symbols are missing from Symbols.csv: {missing_symbols}")
-    provider_symbols = universe.loc[symbols, "ProviderSymbol"].to_dict()
-    downloaded = download_market_data(
-        symbols,
+    requested_universe = universe.loc[symbols].reset_index()
+    downloaded = market_data_service(config).get_market_data(
+        requested_universe,
         config.prediction_history_days,
-        provider_symbols=provider_symbols,
+        force_refresh=args.force_refresh,
+        force_symbols=set(args.force_symbol),
     )
     if not downloaded.symbols:
         raise RuntimeError("No survey symbols could be downloaded")

@@ -12,13 +12,20 @@ class RStockConfig:
 
     project_root: Path
     models_directory: str = "Models"
-    symbols_file: str = "Symbols.csv"
+    data_directory: str = "data"
+    market_data_directory: str = "market"
+    symbols_directory: str = "symbols"
+    metadata_directory: str = "metadata"
+    symbols_file: str = "symbols.csv"
+    market_cache_metadata_file: str = "market_cache.json"
     symbols_to_survey_file: str = "SymbolsToSurvey.csv"
     prediction_result_file: str = "Prediction.csv"
     symbols_history_file: str = "SymbolsHistory.csv"
+    walk_forward_directory: str = "WalkForward"
 
     max_symbols: int = 25
     selected_symbols: tuple[str, ...] | None = None
+    market_cache_workers: int = 8
     model_history_days: int = 730
     prediction_history_days: int = 10
 
@@ -36,6 +43,10 @@ class RStockConfig:
     train_fraction: float = 0.7
     xgb_seed: int = 1234
     prediction_threshold: float = 0.5
+    walk_forward_min_train_size: int = 252
+    walk_forward_test_size: int = 63
+    walk_forward_step_size: int = 63
+    walk_forward_max_symbols: int = 4
 
     def path(self, relative_name: str) -> Path:
         return self.project_root / relative_name
@@ -46,7 +57,27 @@ class RStockConfig:
 
     @property
     def symbols_path(self) -> Path:
-        return self.path(self.symbols_file)
+        return self.symbols_data_path / self.symbols_file
+
+    @property
+    def data_path(self) -> Path:
+        return self.path(self.data_directory)
+
+    @property
+    def market_data_path(self) -> Path:
+        return self.data_path / self.market_data_directory
+
+    @property
+    def symbols_data_path(self) -> Path:
+        return self.data_path / self.symbols_directory
+
+    @property
+    def metadata_path(self) -> Path:
+        return self.data_path / self.metadata_directory
+
+    @property
+    def market_cache_metadata_path(self) -> Path:
+        return self.metadata_path / self.market_cache_metadata_file
 
     @property
     def survey_path(self) -> Path:
@@ -59,6 +90,10 @@ class RStockConfig:
     @property
     def history_path(self) -> Path:
         return self.path(self.symbols_history_file)
+
+    @property
+    def walk_forward_path(self) -> Path:
+        return self.path(self.walk_forward_directory)
 
 
 DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Any
+from collections.abc import Callable
+from datetime import date
+from typing import Any, Protocol
 
 import pandas as pd
 
@@ -13,11 +12,12 @@ import pandas as pd
 Downloader = Callable[..., pd.DataFrame]
 
 
-@dataclass(slots=True)
-class DownloadResult:
-    prices: pd.DataFrame
-    symbols: list[str]
-    failed_symbols: list[str]
+class MarketDataProvider(Protocol):
+    source_name: str
+
+    def fetch(
+        self, provider_symbol: str, start: date, end_exclusive: date
+    ) -> pd.DataFrame: ...
 
 
 def _yfinance_download(*args: Any, **kwargs: Any) -> pd.DataFrame:
@@ -28,11 +28,34 @@ def _yfinance_download(*args: Any, **kwargs: Any) -> pd.DataFrame:
     return yf.download(*args, **kwargs)
 
 
-def _flatten_single_symbol(
-    raw: pd.DataFrame, provider_symbol: str, canonical_symbol: str
-) -> pd.DataFrame:
+class YahooFinanceProvider:
+    """Yahoo Finance adapter returning one canonical OHLCV frame per symbol."""
+
+    source_name = "Yahoo Finance"
+
+    def __init__(self, downloader: Downloader | None = None) -> None:
+        self._downloader = downloader or _yfinance_download
+
+    def fetch(
+        self, provider_symbol: str, start: date, end_exclusive: date
+    ) -> pd.DataFrame:
+        raw = self._downloader(
+            provider_symbol,
+            start=start.isoformat(),
+            end=end_exclusive.isoformat(),
+            progress=False,
+            auto_adjust=False,
+            actions=False,
+            threads=False,
+        )
+        return normalise_yahoo_prices(raw, provider_symbol)
+
+
+def normalise_yahoo_prices(raw: pd.DataFrame, provider_symbol: str) -> pd.DataFrame:
+    """Normalise one Yahoo response while retaining its raw OHLCV fields."""
+
     if raw.empty:
-        raise ValueError("provider returned no rows")
+        return pd.DataFrame()
     result = raw.copy()
     if isinstance(result.columns, pd.MultiIndex):
         # yfinance has used both (field, ticker) and (ticker, field) layouts.
@@ -54,51 +77,17 @@ def _flatten_single_symbol(
         "Adjusted": "Adjusted",
     }
     available = {
-        f"{canonical_symbol}.{target}": result[source]
+        target: result[source]
         for source, target in field_names.items()
         if source in result.columns
     }
-    if (
-        f"{canonical_symbol}.Open" not in available
-        or f"{canonical_symbol}.Close" not in available
-    ):
+    if "Open" not in available or "Close" not in available:
         raise ValueError("provider response has no Open/Close columns")
-    return pd.DataFrame(available, index=result.index)
+    normalised = pd.DataFrame(available, index=result.index)
+    normalised.index = normalised.index.normalize()
+    normalised.index.name = "Date"
+    return normalised[~normalised.index.duplicated(keep="last")].sort_index()
 
 
-def download_market_data(
-    symbols: Sequence[str],
-    history_days: int,
-    *,
-    downloader: Downloader | None = None,
-    today: date | None = None,
-    provider_symbols: Mapping[str, str] | None = None,
-) -> DownloadResult:
-    """Download each symbol independently so one provider error does not abort a run."""
-
-    if history_days < 1:
-        raise ValueError("history_days must be positive")
-    provider = downloader or _yfinance_download
-    start = (today or date.today()) - timedelta(days=history_days)
-    frames: list[pd.DataFrame] = []
-    successful: list[str] = []
-    failed: list[str] = []
-
-    for symbol in symbols:
-        provider_symbol = (provider_symbols or {}).get(symbol, symbol)
-        try:
-            raw = provider(
-                provider_symbol,
-                start=start.isoformat(),
-                progress=False,
-                auto_adjust=False,
-                actions=False,
-            )
-            frames.append(_flatten_single_symbol(raw, provider_symbol, symbol))
-            successful.append(symbol)
-        except Exception:  # provider errors are intentionally isolated per symbol
-            failed.append(symbol)
-
-    prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
-    prices.index.name = "Date"
-    return DownloadResult(prices=prices, symbols=successful, failed_symbols=failed)
+def prefix_symbol_columns(prices: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    return prices.rename(columns={name: f"{symbol}.{name}" for name in prices.columns})
