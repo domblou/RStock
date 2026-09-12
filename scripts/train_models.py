@@ -17,16 +17,22 @@ from rstock.training import train_models
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=DEFAULT_CONFIG.project_root)
-    parser.add_argument(
+    metric_group = parser.add_mutually_exclusive_group()
+    metric_group.add_argument(
+        "--legacy-error-metric",
+        action="store_true",
+        help="Use the historical predictor-based error for compatibility",
+    )
+    metric_group.add_argument(
         "--correct-error-metric",
         action="store_true",
-        help="Opt in to target-based error; this is intentionally not the phase-1 default",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
     config = replace(
         DEFAULT_CONFIG,
         project_root=args.project_root.resolve(),
-        error_metric="outcome" if args.correct_error_metric else "legacy_predictors",
+        error_metric="legacy_predictors" if args.legacy_error_metric else "outcome",
     )
 
     configured_symbols = (
@@ -54,4 +60,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -11,7 +11,7 @@ import pandas as pd
 
 from .combinations import legacy_set_name, symbols_from_set
 from .config import RStockConfig
-from .evaluation import binary_predictions, calculate_error
+from .evaluation import binary_predictions, calculate_error, classification_metrics
 from .features import predictor_columns
 from .persistence import ModelMetadata, prepare_models_directory, save_model_bundle
 
@@ -38,7 +38,7 @@ def train_models(
     models_directory: Path | None = None,
     clear_existing_models: bool = True,
 ) -> TrainingResult:
-    """Train, evaluate and persist models using phase-1 legacy semantics."""
+    """Train, evaluate and persist models using the configured error metric."""
 
     xgb = _xgboost_module()
     directory = models_directory or config.models_path
@@ -47,6 +47,10 @@ def train_models(
     evaluated = generated_sets.copy()
     evaluated["Err"] = 0.0
     evaluated["Set"] = ""
+    for column in ("TN", "FP", "FN", "TP"):
+        evaluated[column] = 0
+    for column in ("Accuracy", "Precision", "Recall", "F1", "ROCAUC"):
+        evaluated[column] = np.nan
 
     train_size = floor(config.train_fraction * len(shuffled))
     if train_size < 1 or train_size >= len(shuffled):
@@ -89,13 +93,18 @@ def train_models(
             test[outcome_name].to_numpy(),
             config.error_metric,
         )
+        metrics = classification_metrics(
+            test[outcome_name].to_numpy(), predicted, probabilities
+        )
         set_name = legacy_set_name(row)
         evaluated.at[row_index, "Err"] = error
         evaluated.at[row_index, "Set"] = set_name
+        for column, value in metrics.as_columns().items():
+            evaluated.at[row_index, column] = value
 
         if error < config.keep_predictor_under:
             metadata = ModelMetadata(
-                schema_version=1,
+                schema_version=2,
                 set_name=set_name,
                 observation=observation,
                 features=feature_symbols,
@@ -103,9 +112,9 @@ def train_models(
                 error=error,
                 error_metric=config.error_metric,
                 model_file="",
+                classification_metrics=metrics.as_dict(),
             )
             save_model_bundle(booster, metadata, directory, f"model_{ordinal:06d}")
 
     survey = evaluated[evaluated["Err"] < config.keep_predictor_under].copy()
     return TrainingResult(evaluated_sets=evaluated, survey_sets=survey)
-

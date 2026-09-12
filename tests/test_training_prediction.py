@@ -36,6 +36,12 @@ def test_train_persist_reload_and_predict_end_to_end(tmp_path):
     predicted = predict_saved_models(prepared, trained.survey_sets, config)
 
     assert len(trained.survey_sets) == 2
+    assert {
+        "TN", "FP", "FN", "TP", "Accuracy", "Precision", "Recall", "F1", "ROCAUC"
+    } <= set(trained.evaluated_sets.columns)
+    assert trained.evaluated_sets["Err"].equals(
+        1.0 - trained.evaluated_sets["Accuracy"]
+    )
     assert len(list(config.models_path.glob("*.ubj"))) == 2
     assert len(list(config.models_path.glob("*.metadata.json"))) == 2
     assert len(predicted) == 2

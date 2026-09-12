@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +18,13 @@ class ModelMetadata:
     error: float
     error_metric: str
     model_file: str
+    classification_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def prepare_models_directory(path: Path, *, clear_existing: bool = True) -> None:
     path.mkdir(parents=True, exist_ok=True)
     if clear_existing:
-        # Phase-1 compatibility: CreateModels.R deletes its existing model files first.
+        # Phase-1 compatibility: legacy_r/CreateModels.R deletes model files first.
         for child in path.iterdir():
             if child.is_file():
                 child.unlink()
@@ -58,4 +59,3 @@ def load_booster(path: Path) -> Any:
     booster = xgb.Booster()
     booster.load_model(path)
     return booster
-

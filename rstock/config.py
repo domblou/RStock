@@ -12,10 +12,10 @@ ErrorMetric = Literal["legacy_predictors", "outcome"]
 
 @dataclass(frozen=True, slots=True)
 class RStockConfig:
-    """Configuration equivalent to ``Settings.R``.
+    """Configuration equivalent to ``legacy_r/Settings.R``.
 
-    ``error_metric`` deliberately defaults to the legacy, known-bad calculation.
-    Selecting ``outcome`` is a separate methodological change, not part of phase 1.
+    Phase 2 evaluates against the actual outcome by default. The historical
+    predictor-based calculation remains available as an explicit compatibility mode.
     """
 
     project_root: Path
@@ -45,7 +45,7 @@ class RStockConfig:
     split_seed: int = 1234
     shuffle_seed: int | None = None
     prediction_threshold: float = 0.5
-    error_metric: ErrorMetric = "legacy_predictors"
+    error_metric: ErrorMetric = "outcome"
     legacy_history_value_comparison: bool = True
     raw_price_fields: tuple[str, ...] = field(
         default=("Open", "High", "Low", "Close", "Volume", "Adjusted")
