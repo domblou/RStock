@@ -1,30 +1,17 @@
 import numpy as np
-import pandas as pd
 
-from rstock.config import DEFAULT_CONFIG
-from rstock.evaluation import binary_predictions, calculate_error, classification_metrics
+from rstock.evaluation import binary_predictions, classification_metrics, outcome_error
 
 
 def test_binary_threshold_is_strictly_greater_than_half():
     assert binary_predictions([0.49, 0.5, 0.51]).tolist() == [0, 0, 1]
 
 
-def test_legacy_error_is_explicitly_distinct_from_correct_outcome_error():
+def test_error_is_calculated_only_against_the_outcome():
     predicted = np.array([1, 0])
-    predictors = pd.DataFrame({"x1": [1, 0], "x2": [1, 1]})
     outcome = np.array([0, 0])
 
-    assert calculate_error(predicted, predictors, outcome, "legacy_predictors") == 0.25
-    assert calculate_error(predicted, predictors, outcome, "outcome") == 0.5
-
-
-def test_correct_outcome_error_is_the_default():
-    predicted = np.array([1, 0])
-    predictors = pd.DataFrame({"x1": [1, 0], "x2": [1, 1]})
-    outcome = np.array([0, 0])
-
-    assert DEFAULT_CONFIG.error_metric == "outcome"
-    assert calculate_error(predicted, predictors, outcome) == 0.5
+    assert outcome_error(predicted, outcome) == 0.5
 
 
 def test_classification_metrics_include_confusion_matrix_and_auc():

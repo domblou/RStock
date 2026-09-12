@@ -14,6 +14,14 @@ méthodologique : l'évaluation des modèles. L'erreur calculée contre la cible
 est désormais le comportement par défaut. Le split aléatoire 70/30 et tous les
 autres comportements décrits dans le contrat de compatibilité restent inchangés.
 
+## État actuel après modernisation méthodologique
+
+Le code Python actif ne contient plus de mode de compatibilité R. L'historique se
+trouve exclusivement dans `legacy_r/`. Le split est temporel, les données
+manquantes ne sont plus imputées à zéro, les dates sont typées et les prochaines
+séances proviennent d'abord des observations disponibles puis du calendrier déclaré
+pour chaque titre. Les modèles antérieurs à ce schéma doivent être réentraînés.
+
 ## Archive de l'implémentation R originale
 
 Le dossier `legacy_r/` contient, sans modification de contenu, l'implémentation R
@@ -47,21 +55,23 @@ Aucun workflow Python actif ne charge ces fichiers. Le fichier
 | `legacy_r/CreateModels.R` | `rstock/training.py`, `rstock/evaluation.py`, `rstock/persistence.py`, `scripts/train_models.py` |
 | `legacy_r/Predict.R` | `rstock/prediction.py`, `rstock/validation.py`, `scripts/predict_daily.py` |
 
-## Contrat de compatibilité
+## Contrat fonctionnel actuel
 
 - La variation est toujours `1 - Open / Close` et le seuil UPDW vaut `0.01`.
-- Les valeurs absentes deviennent toujours zéro.
+- Les valeurs absentes restent manquantes; chaque modèle exclut uniquement les
+  lignes incomplètes pour sa cible et ses predictors.
 - `DAY_MINUS_1` est l'observation boursière précédente.
-- Les données préparées sont en ordre décroissant et les composantes de date
-  gardent la numérotation R à partir de zéro.
+- Les données préparées et les partitions d'entraînement sont ordonnées par une
+  vraie date croissante.
 - Les paires de titres sont ordonnées; les ensembles plus grands utilisent des
   combinaisons non ordonnées par cible.
-- Le mélange et le split aléatoire 70/30 restent en phase 1.
+- Les 70 % observations complètes les plus anciennes forment l'entraînement et les
+  30 % les plus récentes forment le test, sans mélange.
 - La prédiction binaire emploie `probabilité > 0.5`.
-- Une prédiction réussie reste uniquement un vrai positif.
-- La date cible reste le prochain jour civil.
-- La comparaison du résultat historique relu comme texte reste lexicographique;
-  `legacy_history_value_comparison=False` permet la future correction explicite.
+- Une prédiction réussie comprend les vrais positifs et les vrais négatifs.
+- La date cible est la prochaine séance observée, ou la prochaine séance du
+  calendrier déclaré si elle n'est pas encore observée.
+- Les dates et les valeurs historiques sont comparées avec leurs types réels.
 
 `yfinance` remplace `quantmod::getSymbols`. La récupération de la liste de titres
 utilise les répertoires publics Nasdaq Trader comme remplacement de
@@ -80,8 +90,8 @@ mean(binary_predictions != as.matrix(test[, predictorNames]))
 
 Il compare donc chaque prédiction aux features et non à `test$outcome`. Avec
 plusieurs features, le recyclage vectoriel de R compare la prédiction à chacune
-d'elles. `rstock.evaluation.legacy_predictor_error` reproduit toujours exactement
-ce calcul.
+d'elles. Ce calcul n'existe plus dans le code Python actif; il demeure uniquement
+dans `legacy_r/CreateModels.R` à titre historique.
 
 ### Comportement corrigé par défaut
 
@@ -103,39 +113,17 @@ absente (`None` dans les métadonnées JSON, `NaN` dans les tables pandas).
 Ces métriques sont écrites dans `SymbolsToSurvey.csv` et dans les métadonnées des
 modèles sauvegardés.
 
-### Mode de compatibilité legacy
+### Compatibilité historique
 
-Le mode `legacy_predictors` n'est plus activé implicitement. Il doit être demandé :
-
-```powershell
-python scripts/train_models.py --legacy-error-metric
-```
-
-Dans ce mode, seule la colonne `Err` et donc la décision de conserver un modèle
-reprennent le calcul historique. Les métriques standards restent correctement
-calculées contre la cible réelle afin de ne pas leur donner une signification
-trompeuse. L'ancien argument `--correct-error-metric` reste accepté comme alias
-déprécié et masqué; il sélectionne simplement le nouveau comportement par défaut.
+Aucun mode legacy n'est disponible dans l'application Python. Pour examiner le
+calcul antérieur, consulter l'archive R.
 
 ## Autres faiblesses conservées ou rendues explicites
 
-- Split aléatoire et fuite temporelle potentielle.
-- Mélange global non déterministe par défaut, puis même split positionnel pour
-  chaque ensemble.
-- Valeur absente assimilée à zéro.
 - Fallback de lag 1 à 5 jours inopérant dans le code R.
-- Découpage historique au premier point, incorrect pour les tickers comme
-  `BRK.B`; `market_data_to_history(..., legacy_field_split=False)` expose la
-  future correction sans changer le défaut.
-- Ajout à l'historique seulement après la date maximale, sans comblement des trous.
-- Date de prédiction pouvant tomber un week-end/jour férié.
-- Suppression préalable des modèles existants.
-- Vrais négatifs non comptés comme prédictions réussies.
-- Explosion combinatoire très importante avec 500 titres et une profondeur de 3.
-- Valeurs historiques comparées lexicalement au seuil après lecture CSV en mode
-  `character`; ce comportement devient visible dans la configuration.
-- Noms legacy ambigus avec `-` et `NA`; les modèles Python utilisent donc des noms
-  techniques sûrs et des métadonnées JSON tout en conservant le champ `Set`.
+- L'explosion combinatoire demeure intrinsèque à l'objectif, mais une estimation
+  préalable et `max_generated_sets` empêchent désormais sa matérialisation
+  accidentelle.
 - Sélection par regex non échappée dans R. Le portage utilise les noms exacts des
   titres; c'est une correction structurelle documentée nécessaire pour garantir
   le contrat des métadonnées.
@@ -144,8 +132,8 @@ déprécié et masqué; il sélectionne simplement le nouveau comportement par d
 
 ## Phase suivante (hors portage initial)
 
-1. Recalibrer `keep_predictor_under` avec la métrique corrigée.
-2. Remplacer le split aléatoire par une validation walk-forward temporelle.
-3. Corriger la gestion des calendriers de marché et des tickers ponctués.
-4. Distinguer valeurs manquantes et classe négative.
-5. Publier les nouveaux modèles de manière atomique après un entraînement réussi.
+1. Recalibrer `keep_predictor_under` avec la métrique corrigée et le split temporel.
+2. Évaluer une validation walk-forward à plusieurs fenêtres au-delà du split
+   temporel unique actuel.
+3. Évaluer la fraîcheur maximale acceptable des predictors lorsque plusieurs
+   calendriers de marché sont combinés.

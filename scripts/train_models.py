@@ -10,37 +10,29 @@ from rstock.combinations import generate_symbol_sets
 from rstock.config import DEFAULT_CONFIG
 from rstock.data import download_market_data
 from rstock.features import prepare_dataset
-from rstock.symbols import read_symbols
+from rstock.symbols import read_symbol_universe
 from rstock.training import train_models
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=DEFAULT_CONFIG.project_root)
-    metric_group = parser.add_mutually_exclusive_group()
-    metric_group.add_argument(
-        "--legacy-error-metric",
-        action="store_true",
-        help="Use the historical predictor-based error for compatibility",
-    )
-    metric_group.add_argument(
-        "--correct-error-metric",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
     args = parser.parse_args()
-    config = replace(
-        DEFAULT_CONFIG,
-        project_root=args.project_root.resolve(),
-        error_metric="legacy_predictors" if args.legacy_error_metric else "outcome",
-    )
+    config = replace(DEFAULT_CONFIG, project_root=args.project_root.resolve())
 
-    configured_symbols = (
-        list(config.test_mode_stock_symbols)
-        if config.test_mode_stock_symbols
-        else read_symbols(config.symbols_path)[: config.test_mode_max_symbols]
+    universe = read_symbol_universe(config.symbols_path)
+    if config.selected_symbols:
+        universe = universe.set_index("Symbol").loc[list(config.selected_symbols)].reset_index()
+    else:
+        universe = universe.iloc[: config.max_symbols]
+    configured_symbols = universe["Symbol"].tolist()
+    provider_symbols = universe.set_index("Symbol")["ProviderSymbol"].to_dict()
+    market_calendars = universe.set_index("Symbol")["Calendar"].to_dict()
+    downloaded = download_market_data(
+        configured_symbols,
+        config.model_history_days,
+        provider_symbols=provider_symbols,
     )
-    downloaded = download_market_data(configured_symbols, config.model_history_days)
     if not downloaded.symbols:
         raise RuntimeError("No symbols could be downloaded")
     if downloaded.failed_symbols:
@@ -49,8 +41,12 @@ def main() -> None:
     prepared = prepare_dataset(
         downloaded.prices, downloaded.symbols, config.up_down_threshold
     )
-    generated = generate_symbol_sets(downloaded.symbols, config.permutation_depth)
-    result = train_models(prepared, generated, config)
+    generated = generate_symbol_sets(
+        downloaded.symbols,
+        config.permutation_depth,
+        max_sets=config.max_generated_sets,
+    )
+    result = train_models(prepared, generated, config, market_calendars)
     result.survey_sets.to_csv(config.survey_path, index=False)
     print(
         f"Evaluated {len(result.evaluated_sets)} sets; retained "

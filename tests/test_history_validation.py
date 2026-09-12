@@ -5,95 +5,88 @@ from rstock.history import append_symbol_history, market_data_to_history
 from rstock.validation import validate_pending_predictions
 
 
-def test_history_adds_opcl_and_preserves_first_dot_split_bug_explicitly():
+def _prediction(symbol: str, binary: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        [["2024-01-03", "2024-01-02", "XNYS", "set", symbol, binary, -1, 0]],
+        columns=[
+            "Date",
+            "AsOfDate",
+            "MarketCalendar",
+            "Set",
+            "Observation",
+            "BinaryPrediction",
+            "BinaryResult",
+            "SuccessfulPrediction",
+        ],
+    )
+
+
+def test_history_preserves_punctuated_ticker_and_typed_date():
     stock = pd.DataFrame(
         {"BRK.B.Open": [100.0], "BRK.B.Close": [102.0]},
         index=pd.to_datetime(["2024-01-02"]),
     )
-    legacy = market_data_to_history(stock)
-    corrected = market_data_to_history(stock, legacy_field_split=False)
 
-    assert set(legacy["Symbol"]) == {"BRK"}
-    assert "B.OpCl" in set(legacy["Field"])
-    assert set(corrected["Symbol"]) == {"BRK.B"}
-    assert "OpCl" in set(corrected["Field"])
+    history = market_data_to_history(stock)
+
+    assert set(history["Symbol"]) == {"BRK.B"}
+    assert "OpCl" in set(history["Field"])
+    assert pd.api.types.is_datetime64_any_dtype(history["Date"])
 
 
-def test_history_only_appends_dates_after_existing_maximum():
+def test_history_merge_fills_old_gaps_and_refreshes_existing_values():
     existing = pd.DataFrame(
-        [["2024-01-02", "AAA", "Open", "10"]],
+        [["2024-01-02", "AAA", "Open", 9.0]],
         columns=["Date", "Symbol", "Field", "Value"],
     )
     stock = pd.DataFrame(
         {"AAA.Open": [10.0, 11.0], "AAA.Close": [10.0, 12.0]},
         index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
     )
+
     result = append_symbol_history(stock, existing)
 
-    assert len(result[result["Date"] == "2024-01-02"]) == 1
-    assert len(result[result["Date"] == "2024-01-03"]) == 3
+    assert len(result[result["Date"] == pd.Timestamp("2024-01-02")]) == 3
+    refreshed = result[
+        (result["Date"] == pd.Timestamp("2024-01-02"))
+        & (result["Field"] == "Open")
+    ]
+    assert refreshed.iloc[0]["Value"] == 10.0
 
 
-def test_validation_preserves_true_positive_only_success_semantics():
-    predictions = pd.DataFrame(
-        [
-            ["2024-01-03", "A-B", "AAA", 1, -1, 0],
-            ["2024-01-03", "A-C", "BBB", 0, -1, 0],
-        ],
-        columns=[
-            "Date", "Set", "Observation", "BinaryPrediction", "BinaryResult",
-            "SuccessfulPrediction",
-        ],
-    )
+def test_validation_uses_first_actual_session_after_as_of_and_counts_true_negative():
+    predictions = _prediction("AAA", binary=0)
     history = pd.DataFrame(
-        [
-            ["2024-01-03", "AAA", "OpCl", "0.02"],
-            ["2024-01-03", "BBB", "OpCl", "-0.02"],
-        ],
+        [["2024-01-04", "AAA", "OpCl", -0.02]],
         columns=["Date", "Symbol", "Field", "Value"],
     )
 
     result = validate_pending_predictions(predictions, history, 0.01)
 
-    assert result["BinaryResult"].tolist() == [1, 0]
-    assert result["SuccessfulPrediction"].tolist() == [1, 0]
+    assert result.iloc[0]["Date"] == pd.Timestamp("2024-01-04")
+    assert result.iloc[0]["BinaryResult"] == 0
+    assert result.iloc[0]["SuccessfulPrediction"] == 1
 
 
-def test_duplicate_history_result_is_left_pending():
-    predictions = pd.DataFrame(
-        [["2024-01-03", "A-B", "AAA", 1, -1, 0]],
-        columns=[
-            "Date", "Set", "Observation", "BinaryPrediction", "BinaryResult",
-            "SuccessfulPrediction",
-        ],
-    )
+def test_numeric_threshold_comparison_is_not_lexicographic():
+    predictions = _prediction("AAA", binary=0)
     history = pd.DataFrame(
-        [["2024-01-03", "AAA", "OpCl", "0.02"]] * 2,
+        [["2024-01-03", "AAA", "OpCl", "1e-3"]],
+        columns=["Date", "Symbol", "Field", "Value"],
+    )
+
+    result = validate_pending_predictions(predictions, history, 0.01)
+
+    assert result.iloc[0]["BinaryResult"] == 0
+
+
+def test_duplicate_actual_result_is_left_pending():
+    predictions = _prediction("AAA", binary=1)
+    history = pd.DataFrame(
+        [["2024-01-03", "AAA", "OpCl", 0.02]] * 2,
         columns=["Date", "Symbol", "Field", "Value"],
     )
 
     with pytest.warns(RuntimeWarning):
         result = validate_pending_predictions(predictions, history)
     assert result.iloc[0]["BinaryResult"] == -1
-
-
-def test_history_threshold_comparison_exposes_legacy_and_numeric_modes():
-    predictions = pd.DataFrame(
-        [["2024-01-03", "A-B", "AAA", 0, -1, 0]],
-        columns=[
-            "Date", "Set", "Observation", "BinaryPrediction", "BinaryResult",
-            "SuccessfulPrediction",
-        ],
-    )
-    history = pd.DataFrame(
-        [["2024-01-03", "AAA", "OpCl", "1e-3"]],
-        columns=["Date", "Symbol", "Field", "Value"],
-    )
-
-    legacy = validate_pending_predictions(predictions, history, 0.01)
-    numeric = validate_pending_predictions(
-        predictions, history, 0.01, legacy_character_comparison=False
-    )
-
-    assert legacy.iloc[0]["BinaryResult"] == 1
-    assert numeric.iloc[0]["BinaryResult"] == 0

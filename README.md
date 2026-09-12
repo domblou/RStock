@@ -26,11 +26,17 @@ python scripts/train_models.py
 python scripts/predict_daily.py
 ```
 
-Les paramètres et chemins sont centralisés dans `rstock/config.py`. Le portage
-évalue désormais les prédictions contre leur cible réelle et publie matrice de
-confusion, accuracy, precision, recall, F1 et ROC-AUC. Le calcul R historique reste
-disponible uniquement en mode de compatibilité explicite :
+`get_symbols.py` produit un `Symbols.csv` contenant `Symbol`, `ProviderSymbol`,
+`Exchange` et `Calendar`. Un univers personnalisé doit fournir ces quatre colonnes;
+les noms de calendrier sont ceux d'`exchange-calendars`. Il faut régénérer les
+anciens fichiers `Symbols.csv` à une seule colonne avant d'entraîner ou prédire.
 
-```powershell
-python scripts/train_models.py --legacy-error-metric
-```
+Les paramètres et chemins sont centralisés dans `rstock/config.py`. L'entraînement
+utilise les 70 % observations complètes les plus anciennes et teste sur les 30 %
+les plus récentes, sans mélange. La génération s'arrête avant matérialisation si
+elle dépasse `max_generated_sets`; la valeur par défaut de `max_symbols` est donc
+limitée à 25.
+
+Les modèles ne remplacent le dossier actif qu'après la réussite complète de
+l'entraînement. Les anciens bundles doivent être régénérés afin d'inclure leur
+calendrier et leurs bornes temporelles.

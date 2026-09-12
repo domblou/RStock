@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
@@ -28,7 +28,9 @@ def _yfinance_download(*args: Any, **kwargs: Any) -> pd.DataFrame:
     return yf.download(*args, **kwargs)
 
 
-def _flatten_single_symbol(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+def _flatten_single_symbol(
+    raw: pd.DataFrame, provider_symbol: str, canonical_symbol: str
+) -> pd.DataFrame:
     if raw.empty:
         raise ValueError("provider returned no rows")
     result = raw.copy()
@@ -36,8 +38,8 @@ def _flatten_single_symbol(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
         # yfinance has used both (field, ticker) and (ticker, field) layouts.
         for level in range(result.columns.nlevels):
             values = result.columns.get_level_values(level)
-            if symbol in values:
-                result = result.xs(symbol, axis=1, level=level, drop_level=True)
+            if provider_symbol in values:
+                result = result.xs(provider_symbol, axis=1, level=level, drop_level=True)
                 break
     result.index = pd.to_datetime(result.index)
     if result.index.tz is not None:
@@ -52,11 +54,14 @@ def _flatten_single_symbol(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
         "Adjusted": "Adjusted",
     }
     available = {
-        f"{symbol}.{target}": result[source]
+        f"{canonical_symbol}.{target}": result[source]
         for source, target in field_names.items()
         if source in result.columns
     }
-    if f"{symbol}.Open" not in available or f"{symbol}.Close" not in available:
+    if (
+        f"{canonical_symbol}.Open" not in available
+        or f"{canonical_symbol}.Close" not in available
+    ):
         raise ValueError("provider response has no Open/Close columns")
     return pd.DataFrame(available, index=result.index)
 
@@ -67,6 +72,7 @@ def download_market_data(
     *,
     downloader: Downloader | None = None,
     today: date | None = None,
+    provider_symbols: Mapping[str, str] | None = None,
 ) -> DownloadResult:
     """Download each symbol independently so one provider error does not abort a run."""
 
@@ -79,15 +85,16 @@ def download_market_data(
     failed: list[str] = []
 
     for symbol in symbols:
+        provider_symbol = (provider_symbols or {}).get(symbol, symbol)
         try:
             raw = provider(
-                symbol,
+                provider_symbol,
                 start=start.isoformat(),
                 progress=False,
                 auto_adjust=False,
                 actions=False,
             )
-            frames.append(_flatten_single_symbol(raw, symbol))
+            frames.append(_flatten_single_symbol(raw, provider_symbol, symbol))
             successful.append(symbol)
         except Exception:  # provider errors are intentionally isolated per symbol
             failed.append(symbol)
@@ -95,4 +102,3 @@ def download_market_data(
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     prices.index.name = "Date"
     return DownloadResult(prices=prices, symbols=successful, failed_symbols=failed)
-

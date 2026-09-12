@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Python migration of the RStock market prediction workflow"
 requires-python = ">=3.10"
 dependencies = [
+  "exchange-calendars>=4.11",
   "numpy>=1.26",
   "pandas>=2.1",
   "xgboost>=2.0",
@@ -23,4 +24,3 @@ include = ["rstock*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

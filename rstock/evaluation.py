@@ -1,4 +1,4 @@
-"""Binary-classification evaluation and explicit legacy compatibility."""
+"""Correct binary-classification evaluation against observed outcomes."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
-from .config import ErrorMetric
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,20 +45,6 @@ def binary_predictions(probabilities: Sequence[float], threshold: float = 0.5) -
     """Apply the R workflow's strict greater-than threshold."""
 
     return (np.asarray(probabilities, dtype=float) > threshold).astype(int)
-
-
-def legacy_predictor_error(predictions: Sequence[int], predictors: pd.DataFrame) -> float:
-    """Reproduce the erroneous R comparison against every predictor value.
-
-    R recycles the prediction vector down every matrix column. NumPy's row-wise
-    broadcasting below is algebraically equivalent.
-    """
-
-    predicted = np.asarray(predictions).reshape(-1, 1)
-    values = predictors.to_numpy()
-    if len(predicted) != len(values):
-        raise ValueError("predictions and predictors must have the same row count")
-    return float(np.mean(predicted != values))
 
 
 def outcome_error(predictions: Sequence[int], outcome: Sequence[int]) -> float:
@@ -130,16 +114,3 @@ def classification_metrics(
         f1=float(f1),
         roc_auc=_roc_auc(actual, scores),
     )
-
-
-def calculate_error(
-    predictions: Sequence[int],
-    predictors: pd.DataFrame,
-    outcome: Sequence[int],
-    mode: ErrorMetric = "outcome",
-) -> float:
-    if mode == "legacy_predictors":
-        return legacy_predictor_error(predictions, predictors)
-    if mode == "outcome":
-        return outcome_error(predictions, outcome)
-    raise ValueError(f"Unknown error metric: {mode}")

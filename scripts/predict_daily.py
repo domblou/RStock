@@ -18,6 +18,7 @@ from rstock.prediction import (
     survey_symbols,
     write_predictions,
 )
+from rstock.symbols import read_symbol_universe
 from rstock.validation import validate_pending_predictions
 
 
@@ -28,8 +29,16 @@ def main() -> None:
     config = replace(DEFAULT_CONFIG, project_root=args.project_root.resolve())
 
     survey = pd.read_csv(config.survey_path)
+    symbols = survey_symbols(survey)
+    universe = read_symbol_universe(config.symbols_path).set_index("Symbol")
+    missing_symbols = sorted(set(symbols) - set(universe.index))
+    if missing_symbols:
+        raise ValueError(f"Survey symbols are missing from Symbols.csv: {missing_symbols}")
+    provider_symbols = universe.loc[symbols, "ProviderSymbol"].to_dict()
     downloaded = download_market_data(
-        survey_symbols(survey), config.prediction_history_days
+        symbols,
+        config.prediction_history_days,
+        provider_symbols=provider_symbols,
     )
     if not downloaded.symbols:
         raise RuntimeError("No survey symbols could be downloaded")
@@ -41,7 +50,15 @@ def main() -> None:
     prepared = prepare_dataset(
         downloaded.prices, downloaded.symbols, config.up_down_threshold
     )
-    daily = predict_saved_models(prepared, survey, config)
+    observed_dates = {
+        symbol: downloaded.prices.index[
+            downloaded.prices[f"{symbol}.Close"].notna()
+        ]
+        for symbol in downloaded.symbols
+    }
+    daily = predict_saved_models(
+        prepared, survey, config, observed_dates_by_symbol=observed_dates
+    )
     if daily.empty and not config.predictions_path.exists():
         raise RuntimeError("No saved model had all required predictors")
     predictions = append_predictions(daily, config.predictions_path)
@@ -49,7 +66,6 @@ def main() -> None:
         predictions,
         history,
         config.up_down_threshold,
-        legacy_character_comparison=config.legacy_history_value_comparison,
     )
     write_predictions(predictions, config.predictions_path)
     print(f"Added {len(daily)} predictions to {config.predictions_path}")

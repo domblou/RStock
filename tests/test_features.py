@@ -15,10 +15,13 @@ def _stock_frame():
     )
 
 
-def test_prepare_dataset_preserves_threshold_lag_order_and_r_date_numbering():
+def test_prepare_dataset_is_chronological_and_keeps_missing_lags():
     prepared = prepare_dataset(_stock_frame(), ["AAA", "BBB"], 0.01)
 
-    assert prepared.index.tolist() == list(pd.to_datetime(["2024-01-04", "2024-01-03"]))
+    assert prepared.index.tolist() == list(
+        pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    )
+    assert pd.isna(prepared.loc["2024-01-02", "AAA.DAY_MINUS_1_UPDW"])
     assert prepared.loc["2024-01-04", "AAA.UPDW"] == 1
     assert prepared.loc["2024-01-04", "AAA.DAY_MINUS_1_UPDW"] == 0
     assert prepared.loc["2024-01-03", "AAA.DAY_MINUS_1_UPDW"] == 1
@@ -27,12 +30,43 @@ def test_prepare_dataset_preserves_threshold_lag_order_and_r_date_numbering():
 
 def test_prediction_row_uses_latest_current_values_as_lagged_features():
     prepared = prepare_dataset(_stock_frame(), ["AAA", "BBB"], 0.01)
-    row = prepare_prediction_row(prepared)
+    row = prepare_prediction_row(prepared, target_date="2024-01-05")
 
-    assert row.index[0] == pd.Timestamp("2024-01-04")
+    assert row.index[0] == pd.Timestamp("2024-01-05")
     assert "AAA.UPDW" not in row
     assert row.iloc[0]["AAA.DAY_MINUS_1_UPDW"] == 1
     assert row.iloc[0]["BBB.DAY_MINUS_1_UPDW"] == 0
+
+
+def test_lag_uses_previous_real_observation_across_symbol_specific_gap():
+    stock = _stock_frame().copy()
+    stock.loc["2024-01-03", ["AAA.Open", "AAA.Close"]] = float("nan")
+
+    prepared = prepare_dataset(stock, ["AAA", "BBB"], 0.01)
+
+    assert pd.isna(prepared.loc["2024-01-03", "AAA.UPDW"])
+    assert prepared.loc["2024-01-04", "AAA.DAY_MINUS_1_UPDW"] == 1
+
+
+def test_zero_close_is_missing_instead_of_becoming_a_negative_class():
+    stock = _stock_frame().copy()
+    stock.loc["2024-01-03", "AAA.Close"] = 0.0
+
+    prepared = prepare_dataset(stock, ["AAA", "BBB"], 0.01)
+
+    assert pd.isna(prepared.loc["2024-01-03", "AAA.UPDW"])
+
+
+def test_invalid_or_duplicate_dates_are_rejected():
+    duplicate = _stock_frame()
+    duplicate.index = pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-04"])
+
+    try:
+        prepare_dataset(duplicate, ["AAA", "BBB"])
+    except ValueError as error:
+        assert "one row per date" in str(error)
+    else:
+        raise AssertionError("duplicate dates should be rejected")
 
 
 def test_predictor_columns_uses_explicit_symbols_and_optional_date_regex():
@@ -41,4 +75,3 @@ def test_predictor_columns_uses_explicit_symbols_and_optional_date_regex():
     assert predictor_columns(prepared, ["BBB"], r"^(wday|mon)$") == [
         "BBB.DAY_MINUS_1_UPDW", "wday", "mon"
     ]
-

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from rstock.combinations import generate_symbol_sets
+from rstock.calendars import next_market_session
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import prepare_dataset
 from rstock.prediction import predict_saved_models
@@ -27,12 +28,13 @@ def test_train_persist_reload_and_predict_end_to_end(tmp_path):
         xgb_max_depth=2,
         xgb_nthread=1,
         keep_predictor_under=1.1,
-        shuffle_seed=99,
     )
     prepared = prepare_dataset(stock, ["AAA", "BBB"], config.up_down_threshold)
     generated = generate_symbol_sets(["AAA", "BBB"], config.permutation_depth)
 
-    trained = train_models(prepared, generated, config)
+    trained = train_models(
+        prepared, generated, config, {"AAA": "XNYS", "BBB": "XNYS"}
+    )
     predicted = predict_saved_models(prepared, trained.survey_sets, config)
 
     assert len(trained.survey_sets) == 2
@@ -42,10 +44,32 @@ def test_train_persist_reload_and_predict_end_to_end(tmp_path):
     assert trained.evaluated_sets["Err"].equals(
         1.0 - trained.evaluated_sets["Accuracy"]
     )
+    assert (
+        trained.evaluated_sets["TrainEnd"]
+        < trained.evaluated_sets["TestStart"]
+    ).all()
+    assert set(trained.evaluated_sets["TrainRows"]) == {41}
+    assert set(trained.evaluated_sets["TestRows"]) == {18}
     assert len(list(config.models_path.glob("*.ubj"))) == 2
     assert len(list(config.models_path.glob("*.metadata.json"))) == 2
     assert len(predicted) == 2
     assert set(predicted["BinaryPrediction"]) <= {0, 1}
     assert set(predicted["BinaryResult"]) == {-1}
     assert set(predicted["Feature1"]) == {"AAA", "BBB"}
-    assert predicted.iloc[0]["Date"] == (index[-1] + pd.Timedelta(days=1)).date().isoformat()
+    assert set(predicted["MarketCalendar"]) == {"XNYS"}
+    assert predicted.iloc[0]["Date"] == next_market_session(index[-1], "XNYS")
+
+
+def test_training_rejects_non_date_index(tmp_path):
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=1)
+    prepared = pd.DataFrame(
+        {"AAA.UPDW": [0, 1], "BBB.DAY_MINUS_1_UPDW": [1, 0]}
+    )
+    generated = generate_symbol_sets(["AAA", "BBB"], 1)
+
+    try:
+        train_models(prepared, generated, config, {"AAA": "XNYS", "BBB": "XNYS"})
+    except TypeError as error:
+        assert "DatetimeIndex" in str(error)
+    else:
+        raise AssertionError("training should reject a non-date index")
