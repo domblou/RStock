@@ -384,26 +384,42 @@ class UniverseService:
         record = self.record(selection.universe)
         if record.type != STANDARD_UNIVERSE_TYPE:
             raise ValueError("A context universe cannot be selected as the primary universe")
-        source = record.symbols
         if selection.source == SAVED_SOURCE:
-            return ResolvedUniverse(selection, source)
-        if selection.sample_size is None or selection.sample_size < 1:
+            return ResolvedUniverse(selection, record.symbols)
+        return ResolvedUniverse(
+            selection,
+            self._sample_symbols(
+                record.symbols,
+                sample_size=selection.sample_size,
+                selection_method=selection.selection_method,
+                seed=selection.seed,
+            ),
+        )
+
+    @staticmethod
+    def _sample_symbols(
+        symbols: tuple[str, ...],
+        *,
+        sample_size: int | None,
+        selection_method: str | None,
+        seed: int | None,
+    ) -> tuple[str, ...]:
+        """Apply the shared Top N or reproducible-sample policy."""
+
+        if sample_size is None or sample_size < 1:
             raise ValueError("sample_size must be positive")
-        if selection.sample_size > len(source):
+        if sample_size > len(symbols):
             raise ValueError(
-                f"Requested sample size {selection.sample_size} exceeds universe size {len(source)}"
+                f"Requested sample size {sample_size} exceeds universe size {len(symbols)}"
             )
-        if selection.selection_method == TOP_N:
-            return ResolvedUniverse(selection, source[: selection.sample_size])
-        if selection.selection_method == SEEDED_SAMPLE:
-            if selection.seed is None:
+        if selection_method == TOP_N:
+            return symbols[:sample_size]
+        if selection_method == SEEDED_SAMPLE:
+            if seed is None:
                 raise ValueError("A seed is required for a reproducible sample")
             # sample() preserves its generated order and is stable for a fixed
             # source tuple, size and explicit seed.
-            return ResolvedUniverse(
-                selection,
-                tuple(Random(selection.seed).sample(source, selection.sample_size)),
-            )
+            return tuple(Random(seed).sample(symbols, sample_size))
         raise ValueError("A supported sample selection_method is required")
 
     def resolve_experiment(
@@ -412,6 +428,9 @@ class UniverseService:
         context_universe_ids: Iterable[str] = (),
         *,
         manual_symbols: tuple[str, ...] | list[str] = (),
+        context_sample_size: int | None = None,
+        context_selection_method: str | None = None,
+        context_seed: int | None = None,
     ) -> ResolvedExperimentUniverse:
         """Resolve and freeze distinct target and predictor roles for one run."""
 
@@ -424,6 +443,13 @@ class UniverseService:
             for symbol in self.record(context_id).symbols
             if symbol not in target_set
         ))
+        if context_sample_size is not None:
+            context_symbols = self._sample_symbols(
+                context_symbols,
+                sample_size=context_sample_size,
+                selection_method=context_selection_method,
+                seed=context_seed,
+            )
         return ResolvedExperimentUniverse(
             primary_selection=resolved_primary.selection,
             primary_universe_id=primary.universe,

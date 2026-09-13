@@ -251,7 +251,11 @@ def _experiment_universe_selector() -> bool:
     except ValueError as error:
         st.error(f"Univers invalide : {error}")
         return False
-    context_names = service.universe_names()
+    context_names = tuple(
+        record.universe_id
+        for record in service.records()
+        if record.type == CONTEXT_UNIVERSE_TYPE
+    )
     selected_contexts = st.multiselect(
         "Univers de contexte",
         context_names,
@@ -263,7 +267,54 @@ def _experiment_universe_selector() -> bool:
         format_func=lambda item: universe_display_name(item, service),
         key="experiment-context-universes",
     )
-    resolved = service.resolve_experiment(preview.selection, selected_contexts)
+    full_context = service.resolve_experiment(preview.selection, selected_contexts)
+    context_labels = {
+        "Univers complet": SAVED_SOURCE,
+        "Échantillon d’un univers": SAMPLE_SOURCE,
+    }
+    context_mode = st.radio(
+        "Mode d’utilisation du contexte",
+        list(context_labels),
+        horizontal=True,
+        key="experiment-context-mode",
+    )
+    context_sample_size = None
+    context_method = None
+    context_seed = None
+    if context_labels[context_mode] == SAMPLE_SOURCE and full_context.context_symbols:
+        context_sample_size_key = "experiment-context-sample-size"
+        saved_context_size = st.session_state.get(
+            context_sample_size_key, len(full_context.context_symbols)
+        )
+        if not 1 <= int(saved_context_size) <= len(full_context.context_symbols):
+            st.session_state[context_sample_size_key] = len(full_context.context_symbols)
+        context_sample_size = int(st.number_input(
+            "Nombre de symboles de contexte",
+            min_value=1,
+            max_value=len(full_context.context_symbols),
+            value=len(full_context.context_symbols),
+            key=context_sample_size_key,
+        ))
+        context_method_label = st.selectbox(
+            "Méthode de sélection du contexte",
+            ["Top N", "Échantillon reproductible"],
+            key="experiment-context-sample-method",
+        )
+        context_method = TOP_N if context_method_label == "Top N" else SEEDED_SAMPLE
+        if context_method == SEEDED_SAMPLE:
+            context_seed = int(st.number_input(
+                "Seed du contexte", min_value=0, value=1234,
+                key="experiment-context-sample-seed",
+            ))
+    elif context_labels[context_mode] == SAMPLE_SOURCE:
+        st.caption("Aucun symbole de contexte disponible.")
+    resolved = service.resolve_experiment(
+        preview.selection,
+        selected_contexts,
+        context_sample_size=context_sample_size,
+        context_selection_method=context_method,
+        context_seed=context_seed,
+    )
     target_symbols = resolved.target_symbols
     context_symbols = resolved.context_symbols
     predictor_symbols = resolved.predictor_symbols
@@ -1508,22 +1559,42 @@ def _models_page() -> None:
     if not models:
         st.info("Aucun candidat production. Promouvez une combinaison qualifiée depuis Historique.")
         return
-    st.dataframe(
-        [
-            {
-                "model_id": model.model_id, "cible": model.target,
-                "predictors": ", ".join(model.predictors), "statut": model.status.value,
-                "créé": model.created_at, "walk_forward": model.source_walk_forward_run,
-                "version": model.artifact_version,
-                "AUC dev médiane": model.development_metrics.get("ROCAUCMedian"),
-                "AUC holdout": model.holdout_metrics.get("FinalUpROCAUC"),
-            }
-            for model in models
-        ],
-        hide_index=True, width="stretch",
+    table = pd.DataFrame([
+        {
+            "Cible": model.target,
+            "Predictors": ", ".join(model.predictors),
+            "Statut": model.status.value,
+            "Créé": model.created_at,
+            "Walk-forward": model.source_walk_forward_run,
+            "Version": model.artifact_version,
+            "AUC dev médiane": model.development_metrics.get("ROCAUCMedian"),
+            "AUC holdout": model.holdout_metrics.get("FinalUpROCAUC"),
+        }
+        for model in models
+    ])
+    event = st.dataframe(
+        table,
+        hide_index=True,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key="models-grid",
     )
-    selected_id = st.selectbox("Modèle", [model.model_id for model in models])
+    selected_rows = _selected_rows(event)
+    selected_key = "selected-model-id"
+    if selected_rows and selected_rows[0] < len(models):
+        st.session_state[selected_key] = models[selected_rows[0]].model_id
+    available_ids = {model.model_id for model in models}
+    selected_id = st.session_state.get(selected_key)
+    if selected_id not in available_ids:
+        st.session_state.pop(selected_key, None)
+        st.caption("Sélectionnez un modèle dans la grille pour afficher les actions.")
+        st.subheader("Jobs actifs")
+        _live_job_panel(_service())
+        return
     selected = next(model for model in models if model.model_id == selected_id)
+    st.markdown(f"**{selected.target} ← {' + '.join(selected.predictors)}**")
+    st.caption(selected.model_id)
     controls = st.columns(5)
     if controls[0].button(
         "Entraîner", disabled=selected.status.value in {"active", "retired"}

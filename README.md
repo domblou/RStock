@@ -184,6 +184,10 @@ python -m streamlit run rstock/application/streamlit_app.py
 Les jobs walk-forward, calibration XGBoost et calibration des seuils sont
 disponibles. Une combinaison qualifiée peut être promue depuis l'historique,
 entraînée comme nouvel artefact production, puis activée dans la page `Modèles`.
+Dans `Expériences`, l'univers principal comme les univers de contexte peuvent
+être utilisés au complet ou échantillonnés selon la même méthode : `Top N` ou
+échantillon reproductible avec seed. Les symboles de contexte restent uniquement
+des prédicteurs.
 La page `Surveillance` dérive automatiquement l'univers opérationnel des modèles
 actifs et permet de lancer la mise à jour marché, les prédictions Up/Down, le
 screening et le rattachement ultérieur des résultats réalisés. Aucun ordre de

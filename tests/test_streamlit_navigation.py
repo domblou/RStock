@@ -108,7 +108,14 @@ def test_experiments_only_selects_saved_universes_without_manual_entry():
     assert "service.standard_universe_names()" in selector
     assert '"Univers principal"' in selector
     assert '"Univers de contexte"' in selector
+    assert "record.type == CONTEXT_UNIVERSE_TYPE" in selector
+    assert "context_names = service.universe_names()" not in selector
     assert "st.multiselect(" in selector
+    assert '"Mode d’utilisation du contexte"' in selector
+    assert '"Échantillon d’un univers": SAMPLE_SOURCE' in selector
+    assert '"Méthode de sélection du contexte"' in selector
+    assert "context_sample_size=context_sample_size" in selector
+    assert "context_selection_method=context_method" in selector
     assert "resolve_experiment(" in selector
     assert "Cibles résolues" in selector
     assert "Symboles contexte" in selector
@@ -158,6 +165,9 @@ def test_experiment_submission_and_history_expose_frozen_universe_roles():
 
 def test_models_and_surveillance_pages_expose_the_operational_flow():
     source = APP.read_text(encoding="utf-8")
+    models_page = source.split("def _models_page", 1)[1].split(
+        "def _history_page", 1
+    )[0]
 
     assert "Catalogue futur" not in source
     for label in (
@@ -179,6 +189,12 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
         "Production réelle",
     ):
         assert history_kind in source
+    assert 'selection_mode="single-row"' in models_page
+    assert 'key="models-grid"' in models_page
+    assert 'st.selectbox("Modèle"' not in models_page
+    assert '"selected-model-id"' in models_page
+    assert "Sélectionnez un modèle dans la grille pour afficher les actions." in models_page
+    assert "selected.model_id" in models_page
 
 
 def test_surveillance_uses_one_conditional_page_level_polling_fragment():

@@ -242,6 +242,48 @@ def test_experiment_resolution_accepts_multiple_contexts_and_deduplicates_symbol
     assert resolved.predictor_symbols == ("AAA", "BBB", "CCC", "DDD")
 
 
+def test_context_sampling_uses_the_same_top_n_policy_without_creating_targets():
+    service = UniverseService({
+        "PRIMARY": ("AAA", "BBB"),
+        "CONTEXT": ("BBB", "CCC", "DDD", "EEE"),
+    })
+    primary = UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY")
+
+    full_context = service.resolve_experiment(primary, ("CONTEXT",))
+    top_two = service.resolve_experiment(
+        primary,
+        ("CONTEXT",),
+        context_sample_size=2,
+        context_selection_method=TOP_N,
+    )
+
+    assert full_context.context_symbols == ("CCC", "DDD", "EEE")
+    assert top_two.target_symbols == ("AAA", "BBB")
+    assert top_two.context_symbols == ("CCC", "DDD")
+    assert top_two.predictor_symbols == ("AAA", "BBB", "CCC", "DDD")
+    assert len(top_two.predictor_symbols) == 4
+
+
+def test_context_sampling_supports_the_same_reproducible_sample_policy():
+    service = UniverseService({
+        "PRIMARY": ("AAA",),
+        "CONTEXT": ("BBB", "CCC", "DDD", "EEE"),
+    })
+    primary = UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY")
+
+    first = service.resolve_experiment(
+        primary, ("CONTEXT",), context_sample_size=2,
+        context_selection_method=SEEDED_SAMPLE, context_seed=1234,
+    )
+    second = service.resolve_experiment(
+        primary, ("CONTEXT",), context_sample_size=2,
+        context_selection_method=SEEDED_SAMPLE, context_seed=1234,
+    )
+
+    assert first.context_symbols == second.context_symbols
+    assert len(first.context_symbols) == 2
+
+
 def test_no_context_keeps_legacy_symbols_behavior_and_context_run_is_frozen(tmp_path):
     service = UniverseService(root=tmp_path)
     primary = service.create("Primary", ("AAA", "BBB"))
