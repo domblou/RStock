@@ -225,6 +225,30 @@ def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary
     assert 'st.subheader("Pré-filtrage des prédicteurs")' in detail
 
 
+def test_settings_and_combination_detail_expose_model_selection_scores():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split(
+        "def _history_filters", 1
+    )[0]
+    detail = source.split("def _render_run_detail_view", 1)[1].split(
+        "def _render_run_comparison_view", 1
+    )[0]
+
+    assert 'st.subheader("Classement des modèles")' in settings
+    for name in (
+        "model_selection_predictive_quality_weight",
+        "model_selection_stability_weight",
+        "model_selection_holdout_weight",
+        "model_selection_signal_quality_weight",
+        "model_selection_sample_adequacy_weight",
+    ):
+        assert name in settings
+    for label in (
+        "Seuil calibré", "Qualité signal", "Sous-scores", "Score final", "Rang"
+    ):
+        assert label in detail
+
+
 def test_surveillance_uses_one_conditional_page_level_polling_fragment():
     source = APP.read_text(encoding="utf-8")
 

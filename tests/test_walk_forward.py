@@ -100,6 +100,13 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
     assert result.run_configuration["development_end"] < result.run_configuration["final_holdout_start"]
     assert len(result.qualification) == 2
     assert set(result.selection_results["Set"]) == set(result.qualification["Set"])
+    assert {
+        "predictive_quality_score", "stability_score", "holdout_score",
+        "signal_quality_score", "sample_adequacy_score",
+        "model_selection_score", "model_selection_rank",
+    } <= set(result.selection_results)
+    assert "model_selection" in result.run_configuration
+    assert result.run_configuration["model_selection"]["scale"] == "0-100"
     assert len(result.final_holdout) == 2
     assert (result.final_holdout["FinalTrainEnd"] < result.final_holdout["FinalTestStart"]).all()
     assert (result.windows["TestEnd"] < result.final_holdout["FinalTestStart"].min()).all()

@@ -82,6 +82,29 @@ def test_legacy_run_without_artifacts_is_analysable_with_missing_metrics():
     assert analytics.tested_count is None
 
 
+def test_combination_table_exposes_persisted_score_and_components():
+    scores = pd.DataFrame([{
+        "Set": "DIS<-PFE+WMT",
+        "model_selection_score": 78.25,
+        "model_selection_rank": 1,
+        "predictive_quality_score": 52.0,
+        "stability_score": 84.0,
+        "holdout_score": 76.0,
+        "signal_quality_score": pd.NA,
+        "sample_adequacy_score": 100.0,
+    }])
+
+    table = combination_table(
+        _qualification(), _holdout(), depth=3, selection_results=scores
+    )
+    row = table[table["Combinaison"] == "DIS<-PFE+WMT"].iloc[0]
+
+    assert row["Score"] == 78.25
+    assert row["Rang"] == 1
+    assert row["Score stabilité"] == 84.0
+    assert pd.isna(row["Score qualité signal"])
+
+
 def test_comparison_keeps_configuration_and_missing_values_distinct():
     first = _analysis("run-a", 120.0)
     second = _analysis("run-b", 60.0)

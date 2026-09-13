@@ -205,6 +205,7 @@ def history_row(
 
 def qualified_combinations_table(
     qualification: pd.DataFrame, holdout: pd.DataFrame | None = None,
+    selection_results: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Return sortable qualified combinations with development and holdout data."""
 
@@ -221,7 +222,14 @@ def qualified_combinations_table(
     if not final.empty and "Set" in final:
         final_columns = [name for name in ("Set", "FinalUpROCAUC") if name in final]
         eligible = eligible.merge(final[final_columns], on="Set", how="left")
-    result = pd.DataFrame({
+    scored = selection_results if selection_results is not None else pd.DataFrame()
+    if not scored.empty and "Set" in scored:
+        score_columns = [
+            name for name in ("Set", "model_selection_score", "model_selection_rank")
+            if name in scored
+        ]
+        eligible = eligible.merge(scored[score_columns], on="Set", how="left")
+    values = {
         "Combinaison": eligible["Set"].astype(str),
         "Cible": eligible.get("Observation", pd.Series(index=eligible.index, dtype=str)),
         "Predictors": eligible.get("Predictors", pd.Series(index=eligible.index, dtype=str)).map(_predictors_text),
@@ -230,8 +238,14 @@ def qualified_combinations_table(
         "Stabilité / qualification": eligible.get("IneligibilityReasons", pd.Series(index=eligible.index)).map(
             lambda value: "Qualifiée" if not value or str(value) in {"[]", "nan"} else str(value)
         ),
-    })
-    return result.sort_values(["AUC dev médiane", "Combinaison"], ascending=[False, True], kind="stable")
+    }
+    if "model_selection_score" in eligible:
+        values["Score"] = pd.to_numeric(eligible["model_selection_score"], errors="coerce")
+    if "model_selection_rank" in eligible:
+        values["Rang"] = pd.to_numeric(eligible["model_selection_rank"], errors="coerce").astype("Int64")
+    result = pd.DataFrame(values)
+    sort_columns = ["Score", "Combinaison"] if "Score" in result else ["AUC dev médiane", "Combinaison"]
+    return result.sort_values(sort_columns, ascending=[False, True], kind="stable")
 
 
 def _predictors_text(value: object) -> str:

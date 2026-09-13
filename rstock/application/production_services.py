@@ -25,6 +25,7 @@ from rstock.modeling import XGBoostParameters, fit_booster, predict_probabilitie
 from rstock.persistence import load_booster, model_store_transaction
 from rstock.progress import CancellationCheck, check_cancellation
 from rstock.qualification import qualification_parameters
+from rstock.model_selection import SCORE_COLUMNS
 
 from .domain import ExperimentSpec, JobStatus, JobType
 from .production_domain import OperationalUniverse, ProductionModel, ProductionModelStatus
@@ -76,6 +77,20 @@ class PromotionService:
             raise ValueError("Only a qualified combination can be promoted")
         predictors = tuple(json.loads(str(selected["Predictors"])))
         target = str(selected["Observation"])
+        development_metrics = _json_safe(selected.to_dict())
+        selection_path = results / "selection_results.csv"
+        if selection_path.exists():
+            selection_results = pd.read_csv(selection_path)
+            scored = selection_results[
+                selection_results["Set"].astype(str) == set_name
+            ]
+            if not scored.empty:
+                score_values = scored.iloc[0]
+                development_metrics.update(_json_safe({
+                    name: score_values.get(name)
+                    for name in SCORE_COLUMNS
+                    if name in score_values.index
+                }))
         xgb_parameters: dict[str, int | float] = {
             "max_depth": spec.config.xgb_max_depth,
             "eta": spec.config.xgb_eta,
@@ -199,7 +214,7 @@ class PromotionService:
             source_walk_forward_run=walk_forward_run,
             source_xgboost_calibration_run=xgboost_calibration_run,
             source_threshold_calibration_run=threshold_calibration_run,
-            development_metrics=_json_safe(selected.to_dict()),
+            development_metrics=development_metrics,
             holdout_metrics=holdout_metrics,
             created_at=utc_now(),
             training_metadata={

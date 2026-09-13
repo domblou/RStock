@@ -16,6 +16,17 @@ COMBINATION_COLUMNS = (
     "Observations positives", "Statut", "Eligible", "Holdout confirmé",
 )
 
+MODEL_SELECTION_COLUMNS = {
+    "calibrated_signal_threshold": "Seuil calibré",
+    "model_selection_score": "Score",
+    "model_selection_rank": "Rang",
+    "predictive_quality_score": "Score qualité prédictive",
+    "stability_score": "Score stabilité",
+    "holdout_score": "Score holdout",
+    "signal_quality_score": "Score qualité signal",
+    "sample_adequacy_score": "Score adéquation échantillon",
+}
+
 
 def run_universe_summary(configuration: Mapping[str, Any]) -> dict[str, object]:
     """Summarize frozen universe roles for current and legacy run configurations."""
@@ -109,11 +120,19 @@ def load_walk_forward_artifacts(project_root: Path, run_id: str) -> tuple[pd.Dat
     return qualification, holdout
 
 
+def load_model_selection_artifact(project_root: Path, run_id: str) -> pd.DataFrame:
+    """Load final scores when available; legacy runs return an empty frame."""
+
+    path = Path(project_root) / "runs" / run_id / "results" / "selection_results.csv"
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
 def combination_table(
     qualification: pd.DataFrame,
     holdout: pd.DataFrame,
     *,
     depth: object = None,
+    selection_results: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Join existing development and holdout metrics into a UI-safe table."""
 
@@ -124,6 +143,10 @@ def combination_table(
     if not holdout.empty and "Set" in holdout:
         names = [name for name in ("Set", "FinalUpROCAUC", "FinalConfirmed") if name in holdout]
         work = work.merge(holdout.loc[:, names], on="Set", how="left", validate="one_to_one")
+    scored = selection_results if selection_results is not None else pd.DataFrame()
+    if not scored.empty and "Set" in scored:
+        names = ["Set", *[name for name in MODEL_SELECTION_COLUMNS if name in scored]]
+        work = work.merge(scored.loc[:, names], on="Set", how="left", validate="one_to_one")
     holdout_confirmed = _boolean(
         work.get("FinalConfirmed", pd.Series(False, index=work.index))
     )
@@ -147,9 +170,20 @@ def combination_table(
     result["Statut"] = "Non qualifiée"
     result.loc[result["Eligible"], "Statut"] = "Qualifiée développement"
     result.loc[result["Holdout confirmé"], "Statut"] = "Holdout confirmé"
-    return result.loc[:, COMBINATION_COLUMNS].sort_values(
-        ["AUC holdout", "AUC dev", "Combinaison"],
-        ascending=[False, False, True], na_position="last", kind="stable",
+    optional_columns: list[str] = []
+    for source, display in MODEL_SELECTION_COLUMNS.items():
+        if source in work:
+            result[display] = _number(work, source)
+            optional_columns.append(display)
+    sort_columns = (
+        ["Score", "AUC holdout", "AUC dev", "Combinaison"]
+        if "Score" in result
+        else ["AUC holdout", "AUC dev", "Combinaison"]
+    )
+    return result.loc[:, [*COMBINATION_COLUMNS, *optional_columns]].sort_values(
+        sort_columns,
+        ascending=[False] * (len(sort_columns) - 1) + [True],
+        na_position="last", kind="stable",
     ).reset_index(drop=True)
 
 
@@ -237,12 +271,14 @@ class RunAnalytics:
 def analyze_run(
     status: Mapping[str, Any], detail: Mapping[str, Any],
     qualification: pd.DataFrame, holdout: pd.DataFrame,
+    selection_results: pd.DataFrame | None = None,
 ) -> RunAnalytics:
     configuration = detail.get("configuration", {})
     rstock = configuration.get("rstock_config", {})
     summary = detail.get("summary", {})
     combinations = combination_table(
-        qualification, holdout, depth=rstock.get("permutation_depth")
+        qualification, holdout, depth=rstock.get("permutation_depth"),
+        selection_results=selection_results,
     )
     tested = summary.get("total_combinations") or summary.get("combinations")
     if tested is None and not qualification.empty:
@@ -329,6 +365,10 @@ def configuration_differences(
         "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma", "xgb_reg_alpha",
         "xgb_reg_lambda", "qualification_min_windows", "qualification_min_median_auc",
         "qualification_min_worst_window_auc", "final_holdout_size",
+        "model_selection_predictive_quality_weight",
+        "model_selection_stability_weight", "model_selection_holdout_weight",
+        "model_selection_signal_quality_weight",
+        "model_selection_sample_adequacy_weight",
     )
     values: dict[str, list[object]] = {}
     for field in fields:

@@ -70,6 +70,10 @@ def _promotion_run(tmp_path):
     pd.DataFrame([{"Set": "AAA<-BBB", "FinalUpROCAUC": 0.57}]).to_csv(
         results / "final_holdout.csv", index=False
     )
+    pd.DataFrame([{
+        "Set": "AAA<-BBB", "model_selection_score": 74.5,
+        "model_selection_rank": 1, "stability_score": 82.0,
+    }]).to_csv(results / "selection_results.csv", index=False)
     runs.transition(run_id, JobStatus.RUNNING)
     runs.transition(run_id, JobStatus.COMPLETED)
     return runs, run_id
@@ -168,6 +172,9 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
         "predictor_symbols": ["AAA", "BBB"],
     }
     assert first.development_metrics["ROCAUCMedian"] == 0.6
+    assert first.development_metrics["model_selection_score"] == 74.5
+    assert first.development_metrics["model_selection_rank"] == 1
+    assert first.development_metrics["stability_score"] == 82.0
     assert first.holdout_metrics["FinalUpROCAUC"] == 0.57
 
 

@@ -25,6 +25,7 @@ from .features import (
     predictor_columns,
 )
 from .modeling import fit_booster, predict_probabilities
+from .model_selection import model_selection_parameters, score_qualified_models
 from .parallel import process_cancellation_requested, run_combination_tasks
 from .progress import (
     CancellationCheck,
@@ -801,7 +802,9 @@ def evaluate_walk_forward(
         final_holdout_risk = final_holdout_risk.merge(
             eligibility, on="Set", how="left"
         )
-    selection_results = _combine_selection_results(qualification, final_holdout)
+    selection_results = score_qualified_models(
+        _combine_selection_results(qualification, final_holdout), config
+    )
     aggregate_global["EligibleSets"] = int(qualification["Eligible"].sum())
     aggregate_global["EligiblePct"] = float(qualification["Eligible"].mean())
     aggregate_global["FinalConfirmedSets"] = int(
@@ -824,6 +827,7 @@ def evaluate_walk_forward(
         "development_end": development_end.isoformat(),
         "final_holdout_start": holdout_start.isoformat(),
         "qualification": qualification_parameters(config),
+        "model_selection": model_selection_parameters(config),
         "ranking_order": [
             "PctWindowsAboveRandom desc",
             "ROCAUCMedian desc",

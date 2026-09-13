@@ -76,7 +76,8 @@ python scripts/walk_forward_evaluate.py --symbols AAPL MSFT JPM XOM --calendar X
 ```
 
 Les 63 dernières séances sont réservées par défaut comme holdout final et ne
-participent ni aux fenêtres walk-forward, ni à la qualification, ni au classement.
+participent ni aux fenêtres walk-forward, ni à la qualification. Elles servent
+uniquement à confirmer puis à classer les modèles déjà admissibles.
 La taille est configurable avec `--final-holdout-size`.
 
 La qualification de stabilité utilise des seuils de calibration déclarés avant
@@ -85,8 +86,12 @@ fenêtres au-dessus de 0,50, pire AUC, nombre de résultats positifs et écart-t
 maximal. Ils sont configurés dans `rstock/config.py` et exposés par
 `--min-windows`, `--min-median-auc`, `--min-pct-windows-above-random`,
 `--min-worst-window-auc`, `--min-positive-observations` et `--max-auc-std`.
-Le rang des modèles admissibles privilégie successivement la répétabilité, l'AUC
-médian, le pire AUC, la faible dispersion puis le PR-AUC médian.
+Après qualification et confirmation holdout, un score final explicable sur 100
+classe les modèles admissibles sans les promouvoir. Ses composantes séparées
+mesurent la qualité prédictive, la stabilité walk-forward, le holdout, l'adéquation
+de l'échantillon et, lorsqu'elles existent, la qualité et la stabilité des signaux
+calibrés. Les pondérations sont configurables dans `RStockConfig`; une composante
+absente est exclue et les poids disponibles sont renormalisés.
 
 Les résultats détaillés sont écrits dans `WalkForward/`, notamment
 `qualification.csv`, `final_holdout.csv`, `final_holdout_predictions.csv`,

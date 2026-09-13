@@ -72,6 +72,15 @@ class RStockConfig:
     qualification_max_auc_std: float = 0.10
     final_confirmation_min_auc: float = 0.50
 
+    # Final ranking of models that already passed development qualification.
+    # Missing components (for example signal calibration) are excluded and the
+    # remaining weights are renormalized explicitly.
+    model_selection_predictive_quality_weight: float = 0.15
+    model_selection_stability_weight: float = 0.30
+    model_selection_holdout_weight: float = 0.30
+    model_selection_signal_quality_weight: float = 0.10
+    model_selection_sample_adequacy_weight: float = 0.15
+
     # Optional development-only predictor prefilter applied before depth 2/3
     # combinations are materialized.
     predictor_prefilter_enabled: bool = False

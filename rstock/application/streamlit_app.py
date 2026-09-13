@@ -36,6 +36,7 @@ from rstock.application.history_analysis import (
     comparison_chart_frames,
     configuration_differences,
     filter_combinations,
+    load_model_selection_artifact,
     load_walk_forward_artifacts,
     predictor_prefilter_summary,
     run_universe_summary,
@@ -597,6 +598,35 @@ def _settings() -> None:
         max_auc_std = q3.number_input("Écart-type ROC-AUC maximal", min_value=0.0, value=current.qualification_max_auc_std)
         final_auc = q1.number_input("ROC-AUC confirmation finale", min_value=0.0, max_value=1.0, value=current.final_confirmation_min_auc)
         prediction_threshold = q2.number_input("Seuil de décision standard", min_value=0.0, max_value=1.0, value=current.prediction_threshold)
+
+        st.subheader("Classement des modèles")
+        st.caption("Pondérations du score final; les composantes absentes sont exclues puis les poids disponibles sont renormalisés.")
+        s1, s2, s3 = st.columns(3)
+        selection_predictive_weight = s1.number_input(
+            "Poids qualité prédictive", min_value=0.0,
+            value=current.model_selection_predictive_quality_weight,
+            help="Poids de l’AUC médiane walk-forward.",
+        )
+        selection_stability_weight = s2.number_input(
+            "Poids stabilité", min_value=0.0,
+            value=current.model_selection_stability_weight,
+            help="Poids du Worst AUC, de la dispersion et de la constance entre fenêtres.",
+        )
+        selection_holdout_weight = s3.number_input(
+            "Poids holdout", min_value=0.0,
+            value=current.model_selection_holdout_weight,
+            help="Poids de l’AUC holdout et de l’écart développement-holdout.",
+        )
+        selection_signal_weight = s1.number_input(
+            "Poids qualité signal", min_value=0.0,
+            value=current.model_selection_signal_quality_weight,
+            help="Poids de la qualité, de la stabilité et du volume des signaux calibrés.",
+        )
+        selection_sample_weight = s2.number_input(
+            "Poids adéquation échantillon", min_value=0.0,
+            value=current.model_selection_sample_adequacy_weight,
+            help="Poids du nombre et de la validité des fenêtres et observations.",
+        )
         workers = q1.number_input("Workers marché", min_value=1, value=current.market_cache_workers)
         combination_workers = q2.number_input(
             "Workers combinaisons", min_value=1, value=current.combination_workers
@@ -667,6 +697,11 @@ def _settings() -> None:
                 qualification_max_auc_std=float(max_auc_std),
                 final_confirmation_min_auc=float(final_auc),
                 prediction_threshold=float(prediction_threshold),
+                model_selection_predictive_quality_weight=float(selection_predictive_weight),
+                model_selection_stability_weight=float(selection_stability_weight),
+                model_selection_holdout_weight=float(selection_holdout_weight),
+                model_selection_signal_quality_weight=float(selection_signal_weight),
+                model_selection_sample_adequacy_weight=float(selection_sample_weight),
                 market_cache_workers=int(workers),
                 combination_workers=int(combination_workers),
                 xgb_nthread=int(nthread),
@@ -759,7 +794,9 @@ def _render_walk_forward_promotion(
     qualification = pd.read_csv(qualification_path)
     holdout_path = results / "final_holdout.csv"
     holdout = pd.read_csv(holdout_path) if holdout_path.exists() else pd.DataFrame()
-    combinations = qualified_combinations_table(qualification, holdout)
+    selection_path = results / "selection_results.csv"
+    scores = pd.read_csv(selection_path) if selection_path.exists() else pd.DataFrame()
+    combinations = qualified_combinations_table(qualification, holdout, scores)
     st.subheader("Combinaisons qualifiées")
     if combinations.empty:
         st.info("Aucune combinaison ne satisfait les critères de qualification.")
@@ -860,7 +897,10 @@ def _load_run_analytics(
     qualification, holdout = load_walk_forward_artifacts(
         st.session_state.lab_config.project_root, run_id
     )
-    return analyze_run(status, detail, qualification, holdout)
+    selection_results = load_model_selection_artifact(
+        st.session_state.lab_config.project_root, run_id
+    )
+    return analyze_run(status, detail, qualification, holdout, selection_results)
 
 
 def _format_metric(value: object, *, percent: bool = False) -> str:
@@ -902,8 +942,12 @@ def _selected_combination(
 ) -> pd.Series | None:
     if table.empty:
         return None
+    detail_only = [
+        "Score qualité prédictive", "Score stabilité", "Score holdout",
+        "Score qualité signal", "Score adéquation échantillon",
+    ]
     event = st.dataframe(
-        table.drop(columns=["Eligible", "Holdout confirmé"], errors="ignore"),
+        table.drop(columns=["Eligible", "Holdout confirmé", *detail_only], errors="ignore"),
         hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key=f"analysis-combinations-{run_id}",
     )
@@ -1037,6 +1081,32 @@ def _render_run_detail_view(
                     strict=True,
                 ):
                     column.metric(name, _format_metric(selected[name]))
+                diagnostic = pd.DataFrame([
+                    {"Indicateur": "Dispersion", "Valeur": selected.get("Dispersion")},
+                    {"Indicateur": "Fenêtres valides", "Valeur": selected.get("Fenêtres valides")},
+                    {"Indicateur": "Seuil calibré", "Valeur": selected.get("Seuil calibré", "—")},
+                    {"Indicateur": "Qualité signal", "Valeur": selected.get("Score qualité signal", "—")},
+                    {"Indicateur": "Score final", "Valeur": selected.get("Score", "—")},
+                    {"Indicateur": "Rang", "Valeur": selected.get("Rang", "—")},
+                ])
+                st.dataframe(diagnostic, hide_index=True, width="stretch")
+                subscores = [
+                    ("Qualité prédictive", "Score qualité prédictive"),
+                    ("Stabilité", "Score stabilité"),
+                    ("Holdout", "Score holdout"),
+                    ("Qualité signal", "Score qualité signal"),
+                    ("Adéquation échantillon", "Score adéquation échantillon"),
+                ]
+                if any(name in selected.index for _, name in subscores):
+                    st.markdown("**Sous-scores**")
+                    st.dataframe(
+                        pd.DataFrame([
+                            {"Composante": label, "Score / 100": selected.get(name, "—")}
+                            for label, name in subscores
+                        ]),
+                        hide_index=True,
+                        width="stretch",
+                    )
                 _promote_combination_action(run_id, selected)
     with tabs[3]:
         selected_name = st.session_state.get(f"analysis-selected-combination-{run_id}")

@@ -143,6 +143,24 @@ def test_qualified_table_combines_development_holdout_and_is_sortable():
     }]
 
 
+def test_qualified_table_prefers_persisted_final_score_when_available():
+    qualification = pd.DataFrame([
+        {"Set": "A<-B", "Observation": "A", "Predictors": '["B"]', "Eligible": True, "ROCAUCMedian": 0.80},
+        {"Set": "C<-D", "Observation": "C", "Predictors": '["D"]', "Eligible": True, "ROCAUCMedian": 0.70},
+    ])
+    scores = pd.DataFrame([
+        {"Set": "A<-B", "model_selection_score": 65.0, "model_selection_rank": 2},
+        {"Set": "C<-D", "model_selection_score": 82.0, "model_selection_rank": 1},
+    ])
+
+    table = qualified_combinations_table(qualification, selection_results=scores)
+
+    assert table["Combinaison"].tolist() == ["C<-D", "A<-B"]
+    assert table[["Score", "Rang"]].to_dict("records") == [
+        {"Score": 82.0, "Rang": 1}, {"Score": 65.0, "Rang": 2}
+    ]
+
+
 def test_existing_promotion_is_detected_without_changing_registry_logic():
     model = SimpleNamespace(
         source_walk_forward_run="wf-run", target="DIS", predictors=("PFE", "WMT"), status="candidate"
