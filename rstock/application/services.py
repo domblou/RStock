@@ -94,6 +94,7 @@ class ModelService:
         self, run_id: str, set_name: str, *,
         xgboost_calibration_run: str | None = None,
         threshold_calibration_run: str | None = None,
+        selected_threshold_direction: str | None = None,
     ):
         return PromotionService(
             RunRepository(self.repository.root.parent / "runs"), self.repository
@@ -101,6 +102,7 @@ class ModelService:
             run_id, set_name,
             xgboost_calibration_run=xgboost_calibration_run,
             threshold_calibration_run=threshold_calibration_run,
+            selected_threshold_direction=selected_threshold_direction,
         )
 
     def activate(self, model_id: str):

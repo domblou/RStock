@@ -93,6 +93,7 @@ class ExperimentSpec:
     target_symbols: tuple[str, ...] = ()
     context_symbols: tuple[str, ...] = ()
     predictor_symbols: tuple[str, ...] = ()
+    source_walk_forward_run: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
@@ -136,6 +137,7 @@ class ExperimentSpec:
             "target_symbols": list(self.target_symbols),
             "context_symbols": list(self.context_symbols),
             "predictor_symbols": list(self.predictor_symbols),
+            "source_walk_forward_run": self.source_walk_forward_run,
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
             "evaluate_final_holdout": self.evaluate_final_holdout,
@@ -184,6 +186,11 @@ class ExperimentSpec:
             context_symbols=tuple(str(item) for item in values.get("context_symbols", ())),
             predictor_symbols=tuple(
                 str(item) for item in values.get("predictor_symbols", ())
+            ),
+            source_walk_forward_run=(
+                None
+                if values.get("source_walk_forward_run") is None
+                else str(values["source_walk_forward_run"])
             ),
         )
 

@@ -188,6 +188,47 @@ def test_model_signal_threshold_falls_back_to_its_global_prediction_threshold():
     assert model.signal_threshold == 0.71
 
 
+def test_threshold_run_promotion_uses_its_per_set_threshold_and_provenance(tmp_path):
+    runs, walk_forward_run = _promotion_run(tmp_path)
+    threshold_spec = ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"),
+        source_walk_forward_run=walk_forward_run,
+    )
+    threshold_run = runs.create(threshold_spec)
+    results = runs.run_directory(threshold_run) / "results"
+    results.mkdir()
+    (results / "selected_thresholds_by_set.json").write_text(
+        json.dumps({
+            "AAA<-BBB": {
+                "Up": {"status": "selected", "threshold": 0.69},
+                "Down": {"status": "selected", "threshold": 0.31},
+            }
+        }), encoding="utf-8",
+    )
+    pd.DataFrame([{
+        "Set": "AAA<-BBB", "Observation": "AAA", "Direction": "Down",
+        "Threshold": 0.31, "SignalCount": 7, "Precision": 0.71,
+    }]).to_csv(results / "holdout_metrics.csv", index=False)
+    runs.transition(threshold_run, JobStatus.RUNNING)
+    runs.transition(threshold_run, JobStatus.COMPLETED)
+
+    model, created = PromotionService(
+        runs, ProductionRepository(tmp_path)
+    ).promote(
+        walk_forward_run, "AAA<-BBB", threshold_calibration_run=threshold_run,
+        selected_threshold_direction="Down",
+    )
+
+    assert created is True
+    assert model.up_threshold == 0.69
+    assert model.down_threshold == 0.31
+    assert model.source_walk_forward_run == walk_forward_run
+    assert model.source_threshold_calibration_run == threshold_run
+    assert model.training_metadata["selected_threshold_direction"] == "Down"
+
+
 def test_training_publishes_two_new_full_history_artifacts(monkeypatch, tmp_path):
     repository = ProductionRepository(tmp_path)
     repository.add(_model())

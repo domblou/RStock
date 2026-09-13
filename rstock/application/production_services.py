@@ -64,7 +64,10 @@ class PromotionService:
         *,
         xgboost_calibration_run: str | None = None,
         threshold_calibration_run: str | None = None,
+        selected_threshold_direction: str | None = None,
     ) -> tuple[ProductionModel, bool]:
+        if selected_threshold_direction not in {None, "Up", "Down"}:
+            raise ValueError("selected_threshold_direction must be Up or Down")
         self._require_completed_run(walk_forward_run, JobType.WALK_FORWARD)
         spec = self.runs.load_spec(walk_forward_run)
         results = self.runs.run_directory(walk_forward_run) / "results"
@@ -219,6 +222,7 @@ class PromotionService:
             created_at=utc_now(),
             training_metadata={
                 "promotion_fingerprint": fingerprint,
+                "selected_threshold_direction": selected_threshold_direction,
                 "calendar": spec.calendar,
                 "calibration_source_configurations": calibration_sources,
                 "universe_roles": {

@@ -40,11 +40,14 @@ from rstock.application.history_analysis import (
     comparison_chart_frames,
     configuration_differences,
     filter_combinations,
+    filter_threshold_calibration_results,
     load_model_selection_artifact,
+    load_threshold_calibration_artifacts,
     load_walk_forward_artifacts,
     predictor_prefilter_summary,
     run_universe_summary,
     selected_run_action,
+    threshold_calibration_table,
 )
 from rstock.application.runner import running_duration
 from rstock.application.surveillance import (
@@ -893,6 +896,96 @@ def _render_walk_forward_promotion(
                 st.info(f"Combinaison déjà promue — statut : {model.status.value}.")
 
 
+def _render_threshold_calibration_promotion(
+    run_id: str,
+    *,
+    project_root: Path,
+    configuration: dict[str, object],
+) -> None:
+    """Inspect frozen per-set thresholds and promote through the existing service."""
+
+    metrics, holdout, selected_by_set = load_threshold_calibration_artifacts(
+        project_root, run_id
+    )
+    results = threshold_calibration_table(metrics, holdout, selected_by_set)
+    st.subheader("Résultats de calibration des seuils")
+    if results.empty:
+        st.info("Aucun résultat par combinaison n'est disponible pour ce run.")
+        return
+    filters = st.columns(3)
+    direction = filters[0].selectbox(
+        "Direction", ["Up", "Down", "Toutes"], index=0,
+        key=f"threshold-direction-{run_id}",
+    )
+    min_signals = filters[1].number_input(
+        "Signaux holdout minimum", min_value=0, value=0, step=1,
+        key=f"threshold-min-signals-{run_id}",
+    )
+    sort_options = [
+        "Précision holdout", "AUC holdout", "Rendement directionnel moyen"
+    ]
+    if "Score" in results:
+        sort_options.append("Score")
+    sort_by = filters[2].selectbox(
+        "Trier par",
+        sort_options,
+        key=f"threshold-sort-{run_id}",
+    )
+    filtered = filter_threshold_calibration_results(
+        results, direction=direction, min_signals=int(min_signals), sort_by=sort_by
+    )
+    selection = st.dataframe(
+        filtered, hide_index=True, width="stretch", on_select="rerun",
+        selection_mode="single-row", key=f"threshold-results-{run_id}",
+    )
+    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+    selected_key = f"selected-threshold-result-{run_id}"
+    if selected_rows:
+        st.session_state[selected_key] = filtered.iloc[selected_rows[0]].to_dict()
+    elif selected_key in st.session_state:
+        st.session_state.pop(selected_key, None)
+    chosen = st.session_state.get(selected_key)
+    if not isinstance(chosen, dict):
+        st.caption("Sélectionnez une combinaison pour la promouvoir.")
+        return
+    set_name = str(chosen.get("Combinaison", ""))
+    selected_direction = str(chosen.get("Direction", ""))
+    frozen = selected_by_set.get(set_name, {})
+    if not all(
+        isinstance(frozen.get(item), dict)
+        and frozen[item].get("status") == "selected"
+        and frozen[item].get("threshold") is not None
+        for item in ("Up", "Down")
+    ):
+        st.info("Cette combinaison ne possède pas de seuils gelés admissibles pour Up et Down.")
+        return
+    source_run = configuration.get("source_walk_forward_run")
+    if not source_run:
+        st.info(
+            "La provenance walk-forward est absente de ce run historique ; "
+            "la promotion directe n'est pas disponible."
+        )
+        return
+    st.caption(
+        f"Sélection : {chosen.get('Cible', '—')} ← {chosen.get('Predictors', '—')} "
+        f"· seuil {selected_direction} : {chosen.get('Seuil calibré', '—')}"
+    )
+    if st.button("Promouvoir le modèle", type="primary", key=f"promote-threshold-{run_id}-{set_name}-{selected_direction}"):
+        try:
+            model, created = ModelService(project_root).promote(
+                str(source_run), set_name,
+                threshold_calibration_run=run_id,
+                selected_threshold_direction=selected_direction,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            st.error(f"Promotion impossible : {error}")
+        else:
+            if created:
+                st.success(f"Candidat production créé : {model.target} ← {' + '.join(model.predictors)}")
+            else:
+                st.info(f"Combinaison déjà promue — statut : {model.status.value}.")
+
+
 def _render_history_detail(
     run_id: str,
     *,
@@ -918,6 +1011,15 @@ def _render_history_detail(
     ):
         _render_walk_forward_promotion(
             run_id, project_root=st.session_state.lab_config.project_root
+        )
+    elif (
+        status["job_type"] == JobType.THRESHOLD_CALIBRATION.value
+        and status["status"] == "completed"
+    ):
+        _render_threshold_calibration_promotion(
+            run_id,
+            project_root=st.session_state.lab_config.project_root,
+            configuration=detail["configuration"],
         )
     tabs = st.tabs(["Résultats", "Configuration", "Fichiers", "Logs"])
     tabs[0].json(detail["summary"])

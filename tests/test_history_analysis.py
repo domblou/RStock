@@ -10,9 +10,11 @@ from rstock.application.history_analysis import (
     comparison_chart_frames,
     configuration_differences,
     filter_combinations,
+    filter_threshold_calibration_results,
     run_universe_summary,
     predictor_prefilter_summary,
     selected_run_action,
+    threshold_calibration_table,
 )
 
 
@@ -234,3 +236,51 @@ def test_predictor_prefilter_summary_exposes_threshold_rejection_counts():
     assert table.iloc[0]["Rejet fenêtres > 0,50"] == 1
     assert table.iloc[0]["Rejet Worst AUC"] == 3
     assert table.iloc[0]["Rejet dispersion"] == 1
+
+
+def test_threshold_calibration_table_uses_per_set_thresholds_and_holdout_metrics():
+    selected = {
+        "DIS<-AMZN+NVDA": {
+            "Up": {"status": "selected", "threshold": 0.71},
+            "Down": {"status": "selected", "threshold": 0.33},
+        }
+    }
+    holdout = pd.DataFrame([
+        {
+            "Set": "DIS<-AMZN+NVDA", "Observation": "DIS", "Direction": "Up",
+            "Threshold": 0.71, "SignalCount": 12, "Precision": 0.75,
+            "Recall": 0.5, "F1": 0.6, "ROCAUC": 0.66,
+            "DirectionalReturnMean": 0.012, "IntradayReturnMedian": 0.01,
+            "MFEMean": 0.02, "MAEMean": -0.01,
+            "OppositeMoveFrequency": 0.25,
+        },
+        {
+            "Set": "DIS<-AMZN+NVDA", "Observation": "DIS", "Direction": "Down",
+            "Threshold": 0.33, "SignalCount": 8, "Precision": 0.5,
+        },
+    ])
+
+    table = threshold_calibration_table(pd.DataFrame(), holdout, selected)
+    up = table[table["Direction"] == "Up"].iloc[0]
+
+    assert up["Cible"] == "DIS"
+    assert up["Predictors"] == "AMZN + NVDA"
+    assert up["Seuil calibré"] == 0.71
+    assert up["Précision holdout"] == 0.75
+    assert up["Fréquence mouvement opposé"] == 0.25
+
+
+def test_threshold_calibration_filters_direction_and_missing_legacy_metrics():
+    selected = {"AAA<-BBB": {"Up": {"status": "selected", "threshold": 0.6}}}
+    legacy = pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Threshold": 0.6, "Selected": True},
+        {"Set": "AAA<-BBB", "Direction": "Down", "Threshold": 0.4, "Selected": True},
+    ])
+
+    table = threshold_calibration_table(legacy, pd.DataFrame(), selected)
+    filtered = filter_threshold_calibration_results(table, direction="Up", min_signals=0)
+    down = filter_threshold_calibration_results(table, direction="Down", min_signals=0)
+
+    assert filtered["Direction"].tolist() == ["Up"]
+    assert down["Direction"].tolist() == ["Down"]
+    assert pd.isna(filtered.iloc[0]["AUC holdout"])

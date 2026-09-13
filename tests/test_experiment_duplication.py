@@ -255,6 +255,8 @@ def test_duplication_can_change_walk_forward_to_a_compatible_experimental_job(
     assert from_current.job_type is job_type
     assert from_run.config.xgb_seed == 99
     assert from_current.config is current
+    assert from_run.source_walk_forward_run == "run_original"
+    assert from_current.source_walk_forward_run == "run_original"
     for field in ("target_symbols", "context_symbols", "predictor_symbols"):
         assert getattr(from_run, field) == tuple(draft[field])
         assert getattr(from_current, field) == tuple(draft[field])

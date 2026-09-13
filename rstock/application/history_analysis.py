@@ -28,6 +28,15 @@ MODEL_SELECTION_COLUMNS = {
 }
 
 
+THRESHOLD_CALIBRATION_COLUMNS = (
+    "Combinaison", "Cible", "Predictors", "Direction", "Seuil calibré",
+    "Signaux holdout", "Précision holdout", "Success rate holdout", "Recall",
+    "F1", "AUC holdout", "Rendement directionnel moyen",
+    "Rendement médian", "MFE moyen", "MAE moyen",
+    "Fréquence mouvement opposé",
+)
+
+
 def run_universe_summary(configuration: Mapping[str, Any]) -> dict[str, object]:
     """Summarize frozen universe roles for current and legacy run configurations."""
 
@@ -125,6 +134,123 @@ def load_model_selection_artifact(project_root: Path, run_id: str) -> pd.DataFra
 
     path = Path(project_root) / "runs" / run_id / "results" / "selection_results.csv"
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def load_threshold_calibration_artifacts(
+    project_root: Path, run_id: str
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Load published threshold-calibration artifacts without recomputation."""
+
+    results = Path(project_root) / "runs" / run_id / "results"
+    metrics_path = results / "threshold_metrics_by_set.csv"
+    holdout_path = results / "holdout_metrics.csv"
+    selected_path = results / "selected_thresholds_by_set.json"
+    metrics = pd.read_csv(metrics_path) if metrics_path.exists() else pd.DataFrame()
+    holdout = pd.read_csv(holdout_path) if holdout_path.exists() else pd.DataFrame()
+    try:
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        selected = {}
+    return metrics, holdout, selected if isinstance(selected, dict) else {}
+
+
+def _set_parts(set_name: object) -> tuple[str, str]:
+    """Return a readable target/predictor pair from a persisted set identifier."""
+
+    value = str(set_name)
+    if "<-" not in value:
+        return "—", value
+    target, predictors = value.split("<-", 1)
+    return target, predictors.replace("+", " + ")
+
+
+def _selection_for(
+    selected_by_set: Mapping[str, Any], set_name: object, direction: object
+) -> Mapping[str, Any]:
+    item = selected_by_set.get(str(set_name), {})
+    selected = item.get(str(direction), {}) if isinstance(item, Mapping) else {}
+    return selected if isinstance(selected, Mapping) else {}
+
+
+def threshold_calibration_table(
+    metrics_by_set: pd.DataFrame,
+    holdout_metrics: pd.DataFrame,
+    selected_by_set: Mapping[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Project existing selected thresholds and holdout metrics into a UI table.
+
+    Holdout rows are preferred.  When a historical run has no holdout artifact,
+    the selected calibration rows remain inspectable with missing holdout values.
+    """
+
+    selected = selected_by_set or {}
+    source = holdout_metrics.copy()
+    if source.empty:
+        source = metrics_by_set.copy()
+        if not source.empty and "Selected" in source:
+            source = source[_boolean(source["Selected"])]
+    if source.empty or "Set" not in source:
+        return pd.DataFrame(columns=THRESHOLD_CALIBRATION_COLUMNS)
+
+    rows: list[dict[str, Any]] = []
+    for _, row in source.iterrows():
+        set_name = str(row.get("Set", "—"))
+        direction = str(row.get("Direction", "—"))
+        target, predictors = _set_parts(set_name)
+        selection = _selection_for(selected, set_name, direction)
+        threshold = row.get("Threshold")
+        if pd.isna(threshold):
+            threshold = selection.get("threshold")
+        metric = selection.get("calibration_metrics", {})
+        metric = metric if isinstance(metric, Mapping) else {}
+        rows.append({
+            "Combinaison": set_name,
+            "Cible": str(row.get("Observation", target)),
+            "Predictors": predictors,
+            "Direction": direction,
+            "Seuil calibré": threshold,
+            "Signaux holdout": row.get("SignalCount", row.get("TotalSignals")),
+            "Précision holdout": row.get("Precision", row.get("HitRate", metric.get("success_rate"))),
+            "Success rate holdout": row.get("FavorableMoveFrequency", row.get("HitRate", metric.get("success_rate"))),
+            "Recall": row.get("Recall"),
+            "F1": row.get("F1"),
+            "AUC holdout": row.get("ROCAUC"),
+            "Rendement directionnel moyen": row.get("DirectionalReturnMean", row.get("AverageReturn", metric.get("mean_return"))),
+            "Rendement médian": row.get("IntradayReturnMedian", row.get("MedianReturn", metric.get("median_return"))),
+            "MFE moyen": row.get("MFEMean", row.get("MFE", metric.get("mfe_mean"))),
+            "MAE moyen": row.get("MAEMean", row.get("MAE", metric.get("mae_mean"))),
+            "Fréquence mouvement opposé": row.get("OppositeMoveFrequency"),
+            "Score": row.get("model_selection_score", row.get("Score")),
+        })
+    columns = list(THRESHOLD_CALIBRATION_COLUMNS)
+    if "model_selection_score" in source or "Score" in source:
+        columns.append("Score")
+    return pd.DataFrame(rows).loc[:, columns]
+
+
+def filter_threshold_calibration_results(
+    results: pd.DataFrame,
+    *,
+    direction: str = "Up",
+    min_signals: int = 0,
+    sort_by: str = "Précision holdout",
+) -> pd.DataFrame:
+    """Apply display-only threshold result filters with deterministic sorting."""
+
+    table = results.copy()
+    if direction in {"Up", "Down"} and "Direction" in table:
+        table = table[table["Direction"].astype(str) == direction]
+    if "Signaux holdout" in table:
+        table = table[
+            pd.to_numeric(table["Signaux holdout"], errors="coerce").fillna(0)
+            >= min_signals
+        ]
+    if sort_by not in table:
+        sort_by = "Précision holdout"
+    return table.sort_values(
+        [sort_by, "Combinaison"], ascending=[False, True],
+        na_position="last", kind="stable",
+    ).reset_index(drop=True)
 
 
 def combination_table(
