@@ -338,9 +338,24 @@ def test_history_can_duplicate_one_walk_forward_run_into_experiments():
     assert "JobType.WALK_FORWARD.value" in history
     assert "_start_walk_forward_duplication" in history
     assert "Paramètres à utiliser" in experiments
-    assert "Annuler la duplication" in source
+    assert 'button("Annuler"' in source
     assert "duplication_submission_values" in experiments
     assert "st.switch_page(target_page)" in source
+
+
+def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
+    source = APP.read_text(encoding="utf-8")
+    history = source.split("def _history_runs_panel", 1)[1].split(
+        "def _experiments_page", 1
+    )[0]
+
+    assert 'st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]' in history
+    assert 'if selected_rows:' not in history
+    assert 'actions = st.columns([1.2, 2.4, 6])' in history
+    actions = history.split('actions = st.columns([1.2, 2.4, 6])', 1)[1].split(
+        'if action == "comparison"', 1
+    )[0]
+    assert 'width="stretch"' not in actions
 
 
 def test_duplication_draft_is_only_offered_for_one_run_and_can_be_cancelled():
@@ -348,13 +363,28 @@ def test_duplication_draft_is_only_offered_for_one_run_and_can_be_cancelled():
     history = source.split("def _history_runs_panel", 1)[1].split(
         "def _experiments_page", 1
     )[0]
-    controls = source.split("def _duplication_submission_config", 1)[1].split(
+    controls = source.split("def _render_locked_duplication_mode", 1)[1].split(
         "def _service", 1
     )[0]
 
     assert 'if action == "detail"' in history
     assert "JobType.WALK_FORWARD.value" in history
     assert 'st.session_state.pop(DUPLICATION_DRAFT_KEY, None)' in controls
+
+
+def test_duplication_mode_bypasses_editable_universe_form():
+    source = APP.read_text(encoding="utf-8")
+    locked = source.split("def _render_locked_duplication_mode", 1)[1].split(
+        "def _service", 1
+    )[0]
+    experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
+
+    assert "_experiment_universe_selector()" not in locked
+    assert "Paramètres à utiliser" in locked
+    assert "Soumettre la duplication" in locked
+    assert 'button("Annuler"' in locked
+    assert "experiment_spec_from_duplication" in locked
+    assert "if _render_locked_duplication_mode(service):" in experiments
 
 
 def test_comparison_metrics_keeps_quality_and_duration_in_separate_charts():

@@ -284,6 +284,57 @@ def test_context_sampling_supports_the_same_reproducible_sample_policy():
     assert len(first.context_symbols) == 2
 
 
+def test_context_sampling_never_falls_back_to_the_complete_universe():
+    service = UniverseService({
+        "PRIMARY": ("AAA",),
+        "CONTEXT": ("BBB", "CCC", "DDD"),
+    })
+    primary = UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY")
+
+    with pytest.raises(ValueError, match="sample_size must be positive"):
+        service.resolve_experiment(
+            primary,
+            ("CONTEXT",),
+            context_selection_method=TOP_N,
+        )
+
+
+def test_context_top_n_snapshot_keeps_sampling_metadata_and_resolved_lists(tmp_path):
+    service = UniverseService({
+        "PRIMARY": ("AAA", "BBB"),
+        "CONTEXT": ("CCC", "DDD", "EEE"),
+    })
+    primary = UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY")
+    resolved = service.resolve_experiment(
+        primary,
+        ("CONTEXT",),
+        context_sample_size=2,
+        context_selection_method=TOP_N,
+    )
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=resolved.predictor_symbols,
+        universe_selection=primary,
+        primary_universe_id=resolved.primary_universe_id,
+        context_universe_ids=resolved.context_universe_ids,
+        context_sample_size=2,
+        context_selection_method=TOP_N,
+        target_symbols=resolved.target_symbols,
+        context_symbols=resolved.context_symbols,
+        predictor_symbols=resolved.predictor_symbols,
+    )
+
+    snapshot = spec.to_dict()
+
+    assert snapshot["context_sample_size"] == 2
+    assert snapshot["context_selection_method"] == TOP_N
+    assert snapshot["context_seed"] is None
+    assert snapshot["target_symbols"] == ["AAA", "BBB"]
+    assert snapshot["context_symbols"] == ["CCC", "DDD"]
+    assert snapshot["predictor_symbols"] == ["AAA", "BBB", "CCC", "DDD"]
+
+
 def test_no_context_keeps_legacy_symbols_behavior_and_context_run_is_frozen(tmp_path):
     service = UniverseService(root=tmp_path)
     primary = service.create("Primary", ("AAA", "BBB"))

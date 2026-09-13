@@ -2,11 +2,22 @@ from dataclasses import replace
 
 import pytest
 
+from rstock.application.domain import ExperimentSpec, JobType
 from rstock.application.experiment_duplication import (
     config_from_historical_snapshot,
+    duplication_combination_count,
     duplication_submission_values,
+    experiment_spec_from_duplication,
     walk_forward_duplication_draft,
 )
+from rstock.application.universes import (
+    CONTEXT_UNIVERSE_TYPE,
+    SAMPLE_SOURCE,
+    TOP_N,
+    UniverseSelection,
+    UniverseService,
+)
+from rstock.combinations import generate_symbol_sets
 from rstock.config import DEFAULT_CONFIG
 
 
@@ -17,6 +28,9 @@ def _detail(*, job_type="walk_forward", snapshot=None):
             "symbols": ["DIS", "AMZN", "NVDA"],
             "primary_universe_id": "primary",
             "context_universe_ids": ["market"],
+            "context_sample_size": 1,
+            "context_selection_method": "top_n",
+            "context_seed": None,
             "universe_selection": {
                 "source": "universe_sample",
                 "universe": "primary",
@@ -44,6 +58,8 @@ def test_walk_forward_duplication_draft_copies_all_experiment_inputs():
     assert draft["job_type"] == "walk_forward"
     assert draft["primary_universe_id"] == "primary"
     assert draft["context_universe_ids"] == ["market"]
+    assert draft["context_sample_size"] == 1
+    assert draft["context_selection_method"] == "top_n"
     assert draft["target_symbols"] == ["DIS", "AMZN"]
     assert draft["context_symbols"] == ["NVDA"]
     assert draft["predictor_symbols"] == ["DIS", "AMZN", "NVDA"]
@@ -91,3 +107,116 @@ def test_run_or_current_config_choice_preserves_current_project_root(tmp_path):
     assert from_current["config"] is current
     assert from_current["config"].xgb_seed == 17
     assert from_run["target_symbols"] == ["DIS", "AMZN"]
+
+
+def test_duplicated_spec_preserves_all_frozen_run_inputs(tmp_path):
+    source = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path, xgb_seed=99),
+        symbols=("DIS", "AMZN", "NVDA"),
+        calendar="XNYS",
+        combinations_per_target=7,
+        evaluate_final_holdout=False,
+        universe_selection=UniverseSelection(
+            source="universe_sample",
+            universe="primary",
+            sample_size=2,
+            selection_method="top_n",
+        ),
+        primary_universe_id="primary",
+        context_universe_ids=("market",),
+        context_sample_size=1,
+        context_selection_method="top_n",
+        target_symbols=("DIS", "AMZN"),
+        context_symbols=("NVDA",),
+        predictor_symbols=("DIS", "AMZN", "NVDA"),
+    )
+    draft = walk_forward_duplication_draft(
+        "run_original", {"configuration": source.to_dict()}
+    )
+
+    duplicated = experiment_spec_from_duplication(
+        draft, current_config=source.config, use_run_config=True
+    )
+
+    assert duplicated.to_dict() == source.to_dict()
+
+
+def test_current_parameters_replace_only_the_technical_configuration(tmp_path):
+    draft = walk_forward_duplication_draft("run_original", _detail())
+    current = replace(DEFAULT_CONFIG, project_root=tmp_path, xgb_seed=17, lag_depth=8)
+
+    from_run = experiment_spec_from_duplication(
+        draft, current_config=current, use_run_config=True
+    )
+    from_current = experiment_spec_from_duplication(
+        draft, current_config=current, use_run_config=False
+    )
+
+    assert from_current.config is current
+    assert from_run.config.xgb_seed == 99
+    assert from_current.target_symbols == from_run.target_symbols
+    assert from_current.context_symbols == from_run.context_symbols
+    assert from_current.predictor_symbols == from_run.predictor_symbols
+    assert from_current.universe_selection == from_run.universe_selection
+    assert from_current.evaluate_final_holdout == from_run.evaluate_final_holdout
+
+
+def test_duplicate_keeps_top_ten_context_and_1900_combinations_after_universe_change(
+    tmp_path,
+):
+    targets = tuple(f"T{i:02d}" for i in range(10))
+    market_context = tuple(f"C{i:02d}" for i in range(15))
+    universes = UniverseService({"PRIMARY": targets}, root=tmp_path)
+    context = universes.create(
+        "Market Context", market_context, universe_type=CONTEXT_UNIVERSE_TYPE
+    )
+    selection = UniverseSelection(
+        source=SAMPLE_SOURCE,
+        universe="PRIMARY",
+        sample_size=10,
+        selection_method=TOP_N,
+    )
+    resolved = universes.resolve_experiment(
+        selection,
+        (context.universe_id,),
+        context_sample_size=10,
+        context_selection_method=TOP_N,
+    )
+    source = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=2),
+        symbols=resolved.predictor_symbols,
+        universe_selection=selection,
+        primary_universe_id=resolved.primary_universe_id,
+        context_universe_ids=resolved.context_universe_ids,
+        context_sample_size=10,
+        context_selection_method=TOP_N,
+        target_symbols=resolved.target_symbols,
+        context_symbols=resolved.context_symbols,
+        predictor_symbols=resolved.predictor_symbols,
+    )
+    draft = walk_forward_duplication_draft(
+        "run_source", {"configuration": source.to_dict()}
+    )
+
+    universes.update(
+        context.universe_id,
+        name="Market Context",
+        symbols=tuple(f"NEW{i:02d}" for i in range(15)),
+        universe_type=CONTEXT_UNIVERSE_TYPE,
+    )
+    duplicated = experiment_spec_from_duplication(
+        draft, current_config=source.config, use_run_config=True
+    )
+    generated = generate_symbol_sets(
+        list(duplicated.predictor_symbols),
+        duplicated.config.permutation_depth,
+        target_symbols=list(duplicated.target_symbols),
+    )
+
+    assert duplicated.target_symbols == targets
+    assert duplicated.context_symbols == market_context[:10]
+    assert duplicated.predictor_symbols == (*targets, *market_context[:10])
+    assert duplication_combination_count(draft, duplicated.config) == 1900
+    assert len(generated) == 1900

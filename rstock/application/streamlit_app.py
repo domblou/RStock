@@ -14,7 +14,9 @@ import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.experiment_duplication import (
+    duplication_combination_count,
     duplication_submission_values,
+    experiment_spec_from_duplication,
     walk_forward_duplication_draft,
 )
 from rstock.application.history_ui import (
@@ -131,6 +133,9 @@ def _state() -> None:
     st.session_state.setdefault("lab_symbols", cached or ["AAPL", "MSFT"])
     st.session_state.setdefault("lab_universe_selection", UniverseSelection())
     st.session_state.setdefault("lab_context_universe_ids", [])
+    st.session_state.setdefault("lab_context_sample_size", None)
+    st.session_state.setdefault("lab_context_selection_method", None)
+    st.session_state.setdefault("lab_context_seed", None)
     st.session_state.setdefault("lab_target_symbols", [])
     st.session_state.setdefault("lab_context_symbols", [])
 
@@ -146,77 +151,85 @@ def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> N
     st.rerun()
 
 
-def _apply_duplication_draft_to_experiment_state(draft: dict[str, object]) -> None:
-    """Seed experiment widgets once from a historical snapshot."""
-
-    if draft.get("ui_applied"):
-        return
-    selection = UniverseSelection.from_dict(draft.get("universe_selection"))
-    primary_universe_id = draft.get("primary_universe_id") or selection.universe
-    if primary_universe_id:
-        selection = UniverseSelection(
-            source=selection.source,
-            universe=str(primary_universe_id),
-            sample_size=selection.sample_size,
-            selection_method=selection.selection_method,
-            seed=selection.seed,
-        )
-    st.session_state.lab_universe_selection = selection
-    st.session_state.lab_context_universe_ids = list(draft.get("context_universe_ids", ()))
-    st.session_state.lab_target_symbols = list(draft.get("target_symbols", ()))
-    st.session_state.lab_context_symbols = list(draft.get("context_symbols", ()))
-    st.session_state.lab_symbols = list(draft.get("predictor_symbols", ()))
-    st.session_state.lab_calendar = str(draft.get("calendar", "XNYS"))
-    st.session_state.lab_combinations_per_target = int(
-        draft.get("combinations_per_target", 3)
-    )
-    st.session_state.lab_evaluate_holdout = bool(
-        draft.get("evaluate_final_holdout", True)
-    )
-    for key in (
-        "experiment-job-type",
-        "experiment-universe-mode",
-        "experiment-saved-universe",
-        "experiment-sample-size",
-        "experiment-sample-method",
-        "experiment-sample-seed",
-        "experiment-context-universes",
-        "experiment-context-mode",
-        "experiment-context-sample-size",
-        "experiment-context-sample-method",
-        "experiment-context-sample-seed",
-    ):
-        st.session_state.pop(key, None)
-    draft["ui_applied"] = True
-
-
-def _duplication_submission_config() -> object | None:
-    """Render the compact duplication controls and select its configuration."""
+def _render_locked_duplication_mode(service: ExperimentService) -> bool:
+    """Render and submit an immutable historical experiment duplication."""
 
     draft = st.session_state.get(DUPLICATION_DRAFT_KEY)
     if not isinstance(draft, dict):
-        return None
-    _apply_duplication_draft_to_experiment_state(draft)
+        return False
+    selection = UniverseSelection.from_dict(draft.get("universe_selection"))
+    choice = st.session_state.get(
+        DUPLICATION_CONFIG_CHOICE_KEY, "Paramètres du run"
+    )
+    selected_config = duplication_submission_values(
+        draft,
+        current_config=st.session_state.lab_config,
+        use_run_config=choice == "Paramètres du run",
+    )["config"]
+    context_ids = ", ".join(str(item) for item in draft["context_universe_ids"])
+    primary_mode = selection.source
+    if selection.sample_size is not None:
+        primary_mode += f" · {selection.selection_method} · N={selection.sample_size}"
+        if selection.seed is not None:
+            primary_mode += f" · seed={selection.seed}"
+    context_mode = draft.get("context_selection_method") or "population figée"
+    if draft.get("context_sample_size") is not None:
+        context_mode += f" · N={draft['context_sample_size']}"
+    if draft.get("context_seed") is not None:
+        context_mode += f" · seed={draft['context_seed']}"
+    summary = pd.DataFrame(
+        [
+            ("Run source", draft["source_run_id"]),
+            ("Type de job", "Walk-forward"),
+            ("Univers principal", draft["primary_universe_id"] or "—"),
+            ("Mode de sélection", primary_mode),
+            ("Cibles", len(draft["target_symbols"])),
+            ("Univers de contexte", context_ids or "Aucun"),
+            ("Mode/sélection du contexte", context_mode),
+            ("Contexte", len(draft["context_symbols"])),
+            ("Prédicteurs uniques", len(draft["predictor_symbols"])),
+            ("Profondeur", selected_config.permutation_depth),
+            (
+                "Combinaisons attendues",
+                duplication_combination_count(draft, selected_config),
+            ),
+            ("Calendrier", draft["calendar"]),
+            ("Holdout final", "Oui" if draft["evaluate_final_holdout"] else "Non"),
+        ],
+        columns=["Élément", "Valeur"],
+    )
     with st.container(border=True):
-        columns = st.columns([4, 1])
-        columns[0].caption(
-            f"Duplication du run walk-forward {draft.get('source_run_id', 'historique')} — modifiez les choix avant soumission."
-        )
-        if columns[1].button("Annuler la duplication", key="cancel-experiment-duplication"):
-            st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
-            st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
-            st.rerun()
+        st.caption("Duplication en lecture seule — le run source ne sera pas modifié.")
+        st.dataframe(summary, hide_index=True, width="stretch")
         choice = st.radio(
             "Paramètres à utiliser",
             ["Paramètres du run", "Paramètres actuels"],
             horizontal=True,
             key=DUPLICATION_CONFIG_CHOICE_KEY,
         )
-    return duplication_submission_values(
-        draft,
-        current_config=st.session_state.lab_config,
-        use_run_config=choice == "Paramètres du run",
-    )
+        actions = st.columns([2, 1, 5])
+        if actions[0].button(
+            "Soumettre la duplication", type="primary", width="stretch"
+        ):
+            spec = experiment_spec_from_duplication(
+                draft,
+                current_config=st.session_state.lab_config,
+                use_run_config=choice == "Paramètres du run",
+            )
+            submitted = service.submit(spec)
+            if submitted.created:
+                st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
+                st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
+                st.success(f"Run créé : {submitted.run_id}")
+            else:
+                st.warning(f"Configuration déjà active : {submitted.run_id}")
+        if actions[1].button("Annuler", width="stretch"):
+            st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
+            st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
+            st.rerun()
+    st.subheader("Jobs actifs")
+    _live_job_panel(service)
+    return True
 
 
 def _service() -> ExperimentService:
@@ -424,6 +437,9 @@ def _experiment_universe_selector() -> bool:
     predictor_symbols = resolved.predictor_symbols
     st.session_state.lab_universe_selection = preview.selection
     st.session_state.lab_context_universe_ids = list(selected_contexts)
+    st.session_state.lab_context_sample_size = context_sample_size
+    st.session_state.lab_context_selection_method = context_method
+    st.session_state.lab_context_seed = context_seed
     st.session_state.lab_target_symbols = list(target_symbols)
     st.session_state.lab_context_symbols = list(context_symbols)
     st.session_state.lab_symbols = list(predictor_symbols)
@@ -446,26 +462,21 @@ def _experiment_universe_selector() -> bool:
 
 def _experiments(service: ExperimentService) -> None:
     _page_header("Expériences")
-    # Le choix « Paramètres à utiliser » est rendu par ce panneau partagé
-    # via duplication_submission_values.
-    duplication_values = _duplication_submission_config()
+    # Paramètres à utiliser et duplication_submission_values sont gérés ici.
+    if _render_locked_duplication_mode(service):
+        return
     labels = {
         "Walk-forward": JobType.WALK_FORWARD,
         "Calibration XGBoost": JobType.XGBOOST_CALIBRATION,
         "Calibration des seuils": JobType.THRESHOLD_CALIBRATION,
     }
-    choice = st.selectbox("Type de job", list(labels), key="experiment-job-type")
+    choice = st.selectbox("Type de job", list(labels))
     valid_universe = _experiment_universe_selector()
     st.caption("La liste résolue et la configuration seront figées avant le lancement.")
     if st.button("Soumettre l’expérience", type="primary", disabled=not valid_universe):
-        config = (
-            duplication_values["config"]
-            if duplication_values is not None
-            else st.session_state.lab_config
-        )
         spec = ExperimentSpec(
             job_type=labels[choice],
-            config=config,
+            config=st.session_state.lab_config,
             symbols=tuple(st.session_state.lab_symbols),
             calendar=st.session_state.lab_calendar,
             combinations_per_target=st.session_state.lab_combinations_per_target,
@@ -473,6 +484,9 @@ def _experiments(service: ExperimentService) -> None:
             universe_selection=st.session_state.lab_universe_selection,
             primary_universe_id=st.session_state.lab_universe_selection.universe,
             context_universe_ids=tuple(st.session_state.lab_context_universe_ids),
+            context_sample_size=st.session_state.lab_context_sample_size,
+            context_selection_method=st.session_state.lab_context_selection_method,
+            context_seed=st.session_state.lab_context_seed,
             target_symbols=tuple(st.session_state.lab_target_symbols),
             context_symbols=tuple(st.session_state.lab_context_symbols),
             predictor_symbols=tuple(st.session_state.lab_symbols),
@@ -1152,6 +1166,7 @@ def _history_runs_panel(
         runs, allowed_types=allowed_types, models=models, service=service, key_prefix=key_prefix
     )
     if not filtered:
+        st.session_state[f"{key_prefix}-selected-runs"] = []
         st.info("Aucun run ne correspond aux filtres.")
         return
     page_controls = st.columns([1, 1, 4])
@@ -1176,8 +1191,7 @@ def _history_runs_panel(
     )
     selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
     selected_key = f"{key_prefix}-selected-runs"
-    if selected_rows:
-        st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]
+    st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]
     selected = st.session_state.get(selected_key, [])
     if isinstance(selected, str):
         selected = [selected]
@@ -1193,9 +1207,11 @@ def _history_runs_panel(
         selected_run = next(
             run for run in filtered if str(run["run_id"]) == selected_run_id
         )
-        actions = st.columns([1, 1, 5])
+        actions = st.columns([1.2, 2.4, 6])
         if actions[0].button(
-            "Ouvrir le run", type="primary", key=f"open-history-{key_prefix}"
+            "Ouvrir le run",
+            type="primary",
+            key=f"open-history-{key_prefix}",
         ):
             _history_navigation("detail", selected)
         if str(selected_run["job_type"]) == JobType.WALK_FORWARD.value and actions[1].button(

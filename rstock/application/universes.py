@@ -443,7 +443,15 @@ class UniverseService:
             for symbol in self.record(context_id).symbols
             if symbol not in target_set
         ))
-        if context_sample_size is not None:
+        context_sampling_requested = any(
+            value is not None
+            for value in (
+                context_sample_size,
+                context_selection_method,
+                context_seed,
+            )
+        )
+        if context_sampling_requested:
             context_symbols = self._sample_symbols(
                 context_symbols,
                 sample_size=context_sample_size,

@@ -87,6 +87,9 @@ class ExperimentSpec:
     model_id: str | None = None
     primary_universe_id: str | None = None
     context_universe_ids: tuple[str, ...] = ()
+    context_sample_size: int | None = None
+    context_selection_method: str | None = None
+    context_seed: int | None = None
     target_symbols: tuple[str, ...] = ()
     context_symbols: tuple[str, ...] = ()
     predictor_symbols: tuple[str, ...] = ()
@@ -127,6 +130,9 @@ class ExperimentSpec:
             "symbols": list(self.symbols),
             "primary_universe_id": self.primary_universe_id,
             "context_universe_ids": list(self.context_universe_ids),
+            "context_sample_size": self.context_sample_size,
+            "context_selection_method": self.context_selection_method,
+            "context_seed": self.context_seed,
             "target_symbols": list(self.target_symbols),
             "context_symbols": list(self.context_symbols),
             "predictor_symbols": list(self.predictor_symbols),
@@ -160,6 +166,19 @@ class ExperimentSpec:
             ),
             context_universe_ids=tuple(
                 str(item) for item in values.get("context_universe_ids", ())
+            ),
+            context_sample_size=(
+                None
+                if values.get("context_sample_size") is None
+                else int(values["context_sample_size"])
+            ),
+            context_selection_method=(
+                None
+                if values.get("context_selection_method") is None
+                else str(values["context_selection_method"])
+            ),
+            context_seed=(
+                None if values.get("context_seed") is None else int(values["context_seed"])
             ),
             target_symbols=tuple(str(item) for item in values.get("target_symbols", ())),
             context_symbols=tuple(str(item) for item in values.get("context_symbols", ())),
