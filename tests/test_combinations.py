@@ -38,3 +38,19 @@ def test_generation_stops_before_combinatorial_materialisation():
     assert count_symbol_sets(10, 3) == 1290
     with pytest.raises(ValueError, match="exceeds max_generated_sets"):
         generate_symbol_sets([f"S{i}" for i in range(10)], 3, max_sets=1_000)
+
+
+def test_context_symbols_are_available_as_predictors_but_never_targets():
+    generated = generate_symbol_sets(
+        ["AAA", "BBB", "CONTEXT"],
+        permutation_depth=2,
+        target_symbols=["AAA", "BBB"],
+    )
+
+    assert set(generated["V0"]) == {"AAA", "BBB"}
+    assert "CONTEXT" not in set(generated["V0"])
+    assert any(
+        "CONTEXT" in {row.V1, row.V2}
+        for row in generated.itertuples(index=False)
+    )
+    assert len(generated) == 6

@@ -20,6 +20,9 @@ SAVED_SOURCE = "saved_universe"
 SAMPLE_SOURCE = "universe_sample"
 TOP_N = "top_n"
 SEEDED_SAMPLE = "seeded_sample"
+STANDARD_UNIVERSE_TYPE = "standard"
+CONTEXT_UNIVERSE_TYPE = "context"
+UNIVERSE_TYPES = {STANDARD_UNIVERSE_TYPE, CONTEXT_UNIVERSE_TYPE}
 
 
 # This is deliberately a local demonstration registry: no provider, ranking or
@@ -41,6 +44,7 @@ class UniverseRecord:
     source: str
     updated_at: str | None
     system: bool = False
+    type: str = STANDARD_UNIVERSE_TYPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +88,16 @@ class ResolvedUniverse:
     symbols: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedExperimentUniverse:
+    primary_selection: UniverseSelection
+    primary_universe_id: str | None
+    context_universe_ids: tuple[str, ...]
+    target_symbols: tuple[str, ...]
+    context_symbols: tuple[str, ...]
+    predictor_symbols: tuple[str, ...]
+
+
 class UniverseService:
     """Persist and resolve universes without exposing their origin to workflows."""
 
@@ -103,6 +117,7 @@ class UniverseService:
                 source="Système",
                 updated_at=None,
                 system=True,
+                type=STANDARD_UNIVERSE_TYPE,
             )
             for identifier, symbols in supplied.items()
         }
@@ -131,6 +146,13 @@ class UniverseService:
         if not symbols:
             raise ValueError("Un univers doit contenir au moins un symbole")
         return symbols
+
+    @staticmethod
+    def _normalise_type(value: object) -> str:
+        universe_type = str(value or STANDARD_UNIVERSE_TYPE).strip().lower()
+        if universe_type not in UNIVERSE_TYPES:
+            raise ValueError(f"Unknown universe type: {universe_type}")
+        return universe_type
 
     @property
     def directory(self) -> Path | None:
@@ -178,6 +200,7 @@ class UniverseService:
                 symbols=symbols,
                 source=str(item.get("source", "Manuel")),
                 updated_at=None if item.get("updated_at") is None else str(item["updated_at"]),
+                type=self._normalise_type(item.get("type", STANDARD_UNIVERSE_TYPE)),
             )
         return records
 
@@ -203,6 +226,7 @@ class UniverseService:
                     "name": record.name,
                     "source": record.source,
                     "updated_at": record.updated_at,
+                    "type": record.type,
                 }
                 for record in sorted(records.values(), key=lambda item: item.universe_id)
             ]
@@ -228,7 +252,12 @@ class UniverseService:
         return candidate
 
     def create(
-        self, name: str, symbols: str | Iterable[object], *, source: str = "Manuel"
+        self,
+        name: str,
+        symbols: str | Iterable[object],
+        *,
+        source: str = "Manuel",
+        universe_type: str = STANDARD_UNIVERSE_TYPE,
     ) -> UniverseRecord:
         clean_name = name.strip()
         if not clean_name:
@@ -237,7 +266,12 @@ class UniverseService:
         users = self._load_user_records()
         identifier = self._identifier(clean_name, set(users) | set(self._system))
         record = UniverseRecord(
-            identifier, clean_name, normalized, source, datetime.now(timezone.utc).isoformat()
+            identifier,
+            clean_name,
+            normalized,
+            source,
+            datetime.now(timezone.utc).isoformat(),
+            type=self._normalise_type(universe_type),
         )
         self._write_symbols(record)
         users[identifier] = record
@@ -245,7 +279,12 @@ class UniverseService:
         return record
 
     def create_from_csv(
-        self, name: str, content: bytes | str, *, column: str = "symbol"
+        self,
+        name: str,
+        content: bytes | str,
+        *,
+        column: str = "symbol",
+        universe_type: str = STANDARD_UNIVERSE_TYPE,
     ) -> UniverseRecord:
         text = content.decode("utf-8-sig") if isinstance(content, bytes) else content
         reader = csv.DictReader(io.StringIO(text))
@@ -256,10 +295,20 @@ class UniverseService:
         )
         if matching is None:
             raise ValueError(f"Colonne CSV introuvable : {column}")
-        return self.create(name, (row.get(matching, "") for row in reader), source="Import CSV")
+        return self.create(
+            name,
+            (row.get(matching, "") for row in reader),
+            source="Import CSV",
+            universe_type=universe_type,
+        )
 
     def update(
-        self, universe_id: str, *, name: str, symbols: str | Iterable[object]
+        self,
+        universe_id: str,
+        *,
+        name: str,
+        symbols: str | Iterable[object],
+        universe_type: str | None = None,
     ) -> UniverseRecord:
         if universe_id in self._system:
             raise ValueError("Les univers système sont protégés")
@@ -275,6 +324,7 @@ class UniverseService:
             self.parse_symbols(symbols),
             users[universe_id].source,
             datetime.now(timezone.utc).isoformat(),
+            type=self._normalise_type(universe_type or users[universe_id].type),
         )
         self._write_symbols(record)
         users[universe_id] = record
@@ -283,7 +333,12 @@ class UniverseService:
 
     def duplicate(self, universe_id: str) -> UniverseRecord:
         source = self.record(universe_id)
-        return self.create(f"{source.name} (copie)", source.symbols, source="Copie")
+        return self.create(
+            f"{source.name} (copie)",
+            source.symbols,
+            source="Copie",
+            universe_type=source.type,
+        )
 
     def delete(self, universe_id: str) -> None:
         if universe_id in self._system:
@@ -298,6 +353,13 @@ class UniverseService:
 
     def universe_names(self) -> tuple[str, ...]:
         return tuple(record.universe_id for record in self.records())
+
+    def standard_universe_names(self) -> tuple[str, ...]:
+        return tuple(
+            record.universe_id
+            for record in self.records()
+            if record.type == STANDARD_UNIVERSE_TYPE
+        )
 
     def universe_symbols(self, name: str) -> tuple[str, ...]:
         return self.record(name).symbols
@@ -319,7 +381,10 @@ class UniverseService:
             raise ValueError(f"Unknown universe source: {selection.source}")
         if not selection.universe:
             raise ValueError("A saved universe must be selected")
-        source = self.universe_symbols(selection.universe)
+        record = self.record(selection.universe)
+        if record.type != STANDARD_UNIVERSE_TYPE:
+            raise ValueError("A context universe cannot be selected as the primary universe")
+        source = record.symbols
         if selection.source == SAVED_SOURCE:
             return ResolvedUniverse(selection, source)
         if selection.sample_size is None or selection.sample_size < 1:
@@ -340,3 +405,30 @@ class UniverseService:
                 tuple(Random(selection.seed).sample(source, selection.sample_size)),
             )
         raise ValueError("A supported sample selection_method is required")
+
+    def resolve_experiment(
+        self,
+        primary: UniverseSelection,
+        context_universe_ids: Iterable[str] = (),
+        *,
+        manual_symbols: tuple[str, ...] | list[str] = (),
+    ) -> ResolvedExperimentUniverse:
+        """Resolve and freeze distinct target and predictor roles for one run."""
+
+        resolved_primary = self.resolve(primary, manual_symbols=manual_symbols)
+        context_ids = tuple(dict.fromkeys(str(item) for item in context_universe_ids))
+        target_set = set(resolved_primary.symbols)
+        context_symbols = tuple(dict.fromkeys(
+            symbol
+            for context_id in context_ids
+            for symbol in self.record(context_id).symbols
+            if symbol not in target_set
+        ))
+        return ResolvedExperimentUniverse(
+            primary_selection=resolved_primary.selection,
+            primary_universe_id=primary.universe,
+            context_universe_ids=context_ids,
+            target_symbols=resolved_primary.symbols,
+            context_symbols=context_symbols,
+            predictor_symbols=tuple((*resolved_primary.symbols, *context_symbols)),
+        )

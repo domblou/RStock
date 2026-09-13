@@ -17,6 +17,31 @@ COMBINATION_COLUMNS = (
 )
 
 
+def run_universe_summary(configuration: Mapping[str, Any]) -> dict[str, object]:
+    """Summarize frozen universe roles for current and legacy run configurations."""
+
+    selection = configuration.get("universe_selection", {})
+    symbols = tuple(str(item) for item in configuration.get("symbols", ()))
+    targets = tuple(
+        str(item) for item in configuration.get("target_symbols", symbols)
+    )
+    predictors = tuple(
+        str(item) for item in configuration.get("predictor_symbols", symbols)
+    )
+    context_ids = tuple(
+        str(item) for item in configuration.get("context_universe_ids", ())
+    )
+    primary = configuration.get("primary_universe_id")
+    if primary is None and isinstance(selection, Mapping):
+        primary = selection.get("universe")
+    return {
+        "primary_universe_id": "—" if primary is None else str(primary),
+        "target_count": len(targets),
+        "context_universe_ids": context_ids,
+        "predictor_count": len(predictors),
+    }
+
+
 def selected_run_action(run_ids: Sequence[str]) -> str | None:
     """Return the only valid analytical route for a history-grid selection."""
 

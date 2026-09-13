@@ -54,6 +54,11 @@ def _promotion_run(tmp_path):
     spec = ExperimentSpec(
         JobType.WALK_FORWARD, replace(DEFAULT_CONFIG, project_root=tmp_path),
         symbols=("AAA", "BBB"),
+        primary_universe_id="PRIMARY",
+        context_universe_ids=("CONTEXT",),
+        target_symbols=("AAA",),
+        context_symbols=("BBB",),
+        predictor_symbols=("AAA", "BBB"),
     )
     run_id = runs.create(spec)
     results = runs.run_directory(run_id) / "results"
@@ -126,6 +131,13 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
     assert first.up_threshold == 0.63
     assert first.down_threshold == 0.37
     assert first.source_configuration["job_type"] == "walk_forward"
+    assert first.training_metadata["universe_roles"] == {
+        "primary_universe_id": "PRIMARY",
+        "context_universe_ids": ["CONTEXT"],
+        "target_symbols": ["AAA"],
+        "context_symbols": ["BBB"],
+        "predictor_symbols": ["AAA", "BBB"],
+    }
     assert first.development_metrics["ROCAUCMedian"] == 0.6
     assert first.holdout_metrics["FinalUpROCAUC"] == 0.57
 
@@ -245,18 +257,52 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
         "AAA.intraday_return": [0.0, 0.01, -0.01, 0.02],
         "BBB.intraday_return": [0.01, 0.02, -0.01, 0.03],
     }, index=index)
+    market_data = pd.DataFrame({
+        "BBB.Open": [100.0, 100.0, 100.0, 100.0],
+        "BBB.High": [102.0, 103.0, 101.0, 104.0],
+        "BBB.Low": [99.0, 99.0, 98.0, 99.0],
+        "BBB.Close": [101.0, 102.0, 99.0, 103.0],
+    }, index=index)
     monkeypatch.setattr("rstock.application.production_services.load_booster", lambda path: path.stem)
     monkeypatch.setattr(
         "rstock.application.production_services.predict_probabilities",
         lambda booster, *args: np.array([0.8 if booster == "up" else 0.2]),
     )
     predictions = DailyPredictionService(repository).generate(
-        prepared, replace(DEFAULT_CONFIG, project_root=tmp_path, lag_depth=1)
+        prepared,
+        replace(DEFAULT_CONFIG, project_root=tmp_path, lag_depth=1),
+        market_data=market_data,
     )
     signals = ProductionSignalService(repository).screen(predictions)
     assert len(predictions) == 1
     assert predictions.iloc[0]["up_probability"] == 0.8
     assert predictions.iloc[0]["signal_status"] == "bullish_signal"
+    snapshot_fields = {
+        "feature_names", "features", "source_observations",
+        "up_probability", "down_probability", "model_id", "model_version",
+        "prediction_id", "prediction_date",
+    }
+    assert snapshot_fields <= set(predictions.columns)
+    assert json.loads(predictions.iloc[0]["feature_names"]) == ["BBB_intraday_J-1"]
+    assert json.loads(predictions.iloc[0]["features"]) == {
+        "BBB_intraday_J-1": 0.03
+    }
+    assert json.loads(predictions.iloc[0]["source_observations"]) == {
+        "BBB": [{
+            "date": index[-1].date().isoformat(),
+            "intraday_return": 0.03,
+            "open": 100.0,
+            "high": 104.0,
+            "low": 99.0,
+            "close": 103.0,
+        }]
+    }
+    persisted_prediction = repository.read_table("predictions").iloc[0]
+    assert snapshot_fields <= set(repository.read_table("predictions").columns)
+    assert json.loads(persisted_prediction["features"]) == {
+        "BBB_intraday_J-1": 0.03
+    }
+    assert json.loads(persisted_prediction["source_observations"])["BBB"][0]["close"] == 103.0
     assert signals.iloc[0]["category"] == "bullish_signal"
 
     prediction_date = pd.Timestamp(predictions.iloc[0]["prediction_date"])
@@ -599,7 +645,14 @@ def test_old_experiment_config_without_operational_fields_still_loads(tmp_path):
         JobType.WALK_FORWARD, replace(DEFAULT_CONFIG, project_root=tmp_path), symbols=("AAA", "BBB")
     )
     payload = spec.to_dict()
-    payload.pop("model_id")
+    for field in (
+        "model_id", "primary_universe_id", "context_universe_ids",
+        "target_symbols", "context_symbols", "predictor_symbols",
+    ):
+        payload.pop(field)
     restored = ExperimentSpec.from_dict(payload)
     assert restored.model_id is None
     assert restored.symbols == spec.symbols
+    assert restored.target_symbols == spec.symbols
+    assert restored.context_symbols == ()
+    assert restored.predictor_symbols == spec.symbols

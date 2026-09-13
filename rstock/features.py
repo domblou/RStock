@@ -171,6 +171,50 @@ def prepare_prediction_row(
     return pd.DataFrame([values], index=pd.DatetimeIndex([target], name="Date"))
 
 
+def prediction_source_observations(
+    prepared: pd.DataFrame,
+    feature_names: Sequence[str],
+    *,
+    as_of_date: object,
+    market_data: pd.DataFrame | None = None,
+) -> dict[str, list[dict[str, object]]]:
+    """Capture the historical observations behind lagged prediction features."""
+
+    ordered = _normalise_datetime_index(prepared)
+    eligible = ordered.loc[ordered.index <= pd.Timestamp(as_of_date).normalize()]
+    raw = None if market_data is None else _normalise_datetime_index(market_data)
+    observations: dict[str, dict[pd.Timestamp, dict[str, object]]] = {}
+    pattern = re.compile(r"^(?P<symbol>.+)_intraday_J-(?P<lag>\d+)$")
+    for feature_name in feature_names:
+        match = pattern.fullmatch(feature_name)
+        if match is None:
+            continue
+        symbol = match.group("symbol")
+        lag = int(match.group("lag"))
+        return_name = intraday_return_column(symbol)
+        if return_name not in eligible:
+            continue
+        known = eligible[return_name].dropna()
+        if len(known) < lag:
+            continue
+        source_date = pd.Timestamp(known.index[-lag]).normalize()
+        observation: dict[str, object] = {
+            "date": source_date.date().isoformat(),
+            "intraday_return": float(known.iloc[-lag]),
+        }
+        if raw is not None and source_date in raw.index:
+            source_row = raw.loc[source_date]
+            for field in ("Open", "High", "Low", "Close"):
+                column = f"{symbol}.{field}"
+                if column in raw and not pd.isna(source_row[column]):
+                    observation[field.lower()] = float(source_row[column])
+        observations.setdefault(symbol, {})[source_date] = observation
+    return {
+        symbol: [by_date[date] for date in sorted(by_date)]
+        for symbol, by_date in sorted(observations.items())
+    }
+
+
 def predictor_columns(
     dataset: pd.DataFrame,
     feature_symbols: Sequence[str],

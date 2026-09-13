@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -30,6 +31,9 @@ REALIZED_DISPLAY_COLUMNS = (
     "predictors",
     "up_probability",
     "down_probability",
+    "feature_names",
+    "features",
+    "source_observations",
 )
 
 PREDICTION_MAIN_COLUMNS = (
@@ -39,7 +43,7 @@ SIGNAL_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "Catégorie", "P(Up)", "P(Down)",
 )
 REALIZED_MAIN_COLUMNS = (
-    "Date", "Cible", "Predictors", "Open", "High", "Low", "Close",
+    "Date", "Cible", "Predictors", "P(Up)", "P(Down)", "Open", "Close",
     "Rendement", "MFE", "MAE", "UpTarget", "DownTarget",
 )
 
@@ -178,7 +182,12 @@ def build_predictions_view(predictions: pd.DataFrame, *, limit: int = 50) -> Ope
     )
 
 
-def build_signals_view(signals: pd.DataFrame, *, limit: int = 50) -> SignalResultsView:
+def build_signals_view(
+    signals: pd.DataFrame,
+    predictions: pd.DataFrame | None = None,
+    *,
+    limit: int = 50,
+) -> SignalResultsView:
     """Separate actionable signals from folded-away no-signal observations."""
 
     if signals.empty or "category" not in signals:
@@ -186,7 +195,12 @@ def build_signals_view(signals: pd.DataFrame, *, limit: int = 50) -> SignalResul
             pd.DataFrame(), category_column="Catégorie", columns=SIGNAL_MAIN_COLUMNS
         )
         return SignalResultsView(empty, empty)
-    recent = signals.tail(limit).iloc[::-1].reset_index(drop=True)
+    enriched = _merge_missing(
+        signals.copy(),
+        pd.DataFrame() if predictions is None else predictions,
+        ("feature_names", "features", "source_observations"),
+    )
+    recent = enriched.tail(limit).iloc[::-1].reset_index(drop=True)
     actual = recent[recent["category"] == "bullish_signal"].reset_index(drop=True)
     no_signal = recent[recent["category"] == "no_signal"].reset_index(drop=True)
     return SignalResultsView(
@@ -201,6 +215,7 @@ def realized_main_table(table: pd.DataFrame) -> pd.DataFrame:
     aliases = {
         "prediction_date": "Date", "target": "Cible", "predictors": "Predictors",
         "open": "Open", "high": "High", "low": "Low", "close": "Close",
+        "up_probability": "P(Up)", "down_probability": "P(Down)",
         "intraday_return": "Rendement", "up_target_hit": "UpTarget",
         "down_target_hit": "DownTarget",
     }
@@ -210,6 +225,171 @@ def realized_main_table(table: pd.DataFrame) -> pd.DataFrame:
             projected[name] = pd.NA
     projected["Predictors"] = projected["Predictors"].map(_predictors)
     return projected.loc[:, REALIZED_MAIN_COLUMNS].reset_index(drop=True)
+
+
+def _json_mapping(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def prediction_features_table(record: Mapping[str, object]) -> pd.DataFrame:
+    """Return an audit-friendly feature/value table for one prediction."""
+
+    columns = ("Feature", "Valeur")
+    features = _json_mapping(record.get("features"))
+    if not features:
+        return pd.DataFrame(columns=columns)
+    names = record.get("feature_names")
+    if isinstance(names, str):
+        try:
+            names = json.loads(names)
+        except (json.JSONDecodeError, TypeError):
+            names = None
+    ordered_names = (
+        [str(name) for name in names if str(name) in features]
+        if isinstance(names, list)
+        else list(features)
+    )
+    ordered_names.extend(name for name in features if name not in ordered_names)
+    return pd.DataFrame(
+        [{"Feature": name, "Valeur": features[name]} for name in ordered_names],
+        columns=columns,
+    )
+
+
+def _readable_percentage(value: object) -> str | None:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return None
+    return f"{float(numeric):.2%}".replace(".", ",").replace("%", " %")
+
+
+def _readable_number(value: object) -> str | None:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return None
+    text = f"{float(numeric):.4f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        return f"{text}.00"
+    decimals = len(text.rsplit(".", 1)[1])
+    return text + ("0" * max(0, 2 - decimals))
+
+
+def prediction_feature_tables(
+    record: Mapping[str, object],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Pivot lagged intraday features and retain all other features separately."""
+
+    raw = prediction_features_table(record)
+    fallback_columns = ("Feature", "Valeur")
+    if raw.empty:
+        return pd.DataFrame(columns=("Prédicteur",)), pd.DataFrame(columns=fallback_columns)
+    pattern = re.compile(r"^(?P<symbol>.+)_intraday_J-(?P<lag>\d+)$")
+    lagged: dict[str, dict[int, str]] = {}
+    fallback: list[dict[str, object]] = []
+    for item in raw.to_dict("records"):
+        name = str(item["Feature"])
+        match = pattern.fullmatch(name)
+        percentage = _readable_percentage(item["Valeur"])
+        if match is not None and percentage is not None:
+            lagged.setdefault(match.group("symbol"), {})[int(match.group("lag"))] = percentage
+            continue
+        value = item["Valeur"]
+        if "intraday" in name.lower() and percentage is not None:
+            value = percentage
+        fallback.append({"Feature": name, "Valeur": value})
+    lags = sorted({lag for values in lagged.values() for lag in values})
+    pivoted = pd.DataFrame(
+        [
+            {
+                "Prédicteur": symbol,
+                **{f"J-{lag}": values.get(lag, "—") for lag in lags},
+            }
+            for symbol, values in sorted(lagged.items())
+        ],
+        columns=("Prédicteur", *(f"J-{lag}" for lag in lags)),
+    )
+    return pivoted, pd.DataFrame(fallback, columns=fallback_columns)
+
+
+def _source_observations_long_table(record: Mapping[str, object]) -> pd.DataFrame:
+    """Flatten immutable source observations before presentation-specific pivots."""
+
+    columns = ("Symbole source", "Date", "Champ", "Valeur")
+    sources = _json_mapping(record.get("source_observations"))
+    rows: list[dict[str, object]] = []
+    for symbol, observations in sources.items():
+        if not isinstance(observations, list):
+            continue
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            date = observation.get("date", "—")
+            for field, value in observation.items():
+                if field == "date":
+                    continue
+                rows.append({
+                    "Symbole source": symbol,
+                    "Date": date,
+                    "Champ": field,
+                    "Valeur": value,
+                })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def source_observation_tables(
+    record: Mapping[str, object],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Pivot standard OHLC observations and retain unsupported fields separately."""
+
+    columns = (
+        "Symbole source", "Date", "Open", "High", "Low", "Close",
+        "Rendement intraday",
+    )
+    raw = _source_observations_long_table(record)
+    fallback_columns = ("Symbole source", "Date", "Champ", "Valeur")
+    if raw.empty:
+        return pd.DataFrame(columns=columns), pd.DataFrame(columns=fallback_columns)
+    aliases = {
+        "open": "Open", "high": "High", "low": "Low", "close": "Close",
+        "intraday_return": "Rendement intraday",
+    }
+    pivoted: dict[tuple[str, str], dict[str, object]] = {}
+    fallback: list[dict[str, object]] = []
+    for item in raw.to_dict("records"):
+        field = str(item["Champ"])
+        display_field = aliases.get(field.lower())
+        formatted = (
+            _readable_percentage(item["Valeur"])
+            if display_field == "Rendement intraday"
+            else _readable_number(item["Valeur"])
+        )
+        if display_field is None or formatted is None:
+            fallback.append(item)
+            continue
+        symbol = str(item["Symbole source"])
+        date = str(item["Date"])
+        row = pivoted.setdefault(
+            (symbol, date), {"Symbole source": symbol, "Date": date}
+        )
+        row[display_field] = formatted
+    table = pd.DataFrame(
+        [pivoted[key] for key in sorted(pivoted)], columns=columns
+    ).fillna("—")
+    return table, pd.DataFrame(fallback, columns=fallback_columns)
+
+
+def source_observations_table(record: Mapping[str, object]) -> pd.DataFrame:
+    """Return source observations pivoted by symbol and date for display."""
+
+    return source_observation_tables(record)[0]
 
 
 def _pending_predictions(
@@ -248,7 +428,10 @@ def build_realized_results_view(
     joined = _merge_missing(
         joined,
         predictions,
-        ("model_version", "predictors", "up_probability", "down_probability"),
+        (
+            "model_version", "predictors", "up_probability", "down_probability",
+            "feature_names", "features", "source_observations",
+        ),
     )
     joined = _merge_missing(joined, signals, ("signal_id", "category"))
     aliases = {

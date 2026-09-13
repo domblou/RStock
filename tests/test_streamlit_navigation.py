@@ -7,6 +7,7 @@ APP = (
     / "application"
     / "streamlit_app.py"
 )
+LOGO = APP.parents[1] / "assets" / "rstock_logo.png"
 
 
 def test_laboratory_uses_native_top_navigation_without_sidebar_radio():
@@ -30,6 +31,27 @@ def test_primary_native_pages_cover_the_laboratory_sections():
     ):
         assert f'title="{title}"' in source
     assert source.count("st.Page(") == 6
+
+
+def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
+    source = APP.read_text(encoding="utf-8")
+
+    assert LOGO.is_file()
+    assert LOGO.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    header = source.split("def _page_header", 1)[1].split("def _state", 1)[0]
+    assert 'rstock_logo.png' in source
+    assert 'display: flex' in header
+    assert 'align-items: center' in header
+    assert 'gap: 8px' in header
+    assert 'width: 120px' in header
+    assert 'height: auto' in header
+    assert 'transform: translateY(4px)' in header
+    assert 'except OSError:' in header
+    assert 'st.title(title)' in header
+    for title in (
+        "Surveillance", "Expériences", "Modèles", "Historique", "Univers", "Paramètres",
+    ):
+        assert f'_page_header("{title}")' in source
 
 
 def test_surveillance_is_the_default_page_without_dashboard_navigation():
@@ -83,6 +105,55 @@ def test_experiments_only_selects_saved_universes_without_manual_entry():
     assert "Liste personnalisée" not in selector
     assert "experiment-manual-symbols" not in selector
     assert "Symboles (séparés par virgule)" not in selector
+    assert "service.standard_universe_names()" in selector
+    assert '"Univers principal"' in selector
+    assert '"Univers de contexte"' in selector
+    assert "st.multiselect(" in selector
+    assert "resolve_experiment(" in selector
+    assert "Cibles résolues" in selector
+    assert "Symboles contexte" in selector
+    assert "Prédicteurs disponibles" in selector
+
+
+def test_universe_page_exposes_persisted_type_without_weakening_system_protection():
+    source = APP.read_text(encoding="utf-8")
+    creation = source.split("def _create_universe_panel", 1)[1].split(
+        "def _universe_selection_preview", 1
+    )[0]
+    detail = source.split("def _universe_detail", 1)[1].split(
+        "def _universes_page", 1
+    )[0]
+    page = source.split("def _universes_page", 1)[1].split(
+        "def _selected_rows", 1
+    )[0]
+
+    assert '"Type d’univers", ["Standard", "Contexte"]' in creation
+    assert "universe_type=universe_type" in creation
+    assert "edit-universe-type" in detail
+    assert "universe_type=edited_type" in detail
+    assert '"Type": "Standard"' in page
+    assert "Univers système protégé" in detail
+
+
+def test_experiment_submission_and_history_expose_frozen_universe_roles():
+    source = APP.read_text(encoding="utf-8")
+    experiments = source.split("def _experiments(", 1)[1].split(
+        "def _settings", 1
+    )[0]
+    detail = source.split("def _render_run_detail_view", 1)[1].split(
+        "def _render_run_comparison_view", 1
+    )[0]
+
+    for field in (
+        "primary_universe_id", "context_universe_ids", "target_symbols",
+        "context_symbols", "predictor_symbols",
+    ):
+        assert f"{field}=" in experiments
+    assert "run_universe_summary" in detail
+    assert "Univers principal" in detail
+    assert "Cibles" in detail
+    assert "Univers de contexte" in detail
+    assert "Prédicteurs disponibles" in detail
 
 
 def test_models_and_surveillance_pages_expose_the_operational_flow():
@@ -97,7 +168,7 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
         "Retirer",
         "Mettre à jour le marché",
         "Prédictions quotidiennes",
-        "Screening",
+        "Détecter les signaux",
         "Résultats réalisés",
         "Exécution complète",
     ):
@@ -124,11 +195,69 @@ def test_surveillance_uses_internal_tabs_and_on_demand_technical_details():
 
     assert 'st.tabs(["Prédictions", "Signaux", "Résultats réalisés"])' in source
     assert "_render_predictions_tab(predictions)" in source
-    assert "_render_signals_tab(signals, models)" in source
+    assert "_render_signals_tab(signals, predictions, models)" in source
     assert "_realized_results_panel(predictions, signals)" in source
     assert "Voir les prédictions sans signal" in source
     assert "Détails techniques" in source
     assert "Pourquoi ce signal ?" in source
+
+
+def test_surveillance_kpis_keep_last_update_wide_and_prediction_secondary():
+    source = APP.read_text(encoding="utf-8")
+    surveillance = source.split("def _render_surveillance_page", 1)[1].split(
+        "if hasattr(st, \"fragment\")", 1
+    )[0]
+
+    assert 'columns = st.columns([1, 1.15, 1.2, 1.9, 0.7])' in surveillance
+    assert 'columns[3].metric("Dernière mise à jour", _compact_datetime(last_market))' in surveillance
+    assert 'columns[4].metric("Erreurs", len(errors))' in surveillance
+    assert 'st.caption(f"Dernière prédiction : {_compact_datetime(last_prediction)}")' in surveillance
+    assert 'columns[4].metric("Dernière prédiction"' not in surveillance
+    assert 'timestamp.strftime("%Y-%m-%d %H:%M")' in source
+
+
+def test_realized_results_grid_is_always_rendered_with_readable_audit_details():
+    source = APP.read_text(encoding="utf-8")
+    panel = source.split("def _realized_results_panel", 1)[1].split(
+        "def _render_surveillance_page", 1
+    )[0]
+
+    assert "main_table = realized_main_table(view.table)" in panel
+    assert "if view.table.empty:" not in panel
+    assert 'key="surveillance-realized"' in panel
+    assert "_render_prediction_audit_details(record)" in panel
+    assert "pending_columns = st.columns(2)" not in panel
+    assert 'st.caption(' in panel
+    assert "Prochaine validation" in panel
+    assert "Données jusqu’au" in panel
+    assert "Aucun résultat réalisé disponible pour l’instant." not in panel
+    assert "if new_results:" in panel
+
+
+def test_prediction_audit_ui_is_shared_by_predictions_signals_and_results():
+    source = APP.read_text(encoding="utf-8")
+    helper = source.split("def _render_prediction_audit_details", 1)[1].split(
+        "def _render_predictions_tab", 1
+    )[0]
+    predictions = source.split("def _render_predictions_tab", 1)[1].split(
+        "def _render_signals_tab", 1
+    )[0]
+    signals = source.split("def _render_signals_tab", 1)[1].split(
+        "def _realized_results_panel", 1
+    )[0]
+    realized = source.split("def _realized_results_panel", 1)[1].split(
+        "def _render_surveillance_page", 1
+    )[0]
+
+    assert "prediction_feature_tables(record)" in helper
+    assert "source_observation_tables(record)" in helper
+    assert "Entrées du modèle au moment de la prédiction" in helper
+    assert "Observations sources" in helper
+    assert "Non disponible pour cette prédiction historique." in helper
+    assert "_render_prediction_audit_details(technical)" in predictions
+    assert "_render_prediction_audit_details(" in signals
+    assert "_render_prediction_audit_details(record)" in realized
+    assert source.count("def _render_prediction_audit_details") == 1
 
 
 def test_history_uses_filtered_paginated_row_selection_without_guid_dropdown():

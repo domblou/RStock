@@ -85,14 +85,36 @@ class ExperimentSpec:
     evaluate_final_holdout: bool = True
     universe_selection: UniverseSelection = UniverseSelection()
     model_id: str | None = None
+    primary_universe_id: str | None = None
+    context_universe_ids: tuple[str, ...] = ()
+    target_symbols: tuple[str, ...] = ()
+    context_symbols: tuple[str, ...] = ()
+    predictor_symbols: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
             raise ValueError(f"Job type is reserved but not implemented: {self.job_type.value}")
-        if len(self.symbols) < 2:
-            raise ValueError("At least two symbols are required")
         if len(set(self.symbols)) != len(self.symbols):
             raise ValueError("Symbols must be unique")
+        targets = tuple(dict.fromkeys(self.target_symbols or self.symbols))
+        target_set = set(targets)
+        context = tuple(
+            symbol
+            for symbol in dict.fromkeys(self.context_symbols)
+            if symbol not in target_set
+        )
+        predictors = tuple(dict.fromkeys((*targets, *context)))
+        context_ids = tuple(dict.fromkeys(self.context_universe_ids))
+        primary_id = self.primary_universe_id or self.universe_selection.universe
+        object.__setattr__(self, "primary_universe_id", primary_id)
+        object.__setattr__(self, "context_universe_ids", context_ids)
+        object.__setattr__(self, "target_symbols", targets)
+        object.__setattr__(self, "context_symbols", context)
+        object.__setattr__(self, "predictor_symbols", predictors)
+        # ``symbols`` remains the backward-compatible market-data universe.
+        object.__setattr__(self, "symbols", predictors)
+        if len(self.symbols) < 2:
+            raise ValueError("At least two symbols are required")
         if self.combinations_per_target < 1:
             raise ValueError("combinations_per_target must be positive")
         if self.job_type == JobType.PRODUCTION_TRAINING and not self.model_id:
@@ -103,6 +125,11 @@ class ExperimentSpec:
             "schema_version": 1,
             "job_type": self.job_type.value,
             "symbols": list(self.symbols),
+            "primary_universe_id": self.primary_universe_id,
+            "context_universe_ids": list(self.context_universe_ids),
+            "target_symbols": list(self.target_symbols),
+            "context_symbols": list(self.context_symbols),
+            "predictor_symbols": list(self.predictor_symbols),
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
             "evaluate_final_holdout": self.evaluate_final_holdout,
@@ -126,6 +153,19 @@ class ExperimentSpec:
             evaluate_final_holdout=bool(values.get("evaluate_final_holdout", True)),
             universe_selection=UniverseSelection.from_dict(values.get("universe_selection")),
             model_id=None if values.get("model_id") is None else str(values["model_id"]),
+            primary_universe_id=(
+                None
+                if values.get("primary_universe_id") is None
+                else str(values["primary_universe_id"])
+            ),
+            context_universe_ids=tuple(
+                str(item) for item in values.get("context_universe_ids", ())
+            ),
+            target_symbols=tuple(str(item) for item in values.get("target_symbols", ())),
+            context_symbols=tuple(str(item) for item in values.get("context_symbols", ())),
+            predictor_symbols=tuple(
+                str(item) for item in values.get("predictor_symbols", ())
+            ),
         )
 
     @property

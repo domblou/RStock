@@ -4,7 +4,9 @@ import sys
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
@@ -12,7 +14,7 @@ import rstock.application.repository as repository_module
 from rstock.application.repository import RunRepository
 from rstock.application.runner import ProgressReporter, RunService
 from rstock.application.worker import SlotLease, execute_run
-from rstock.application.workflows import WorkflowRegistry
+from rstock.application.workflows import WorkflowRegistry, _prepared_experiment
 from rstock.config import DEFAULT_CONFIG
 from rstock.progress import ProgressEvent, check_cancellation
 
@@ -56,6 +58,43 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     restored = RunRepository(tmp_path / "runs").load_spec(run_id)
     assert restored == spec
     assert restored.config.xgb_seed == 987
+
+
+def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
+    monkeypatch, tmp_path
+):
+    index = pd.bdate_range("2026-01-05", periods=4)
+    prices = pd.DataFrame(index=index)
+    for symbol in ("AAA", "BBB", "CONTEXT"):
+        prices[f"{symbol}.Open"] = 100.0
+        prices[f"{symbol}.High"] = 102.0
+        prices[f"{symbol}.Low"] = 99.0
+        prices[f"{symbol}.Close"] = 101.0
+    captured_symbols = []
+
+    def fake_load(self, spec, **kwargs):
+        captured_symbols.append(spec.symbols)
+        return SimpleNamespace(
+            prices=prices,
+            symbols=list(spec.symbols),
+            failed_symbols=[],
+        ), {}
+
+    monkeypatch.setattr("rstock.application.workflows.MarketDataService.load", fake_load)
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=1),
+        symbols=("AAA", "BBB", "CONTEXT"),
+        target_symbols=("AAA", "BBB"),
+        context_symbols=("CONTEXT",),
+    )
+
+    prepared, generated, _ = _prepared_experiment(spec, None, None)
+
+    assert captured_symbols == [("AAA", "BBB", "CONTEXT")]
+    assert "CONTEXT_intraday_J-1" in prepared
+    assert set(generated["V0"]) == {"AAA", "BBB"}
+    assert "CONTEXT" in set(generated["V1"])
 
 
 def test_status_transitions_and_duration_are_persisted(tmp_path):

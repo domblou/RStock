@@ -18,6 +18,7 @@ from rstock.features import (
     intraday_return_column,
     intraday_target_column,
     predictor_columns,
+    prediction_source_observations,
     prepare_prediction_row,
 )
 from rstock.modeling import XGBoostParameters, fit_booster, predict_probabilities
@@ -35,10 +36,15 @@ SUPPORTED_FEATURE_VERSIONS = {"rstock_features_v1"}
 
 
 def _json_safe(values: dict[str, Any]) -> dict[str, Any]:
-    return {
-        str(key): (None if pd.isna(value) else value)
-        for key, value in values.items()
-    }
+    normalized: dict[str, Any] = {}
+    for key, value in values.items():
+        if pd.isna(value):
+            normalized[str(key)] = None
+        elif isinstance(value, np.generic):
+            normalized[str(key)] = value.item()
+        else:
+            normalized[str(key)] = value
+    return normalized
 
 
 def _is_true(value: Any) -> bool:
@@ -166,6 +172,13 @@ class PromotionService:
                 "promotion_fingerprint": fingerprint,
                 "calendar": spec.calendar,
                 "calibration_source_configurations": calibration_sources,
+                "universe_roles": {
+                    "primary_universe_id": spec.primary_universe_id,
+                    "context_universe_ids": list(spec.context_universe_ids),
+                    "target_symbols": list(spec.target_symbols),
+                    "context_symbols": list(spec.context_symbols),
+                    "predictor_symbols": list(spec.predictor_symbols),
+                },
             },
             down_xgboost_parameters=down_xgb_parameters,
             xgboost_seed=xgboost_seed,
@@ -356,6 +369,7 @@ class DailyPredictionService:
         prepared: pd.DataFrame,
         config: RStockConfig,
         *,
+        market_data: pd.DataFrame | None = None,
         persist: bool = True,
     ) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []
@@ -363,7 +377,7 @@ class DailyPredictionService:
             if model.status != ProductionModelStatus.ACTIVE:
                 continue
             try:
-                rows.append(self._predict_model(model, prepared))
+                rows.append(self._predict_model(model, prepared, market_data))
             except Exception as error:
                 # One stale/corrupt model must be visible as an operational
                 # error without suppressing predictions from other models.
@@ -374,7 +388,10 @@ class DailyPredictionService:
         return frame
 
     def _predict_model(
-        self, model: ProductionModel, prepared: pd.DataFrame
+        self,
+        model: ProductionModel,
+        prepared: pd.DataFrame,
+        market_data: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.artifact_directory(model.model_id)
         metadata = json.loads(
@@ -401,6 +418,13 @@ class DailyPredictionService:
         names = list(metadata["predictor_columns"])
         if any(name not in current or current[name].isna().any() for name in names):
             raise ValueError("missing predictors")
+        features = _json_safe(current.loc[current.index[0], names].to_dict())
+        source_observations = prediction_source_observations(
+            prepared,
+            names,
+            as_of_date=as_of,
+            market_data=market_data,
+        )
         up = float(predict_probabilities(load_booster(directory / "up.ubj"), current, names)[0])
         down = float(predict_probabilities(load_booster(directory / "down.ubj"), current, names)[0])
         signal_status = (
@@ -417,6 +441,9 @@ class DailyPredictionService:
             "as_of_date": pd.Timestamp(as_of).date().isoformat(),
             "target": model.target,
             "predictors": json.dumps(model.predictors),
+            "feature_names": json.dumps(names),
+            "features": json.dumps(features, ensure_ascii=False),
+            "source_observations": json.dumps(source_observations, ensure_ascii=False),
             "model_id": model.model_id,
             "model_version": model.artifact_version,
             "up_probability": up,
@@ -436,6 +463,7 @@ class DailyPredictionService:
             "prediction_id": hashlib.sha256(token.encode()).hexdigest()[:20],
             "prediction_date": None if date is None else pd.Timestamp(date).date().isoformat(),
             "as_of_date": None, "target": model.target, "predictors": json.dumps(model.predictors),
+            "feature_names": None, "features": None, "source_observations": None,
             "model_id": model.model_id, "model_version": model.artifact_version,
             "up_probability": np.nan, "down_probability": np.nan,
             "up_threshold": model.up_threshold, "down_threshold": model.down_threshold,

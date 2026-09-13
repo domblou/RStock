@@ -10,6 +10,7 @@ from rstock.application.history_analysis import (
     comparison_chart_frames,
     configuration_differences,
     filter_combinations,
+    run_universe_summary,
     selected_run_action,
 )
 
@@ -129,3 +130,29 @@ def test_comparison_charts_keep_quality_and_duration_on_separate_human_axes():
         {"Durée (s)": 372.0, "Durée": "06:12"},
         {"Durée (s)": 1609.0, "Durée": "26:49"},
     ]
+
+
+def test_run_universe_summary_supports_context_and_legacy_configurations():
+    contextual = run_universe_summary({
+        "primary_universe_id": "US_CORE_50",
+        "context_universe_ids": ["MARKET_CONTEXT", "SECTOR_ETFS"],
+        "target_symbols": ["AAA", "BBB"],
+        "predictor_symbols": ["AAA", "BBB", "SPY"],
+    })
+    legacy = run_universe_summary({
+        "symbols": ["AAA", "BBB"],
+        "universe_selection": {"universe": "LEGACY"},
+    })
+
+    assert contextual == {
+        "primary_universe_id": "US_CORE_50",
+        "target_count": 2,
+        "context_universe_ids": ("MARKET_CONTEXT", "SECTOR_ETFS"),
+        "predictor_count": 3,
+    }
+    assert legacy == {
+        "primary_universe_id": "LEGACY",
+        "target_count": 2,
+        "context_universe_ids": (),
+        "predictor_count": 2,
+    }

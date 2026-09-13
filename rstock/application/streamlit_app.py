@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import html
 import json
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import altair as alt
 import pandas as pd
@@ -28,6 +31,7 @@ from rstock.application.history_analysis import (
     configuration_differences,
     filter_combinations,
     load_walk_forward_artifacts,
+    run_universe_summary,
     selected_run_action,
 )
 from rstock.application.runner import running_duration
@@ -36,7 +40,9 @@ from rstock.application.surveillance import (
     build_predictions_view,
     build_realized_results_view,
     build_signals_view,
+    prediction_feature_tables,
     realized_main_table,
+    source_observation_tables,
     validation_feedback,
 )
 from rstock.application.surveillance_refresh import (
@@ -51,9 +57,11 @@ from rstock.application.services import (
     SignalService,
 )
 from rstock.application.universes import (
+    CONTEXT_UNIVERSE_TYPE,
     SAMPLE_SOURCE,
     SAVED_SOURCE,
     SEEDED_SAMPLE,
+    STANDARD_UNIVERSE_TYPE,
     TOP_N,
     UniverseSelection,
     UniverseService,
@@ -64,12 +72,43 @@ from rstock.config import DEFAULT_CONFIG
 
 st.set_page_config(page_title="RStock Laboratory", page_icon="🧪", layout="wide")
 
+LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "rstock_logo.png"
+
+
+def _page_header(title: str) -> None:
+    """Render a compact page title with the optional bundled RStock logo."""
+
+    try:
+        encoded_logo = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii")
+    except OSError:
+        st.title(title)
+        return
+    st.markdown(
+        f"""
+        <div style="display: flex; align-items: center; gap: 8px; margin: 0 0 0.35rem; line-height: 1;">
+          <img src="data:image/png;base64,{encoded_logo}" alt="RStock"
+               style="display: block; width: 120px; height: auto; flex: 0 0 auto;" />
+          <h1 style="margin: 0; padding: 0; font-size: 2rem; line-height: 1.12; transform: translateY(4px);">
+            {html.escape(title)}</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _compact_datetime(value: object) -> str:
+    timestamp = pd.to_datetime(value, errors="coerce")
+    return "—" if pd.isna(timestamp) else timestamp.strftime("%Y-%m-%d %H:%M")
+
 
 def _state() -> None:
     st.session_state.setdefault("lab_config", DEFAULT_CONFIG)
     cached = MarketDataService().available_symbols(DEFAULT_CONFIG)
     st.session_state.setdefault("lab_symbols", cached or ["AAPL", "MSFT"])
     st.session_state.setdefault("lab_universe_selection", UniverseSelection())
+    st.session_state.setdefault("lab_context_universe_ids", [])
+    st.session_state.setdefault("lab_target_symbols", [])
+    st.session_state.setdefault("lab_context_symbols", [])
     st.session_state.setdefault("lab_calendar", "XNYS")
     st.session_state.setdefault("lab_combinations_per_target", 3)
     st.session_state.setdefault("lab_evaluate_holdout", True)
@@ -171,9 +210,9 @@ def _experiment_universe_selector() -> bool:
     size = None
     method = None
     seed = None
-    names = service.universe_names()
+    names = service.standard_universe_names()
     universe_id = st.selectbox(
-        "Univers",
+        "Univers principal",
         names,
         index=names.index(current.universe) if current.universe in names else 0,
         format_func=lambda item: universe_display_name(item, service),
@@ -212,18 +251,46 @@ def _experiment_universe_selector() -> bool:
     except ValueError as error:
         st.error(f"Univers invalide : {error}")
         return False
+    context_names = service.universe_names()
+    selected_contexts = st.multiselect(
+        "Univers de contexte",
+        context_names,
+        default=[
+            item
+            for item in st.session_state.lab_context_universe_ids
+            if item in context_names
+        ],
+        format_func=lambda item: universe_display_name(item, service),
+        key="experiment-context-universes",
+    )
+    resolved = service.resolve_experiment(preview.selection, selected_contexts)
+    target_symbols = resolved.target_symbols
+    context_symbols = resolved.context_symbols
+    predictor_symbols = resolved.predictor_symbols
     st.session_state.lab_universe_selection = preview.selection
-    st.session_state.lab_symbols = list(preview.resolved_symbols)
-    st.caption(f"{len(preview.resolved_symbols)} symboles résolus")
-    st.write(", ".join(preview.resolved_symbols[:8]) + (", …" if len(preview.resolved_symbols) > 8 else ""))
+    st.session_state.lab_context_universe_ids = list(selected_contexts)
+    st.session_state.lab_target_symbols = list(target_symbols)
+    st.session_state.lab_context_symbols = list(context_symbols)
+    st.session_state.lab_symbols = list(predictor_symbols)
+    st.caption(f"Univers principal : {universe_id}")
+    st.caption(f"Cibles résolues : {len(target_symbols)}")
+    st.caption(
+        "Univers de contexte : "
+        + (", ".join(selected_contexts) if selected_contexts else "Aucun")
+    )
+    st.caption(f"Symboles contexte : {len(context_symbols)}")
+    st.caption(f"Prédicteurs disponibles : {len(predictor_symbols)} symboles uniques")
     with st.expander("Voir les symboles sélectionnés"):
-        st.code(", ".join(preview.resolved_symbols))
+        st.write("Cibles")
+        st.code(", ".join(target_symbols))
+        st.write("Contexte")
+        st.code(", ".join(context_symbols) or "Aucun")
     st.caption("La création et la modification des listes se font dans la page Univers.")
     return True
 
 
 def _experiments(service: ExperimentService) -> None:
-    st.title("Expériences")
+    _page_header("Expériences")
     labels = {
         "Walk-forward": JobType.WALK_FORWARD,
         "Calibration XGBoost": JobType.XGBOOST_CALIBRATION,
@@ -241,6 +308,11 @@ def _experiments(service: ExperimentService) -> None:
             combinations_per_target=st.session_state.lab_combinations_per_target,
             evaluate_final_holdout=st.session_state.lab_evaluate_holdout,
             universe_selection=st.session_state.lab_universe_selection,
+            primary_universe_id=st.session_state.lab_universe_selection.universe,
+            context_universe_ids=tuple(st.session_state.lab_context_universe_ids),
+            target_symbols=tuple(st.session_state.lab_target_symbols),
+            context_symbols=tuple(st.session_state.lab_context_symbols),
+            predictor_symbols=tuple(st.session_state.lab_symbols),
         )
         submitted = service.submit(spec)
         if submitted.created:
@@ -252,7 +324,7 @@ def _experiments(service: ExperimentService) -> None:
 
 
 def _settings() -> None:
-    st.title("Paramètres")
+    _page_header("Paramètres")
     current = st.session_state.lab_config
     with st.expander("Valeurs RStock par défaut"):
         defaults = asdict(DEFAULT_CONFIG)
@@ -645,10 +717,18 @@ def _render_run_detail_view(
         )
         return
     analytics = _load_run_analytics(run_id, status, detail)
+    universe_summary = run_universe_summary(detail["configuration"])
     st.caption("Historique > Détail du run")
     if st.button("← Retour à Historique", key="history-back-detail"):
         _clear_history_navigation()
     st.title(f"Walk-forward — {len(analytics.symbols)} symboles — profondeur {analytics.depth}")
+    st.caption(f"Univers principal : {universe_summary['primary_universe_id']}")
+    st.caption(f"Cibles : {universe_summary['target_count']}")
+    st.caption(
+        "Univers de contexte : "
+        + (", ".join(universe_summary["context_universe_ids"]) or "Aucun")
+    )
+    st.caption(f"Prédicteurs disponibles : {universe_summary['predictor_count']}")
     st.caption(
         f"{history_row(status, detail, {}).date_time} · {history_row(status, detail, {}).duration} · "
         f"Statut : {analytics.status}"
@@ -906,6 +986,13 @@ def _create_universe_panel(service: UniverseService) -> None:
             horizontal=True, key="create-universe-mode",
         )
         name = st.text_input("Nom de l’univers", key="create-universe-name")
+        type_label = st.radio(
+            "Type d’univers", ["Standard", "Contexte"], horizontal=True,
+            key="create-universe-type",
+        )
+        universe_type = (
+            STANDARD_UNIVERSE_TYPE if type_label == "Standard" else CONTEXT_UNIVERSE_TYPE
+        )
         if mode == "Création manuelle":
             symbols = st.text_area(
                 "Symboles",
@@ -914,7 +1001,7 @@ def _create_universe_panel(service: UniverseService) -> None:
             )
             if st.button("Enregistrer", type="primary", key="save-manual-universe"):
                 try:
-                    created = service.create(name, symbols)
+                    created = service.create(name, symbols, universe_type=universe_type)
                 except ValueError as error:
                     st.error(str(error))
                 else:
@@ -948,7 +1035,8 @@ def _create_universe_panel(service: UniverseService) -> None:
             ):
                 try:
                     created = service.create_from_csv(
-                        name, uploaded.getvalue(), column=selected_column
+                        name, uploaded.getvalue(), column=selected_column,
+                        universe_type=universe_type,
                     )
                 except ValueError as error:
                     st.error(str(error))
@@ -962,6 +1050,10 @@ def _create_universe_panel(service: UniverseService) -> None:
 def _universe_selection_preview(service: UniverseService, universe_id: str) -> None:
     record = service.record(universe_id)
     st.subheader("Aperçu de sélection")
+    if record.type == CONTEXT_UNIVERSE_TYPE:
+        st.caption("Univers de contexte · utilisé au complet · ne peut pas fournir de cibles")
+        st.write(", ".join(record.symbols[:8]) + (", …" if len(record.symbols) > 8 else ""))
+        return
     mode = st.radio(
         "Mode", ["Univers complet", "Top N", "Échantillon reproductible"],
         horizontal=True, key=f"universe-preview-mode-{universe_id}",
@@ -998,7 +1090,10 @@ def _universe_selection_preview(service: UniverseService, universe_id: str) -> N
 def _universe_detail(service: UniverseService, universe_id: str) -> None:
     record = service.record(universe_id)
     st.subheader(record.name)
-    st.caption(f"{len(record.symbols)} symboles · Source : {record.source}")
+    type_label = "Standard" if record.type == STANDARD_UNIVERSE_TYPE else "Contexte"
+    st.caption(
+        f"{len(record.symbols)} symboles · Type : {type_label} · Source : {record.source}"
+    )
     st.write(", ".join(record.symbols[:8]) + (", …" if len(record.symbols) > 8 else ""))
     with st.expander("Voir tous les symboles"):
         st.code(", ".join(record.symbols))
@@ -1015,10 +1110,27 @@ def _universe_detail(service: UniverseService, universe_id: str) -> None:
                 value="\n".join(record.symbols),
                 key=f"edit-universe-symbols-{universe_id}",
             )
+            edited_type_label = st.radio(
+                "Type d’univers",
+                ["Standard", "Contexte"],
+                index=0 if record.type == STANDARD_UNIVERSE_TYPE else 1,
+                horizontal=True,
+                key=f"edit-universe-type-{universe_id}",
+            )
+            edited_type = (
+                STANDARD_UNIVERSE_TYPE
+                if edited_type_label == "Standard"
+                else CONTEXT_UNIVERSE_TYPE
+            )
             st.caption("Vous pouvez ajouter, retirer ou remplacer les symboles avant d’enregistrer.")
             if st.button("Enregistrer les modifications", key=f"update-universe-{universe_id}"):
                 try:
-                    service.update(universe_id, name=name, symbols=symbols)
+                    service.update(
+                        universe_id,
+                        name=name,
+                        symbols=symbols,
+                        universe_type=edited_type,
+                    )
                 except ValueError as error:
                     st.error(str(error))
                 else:
@@ -1055,20 +1167,25 @@ def _universe_detail(service: UniverseService, universe_id: str) -> None:
                 was_current = current.universe == universe_id
                 service.delete(universe_id)
                 if was_current:
-                    fallback = service.records()[0]
+                    fallback = service.record(service.standard_universe_names()[0])
                     st.session_state.lab_universe_selection = UniverseSelection(
                         source=SAVED_SOURCE, universe=fallback.universe_id
                     )
                     st.session_state.lab_symbols = list(fallback.symbols)
                 st.session_state.pop(confirmation_key, None)
                 st.session_state.pop("selected_universe_id", None)
+                st.session_state.lab_context_universe_ids = [
+                    item
+                    for item in st.session_state.lab_context_universe_ids
+                    if item != universe_id
+                ]
                 st.success("Univers supprimé. Aucun run historique n’a été modifié.")
                 st.rerun()
     _universe_selection_preview(service, universe_id)
 
 
 def _universes_page() -> None:
-    st.title("Univers")
+    _page_header("Univers")
     st.caption("Gérez les listes de symboles utilisées par vos expériences.")
     service = _universe_service()
     st.subheader("Univers sauvegardés")
@@ -1077,7 +1194,8 @@ def _universes_page() -> None:
         {
             "Nom": record.name,
             "Nombre de symboles": len(record.symbols),
-            "Type / source": record.source,
+            "Type": "Standard" if record.type == STANDARD_UNIVERSE_TYPE else "Contexte",
+            "Source": record.source,
             "Dernière modification": (
                 "—" if record.updated_at is None
                 else pd.to_datetime(record.updated_at).strftime("%Y-%m-%d")
@@ -1136,6 +1254,36 @@ def _technical_record(view: OperationalTableView, selected: list[int]) -> dict[s
     return json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso"))
 
 
+def _render_prediction_audit_details(
+    record: dict[str, object],
+    *,
+    technical_title: str = "Détails techniques",
+    technical_payload: object | None = None,
+) -> None:
+    lagged_features, other_features = prediction_feature_tables(record)
+    st.markdown("**Entrées du modèle au moment de la prédiction**")
+    if lagged_features.empty and other_features.empty:
+        st.caption("Non disponible pour cette prédiction historique.")
+    if not lagged_features.empty:
+        st.dataframe(lagged_features, hide_index=True, width="stretch")
+    if not other_features.empty:
+        if not lagged_features.empty:
+            st.caption("Autres features")
+        st.dataframe(other_features, hide_index=True, width="content")
+    observations, other_observations = source_observation_tables(record)
+    st.markdown("**Observations sources**")
+    if observations.empty and other_observations.empty:
+        st.caption("Non disponible pour cette prédiction historique.")
+    if not observations.empty:
+        st.dataframe(observations, hide_index=True, width="stretch")
+    if not other_observations.empty:
+        if not observations.empty:
+            st.caption("Autres observations")
+        st.dataframe(other_observations, hide_index=True, width="stretch")
+    with st.expander(technical_title, expanded=False):
+        st.json(record if technical_payload is None else technical_payload)
+
+
 def _render_predictions_tab(predictions: pd.DataFrame) -> None:
     view = build_predictions_view(predictions)
     if view.table.empty:
@@ -1147,12 +1295,15 @@ def _render_predictions_tab(predictions: pd.DataFrame) -> None:
     )
     technical = _technical_record(view, _selected_rows(event))
     if technical is not None:
-        with st.expander("Détails techniques", expanded=False):
-            st.json(technical)
+        _render_prediction_audit_details(technical)
 
 
-def _render_signals_tab(signals: pd.DataFrame, models: ModelService) -> None:
-    view = build_signals_view(signals)
+def _render_signals_tab(
+    signals: pd.DataFrame,
+    predictions: pd.DataFrame,
+    models: ModelService,
+) -> None:
+    view = build_signals_view(signals, predictions)
     selected_signal = None
     if view.signals.table.empty:
         st.info("Aucun signal haussier aujourd’hui.")
@@ -1182,11 +1333,14 @@ def _render_signals_tab(signals: pd.DataFrame, models: ModelService) -> None:
             (model for model in models.models() if model.model_id == selected.get("model_id")),
             None,
         )
-        with st.expander("Pourquoi ce signal ?", expanded=False):
-            st.json({
+        _render_prediction_audit_details(
+            selected,
+            technical_title="Pourquoi ce signal ?",
+            technical_payload={
                 "signal": selected,
                 "modèle_source": None if source_model is None else source_model.to_dict(),
-            })
+            },
+        )
 
 
 def _realized_results_panel(
@@ -1213,10 +1367,11 @@ def _realized_results_panel(
     )
     view = build_realized_results_view(predictions, signals, realized, freshness)
 
-    pending_columns = st.columns(2)
-    pending_columns[0].metric("Prédictions en attente", view.pending_count)
-    pending_columns[1].metric(
-        "Prochaine date à valider", view.next_validation_date or "—"
+    prediction_word = "prédiction" if view.pending_count == 1 else "prédictions"
+    st.caption(
+        f"{view.pending_count} {prediction_word} en attente"
+        f" · Prochaine validation : {view.next_validation_date or '—'}"
+        f" · Données jusqu’au : {view.latest_market_date or '—'}"
     )
 
     validation_jobs = [
@@ -1233,23 +1388,20 @@ def _realized_results_panel(
             st.error(f"La dernière validation a échoué : {latest.get('error') or 'erreur inconnue'}")
         elif latest["status"] == "completed":
             summary = _service().run(str(latest["run_id"]))["summary"]
-            level, message = validation_feedback(
-                int(summary.get("realized_results", 0)), view
-            )
-            getattr(st, level)(message)
+            new_results = int(summary.get("realized_results", 0))
+            if new_results:
+                level, message = validation_feedback(new_results, view)
+                getattr(st, level)(message)
 
-    if view.table.empty:
-        st.caption("Aucun résultat réalisé disponible pour l’instant.")
-    else:
-        main_table = realized_main_table(view.table)
-        event = st.dataframe(
-            main_table, hide_index=True, width="stretch",
-            on_select="rerun", selection_mode="single-row", key="surveillance-realized",
-        )
-        selected = _selected_rows(event)
-        if selected and selected[0] < len(view.technical):
-            with st.expander("Détails techniques", expanded=False):
-                st.json(json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso")))
+    main_table = realized_main_table(view.table)
+    event = st.dataframe(
+        main_table, hide_index=True, width="stretch",
+        on_select="rerun", selection_mode="single-row", key="surveillance-realized",
+    )
+    selected = _selected_rows(event)
+    if selected and selected[0] < len(view.technical):
+        record = json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso"))
+        _render_prediction_audit_details(record)
     if not view.pending.empty:
         with st.expander("Voir les prédictions en attente"):
             st.dataframe(
@@ -1260,7 +1412,7 @@ def _realized_results_panel(
 
 
 def _render_surveillance_page(*, polling: bool) -> None:
-    st.title("Surveillance")
+    _page_header("Surveillance")
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
     universe = models.operational_universe()
@@ -1283,16 +1435,16 @@ def _render_surveillance_page(*, polling: bool) -> None:
         for run in runs
         if run["status"] == "failed" and run["job_type"] in OPERATIONAL_JOB_TYPES
     ]
-    columns = st.columns(6)
+    columns = st.columns([1, 1.15, 1.2, 1.9, 0.7])
     columns[0].metric("Modèles actifs", len(universe.model_ids))
     columns[1].metric("Symboles surveillés", len(universe.symbols))
     columns[2].metric(
         "Signaux haussiers",
         int((signals.get("category") == "bullish_signal").sum()) if not signals.empty else 0,
     )
-    columns[3].metric("Dernière mise à jour", last_market or "—")
-    columns[4].metric("Dernière prédiction", last_prediction or "—")
-    columns[5].metric("Erreurs", len(errors))
+    columns[3].metric("Dernière mise à jour", _compact_datetime(last_market))
+    columns[4].metric("Erreurs", len(errors))
+    st.caption(f"Dernière prédiction : {_compact_datetime(last_prediction)}")
     if freshness:
         st.caption(
             "Fraîcheur des données : "
@@ -1309,7 +1461,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
     actions = [
         ("Mettre à jour le marché", JobType.MARKET_UPDATE),
         ("Prédictions quotidiennes", JobType.DAILY_PREDICTION),
-        ("Screening", JobType.DAILY_SCREENING),
+        ("Détecter les signaux", JobType.DAILY_SCREENING),
         ("Résultats réalisés", JobType.REALIZED_VALIDATION),
         ("Exécution complète", JobType.OPERATIONAL_RUN),
     ]
@@ -1324,7 +1476,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
     with content_tabs[0]:
         _render_predictions_tab(predictions)
     with content_tabs[1]:
-        _render_signals_tab(signals, models)
+        _render_signals_tab(signals, predictions, models)
     with content_tabs[2]:
         _realized_results_panel(predictions, signals)
     if errors:
@@ -1350,7 +1502,7 @@ def _surveillance_page() -> None:
 
 
 def _models_page() -> None:
-    st.title("Modèles")
+    _page_header("Modèles")
     service = ModelService(st.session_state.lab_config.project_root)
     models = service.models()
     if not models:
@@ -1406,7 +1558,7 @@ def _history_page() -> None:
             _render_run_comparison_view(service, run_ids)
             return
         st.session_state.pop("history-navigation", None)
-    st.title("Historique")
+    _page_header("Historique")
     tabs = st.tabs(["Backtest / walk-forward", "Holdout", "Production réelle"])
     with tabs[0]:
         _history_runs_panel(

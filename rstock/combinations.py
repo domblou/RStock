@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from itertools import combinations, permutations
+from itertools import combinations
 from math import comb
 
 import pandas as pd
@@ -22,6 +22,7 @@ def generate_symbol_sets(
     symbols: list[str],
     permutation_depth: int = 1,
     *,
+    target_symbols: list[str] | None = None,
     max_sets: int = 100_000,
 ) -> pd.DataFrame:
     """Generate target/feature sets after checking their combinatorial size."""
@@ -33,7 +34,17 @@ def generate_symbol_sets(
         raise ValueError("permutation_depth must be at least 1")
     if len(set(symbols)) != len(symbols):
         raise ValueError("symbols must be unique")
-    expected = count_symbol_sets(len(symbols), permutation_depth)
+    targets = list(symbols if target_symbols is None else target_symbols)
+    if not targets:
+        raise ValueError("target_symbols must not be empty")
+    if len(set(targets)) != len(targets):
+        raise ValueError("target_symbols must be unique")
+    if not set(targets) <= set(symbols):
+        raise ValueError("target_symbols must be included in symbols")
+    expected = len(targets) * sum(
+        comb(len(symbols) - 1, feature_count)
+        for feature_count in range(1, permutation_depth + 1)
+    )
     if expected > max_sets:
         raise ValueError(
             f"Generating {expected:,} symbol sets exceeds max_generated_sets={max_sets:,}"
@@ -42,11 +53,13 @@ def generate_symbol_sets(
     width = permutation_depth + 1
     rows: list[list[str | None]] = []
 
-    for pair in permutations(symbols, 2):
-        rows.append([*pair, *([None] * (width - 2))])
+    for observation in targets:
+        for feature in symbols:
+            if feature != observation:
+                rows.append([observation, feature, *([None] * (width - 2))])
 
     for feature_count in range(2, permutation_depth + 1):
-        for observation in symbols:
+        for observation in targets:
             candidates = [symbol for symbol in symbols if symbol != observation]
             for features in combinations(candidates, feature_count):
                 rows.append(

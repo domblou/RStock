@@ -96,9 +96,15 @@ def _prepared_experiment(
     )
     _phase(progress_callback, "data_preparation", "completed", symbols=len(downloaded.symbols))
     _phase(progress_callback, "combination_generation", "started")
+    available = set(downloaded.symbols)
+    predictor_symbols = [
+        symbol for symbol in spec.predictor_symbols if symbol in available
+    ]
+    target_symbols = [symbol for symbol in spec.target_symbols if symbol in available]
     generated = generate_symbol_sets(
-        downloaded.symbols,
+        predictor_symbols,
         spec.config.permutation_depth,
+        target_symbols=target_symbols,
         max_sets=spec.config.max_generated_sets,
     )
     _phase(progress_callback, "combination_generation", "completed", combinations=len(generated))
@@ -314,7 +320,7 @@ def _daily_prediction(
         lag_depth=max(model.lag_depth for model in active),
         model_history_days=max([spec.config.model_history_days, *source_history]),
     )
-    prepared, _ = _operational_prepared(
+    prepared, downloaded = _operational_prepared(
         spec,
         progress_callback,
         cancellation_check,
@@ -322,7 +328,10 @@ def _daily_prediction(
     )
     _phase(progress_callback, "daily_prediction", "started")
     predictions = DailyPredictionService(repository).generate(
-        prepared, effective_config, persist=False
+        prepared,
+        effective_config,
+        market_data=getattr(downloaded, "prices", None),
+        persist=False,
     )
     check_cancellation(cancellation_check)
     if not predictions.empty:
@@ -406,7 +415,10 @@ def _operational_run(
     check_cancellation(cancellation_check)
     _phase(progress_callback, "daily_prediction", "started")
     predictions = DailyPredictionService(repository).generate(
-        prepared, effective_config, persist=False
+        prepared,
+        effective_config,
+        market_data=getattr(downloaded, "prices", None),
+        persist=False,
     )
     _phase(progress_callback, "daily_prediction", "completed", predictions=len(predictions))
     check_cancellation(cancellation_check)

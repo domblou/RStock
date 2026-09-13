@@ -5,10 +5,12 @@ import pytest
 from rstock.application.domain import ExperimentSpec, JobType
 from rstock.application.repository import RunRepository
 from rstock.application.universes import (
+    CONTEXT_UNIVERSE_TYPE,
     MANUAL_SOURCE,
     SAMPLE_SOURCE,
     SAVED_SOURCE,
     SEEDED_SAMPLE,
+    STANDARD_UNIVERSE_TYPE,
     TOP_N,
     UniverseSelection,
     UniverseService,
@@ -177,3 +179,101 @@ def test_persisted_run_stays_frozen_after_saved_universe_is_deleted(tmp_path):
 
     assert universe.universe_id not in service.universe_names()
     assert repository.load_spec(run_id).symbols == ("AAA", "BBB", "CCC")
+
+
+def test_historical_universe_without_type_defaults_to_standard(tmp_path):
+    directory = tmp_path / "data" / "universes"
+    directory.mkdir(parents=True)
+    (directory / "LEGACY.csv").write_text("symbol\nAAA\nBBB\n", encoding="utf-8")
+    (directory / "universes.json").write_text(
+        '{"universes":[{"universe_id":"LEGACY","name":"Legacy","source":"Manuel"}]}',
+        encoding="utf-8",
+    )
+
+    record = UniverseService(root=tmp_path).record("LEGACY")
+
+    assert record.type == STANDARD_UNIVERSE_TYPE
+
+
+def test_context_universe_is_persisted_editable_and_cannot_be_primary(tmp_path):
+    service = UniverseService(root=tmp_path)
+    created = service.create(
+        "Market context", ("SPY", "QQQ"), universe_type=CONTEXT_UNIVERSE_TYPE
+    )
+    reloaded = UniverseService(root=tmp_path).record(created.universe_id)
+
+    assert reloaded.type == CONTEXT_UNIVERSE_TYPE
+    with pytest.raises(ValueError, match="context universe"):
+        service.resolve(
+            UniverseSelection(source=SAVED_SOURCE, universe=created.universe_id)
+        )
+    updated = service.update(
+        created.universe_id,
+        name="Market context",
+        symbols=("SPY", "TLT"),
+        universe_type=STANDARD_UNIVERSE_TYPE,
+    )
+    assert updated.type == STANDARD_UNIVERSE_TYPE
+    assert service.resolve(
+        UniverseSelection(source=SAVED_SOURCE, universe=created.universe_id)
+    ).symbols == ("SPY", "TLT")
+
+
+def test_experiment_resolution_accepts_multiple_contexts_and_deduplicates_symbols():
+    service = UniverseService({
+        "PRIMARY": ("AAA", "BBB"),
+        "STANDARD_CONTEXT": ("BBB", "CCC"),
+    })
+    contextual = service.create(
+        "Context only", ("CCC", "DDD"), universe_type=CONTEXT_UNIVERSE_TYPE
+    )
+
+    resolved = service.resolve_experiment(
+        UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY"),
+        ("STANDARD_CONTEXT", contextual.universe_id, "STANDARD_CONTEXT"),
+    )
+
+    assert resolved.primary_universe_id == "PRIMARY"
+    assert resolved.context_universe_ids == (
+        "STANDARD_CONTEXT", contextual.universe_id,
+    )
+    assert resolved.target_symbols == ("AAA", "BBB")
+    assert resolved.context_symbols == ("CCC", "DDD")
+    assert resolved.predictor_symbols == ("AAA", "BBB", "CCC", "DDD")
+
+
+def test_no_context_keeps_legacy_symbols_behavior_and_context_run_is_frozen(tmp_path):
+    service = UniverseService(root=tmp_path)
+    primary = service.create("Primary", ("AAA", "BBB"))
+    context = service.create(
+        "Context", ("BBB", "CCC"), universe_type=CONTEXT_UNIVERSE_TYPE
+    )
+    selection = UniverseSelection(source=SAVED_SOURCE, universe=primary.universe_id)
+    without_context = service.resolve_experiment(selection)
+    assert without_context.target_symbols == without_context.predictor_symbols
+
+    resolved = service.resolve_experiment(selection, (context.universe_id,))
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=resolved.predictor_symbols,
+        universe_selection=selection,
+        primary_universe_id=resolved.primary_universe_id,
+        context_universe_ids=resolved.context_universe_ids,
+        target_symbols=resolved.target_symbols,
+        context_symbols=resolved.context_symbols,
+        predictor_symbols=resolved.predictor_symbols,
+    )
+    run_id = RunRepository(tmp_path / "runs").create(spec)
+    saved = RunRepository(tmp_path / "runs").read_json(run_id, "config.json")
+    service.update(context.universe_id, name="Context", symbols=("ZZZ",))
+    restored = RunRepository(tmp_path / "runs").load_spec(run_id)
+
+    assert saved["primary_universe_id"] == primary.universe_id
+    assert saved["context_universe_ids"] == [context.universe_id]
+    assert saved["target_symbols"] == ["AAA", "BBB"]
+    assert saved["context_symbols"] == ["CCC"]
+    assert saved["predictor_symbols"] == ["AAA", "BBB", "CCC"]
+    assert restored.target_symbols == ("AAA", "BBB")
+    assert restored.context_symbols == ("CCC",)
+    assert restored.predictor_symbols == ("AAA", "BBB", "CCC")
