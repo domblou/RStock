@@ -31,6 +31,7 @@ from rstock.application.history_analysis import (
     configuration_differences,
     filter_combinations,
     load_walk_forward_artifacts,
+    predictor_prefilter_summary,
     run_universe_summary,
     selected_run_action,
 )
@@ -398,6 +399,50 @@ def _settings() -> None:
         step = w3.number_input("Step", min_value=1, value=current.walk_forward_step_size)
         holdout = w4.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
 
+        st.subheader("Pré-filtrage des prédicteurs")
+        prefilter_enabled = st.checkbox(
+            "Activer le pré-filtrage",
+            value=current.predictor_prefilter_enabled,
+            help="Évalue les prédicteurs seuls avant de générer les combinaisons.",
+        )
+        p1, p2, p3 = st.columns(3)
+        prefilter_top_n = p1.number_input(
+            "Top N prédicteurs",
+            min_value=1,
+            value=current.predictor_prefilter_top_n,
+            help="Nombre maximal de prédicteurs admissibles conservés par cible.",
+        )
+        prefilter_median_auc = p2.number_input(
+            "AUC médiane minimale",
+            min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_min_median_auc,
+            help="Performance médiane minimale sur les fenêtres de développement.",
+        )
+        prefilter_pct_random = p3.number_input(
+            "Part minimale de fenêtres > 0,50",
+            min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_min_pct_above_random,
+            help="Proportion minimale de fenêtres meilleures que le hasard.",
+        )
+        prefilter_worst_auc = p1.number_input(
+            "Worst AUC minimal",
+            min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_min_worst_auc,
+            help="AUC minimale tolérée parmi les fenêtres valides.",
+        )
+        prefilter_auc_std = p2.number_input(
+            "Dispersion AUC maximale",
+            min_value=0.0,
+            value=current.predictor_prefilter_max_auc_std,
+            help="Écart-type maximal des AUC entre fenêtres.",
+        )
+        prefilter_correlation = p3.number_input(
+            "Seuil de corrélation",
+            min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_correlation_threshold,
+            help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
+        )
+
         st.subheader("XGBoost")
         x1, x2, x3 = st.columns(3)
         max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
@@ -464,6 +509,15 @@ def _settings() -> None:
                 walk_forward_test_size=int(test_size),
                 walk_forward_step_size=int(step),
                 final_holdout_size=int(holdout),
+                predictor_prefilter_enabled=bool(prefilter_enabled),
+                predictor_prefilter_top_n=int(prefilter_top_n),
+                predictor_prefilter_min_median_auc=float(prefilter_median_auc),
+                predictor_prefilter_min_pct_above_random=float(prefilter_pct_random),
+                predictor_prefilter_min_worst_auc=float(prefilter_worst_auc),
+                predictor_prefilter_max_auc_std=float(prefilter_auc_std),
+                predictor_prefilter_correlation_threshold=float(
+                    prefilter_correlation
+                ),
                 xgb_max_depth=int(max_depth),
                 xgb_eta=float(eta),
                 xgb_rounds=int(rounds),
@@ -796,6 +850,10 @@ def _render_run_detail_view(
     ))
     tabs = st.tabs(["Résumé", "Analyse", "Combinaisons", "Validation", "Technique"])
     with tabs[0]:
+        prefilter_table = predictor_prefilter_summary(detail.get("summary", {}))
+        if not prefilter_table.empty:
+            st.subheader("Pré-filtrage des prédicteurs")
+            st.dataframe(prefilter_table, hide_index=True, width="stretch")
         rate_columns = st.columns(2)
         rate_columns[0].metric("Taux de qualification", _format_metric(analytics.qualification_rate, percent=True))
         rate_columns[1].metric("Taux de confirmation holdout", _format_metric(analytics.confirmation_rate, percent=True))
@@ -1595,6 +1653,31 @@ def _models_page() -> None:
     selected = next(model for model in models if model.model_id == selected_id)
     st.markdown(f"**{selected.target} ← {' + '.join(selected.predictors)}**")
     st.caption(selected.model_id)
+    if selected.calibrated_signal_threshold is not None:
+        metrics = selected.calibration_metrics
+        holdout = selected.holdout_signal_metrics
+        st.markdown("**Calibration du signal haussier**")
+        calibration_columns = st.columns(4)
+        calibration_columns[0].metric("Seuil calibré", f"{selected.calibrated_signal_threshold:.3f}")
+        calibration_columns[1].metric("Signaux", metrics.get("total_signals", "—"))
+        calibration_columns[2].metric(
+            "Taux de réussite",
+            _format_metric(metrics.get("success_rate"), percent=True),
+        )
+        calibration_columns[3].metric(
+            "Rendement moyen",
+            _format_metric(metrics.get("mean_return"), percent=True),
+        )
+        st.caption(
+            "MFE : " + _format_metric(metrics.get("mfe_mean"), percent=True)
+            + " · MAE : " + _format_metric(metrics.get("mae_mean"), percent=True)
+            + " · Stabilité : " + _format_metric(metrics.get("return_stability"), percent=True)
+            + " · Holdout : " + _format_metric(
+                holdout.get("IntradayReturnMean"), percent=True
+            )
+        )
+    else:
+        st.caption("Seuil de signal : seuil global de décision (aucune calibration associée).")
     controls = st.columns(5)
     if controls[0].button(
         "Entraîner", disabled=selected.status.value in {"active", "retired"}

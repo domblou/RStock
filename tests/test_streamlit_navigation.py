@@ -195,6 +195,34 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
     assert '"selected-model-id"' in models_page
     assert "Sélectionnez un modèle dans la grille pour afficher les actions." in models_page
     assert "selected.model_id" in models_page
+    assert "Calibration du signal haussier" in models_page
+    assert "calibrated_signal_threshold" in models_page
+    assert "Seuil de signal : seuil global de décision" in models_page
+
+
+def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split(
+        "def _history_filters", 1
+    )[0]
+    detail = source.split("def _render_run_detail_view", 1)[1].split(
+        "def _render_run_comparison_view", 1
+    )[0]
+
+    assert 'st.subheader("Pré-filtrage des prédicteurs")' in settings
+    for name in (
+        "predictor_prefilter_enabled",
+        "predictor_prefilter_top_n",
+        "predictor_prefilter_min_median_auc",
+        "predictor_prefilter_min_pct_above_random",
+        "predictor_prefilter_min_worst_auc",
+        "predictor_prefilter_max_auc_std",
+        "predictor_prefilter_correlation_threshold",
+    ):
+        assert name in settings
+    assert settings.count("help=") >= 7
+    assert "predictor_prefilter_summary" in detail
+    assert 'st.subheader("Pré-filtrage des prédicteurs")' in detail
 
 
 def test_surveillance_uses_one_conditional_page_level_polling_fragment():

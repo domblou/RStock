@@ -667,6 +667,7 @@ def evaluate_walk_forward(
     test_size: int | None = None,
     step_size: int | None = None,
     final_holdout_size: int | None = None,
+    evaluate_holdout: bool = True,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
 ) -> WalkForwardResult:
@@ -747,10 +748,15 @@ def evaluate_walk_forward(
     risk_by_set = risk_by_set.merge(eligibility, on="Set", how="left")
     report_progress(progress_callback, "qualification", substage="completed", details={"phase_event": "completed", "eligible_combinations": int(qualification["Eligible"].sum())})
     report_progress(progress_callback, "final_holdout", substage="started", details={"phase_event": "started"})
+    holdout_qualification = (
+        qualification
+        if evaluate_holdout
+        else qualification.assign(Eligible=False)
+    )
     final_holdout, final_predictions = _evaluate_final_holdout(
         ordered,
         generated_sets,
-        qualification,
+        holdout_qualification,
         config,
         holdout_start,
         market_calendars or {},
@@ -795,6 +801,8 @@ def evaluate_walk_forward(
             "PRAUCMedian desc",
         ],
     }
+    if not evaluate_holdout:
+        run_configuration["final_holdout_evaluated"] = False
     return WalkForwardResult(
         windows=windows_frame,
         predictions=predictions_frame,

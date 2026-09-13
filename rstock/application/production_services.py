@@ -108,6 +108,10 @@ class PromotionService:
             down_xgb_parameters = dict(calibrated["Down"]["parameters"])
         up_threshold = spec.config.prediction_threshold
         down_threshold = spec.config.prediction_threshold
+        calibrated_signal_threshold = None
+        calibration_metrics: dict[str, Any] = {}
+        calibration_sample_size = None
+        holdout_signal_metrics: dict[str, Any] = {}
         if threshold_calibration_run:
             self._require_completed_run(
                 threshold_calibration_run, JobType.THRESHOLD_CALIBRATION
@@ -117,8 +121,19 @@ class PromotionService:
                 spec, threshold_spec, "threshold calibration"
             )
             calibration_sources["thresholds"] = threshold_spec.to_dict()
-            path = self.runs.run_directory(threshold_calibration_run) / "results" / "selected_thresholds.json"
-            calibrated = json.loads(path.read_text(encoding="utf-8"))
+            calibration_results = self.runs.run_directory(threshold_calibration_run) / "results"
+            path = calibration_results / "selected_thresholds_by_set.json"
+            if path.exists():
+                by_set = json.loads(path.read_text(encoding="utf-8"))
+                calibrated = by_set.get(set_name)
+                if calibrated is None:
+                    raise ValueError("Threshold calibration did not evaluate this combination")
+            else:
+                calibrated = json.loads(
+                    (calibration_results / "selected_thresholds.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
             if any(
                 calibrated.get(direction, {}).get("status") not in {None, "selected"}
                 or calibrated.get(direction, {}).get("threshold") is None
@@ -127,6 +142,25 @@ class PromotionService:
                 raise ValueError("Threshold calibration has no eligible Up/Down selection")
             up_threshold = float(calibrated["Up"]["threshold"])
             down_threshold = float(calibrated["Down"]["threshold"])
+            calibrated_signal_threshold = up_threshold
+            calibration_metrics = _json_safe(
+                dict(calibrated["Up"].get("calibration_metrics", {}))
+            )
+            sample_size = calibrated["Up"].get("calibration_sample_size")
+            calibration_sample_size = None if sample_size is None else int(sample_size)
+            holdout_path = calibration_results / "holdout_metrics.csv"
+            if holdout_path.exists():
+                signal_holdout = pd.read_csv(holdout_path)
+                matched_holdout = signal_holdout[
+                    (signal_holdout.get("Set", pd.Series(index=signal_holdout.index))
+                     .astype(str) == set_name)
+                    & (signal_holdout.get("Direction", pd.Series(index=signal_holdout.index))
+                       .astype(str) == "Up")
+                ]
+                if not matched_holdout.empty:
+                    holdout_signal_metrics = _json_safe(
+                        matched_holdout.iloc[0].to_dict()
+                    )
         final_path = results / "final_holdout.csv"
         holdout_metrics: dict[str, Any] = {}
         if final_path.exists():
@@ -184,6 +218,11 @@ class PromotionService:
             xgboost_seed=xgboost_seed,
             xgboost_threads=xgboost_threads,
             source_configuration=spec.to_dict(),
+            calibrated_signal_threshold=calibrated_signal_threshold,
+            calibration_source_run=threshold_calibration_run,
+            calibration_metrics=calibration_metrics,
+            calibration_sample_size=calibration_sample_size,
+            holdout_signal_metrics=holdout_signal_metrics,
         )
         return self.production.add(model), True
 
@@ -429,7 +468,7 @@ class DailyPredictionService:
         down = float(predict_probabilities(load_booster(directory / "down.ubj"), current, names)[0])
         signal_status = (
             "bullish_signal"
-            if up >= model.up_threshold and down < model.down_threshold
+            if up >= model.signal_threshold and down < model.down_threshold
             else "no_signal"
         )
         prediction_id = hashlib.sha256(
@@ -448,7 +487,7 @@ class DailyPredictionService:
             "model_version": model.artifact_version,
             "up_probability": up,
             "down_probability": down,
-            "up_threshold": model.up_threshold,
+            "up_threshold": model.signal_threshold,
             "down_threshold": model.down_threshold,
             "signal_status": signal_status,
             "status": "predicted",
@@ -466,7 +505,7 @@ class DailyPredictionService:
             "feature_names": None, "features": None, "source_observations": None,
             "model_id": model.model_id, "model_version": model.artifact_version,
             "up_probability": np.nan, "down_probability": np.nan,
-            "up_threshold": model.up_threshold, "down_threshold": model.down_threshold,
+            "up_threshold": model.signal_threshold, "down_threshold": model.down_threshold,
             "signal_status": "error", "status": "error", "error": error, "created_at": utc_now(),
         }
 

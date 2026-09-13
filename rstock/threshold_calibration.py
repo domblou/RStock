@@ -80,6 +80,7 @@ class ThresholdCalibrationResult:
 class ControlledThresholdCalibrationResult:
     development_predictions: pd.DataFrame
     calibration: ThresholdCalibrationResult
+    calibrations_by_set: dict[str, ThresholdCalibrationResult]
     sampled_combinations: pd.DataFrame
     holdout_predictions: pd.DataFrame
     holdout_metrics: pd.DataFrame
@@ -340,6 +341,7 @@ def summarize_and_select_thresholds(
                 "Threshold": float(threshold),
                 "ReferenceThreshold": bool(np.isclose(threshold, 0.5)),
                 "Windows": windows,
+                "CalibrationSampleSize": int(group["Observations"].sum()),
                 "RequiredWindowsMeetingMinSignals": required_windows,
                 "WindowsMeetingMinSignals": windows_meeting,
                 "WindowCoverage": windows_meeting / windows,
@@ -407,6 +409,18 @@ def summarize_and_select_thresholds(
             "threshold": float(winner["Threshold"]),
             "total_signals": int(winner["TotalSignals"]),
             "windows_meeting_min_signals": int(winner["WindowsMeetingMinSignals"]),
+            "calibration_sample_size": int(winner["CalibrationSampleSize"]),
+            "calibration_metrics": {
+                "total_signals": int(winner["TotalSignals"]),
+                "window_coverage": float(winner["WindowCoverage"]),
+                "success_rate": float(winner["FavorableMoveFrequencyMedian"]),
+                "mean_return": float(winner["IntradayReturnMeanMedian"]),
+                "median_return": float(winner["IntradayReturnMedianMedian"]),
+                "mfe_mean": float(winner["MFEMeanMedian"]),
+                "mae_mean": float(winner["MAEMeanMedian"]),
+                "return_stability": float(winner["DirectionalReturnMeanStd"]),
+                "precision_stability": float(winner["PrecisionStd"]),
+            },
             "selection_order": THRESHOLD_SELECTION_ORDER,
         }
     return summary.sort_values(
@@ -451,6 +465,20 @@ def calibrate_thresholds(
         selected_thresholds=selected,
         baseline_comparison=_baseline_comparison(summary),
     )
+
+
+def calibrate_thresholds_by_set(
+    development_predictions: pd.DataFrame, config: RStockConfig
+) -> dict[str, ThresholdCalibrationResult]:
+    """Calibrate frozen thresholds independently for every model combination."""
+
+    _validate_predictions(development_predictions)
+    if "Set" not in development_predictions:
+        return {"__pooled__": calibrate_thresholds(development_predictions, config)}
+    return {
+        str(set_name): calibrate_thresholds(group.copy(), config)
+        for set_name, group in development_predictions.groupby("Set", sort=True)
+    }
 
 
 def generate_development_probabilities(
@@ -571,16 +599,37 @@ def apply_frozen_thresholds(
     return result
 
 
+def apply_frozen_thresholds_by_set(
+    predictions: pd.DataFrame,
+    selected_thresholds_by_set: Mapping[str, Mapping[str, Mapping[str, object]]],
+) -> pd.DataFrame:
+    """Apply each combination's already-selected thresholds without re-selection."""
+
+    if "Set" not in predictions:
+        raise ValueError("Threshold application predictions require Set")
+    frames = []
+    for set_name, group in predictions.groupby("Set", sort=True):
+        selected = selected_thresholds_by_set.get(str(set_name))
+        if selected is None:
+            raise ValueError(f"No frozen thresholds are available for {set_name}")
+        frames.append(apply_frozen_thresholds(group, selected))
+    return pd.concat(frames, ignore_index=True) if frames else predictions.copy()
+
+
 def evaluate_applied_thresholds(
     predictions: pd.DataFrame, config: RStockConfig
 ) -> pd.DataFrame:
     rows = []
-    for direction, group in predictions.groupby("Direction", sort=True):
+    group_names = [name for name in ("Set", "Observation", "Direction") if name in predictions]
+    for keys, group in predictions.groupby(group_names, sort=True):
+        values = keys if isinstance(keys, tuple) else (keys,)
+        identity = dict(zip(group_names, values, strict=True))
+        direction = str(identity["Direction"])
         threshold = float(group["Threshold"].iloc[0])
         metrics = _threshold_window_metrics(group, direction, threshold, config)
         rows.append(
             {
-                "Direction": direction,
+                **identity,
                 "Threshold": threshold,
                 "Observations": len(group),
                 **metrics,
@@ -632,8 +681,17 @@ def run_controlled_threshold_calibration(
     report_progress(progress_callback, "walk_forward", substage="completed", details={"phase_event": "completed"})
     report_progress(progress_callback, "metrics", substage="started", details={"phase_event": "started"})
     calibration = calibrate_thresholds(development_predictions, config)
+    calibrations_by_set = (
+        calibrate_thresholds_by_set(development_predictions, config)
+        if "Set" in development_predictions
+        else {"__pooled__": calibration}
+    )
+    selected_by_set = {
+        set_name: item.selected_thresholds
+        for set_name, item in calibrations_by_set.items()
+    }
     frozen_json = json.dumps(
-        calibration.selected_thresholds, sort_keys=True, separators=(",", ":")
+        selected_by_set, sort_keys=True, separators=(",", ":")
     )
     frozen_digest = hashlib.sha256(frozen_json.encode()).hexdigest()
 
@@ -649,8 +707,10 @@ def run_controlled_threshold_calibration(
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
         )
-        holdout_predictions = apply_frozen_thresholds(
-            raw_holdout, calibration.selected_thresholds
+        holdout_predictions = (
+            apply_frozen_thresholds_by_set(raw_holdout, selected_by_set)
+            if "Set" in raw_holdout
+            else apply_frozen_thresholds(raw_holdout, calibration.selected_thresholds)
         )
         holdout_metrics = evaluate_applied_thresholds(holdout_predictions, config)
         report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed"})
@@ -680,11 +740,13 @@ def run_controlled_threshold_calibration(
         "combination_workers": config.combination_workers,
         "sampled_combinations": len(sampled),
         "selected_thresholds": calibration.selected_thresholds,
+        "selected_thresholds_by_set": selected_by_set,
     }
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     return ControlledThresholdCalibrationResult(
         development_predictions=development_predictions,
         calibration=calibration,
+        calibrations_by_set=calibrations_by_set,
         sampled_combinations=sampled_output,
         holdout_predictions=holdout_predictions,
         holdout_metrics=holdout_metrics,
@@ -714,11 +776,23 @@ def write_threshold_calibration_results(
     result.calibration.baseline_comparison.to_csv(
         directory / "baseline_vs_calibrated_threshold.csv", index=False
     )
+    per_set_metrics = pd.concat(
+        [
+            calibration.metrics_by_threshold.assign(Set=set_name)
+            for set_name, calibration in result.calibrations_by_set.items()
+        ],
+        ignore_index=True,
+    )
+    per_set_metrics.to_csv(directory / "threshold_metrics_by_set.csv", index=False)
     result.sampled_combinations.to_csv(
         directory / "sampled_combinations.csv", index=False
     )
     (directory / "selected_thresholds.json").write_text(
         json.dumps(result.calibration.selected_thresholds, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "selected_thresholds_by_set.json").write_text(
+        json.dumps(result.run_configuration["selected_thresholds_by_set"], indent=2) + "\n",
         encoding="utf-8",
     )
     (directory / "run_configuration.json").write_text(

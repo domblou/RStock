@@ -103,6 +103,29 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
         json.dumps({"Up": {"threshold": 0.63}, "Down": {"threshold": 0.37}}),
         encoding="utf-8",
     )
+
+    (threshold_results / "selected_thresholds_by_set.json").write_text(
+        json.dumps({
+            "AAA<-BBB": {
+                "Up": {
+                    "status": "selected", "threshold": 0.63,
+                    "calibration_sample_size": 42,
+                    "calibration_metrics": {
+                        "total_signals": 18, "success_rate": 0.67,
+                        "mean_return": 0.012, "median_return": 0.01,
+                        "mfe_mean": 0.02, "mae_mean": -0.01,
+                        "return_stability": 0.03,
+                    },
+                },
+                "Down": {"status": "selected", "threshold": 0.37},
+            }
+        }),
+        encoding="utf-8",
+    )
+    pd.DataFrame([{
+        "Set": "AAA<-BBB", "Observation": "AAA", "Direction": "Up",
+        "Threshold": 0.63, "IntradayReturnMean": 0.009,
+    }]).to_csv(threshold_results / "holdout_metrics.csv", index=False)
     runs.transition(threshold_run, JobStatus.RUNNING)
     runs.transition(threshold_run, JobStatus.COMPLETED)
     repository = ProductionRepository(tmp_path)
@@ -130,6 +153,12 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
     assert first.down_xgboost_parameters["max_depth"] == 2
     assert first.up_threshold == 0.63
     assert first.down_threshold == 0.37
+    assert first.calibrated_signal_threshold == 0.63
+    assert first.signal_threshold == 0.63
+    assert first.calibration_source_run == threshold_run
+    assert first.calibration_sample_size == 42
+    assert first.calibration_metrics["total_signals"] == 18
+    assert first.holdout_signal_metrics["IntradayReturnMean"] == 0.009
     assert first.source_configuration["job_type"] == "walk_forward"
     assert first.training_metadata["universe_roles"] == {
         "primary_universe_id": "PRIMARY",
@@ -140,6 +169,16 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
     }
     assert first.development_metrics["ROCAUCMedian"] == 0.6
     assert first.holdout_metrics["FinalUpROCAUC"] == 0.57
+
+
+def test_model_signal_threshold_falls_back_to_its_global_prediction_threshold():
+    model = replace(
+        _model(),
+        source_configuration={"rstock_config": {"prediction_threshold": 0.71}},
+    )
+
+    assert model.calibrated_signal_threshold is None
+    assert model.signal_threshold == 0.71
 
 
 def test_training_publishes_two_new_full_history_artifacts(monkeypatch, tmp_path):
@@ -237,7 +276,12 @@ def test_market_update_uses_only_frozen_operational_symbols(monkeypatch, tmp_pat
 
 def test_daily_prediction_threshold_screening_and_realized_result_are_separate(monkeypatch, tmp_path):
     repository = ProductionRepository(tmp_path)
-    model = replace(_model(), status=ProductionModelStatus.ACTIVE, artifact_version=1)
+    model = replace(
+        _model(),
+        status=ProductionModelStatus.ACTIVE,
+        artifact_version=1,
+        calibrated_signal_threshold=0.85,
+    )
     repository.add(model)
     directory = repository.artifact_directory(model.model_id)
     directory.mkdir(parents=True)
@@ -276,7 +320,8 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
     signals = ProductionSignalService(repository).screen(predictions)
     assert len(predictions) == 1
     assert predictions.iloc[0]["up_probability"] == 0.8
-    assert predictions.iloc[0]["signal_status"] == "bullish_signal"
+    assert predictions.iloc[0]["signal_status"] == "no_signal"
+    assert predictions.iloc[0]["up_threshold"] == 0.85
     snapshot_fields = {
         "feature_names", "features", "source_observations",
         "up_probability", "down_probability", "model_id", "model_version",
@@ -303,7 +348,7 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
         "BBB_intraday_J-1": 0.03
     }
     assert json.loads(persisted_prediction["source_observations"])["BBB"][0]["close"] == 103.0
-    assert signals.iloc[0]["category"] == "bullish_signal"
+    assert signals.iloc[0]["category"] == "no_signal"
 
     prediction_date = pd.Timestamp(predictions.iloc[0]["prediction_date"])
     prices = pd.DataFrame(

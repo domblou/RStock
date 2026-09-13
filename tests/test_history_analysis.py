@@ -11,6 +11,7 @@ from rstock.application.history_analysis import (
     configuration_differences,
     filter_combinations,
     run_universe_summary,
+    predictor_prefilter_summary,
     selected_run_action,
 )
 
@@ -156,3 +157,29 @@ def test_run_universe_summary_supports_context_and_legacy_configurations():
         "context_universe_ids": (),
         "predictor_count": 2,
     }
+
+
+def test_predictor_prefilter_summary_is_compact_and_legacy_safe():
+    table = predictor_prefilter_summary({
+        "predictor_prefilter": [{
+            "target": "DIS",
+            "initial_candidates": 49,
+            "after_qualification": 18,
+            "after_top_n": 10,
+            "after_redundancy": 8,
+            "retained_predictors": ["A", "B", "C", "D", "E", "F", "G", "H"],
+            "combinations_before_filtering": 19649,
+            "combinations_tested": 92,
+        }]
+    })
+
+    assert table.iloc[0].to_dict() == {
+        "Cible": "DIS",
+        "Candidats initiaux": 49,
+        "Après qualification": 18,
+        "Après Top N": 10,
+        "Après redondance": 8,
+        "Retenus": 8,
+        "Combinaisons": "92 au lieu de 19649",
+    }
+    assert predictor_prefilter_summary({}).empty

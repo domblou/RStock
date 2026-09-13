@@ -14,7 +14,7 @@ import rstock.application.repository as repository_module
 from rstock.application.repository import RunRepository
 from rstock.application.runner import ProgressReporter, RunService
 from rstock.application.worker import SlotLease, execute_run
-from rstock.application.workflows import WorkflowRegistry, _prepared_experiment
+from rstock.application.workflows import WorkflowRegistry, _prepared_experiment, _walk_forward
 from rstock.config import DEFAULT_CONFIG
 from rstock.progress import ProgressEvent, check_cancellation
 
@@ -95,6 +95,127 @@ def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
     assert "CONTEXT_intraday_J-1" in prepared
     assert set(generated["V0"]) == {"AAA", "BBB"}
     assert "CONTEXT" in set(generated["V1"])
+
+
+def test_disabled_predictor_prefilter_keeps_the_existing_walk_forward_path(
+    monkeypatch, tmp_path
+):
+    generated = pd.DataFrame([{"V0": "AAA", "V1": "BBB"}])
+    result = SimpleNamespace(
+        aggregate_global=pd.DataFrame([{"Sets": 1}]),
+        qualification=pd.DataFrame([{"Eligible": True}]),
+        run_configuration={},
+    )
+    calls = []
+
+    def fake_prepared(spec, progress, cancellation):
+        calls.append("existing-preparation")
+        return pd.DataFrame(), generated, {}
+
+    monkeypatch.setattr("rstock.application.workflows._prepared_experiment", fake_prepared)
+    monkeypatch.setattr(
+        "rstock.application.workflows.select_predictors",
+        lambda *args, **kwargs: pytest.fail("disabled prefilter must not run"),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_walk_forward",
+        lambda *args, **kwargs: result,
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.write_walk_forward_results",
+        lambda *args, **kwargs: None,
+    )
+
+    summary = _walk_forward(_spec(tmp_path), tmp_path, None, None)
+
+    assert calls == ["existing-preparation"]
+    assert "predictor_prefilter" not in summary
+    assert "total_combinations" not in summary
+
+
+def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
+    monkeypatch, tmp_path
+):
+    index = pd.bdate_range("2026-01-01", periods=10)
+    prepared = pd.DataFrame(index=index)
+    for symbol, offset in (("A", 0.0), ("B", 10.0)):
+        for lag in range(1, 4):
+            prepared[f"{symbol}_intraday_J-{lag}"] = range(
+                lag, lag + len(index)
+            )
+            prepared[f"{symbol}_intraday_J-{lag}"] += offset
+    qualification = pd.DataFrame([
+        {
+            "Set": "T<-A", "Observation": "T", "Predictors": '["A"]',
+            "ROCAUCMedian": 0.65, "PctWindowsAboveRandom": 1.0,
+            "ROCAUCStd": 0.02, "ROCAUCWorst": 0.55, "Eligible": True,
+            "IneligibilityReasons": "[]",
+        },
+        {
+            "Set": "T<-B", "Observation": "T", "Predictors": '["B"]',
+            "ROCAUCMedian": 0.45, "PctWindowsAboveRandom": 0.25,
+            "ROCAUCStd": 0.20, "ROCAUCWorst": 0.30, "Eligible": False,
+            "IneligibilityReasons": '["median_auc"]',
+        },
+    ])
+    final_result = SimpleNamespace(
+        aggregate_global=pd.DataFrame([{"Sets": 1}]),
+        qualification=pd.DataFrame([{"Eligible": True}]),
+        run_configuration={},
+    )
+    evaluated_sets = []
+    evaluated_configs = []
+    evaluated_options = []
+
+    monkeypatch.setattr(
+        "rstock.application.workflows._prepared_inputs",
+        lambda *args: (prepared, ["T", "A", "B"], ["T"], {}),
+    )
+
+    def fake_evaluate(data, generated, config, **kwargs):
+        evaluated_sets.append(generated.copy())
+        evaluated_configs.append(config)
+        evaluated_options.append(kwargs)
+        if len(evaluated_sets) == 1:
+            return SimpleNamespace(qualification=qualification)
+        return final_result
+
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_walk_forward", fake_evaluate
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.write_walk_forward_results",
+        lambda *args, **kwargs: None,
+    )
+    spec = _spec(
+        tmp_path,
+        predictor_prefilter_enabled=True,
+        predictor_prefilter_top_n=1,
+        permutation_depth=2,
+        final_holdout_size=2,
+    )
+    spec = replace(
+        spec,
+        symbols=("T", "A", "B"),
+        target_symbols=("T",),
+        context_symbols=("A", "B"),
+    )
+
+    summary = _walk_forward(spec, tmp_path, None, None)
+
+    assert len(evaluated_sets) == 2
+    assert evaluated_sets[0]["V1"].tolist() == ["A", "B"]
+    assert evaluated_sets[1]["V1"].tolist() == ["A"]
+    assert evaluated_sets[1]["V2"].isna().all()
+    assert evaluated_configs[0].qualification_min_median_auc == (
+        spec.config.predictor_prefilter_min_median_auc
+    )
+    assert evaluated_options[0]["evaluate_holdout"] is False
+    assert "evaluate_holdout" not in evaluated_options[1]
+    assert summary["total_combinations"] == 1
+    assert summary["predictor_prefilter"][0]["retained_predictors"] == ["A"]
+    assert (tmp_path / "predictor_prefilter.csv").exists()
+    assert (tmp_path / "predictor_prefilter.json").exists()
 
 
 def test_status_transitions_and_duration_are_persisted(tmp_path):

@@ -69,6 +69,42 @@ def generate_symbol_sets(
     return pd.DataFrame(rows, columns=[f"V{i}" for i in range(width)])
 
 
+def generate_target_symbol_sets(
+    predictors_by_target: dict[str, tuple[str, ...]],
+    permutation_depth: int,
+    *,
+    max_sets: int = 100_000,
+) -> pd.DataFrame:
+    """Generate sets from an independently filtered predictor pool per target."""
+
+    if permutation_depth < 1:
+        raise ValueError("permutation_depth must be at least 1")
+    expected = sum(
+        sum(comb(len(predictors), depth) for depth in range(1, min(
+            permutation_depth, len(predictors)
+        ) + 1))
+        for predictors in predictors_by_target.values()
+    )
+    if expected > max_sets:
+        raise ValueError(
+            f"Generating {expected:,} symbol sets exceeds max_generated_sets={max_sets:,}"
+        )
+    width = permutation_depth + 1
+    rows: list[list[str | None]] = []
+    for depth in range(1, permutation_depth + 1):
+        for target, predictors in predictors_by_target.items():
+            unique = tuple(dict.fromkeys(predictors))
+            if target in unique:
+                raise ValueError("A target cannot also be one of its predictors")
+            for selected in combinations(unique, depth):
+                rows.append([
+                    target,
+                    *selected,
+                    *([None] * (width - depth - 1)),
+                ])
+    return pd.DataFrame(rows, columns=[f"V{i}" for i in range(width)])
+
+
 def symbol_set_id(row: pd.Series, symbol_columns: list[str] | None = None) -> str:
     """Build an unambiguous JSON identifier that supports punctuated tickers."""
 

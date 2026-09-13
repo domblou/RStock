@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from rstock.calibration import run_controlled_calibration, write_calibration_results
-from rstock.combinations import generate_symbol_sets
+from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
 from rstock.progress import (
@@ -22,6 +22,7 @@ from rstock.progress import (
     check_cancellation,
     report_progress,
 )
+from rstock.predictor_prefilter import PREFILTER_SCORE_FORMULA, select_predictors
 from rstock.threshold_calibration import (
     run_controlled_threshold_calibration,
     write_threshold_calibration_results,
@@ -74,11 +75,11 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _prepared_experiment(
+def _prepared_inputs(
     spec: ExperimentSpec,
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
+) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
     _phase(progress_callback, "data_preparation", "started")
     downloaded, calendars = MarketDataService().load(
         spec,
@@ -95,12 +96,23 @@ def _prepared_experiment(
         spec.config.intraday_down_threshold,
     )
     _phase(progress_callback, "data_preparation", "completed", symbols=len(downloaded.symbols))
-    _phase(progress_callback, "combination_generation", "started")
     available = set(downloaded.symbols)
     predictor_symbols = [
         symbol for symbol in spec.predictor_symbols if symbol in available
     ]
     target_symbols = [symbol for symbol in spec.target_symbols if symbol in available]
+    return prepared, predictor_symbols, target_symbols, calendars
+
+
+def _prepared_experiment(
+    spec: ExperimentSpec,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
+    prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
+        spec, progress_callback, cancellation_check
+    )
+    _phase(progress_callback, "combination_generation", "started")
     generated = generate_symbol_sets(
         predictor_symbols,
         spec.config.permutation_depth,
@@ -117,9 +129,62 @@ def _walk_forward(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
-    prepared, generated, calendars = _prepared_experiment(
-        spec, progress_callback, cancellation_check
-    )
+    prefilter = None
+    if spec.config.predictor_prefilter_enabled:
+        prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
+            spec, progress_callback, cancellation_check
+        )
+        _phase(progress_callback, "combination_generation", "started")
+        univariate_sets = generate_symbol_sets(
+            predictor_symbols,
+            1,
+            target_symbols=target_symbols,
+            max_sets=spec.config.max_generated_sets,
+        )
+        prefilter_config = replace(
+            spec.config,
+            qualification_min_median_auc=spec.config.predictor_prefilter_min_median_auc,
+            qualification_min_pct_windows_above_random=(
+                spec.config.predictor_prefilter_min_pct_above_random
+            ),
+            qualification_min_worst_window_auc=(
+                spec.config.predictor_prefilter_min_worst_auc
+            ),
+            qualification_max_auc_std=spec.config.predictor_prefilter_max_auc_std,
+        )
+        univariate = evaluate_walk_forward(
+            prepared,
+            univariate_sets,
+            prefilter_config,
+            market_calendars=calendars,
+            evaluate_holdout=False,
+            cancellation_check=cancellation_check,
+        )
+        development = prepared.iloc[:-spec.config.final_holdout_size]
+        prefilter = select_predictors(
+            univariate.qualification,
+            development,
+            targets=target_symbols,
+            candidate_symbols=predictor_symbols,
+            config=spec.config,
+        )
+        generated = generate_target_symbol_sets(
+            prefilter.predictors_by_target,
+            spec.config.permutation_depth,
+            max_sets=spec.config.max_generated_sets,
+        )
+        if generated.empty:
+            raise ValueError("Predictor prefilter retained no testable combinations")
+        _phase(
+            progress_callback,
+            "combination_generation",
+            "completed",
+            combinations=len(generated),
+        )
+    else:
+        prepared, generated, calendars = _prepared_experiment(
+            spec, progress_callback, cancellation_check
+        )
     result = evaluate_walk_forward(
         prepared,
         generated,
@@ -128,15 +193,48 @@ def _walk_forward(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
+    if prefilter is not None:
+        result.run_configuration["predictor_prefilter"] = {
+            "enabled": True,
+            "score_formula": PREFILTER_SCORE_FORMULA,
+            "top_n": spec.config.predictor_prefilter_top_n,
+            "min_median_auc": spec.config.predictor_prefilter_min_median_auc,
+            "min_pct_above_random": (
+                spec.config.predictor_prefilter_min_pct_above_random
+            ),
+            "min_worst_auc": spec.config.predictor_prefilter_min_worst_auc,
+            "max_auc_std": spec.config.predictor_prefilter_max_auc_std,
+            "correlation_threshold": (
+                spec.config.predictor_prefilter_correlation_threshold
+            ),
+            "targets": prefilter.diagnostics,
+        }
     _phase(progress_callback, "result_writing", "started")
     write_walk_forward_results(result, output)
+    if prefilter is not None:
+        prefilter.metrics.to_csv(output / "predictor_prefilter.csv", index=False)
+        (output / "predictor_prefilter.json").write_text(
+            json.dumps(
+                {
+                    "score_formula": PREFILTER_SCORE_FORMULA,
+                    "targets": prefilter.diagnostics,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
     _phase(progress_callback, "result_writing", "completed")
-    return {
+    summary = {
         "job_type": spec.job_type.value,
         "metrics": _json_value(result.aggregate_global.iloc[0].to_dict()),
         "eligible_combinations": int(result.qualification["Eligible"].sum()),
         "result_files": sorted(path.name for path in output.iterdir()),
     }
+    if prefilter is not None:
+        summary["total_combinations"] = len(generated)
+        summary["predictor_prefilter"] = _json_value(prefilter.diagnostics)
+    return summary
 
 
 def _xgboost_calibration(

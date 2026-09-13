@@ -12,7 +12,9 @@ from rstock.threshold_calibration import (
     EXPERIMENTAL_XGBOOST_PARAMETERS,
     adaptive_threshold_grid,
     apply_frozen_thresholds,
+    apply_frozen_thresholds_by_set,
     calibrate_thresholds,
+    calibrate_thresholds_by_set,
     evaluate_threshold_grid,
     generate_development_probabilities,
     probability_distribution,
@@ -169,6 +171,53 @@ def test_calibration_compares_reference_and_frozen_threshold_application():
     )
     pd.testing.assert_series_equal(applied["Threshold"], altered_applied["Threshold"])
     pd.testing.assert_series_equal(applied["Prediction"], altered_applied["Prediction"])
+
+
+def test_calibration_is_independent_per_model_set_and_keeps_signal_diagnostics():
+    predictions = _predictions()
+    first = predictions.copy()
+    first["Set"] = "AAA<-BBB"
+    second = predictions.copy()
+    second["Set"] = "CCC<-DDD"
+    second["Probability"] = 1.0 - second["Probability"]
+
+    calibrated = calibrate_thresholds_by_set(
+        pd.concat([first, second], ignore_index=True), _config()
+    )
+
+    assert set(calibrated) == {"AAA<-BBB", "CCC<-DDD"}
+    selected = calibrated["AAA<-BBB"].selected_thresholds["Up"]
+    assert selected["status"] == "selected"
+    assert selected["calibration_sample_size"] == 8
+    assert {
+        "total_signals", "success_rate", "mean_return", "median_return",
+        "mfe_mean", "mae_mean", "return_stability", "precision_stability",
+    } <= set(selected["calibration_metrics"])
+
+
+def test_holdout_application_uses_each_set_frozen_threshold_without_reselection():
+    predictions = _predictions()
+    first = predictions.copy()
+    first["Set"] = "AAA<-BBB"
+    second = predictions.copy()
+    second["Set"] = "CCC<-DDD"
+    frozen = {
+        "AAA<-BBB": {
+            "Up": {"status": "selected", "threshold": 0.50},
+            "Down": {"status": "selected", "threshold": 0.50},
+        },
+        "CCC<-DDD": {
+            "Up": {"status": "selected", "threshold": 0.90},
+            "Down": {"status": "selected", "threshold": 0.90},
+        },
+    }
+
+    applied = apply_frozen_thresholds_by_set(
+        pd.concat([first, second], ignore_index=True), frozen
+    )
+
+    assert set(applied[applied["Set"] == "AAA<-BBB"]["Threshold"]) == {0.5}
+    assert set(applied[applied["Set"] == "CCC<-DDD"]["Threshold"]) == {0.9}
 
 
 def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch):

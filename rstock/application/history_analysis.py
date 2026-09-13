@@ -42,6 +42,30 @@ def run_universe_summary(configuration: Mapping[str, Any]) -> dict[str, object]:
     }
 
 
+def predictor_prefilter_summary(summary: Mapping[str, Any]) -> pd.DataFrame:
+    """Return a compact, legacy-safe diagnostic table for predictor filtering."""
+
+    records = summary.get("predictor_prefilter", ())
+    if not isinstance(records, list):
+        return pd.DataFrame()
+    return pd.DataFrame([
+        {
+            "Cible": item.get("target", "—"),
+            "Candidats initiaux": item.get("initial_candidates", 0),
+            "Après qualification": item.get("after_qualification", 0),
+            "Après Top N": item.get("after_top_n", 0),
+            "Après redondance": item.get("after_redundancy", 0),
+            "Retenus": len(item.get("retained_predictors", ())),
+            "Combinaisons": (
+                f"{item.get('combinations_tested', 0)} au lieu de "
+                f"{item.get('combinations_before_filtering', 0)}"
+            ),
+        }
+        for item in records
+        if isinstance(item, Mapping)
+    ])
+
+
 def selected_run_action(run_ids: Sequence[str]) -> str | None:
     """Return the only valid analytical route for a history-grid selection."""
 

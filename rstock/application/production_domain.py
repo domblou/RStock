@@ -43,6 +43,11 @@ class ProductionModel:
     xgboost_seed: int = 1234
     xgboost_threads: int = 2
     source_configuration: dict[str, Any] = field(default_factory=dict)
+    calibrated_signal_threshold: float | None = None
+    calibration_source_run: str | None = None
+    calibration_metrics: dict[str, Any] = field(default_factory=dict)
+    calibration_sample_size: int | None = None
+    holdout_signal_metrics: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.target or not self.predictors:
@@ -55,6 +60,8 @@ class ProductionModel:
             raise ValueError("Target thresholds cannot be negative")
         if not 0 <= self.up_threshold <= 1 or not 0 <= self.down_threshold <= 1:
             raise ValueError("Decision thresholds must be between zero and one")
+        if self.calibrated_signal_threshold is not None and not 0 <= self.calibrated_signal_threshold <= 1:
+            raise ValueError("Calibrated signal threshold must be between zero and one")
         if not self.xgboost_parameters:
             raise ValueError("XGBoost parameters are required")
         if self.xgboost_threads < 1:
@@ -63,6 +70,15 @@ class ProductionModel:
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys((self.target, *self.predictors)))
+
+    @property
+    def signal_threshold(self) -> float:
+        """Use the frozen calibrated Up threshold, else the model's global fallback."""
+
+        if self.calibrated_signal_threshold is not None:
+            return self.calibrated_signal_threshold
+        source = self.source_configuration.get("rstock_config", {})
+        return float(source.get("prediction_threshold", self.up_threshold))
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -83,6 +99,11 @@ class ProductionModel:
         restored.setdefault("xgboost_seed", 1234)
         restored.setdefault("xgboost_threads", 2)
         restored.setdefault("source_configuration", {})
+        restored.setdefault("calibrated_signal_threshold", None)
+        restored.setdefault("calibration_source_run", None)
+        restored.setdefault("calibration_metrics", {})
+        restored.setdefault("calibration_sample_size", None)
+        restored.setdefault("holdout_signal_metrics", {})
         return cls(**restored)
 
 

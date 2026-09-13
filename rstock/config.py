@@ -68,6 +68,16 @@ class RStockConfig:
     qualification_max_auc_std: float = 0.10
     final_confirmation_min_auc: float = 0.50
 
+    # Optional development-only predictor prefilter applied before depth 2/3
+    # combinations are materialized.
+    predictor_prefilter_enabled: bool = False
+    predictor_prefilter_top_n: int = 10
+    predictor_prefilter_min_median_auc: float = 0.50
+    predictor_prefilter_min_pct_above_random: float = 0.50
+    predictor_prefilter_min_worst_auc: float = 0.40
+    predictor_prefilter_max_auc_std: float = 0.15
+    predictor_prefilter_correlation_threshold: float = 0.90
+
     # Decision-threshold calibration is performed only on development predictions.
     threshold_calibration_min_signals_per_window: int = 20
     threshold_calibration_min_window_fraction: float = 1.0

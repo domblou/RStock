@@ -184,6 +184,21 @@ python -m streamlit run rstock/application/streamlit_app.py
 Les jobs walk-forward, calibration XGBoost et calibration des seuils sont
 disponibles. Une combinaison qualifiée peut être promue depuis l'historique,
 entraînée comme nouvel artefact production, puis activée dans la page `Modèles`.
+La calibration des seuils utilise uniquement les probabilités hors entraînement
+des fenêtres walk-forward. Elle sélectionne un seuil haussier par combinaison,
+en imposant un nombre minimal de signaux et une couverture temporelle suffisante;
+le holdout final mesure ensuite ce seuil figé sans participer à son choix. Lors
+de la promotion, le seuil calibré et ses métriques sont conservés avec le modèle;
+sans calibration associée, le seuil global `prediction_threshold` reste utilisé.
+Le walk-forward peut activer un pré-filtrage univarié des prédicteurs avant les
+combinaisons de profondeur 2 et 3. Il applique des seuils de performance et de
+stabilité, un Top N par cible, puis retire les séries de features dont la
+corrélation absolue dépasse le seuil configuré. Le classement utilise le score
+explicable `AUC médiane + part des fenêtres > 0,50 - dispersion - pénalité de
+Worst AUC`. Les minima de fenêtres valides et d'observations positives restent
+ceux de la qualification générale. Les diagnostics complets sont
+publiés dans `predictor_prefilter.csv` et `predictor_prefilter.json`. Lorsque
+l'option est désactivée, la génération historique des combinaisons est conservée.
 Dans `Expériences`, l'univers principal comme les univers de contexte peuvent
 être utilisés au complet ou échantillonnés selon la même méthode : `Top N` ou
 échantillon reproductible avec seed. Les symboles de contexte restent uniquement
