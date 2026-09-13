@@ -382,7 +382,7 @@ Je placerais ton projet approximativement ici :
 ✅ Sélection V1 d'univers de titres (manuel, sauvegardé, échantillon reproductible)
 Sélecteur de titres pour créer des univers
 ⬜ Bassins différents selon profondeur
-⬜ Comparaison conviviale des expériences
+✅ Comparaison conviviale des expériences
 ✅ Promotion d'une expérience/configuration
 ✅ Registre des modèles/configurations
 ✅ Entraînement complet production

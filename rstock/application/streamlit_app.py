@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -18,6 +19,16 @@ from rstock.application.history_ui import (
     history_row,
     paginate_runs,
     qualified_combinations_table,
+)
+from rstock.application.history_analysis import (
+    RunAnalytics,
+    analyze_run,
+    comparison_table,
+    comparison_chart_frames,
+    configuration_differences,
+    filter_combinations,
+    load_walk_forward_artifacts,
+    selected_run_action,
 )
 from rstock.application.runner import running_duration
 from rstock.application.surveillance import (
@@ -429,7 +440,7 @@ def _render_walk_forward_promotion(
     selection = st.dataframe(
         combinations,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         on_select="rerun",
         selection_mode="single-row",
         key=f"qualified-combinations-{run_id}",
@@ -506,6 +517,308 @@ def _render_history_detail(
     tabs[3].code("\n".join(detail["log_tail"]) or "Aucun message")
 
 
+def _history_navigation(mode: str, run_ids: list[str]) -> None:
+    st.session_state["history-navigation"] = {"mode": mode, "run_ids": run_ids}
+    st.rerun()
+
+
+def _clear_history_navigation() -> None:
+    st.session_state.pop("history-navigation", None)
+    st.rerun()
+
+
+def _load_run_analytics(
+    run_id: str, status: dict[str, object], detail: dict[str, object]
+) -> RunAnalytics:
+    qualification, holdout = load_walk_forward_artifacts(
+        st.session_state.lab_config.project_root, run_id
+    )
+    return analyze_run(status, detail, qualification, holdout)
+
+
+def _format_metric(value: object, *, percent: bool = False) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):.2%}" if percent else f"{float(value):.2f}"
+
+
+def _promote_combination_action(run_id: str, combination: pd.Series) -> None:
+    st.caption(f"Sélection : {combination['Cible']} ← {combination['Predictors']}")
+    model_service = ModelService(st.session_state.lab_config.project_root)
+    existing = already_promoted(
+        walk_forward_run=run_id,
+        set_name=str(combination["Combinaison"]),
+        models=model_service.models(),
+    )
+    if existing is not None:
+        st.info(f"Déjà promue — statut : {existing.status.value}.")
+        return
+    if st.button(
+        "Promouvoir comme candidat production",
+        type="primary",
+        key=f"promote-analysis-{run_id}-{combination['Combinaison']}",
+    ):
+        try:
+            model, created = model_service.promote(run_id, str(combination["Combinaison"]))
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            st.error(f"Promotion impossible : {error}")
+        else:
+            message = (
+                f"Candidat production créé : {model.target} ← {' + '.join(model.predictors)}"
+                if created else f"Combinaison déjà promue — statut : {model.status.value}."
+            )
+            (st.success if created else st.info)(message)
+
+
+def _selected_combination(
+    run_id: str, table: pd.DataFrame,
+) -> pd.Series | None:
+    if table.empty:
+        return None
+    event = st.dataframe(
+        table.drop(columns=["Eligible", "Holdout confirmé"], errors="ignore"),
+        hide_index=True, width="stretch",
+        on_select="rerun", selection_mode="single-row", key=f"analysis-combinations-{run_id}",
+    )
+    selected_rows = _selected_rows(event)
+    key = f"analysis-selected-combination-{run_id}"
+    if selected_rows:
+        st.session_state[key] = str(table.iloc[selected_rows[0]]["Combinaison"])
+    selected = st.session_state.get(key)
+    matching = table[table["Combinaison"] == selected]
+    return None if matching.empty else matching.iloc[0]
+
+
+def _render_combination_filters(analytics: RunAnalytics) -> pd.DataFrame:
+    combinations = analytics.combinations
+    targets = ["Toutes", *sorted(combinations["Cible"].dropna().unique())]
+    columns = st.columns(4)
+    target = columns[0].selectbox("Cible", targets, key=f"analysis-target-{analytics.run_id}")
+    depth = columns[1].selectbox(
+        "Profondeur", ["Toutes", str(analytics.depth)], key=f"analysis-depth-{analytics.run_id}"
+    )
+    min_dev = columns[2].number_input(
+        "AUC dev min", min_value=0.0, max_value=1.0, value=0.0,
+        key=f"analysis-dev-{analytics.run_id}",
+    )
+    min_holdout = columns[3].number_input(
+        "AUC holdout min", min_value=0.0, max_value=1.0, value=0.0,
+        key=f"analysis-holdout-{analytics.run_id}",
+    )
+    columns = st.columns(4)
+    min_worst = columns[0].number_input(
+        "Worst AUC min", min_value=0.0, max_value=1.0, value=0.0,
+        key=f"analysis-worst-{analytics.run_id}",
+    )
+    max_dispersion = columns[1].number_input(
+        "Dispersion max", min_value=0.0, max_value=1.0, value=1.0,
+        key=f"analysis-dispersion-{analytics.run_id}",
+    )
+    min_positive = columns[2].number_input(
+        "Observations positives min", min_value=0, value=0,
+        key=f"analysis-positive-{analytics.run_id}",
+    )
+    confirmed = columns[3].checkbox(
+        "Holdout confirmé seulement", key=f"analysis-confirmed-{analytics.run_id}"
+    )
+    return filter_combinations(
+        combinations, target=target, depth=depth, min_dev_auc=float(min_dev),
+        min_holdout_auc=float(min_holdout), min_worst_auc=float(min_worst),
+        max_dispersion=float(max_dispersion), min_positive_observations=int(min_positive),
+        confirmed_only=confirmed,
+    )
+
+
+def _render_run_detail_view(
+    service: ExperimentService, run_id: str,
+) -> None:
+    detail = service.run(run_id)
+    status = detail["status"]
+    if status["job_type"] != JobType.WALK_FORWARD.value:
+        st.caption("Historique > Détail du run")
+        if st.button("← Retour à Historique"):
+            _clear_history_navigation()
+        _render_history_detail(
+            run_id, status=status, detail=detail,
+            context=history_row(status, detail, {}).context,
+            summary_text=history_row(status, detail, {}).summary,
+        )
+        return
+    analytics = _load_run_analytics(run_id, status, detail)
+    st.caption("Historique > Détail du run")
+    if st.button("← Retour à Historique", key="history-back-detail"):
+        _clear_history_navigation()
+    st.title(f"Walk-forward — {len(analytics.symbols)} symboles — profondeur {analytics.depth}")
+    st.caption(
+        f"{history_row(status, detail, {}).date_time} · {history_row(status, detail, {}).duration} · "
+        f"Statut : {analytics.status}"
+    )
+    metrics = st.columns(6)
+    metrics[0].metric("Combinaisons testées", analytics.tested_count if analytics.tested_count is not None else "—")
+    metrics[1].metric("Qualifiées", analytics.qualified_count)
+    metrics[2].metric("Confirmées holdout", analytics.confirmed_count)
+    metrics[3].metric("AUC dev médiane", _format_metric(analytics.dev_auc_median))
+    metrics[4].metric("AUC holdout médiane", _format_metric(analytics.holdout_auc_median))
+    metrics[5].metric("Fenêtres (médiane)", _format_metric(
+        pd.to_numeric(analytics.combinations.get("Fenêtres valides"), errors="coerce").median()
+        if not analytics.combinations.empty else None
+    ))
+    tabs = st.tabs(["Résumé", "Analyse", "Combinaisons", "Validation", "Technique"])
+    with tabs[0]:
+        rate_columns = st.columns(2)
+        rate_columns[0].metric("Taux de qualification", _format_metric(analytics.qualification_rate, percent=True))
+        rate_columns[1].metric("Taux de confirmation holdout", _format_metric(analytics.confirmation_rate, percent=True))
+        if analytics.combinations.empty:
+            st.info("Les artefacts analytiques ne sont pas disponibles pour ce run historique.")
+        else:
+            chart = analytics.combinations[["AUC dev", "AUC holdout"]].dropna(how="all")
+            if not chart.empty:
+                st.bar_chart(chart)
+            scatter = analytics.combinations[["AUC dev", "AUC holdout"]].dropna()
+            if not scatter.empty:
+                st.caption("AUC développement vs holdout — une ligne par combinaison")
+                st.scatter_chart(scatter, x="AUC dev", y="AUC holdout")
+    with tabs[1]:
+        if analytics.combinations.empty:
+            st.caption("Aucune métrique de stabilité publiée pour ce run.")
+        else:
+            st.bar_chart(analytics.combinations[["Worst AUC", "Dispersion", "Delta dev→holdout"]])
+    with tabs[2]:
+        st.caption(f"{analytics.qualified_count} combinaisons qualifiées")
+        filtered = _render_combination_filters(analytics)
+        st.caption(f"{len(filtered)} correspondent aux filtres")
+        selected = _selected_combination(run_id, filtered)
+        if selected is not None:
+            with st.container(border=True):
+                st.subheader(f"{selected['Cible']} ← {selected['Predictors']}")
+                details_columns = st.columns(4)
+                for column, name in zip(
+                    details_columns,
+                    ("AUC dev", "AUC holdout", "Delta dev→holdout", "Worst AUC"),
+                    strict=True,
+                ):
+                    column.metric(name, _format_metric(selected[name]))
+                _promote_combination_action(run_id, selected)
+    with tabs[3]:
+        selected_name = st.session_state.get(f"analysis-selected-combination-{run_id}")
+        selected = analytics.combinations[analytics.combinations["Combinaison"] == selected_name]
+        if selected.empty:
+            st.caption("Sélectionnez une combinaison dans l’onglet Combinaisons.")
+        else:
+            row = selected.iloc[0]
+            validation = pd.DataFrame([
+                {"Phase": "Développement", "Fenêtres": row["Fenêtres valides"], "AUC médiane": row["AUC dev"], "AUC min": row["Worst AUC"], "Dispersion": row["Dispersion"], "Verdict": "Qualifiée développement" if row["Eligible"] else "Non qualifiée"},
+                {"Phase": "Holdout final", "Fenêtres": "—", "AUC médiane": row["AUC holdout"], "AUC min": "—", "Dispersion": "—", "Verdict": "Holdout confirmé" if row["Holdout confirmé"] else "Échec de confirmation holdout"},
+            ])
+            st.dataframe(validation, hide_index=True, width="stretch")
+    with tabs[4]:
+        st.caption(f"ID technique : {run_id}")
+        technical = st.tabs(["Configuration", "Fichiers", "Logs"])
+        technical[0].json(detail["configuration"])
+        technical[1].write(detail["files"] or "Aucun résultat publié")
+        technical[2].code("\n".join(detail["log_tail"]) or "Aucun message")
+
+
+def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) -> None:
+    details = [service.run(run_id) for run_id in run_ids]
+    analytics = [_load_run_analytics(run_id, item["status"], item) for run_id, item in zip(run_ids, details, strict=True)]
+    labels = {
+        item.run_id: history_row(detail["status"], detail, {}).date_time
+        for item, detail in zip(analytics, details, strict=True)
+    }
+    if len(set(labels.values())) != len(labels):
+        labels = {key: f"{value} · {key[-4:]}" for key, value in labels.items()}
+    st.caption("Historique > Comparaison de runs")
+    if st.button("← Retour à Historique", key="history-back-comparison"):
+        _clear_history_navigation()
+    st.title("Comparaison de runs — Walk-forward")
+    cards = st.columns(len(analytics))
+    for column, analysis in zip(cards, analytics, strict=True):
+        column.markdown(
+            f"**{labels[analysis.run_id]}**\n\n{len(analysis.symbols)} symboles · profondeur {analysis.depth}\n\n{analysis.status}"
+        )
+    summary = comparison_table(analytics, labels)
+    tabs = st.tabs(["Synthèse", "Métriques", "Combinaisons", "Validation", "Technique"])
+    with tabs[0]:
+        best_holdout = max(
+            (item for item in analytics if item.holdout_auc_median is not None),
+            key=lambda item: item.holdout_auc_median, default=None,
+        )
+        fastest = min(
+            (item for item in analytics if item.duration_seconds is not None),
+            key=lambda item: item.duration_seconds, default=None,
+        )
+        stable_delta = min(
+            (item for item in analytics if item.delta_median is not None),
+            key=lambda item: abs(item.delta_median), default=None,
+        )
+        kpis = st.columns(4)
+        kpis[0].metric("Meilleur AUC holdout médian", _format_metric(None if best_holdout is None else best_holdout.holdout_auc_median))
+        kpis[1].metric("Combinaisons qualifiées max", max(item.qualified_count for item in analytics))
+        kpis[2].metric("Run le plus rapide", "—" if fastest is None else history_row(next(detail["status"] for detail in details if detail["status"]["run_id"] == fastest.run_id), next(detail for detail in details if detail["status"]["run_id"] == fastest.run_id), {}).duration)
+        kpis[3].metric("Delta dev→holdout le plus stable", _format_metric(None if stable_delta is None else stable_delta.delta_median))
+        st.dataframe(summary, hide_index=True, width="stretch")
+    with tabs[1]:
+        quality, durations = comparison_chart_frames(analytics, labels)
+        st.subheader("Qualité prédictive")
+        quality_long = quality.melt(
+            id_vars=["Run", "Date / heure"],
+            value_vars=["AUC dev médiane", "AUC holdout médiane"],
+            var_name="Métrique", value_name="AUC",
+        ).dropna(subset=["AUC"])
+        if quality_long.empty:
+            st.caption("Aucune AUC publiée pour les runs sélectionnés.")
+        else:
+            quality_chart = alt.Chart(quality_long).mark_bar().encode(
+                x=alt.X("Run:N", title=None),
+                xOffset="Métrique:N",
+                y=alt.Y("AUC:Q", title="AUC", scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("Métrique:N", title=None),
+                tooltip=["Run:N", "Métrique:N", alt.Tooltip("AUC:Q", format=".3f"), "Date / heure:N"],
+            )
+            st.altair_chart(quality_chart, width="stretch")
+        st.dataframe(
+            quality[["Run", "Delta dev→holdout", "Date / heure"]],
+            hide_index=True, width="stretch",
+            column_config={"Delta dev→holdout": st.column_config.NumberColumn(format="%.3f")},
+        )
+        st.subheader("Durée d’exécution")
+        duration_chart_data = durations.dropna(subset=["Durée (s)"])
+        if duration_chart_data.empty:
+            st.caption("Aucune durée publiée pour les runs sélectionnés.")
+        else:
+            duration_chart = alt.Chart(duration_chart_data).mark_bar().encode(
+                y=alt.Y("Run:N", title=None, sort="-x"),
+                x=alt.X("Durée (s):Q", title="Durée (secondes)"),
+                tooltip=["Run:N", "Durée:N", "Date / heure:N"],
+            )
+            st.altair_chart(duration_chart, width="stretch")
+    with tabs[2]:
+        for analysis in analytics:
+            st.subheader(labels[analysis.run_id])
+            top = analysis.combinations[analysis.combinations["Eligible"]].head(10)
+            if top.empty:
+                st.caption("Aucune combinaison qualifiée disponible.")
+            else:
+                st.dataframe(top.drop(columns=["Eligible", "Holdout confirmé"]), hide_index=True, width="stretch")
+    with tabs[3]:
+        validation = summary[summary["Indicateur"].isin(["% qualifiées", "% confirmées", "Delta dev→holdout", "Combinaisons qualifiées", "Confirmées holdout"])]
+        st.dataframe(validation, hide_index=True, width="stretch")
+    with tabs[4]:
+        differences = configuration_differences(
+            [detail["configuration"] for detail in details],
+            [labels[analysis.run_id] for analysis in analytics],
+        )
+        if differences.empty:
+            st.caption("Aucun paramètre expérimental suivi ne diffère entre ces runs.")
+        else:
+            st.subheader("Paramètres différents")
+            st.dataframe(differences, hide_index=True, width="stretch")
+        for detail, analysis in zip(details, analytics, strict=True):
+            with st.expander(labels[analysis.run_id]):
+                st.json(detail["configuration"])
+
+
 def _history_runs_panel(
     service: ExperimentService,
     *,
@@ -535,30 +848,40 @@ def _history_runs_panel(
     selection = st.dataframe(
         pd.DataFrame([row.display() for row in rows]),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="multi-row",
         key=f"{key_prefix}-grid",
     )
     selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
-    selected_key = f"{key_prefix}-selected-run"
+    selected_key = f"{key_prefix}-selected-runs"
     if selected_rows:
-        st.session_state[selected_key] = rows[selected_rows[0]].run_id
-    selected = st.session_state.get(selected_key)
+        st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]
+    selected = st.session_state.get(selected_key, [])
+    if isinstance(selected, str):
+        selected = [selected]
     filtered_ids = {str(run["run_id"]) for run in filtered}
-    if selected not in filtered_ids:
-        st.session_state.pop(selected_key, None)
+    selected = [run_id for run_id in selected if run_id in filtered_ids]
+    st.session_state[selected_key] = selected
+    if not selected:
+        st.caption("Sélectionnez un run pour l’ouvrir, ou de 2 à 4 runs pour les comparer.")
         return
-    selected_status = next(run for run in filtered if str(run["run_id"]) == selected)
-    selected_detail = service.run(str(selected))
-    selected_row = history_row(selected_status, selected_detail, models)
-    _render_history_detail(
-        str(selected),
-        status=selected_status,
-        detail=selected_detail,
-        context=selected_row.context,
-        summary_text=selected_row.summary,
-    )
+    action = selected_run_action(selected)
+    if action == "detail":
+        if st.button("Ouvrir le run", type="primary", key=f"open-history-{key_prefix}"):
+            _history_navigation("detail", selected)
+        return
+    if action == "comparison":
+        selected_types = {
+            str(next(run for run in filtered if str(run["run_id"]) == run_id)["job_type"])
+            for run_id in selected
+        }
+        if selected_types != {JobType.WALK_FORWARD.value}:
+            st.caption("La comparaison analytique est disponible pour des runs walk-forward uniquement.")
+        elif st.button("Comparer les runs", type="primary", key=f"compare-history-{key_prefix}"):
+            _history_navigation("comparison", selected)
+        return
+    st.warning("Sélectionnez au maximum 4 runs pour une comparaison.")
 
 
 def _experiments_page() -> None:
@@ -763,7 +1086,7 @@ def _universes_page() -> None:
         for record in records
     ])
     event = st.dataframe(
-        table, hide_index=True, use_container_width=True,
+        table, hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key="saved-universes-grid",
     )
     selected = _selected_rows(event)
@@ -819,7 +1142,7 @@ def _render_predictions_tab(predictions: pd.DataFrame) -> None:
         st.info("Aucune prédiction disponible.")
         return
     event = st.dataframe(
-        view.table, hide_index=True, use_container_width=True,
+        view.table, hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key="surveillance-predictions",
     )
     technical = _technical_record(view, _selected_rows(event))
@@ -835,7 +1158,7 @@ def _render_signals_tab(signals: pd.DataFrame, models: ModelService) -> None:
         st.info("Aucun signal haussier aujourd’hui.")
     else:
         event = st.dataframe(
-            view.signals.table, hide_index=True, use_container_width=True,
+            view.signals.table, hide_index=True, width="stretch",
             on_select="rerun", selection_mode="single-row", key="surveillance-signals",
         )
         selected_signal = _technical_record(view.signals, _selected_rows(event))
@@ -846,7 +1169,7 @@ def _render_signals_tab(signals: pd.DataFrame, models: ModelService) -> None:
             st.caption("Aucune prédiction sans signal.")
         else:
             event = st.dataframe(
-                view.no_signal.table, hide_index=True, use_container_width=True,
+                view.no_signal.table, hide_index=True, width="stretch",
                 on_select="rerun", selection_mode="single-row", key="surveillance-no-signals",
             )
             no_signal_selection = _selected_rows(event)
@@ -920,7 +1243,7 @@ def _realized_results_panel(
     else:
         main_table = realized_main_table(view.table)
         event = st.dataframe(
-            main_table, hide_index=True, use_container_width=True,
+            main_table, hide_index=True, width="stretch",
             on_select="rerun", selection_mode="single-row", key="surveillance-realized",
         )
         selected = _selected_rows(event)
@@ -932,7 +1255,7 @@ def _realized_results_panel(
             st.dataframe(
                 build_predictions_view(view.pending, limit=len(view.pending)).table,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
 
 
@@ -980,7 +1303,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
         if universe.used_by:
             st.dataframe(
                 [{"Symbole": symbol, "Modèles": ", ".join(ids)} for symbol, ids in universe.used_by.items()],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
     action_columns = st.columns(5)
     actions = [
@@ -1045,7 +1368,7 @@ def _models_page() -> None:
             }
             for model in models
         ],
-        hide_index=True, use_container_width=True,
+        hide_index=True, width="stretch",
     )
     selected_id = st.selectbox("Modèle", [model.model_id for model in models])
     selected = next(model for model in models if model.model_id == selected_id)
@@ -1070,6 +1393,19 @@ def _models_page() -> None:
 
 
 def _history_page() -> None:
+    navigation = st.session_state.get("history-navigation")
+    if isinstance(navigation, dict):
+        run_ids = [str(run_id) for run_id in navigation.get("run_ids", [])]
+        mode = navigation.get("mode")
+        service = _service()
+        available = {str(run["run_id"]) for run in service.runs()}
+        if mode == "detail" and len(run_ids) == 1 and run_ids[0] in available:
+            _render_run_detail_view(service, run_ids[0])
+            return
+        if mode == "comparison" and 2 <= len(run_ids) <= 4 and set(run_ids) <= available:
+            _render_run_comparison_view(service, run_ids)
+            return
+        st.session_state.pop("history-navigation", None)
     st.title("Historique")
     tabs = st.tabs(["Backtest / walk-forward", "Holdout", "Production réelle"])
     with tabs[0]:
@@ -1081,7 +1417,7 @@ def _history_page() -> None:
         models = ModelService(st.session_state.lab_config.project_root).models()
         st.dataframe(
             [{"model_id": model.model_id, **model.holdout_metrics} for model in models],
-            hide_index=True, use_container_width=True,
+            hide_index=True, width="stretch",
         )
     with tabs[2]:
         _history_runs_panel(
@@ -1113,7 +1449,7 @@ def _history_page() -> None:
                 retour_moyen=("intraday_return", "mean"), mfe_moyenne=("mfe", "mean"),
                 mae_moyenne=("mae", "mean"), fortes_baisses=("down_target", "mean"),
             ).reset_index()
-            st.dataframe(summary, hide_index=True, use_container_width=True)
+            st.dataframe(summary, hide_index=True, width="stretch")
             if (summary["prédictions_réalisées"] < 30).any():
                 st.warning(
                     "Au moins un modèle compte moins de 30 prédictions réalisées; "
@@ -1123,11 +1459,11 @@ def _history_page() -> None:
                 results["intraday_return"], bins=10, duplicates="drop"
             ).value_counts(sort=False)
             st.bar_chart(distribution.rename("Nombre de prédictions"))
-            st.dataframe(results.tail(100), hide_index=True, use_container_width=True)
+            st.dataframe(results.tail(100), hide_index=True, width="stretch")
         with st.expander("Historique des prédictions de production"):
-            st.dataframe(predictions.tail(200), hide_index=True, use_container_width=True)
+            st.dataframe(predictions.tail(200), hide_index=True, width="stretch")
         with st.expander("Historique des signaux de production"):
-            st.dataframe(signals.tail(200), hide_index=True, use_container_width=True)
+            st.dataframe(signals.tail(200), hide_index=True, width="stretch")
 
 
 def _primary_pages() -> list[st.Page]:

@@ -139,3 +139,29 @@ def test_history_uses_filtered_paginated_row_selection_without_guid_dropdown():
     assert "Runs par page" in source
     assert "Type de run" in source
     assert "Promouvoir comme candidat production" in source
+
+
+def test_history_supports_single_run_detail_and_multi_run_comparison_navigation():
+    source = APP.read_text(encoding="utf-8")
+
+    assert 'selection_mode="multi-row"' in source
+    assert "Ouvrir le run" in source
+    assert "Comparer les runs" in source
+    assert "Historique > Détail du run" in source
+    assert "Historique > Comparaison de runs" in source
+    assert "← Retour à Historique" in source
+    assert 'st.tabs(["Résumé", "Analyse", "Combinaisons", "Validation", "Technique"])' in source
+    assert 'st.tabs(["Synthèse", "Métriques", "Combinaisons", "Validation", "Technique"])' in source
+
+
+def test_comparison_metrics_keeps_quality_and_duration_in_separate_charts():
+    source = APP.read_text(encoding="utf-8")
+    comparison = source.split("def _render_run_comparison_view", 1)[1].split(
+        "def _history_runs_panel", 1
+    )[0]
+
+    assert "Qualité prédictive" in comparison
+    assert "Durée d’exécution" in comparison
+    assert "comparison_chart_frames(analytics, labels)" in comparison
+    assert "scale=alt.Scale(domain=[0, 1])" in comparison
+    assert "Delta dev→holdout" in comparison
