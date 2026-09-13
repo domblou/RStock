@@ -68,6 +68,36 @@ def _combination_count(candidate_count: int, depth: int) -> int:
     ) + 1))
 
 
+def _threshold_rejection_counts(
+    candidates: pd.DataFrame, config: RStockConfig
+) -> dict[str, int]:
+    """Count each univariate threshold failure without making them exclusive."""
+
+    median = pd.to_numeric(candidates["ROCAUCMedian"], errors="coerce")
+    pct_above_random = pd.to_numeric(
+        candidates["PctWindowsAboveRandom"], errors="coerce"
+    )
+    worst = pd.to_numeric(candidates["ROCAUCWorst"], errors="coerce")
+    auc_std = pd.to_numeric(candidates["ROCAUCStd"], errors="coerce")
+    return {
+        "rejected_median_auc": int(
+            ((~np.isfinite(median)) | (median < config.predictor_prefilter_min_median_auc)).sum()
+        ),
+        "rejected_pct_above_random": int(
+            (
+                (~np.isfinite(pct_above_random))
+                | (pct_above_random < config.predictor_prefilter_min_pct_above_random)
+            ).sum()
+        ),
+        "rejected_worst_auc": int(
+            ((~np.isfinite(worst)) | (worst < config.predictor_prefilter_min_worst_auc)).sum()
+        ),
+        "rejected_auc_std": int(
+            ((~np.isfinite(auc_std)) | (auc_std > config.predictor_prefilter_max_auc_std)).sum()
+        ),
+    }
+
+
 def select_predictors(
     qualification: pd.DataFrame,
     prepared_development: pd.DataFrame,
@@ -95,7 +125,10 @@ def select_predictors(
 
     for target in targets:
         initial = [symbol for symbol in candidate_symbols if symbol != target]
-        target_rows = metrics[metrics["Observation"] == target]
+        target_rows = metrics[
+            (metrics["Observation"] == target)
+            & metrics["Predictor"].isin(initial)
+        ]
         qualified = target_rows[target_rows["Eligible"]].sort_values(
             [
                 "PrefilterScore", "PctWindowsAboveRandom", "ROCAUCMedian",
@@ -130,6 +163,7 @@ def select_predictors(
         diagnostics.append({
             "target": target,
             "initial_candidates": len(initial),
+            **_threshold_rejection_counts(target_rows, config),
             "after_qualification": len(qualified),
             "after_top_n": len(top),
             "removed_for_redundancy": len(top) - len(retained),

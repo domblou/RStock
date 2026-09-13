@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from rstock.combinations import generate_target_symbol_sets, symbols_from_set
 from rstock.config import DEFAULT_CONFIG
@@ -84,6 +85,10 @@ def test_prefilter_applies_threshold_top_n_and_actual_feature_redundancy():
     assert diagnostic == {
         "target": "T",
         "initial_candidates": 5,
+        "rejected_median_auc": 1,
+        "rejected_pct_above_random": 1,
+        "rejected_worst_auc": 1,
+        "rejected_auc_std": 1,
         "after_qualification": 4,
         "after_top_n": 3,
         "removed_for_redundancy": 1,
@@ -120,3 +125,61 @@ def test_prefilter_is_reproducible_and_generated_sets_use_only_retained_candidat
     assert len(parsed) == 3
     assert {predictor for _, predictors in parsed for predictor in predictors} == {"A", "C"}
     assert max(len(predictors) for _, predictors in parsed) == 2
+
+
+@pytest.mark.parametrize(
+    ("median", "pct", "std", "worst", "expected"),
+    [
+        (0.49, 0.80, 0.02, 0.50, {"rejected_median_auc": 1}),
+        (0.60, 0.49, 0.02, 0.50, {"rejected_pct_above_random": 1}),
+        (0.60, 0.80, 0.02, 0.39, {"rejected_worst_auc": 1}),
+        (0.60, 0.80, 0.16, 0.50, {"rejected_auc_std": 1}),
+        (
+            0.49,
+            0.49,
+            0.16,
+            0.39,
+            {
+                "rejected_median_auc": 1,
+                "rejected_pct_above_random": 1,
+                "rejected_worst_auc": 1,
+                "rejected_auc_std": 1,
+            },
+        ),
+    ],
+    ids=["median", "pct_above_random", "worst", "dispersion", "multiple"],
+)
+def test_prefilter_counts_each_threshold_rejection_without_changing_selection(
+    median, pct, std, worst, expected
+):
+    qualification = _qualification()
+    weak = qualification["Predictors"] == '["WEAK"]'
+    qualification.loc[weak, "ROCAUCMedian"] = median
+    qualification.loc[weak, "PctWindowsAboveRandom"] = pct
+    qualification.loc[weak, "ROCAUCStd"] = std
+    qualification.loc[weak, "ROCAUCWorst"] = worst
+    qualification.loc[weak, "Eligible"] = False
+    config = replace(
+        DEFAULT_CONFIG,
+        predictor_prefilter_enabled=True,
+        predictor_prefilter_top_n=10,
+        predictor_prefilter_correlation_threshold=0.90,
+    )
+
+    result = select_predictors(
+        qualification,
+        _prepared(),
+        targets=["T"],
+        candidate_symbols=["T", "A", "B", "C", "D", "WEAK"],
+        config=config,
+    )
+    diagnostic = result.diagnostics[0]
+
+    for name in (
+        "rejected_median_auc",
+        "rejected_pct_above_random",
+        "rejected_worst_auc",
+        "rejected_auc_std",
+    ):
+        assert diagnostic[name] == expected.get(name, 0)
+    assert result.predictors_by_target["T"] == ("A", "C", "D")

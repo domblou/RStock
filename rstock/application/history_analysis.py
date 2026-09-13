@@ -52,6 +52,10 @@ def predictor_prefilter_summary(summary: Mapping[str, Any]) -> pd.DataFrame:
         {
             "Cible": item.get("target", "—"),
             "Candidats initiaux": item.get("initial_candidates", 0),
+            "Rejet AUC médiane": item.get("rejected_median_auc", "—"),
+            "Rejet fenêtres > 0,50": item.get("rejected_pct_above_random", "—"),
+            "Rejet Worst AUC": item.get("rejected_worst_auc", "—"),
+            "Rejet dispersion": item.get("rejected_auc_std", "—"),
             "Après qualification": item.get("after_qualification", 0),
             "Après Top N": item.get("after_top_n", 0),
             "Après redondance": item.get("after_redundancy", 0),

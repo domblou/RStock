@@ -176,6 +176,10 @@ def test_predictor_prefilter_summary_is_compact_and_legacy_safe():
     assert table.iloc[0].to_dict() == {
         "Cible": "DIS",
         "Candidats initiaux": 49,
+        "Rejet AUC médiane": "—",
+        "Rejet fenêtres > 0,50": "—",
+        "Rejet Worst AUC": "—",
+        "Rejet dispersion": "—",
         "Après qualification": 18,
         "Après Top N": 10,
         "Après redondance": 8,
@@ -183,3 +187,27 @@ def test_predictor_prefilter_summary_is_compact_and_legacy_safe():
         "Combinaisons": "92 au lieu de 19649",
     }
     assert predictor_prefilter_summary({}).empty
+
+
+def test_predictor_prefilter_summary_exposes_threshold_rejection_counts():
+    table = predictor_prefilter_summary({
+        "predictor_prefilter": [{
+            "target": "DIS",
+            "initial_candidates": 5,
+            "rejected_median_auc": 2,
+            "rejected_pct_above_random": 1,
+            "rejected_worst_auc": 3,
+            "rejected_auc_std": 1,
+            "after_qualification": 2,
+            "after_top_n": 2,
+            "after_redundancy": 2,
+            "retained_predictors": ["AMZN", "NVDA"],
+            "combinations_before_filtering": 15,
+            "combinations_tested": 3,
+        }]
+    })
+
+    assert table.iloc[0]["Rejet AUC médiane"] == 2
+    assert table.iloc[0]["Rejet fenêtres > 0,50"] == 1
+    assert table.iloc[0]["Rejet Worst AUC"] == 3
+    assert table.iloc[0]["Rejet dispersion"] == 1

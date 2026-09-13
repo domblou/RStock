@@ -214,6 +214,12 @@ def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
     assert "evaluate_holdout" not in evaluated_options[1]
     assert summary["total_combinations"] == 1
     assert summary["predictor_prefilter"][0]["retained_predictors"] == ["A"]
+    assert {
+        "rejected_median_auc",
+        "rejected_pct_above_random",
+        "rejected_worst_auc",
+        "rejected_auc_std",
+    } <= set(summary["predictor_prefilter"][0])
     assert (tmp_path / "predictor_prefilter.csv").exists()
     assert (tmp_path / "predictor_prefilter.json").exists()
 
