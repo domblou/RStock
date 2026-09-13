@@ -21,15 +21,68 @@ def test_primary_native_pages_cover_the_laboratory_sections():
     source = APP.read_text(encoding="utf-8")
 
     for title in (
-        "Dashboard",
         "Surveillance",
         "Expériences",
         "Modèles",
         "Historique",
+        "Univers",
         "Paramètres",
     ):
         assert f'title="{title}"' in source
     assert source.count("st.Page(") == 6
+
+
+def test_surveillance_is_the_default_page_without_dashboard_navigation():
+    source = APP.read_text(encoding="utf-8")
+
+    assert 'st.Page(_surveillance_page, title="Surveillance", icon=":material/monitoring:", default=True)' in source
+    assert "title=\"Dashboard\"" not in source
+    assert "_dashboard_page" not in source
+
+
+def test_universe_management_is_separate_from_settings_and_selection_is_in_experiments():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings()", 1)[1].split(
+        "def _history_model_contexts", 1
+    )[0]
+    experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
+
+    assert "Univers des titres" not in settings
+    assert "lab_universe_selection" not in settings
+    assert "_experiment_universe_selector()" in experiments
+    assert 'st.Page(_universes_page, title="Univers"' in source
+    assert "+ Créer un univers" in source
+    assert "Importer un CSV" in source
+    assert "Dupliquer" in source
+    assert "Supprimer" in source
+
+
+def test_user_universe_deletion_requires_confirmation_and_resets_the_draft():
+    source = APP.read_text(encoding="utf-8")
+    detail = source.split("def _universe_detail", 1)[1].split(
+        "def _universes_page", 1
+    )[0]
+
+    assert 'button("Supprimer"' in detail
+    assert "Confirmer la suppression de l’univers" in detail
+    assert 'button(\n                "Annuler"' in detail
+    assert "service.delete(universe_id)" in detail
+    assert "was_current = current.universe == universe_id" in detail
+    assert "lab_universe_selection = UniverseSelection" in detail
+    assert "st.rerun()" in detail
+
+
+def test_experiments_only_selects_saved_universes_without_manual_entry():
+    source = APP.read_text(encoding="utf-8")
+    selector = source.split("def _experiment_universe_selector", 1)[1].split(
+        "def _experiments", 1
+    )[0]
+
+    assert "Univers complet" in selector
+    assert "Échantillon d’un univers" in selector
+    assert "Liste personnalisée" not in selector
+    assert "experiment-manual-symbols" not in selector
+    assert "Symboles (séparés par virgule)" not in selector
 
 
 def test_models_and_surveillance_pages_expose_the_operational_flow():

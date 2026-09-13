@@ -85,3 +85,95 @@ def test_run_config_freezes_resolved_symbols_independent_of_later_universe_chang
     restored = repository.load_spec(run_id)
     assert restored.symbols == resolved.symbols
     assert restored.universe_selection == selection
+
+
+def test_persistent_manual_universe_normalizes_deduplicates_and_reloads(tmp_path):
+    service = UniverseService(root=tmp_path)
+
+    created = service.create("Tech US", " aapl, MSFT\naapl\n nvda ")
+    reloaded = UniverseService(root=tmp_path).record(created.universe_id)
+
+    assert created.symbols == ("AAPL", "MSFT", "NVDA")
+    assert reloaded == created
+    assert (tmp_path / "data" / "universes" / f"{created.universe_id}.csv").exists()
+    assert (tmp_path / "data" / "universes" / "universes.json").exists()
+
+
+def test_csv_import_supports_symbol_or_selected_column(tmp_path):
+    service = UniverseService(root=tmp_path)
+    standard = service.create_from_csv("Standard", b"symbol,name\naapl,Apple\nMSFT,Microsoft\n")
+    selected = service.create_from_csv(
+        "Ticker column", "ticker,label\namd,AMD\nNVDA,Nvidia\n", column="ticker"
+    )
+
+    assert standard.symbols == ("AAPL", "MSFT")
+    assert standard.source == "Import CSV"
+    assert selected.symbols == ("AMD", "NVDA")
+
+
+def test_update_duplicate_and_delete_persistent_universe(tmp_path):
+    service = UniverseService(root=tmp_path)
+    created = service.create("Initial", ("AAA", "BBB"))
+
+    updated = service.update(created.universe_id, name="Modifié", symbols="CCC, ddd, CCC")
+    copied = service.duplicate(created.universe_id)
+    service.delete(created.universe_id)
+    reloaded = UniverseService(root=tmp_path)
+
+    assert updated.name == "Modifié"
+    assert updated.symbols == ("CCC", "DDD")
+    assert copied.name == "Modifié (copie)"
+    assert copied.symbols == updated.symbols
+    assert created.universe_id not in reloaded.universe_names()
+    assert copied.universe_id in reloaded.universe_names()
+
+
+def test_system_demo_is_compatible_protected_and_duplicable(tmp_path):
+    service = UniverseService(root=tmp_path)
+    demo = service.record("US_STOCKS_DEMO")
+
+    assert demo.name == "Test — 15 titres"
+    assert demo.system is True
+    assert len(demo.symbols) == 15
+    assert service.duplicate(demo.universe_id).symbols == demo.symbols
+    with pytest.raises(ValueError, match="protégés"):
+        service.delete(demo.universe_id)
+
+
+def test_persisted_run_stays_frozen_after_saved_universe_is_edited(tmp_path):
+    service = UniverseService(root=tmp_path)
+    universe = service.create("Research", ("AAA", "BBB", "CCC"))
+    selection = UniverseSelection(source=SAVED_SOURCE, universe=universe.universe_id)
+    resolved = service.resolve(selection)
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=resolved.symbols,
+        universe_selection=selection,
+    )
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(spec)
+
+    service.update(universe.universe_id, name="Research", symbols=("ZZZ", "YYY"))
+
+    assert repository.load_spec(run_id).symbols == ("AAA", "BBB", "CCC")
+    assert service.resolve(selection).symbols == ("ZZZ", "YYY")
+
+
+def test_persisted_run_stays_frozen_after_saved_universe_is_deleted(tmp_path):
+    service = UniverseService(root=tmp_path)
+    universe = service.create("Disposable", ("AAA", "BBB", "CCC"))
+    selection = UniverseSelection(source=SAVED_SOURCE, universe=universe.universe_id)
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=service.resolve(selection).symbols,
+        universe_selection=selection,
+    )
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(spec)
+
+    service.delete(universe.universe_id)
+
+    assert universe.universe_id not in service.universe_names()
+    assert repository.load_spec(run_id).symbols == ("AAA", "BBB", "CCC")

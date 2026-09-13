@@ -24,9 +24,10 @@ class UniverseUiPreview:
 def universe_display_name(name: str, service: UniverseService) -> str:
     """Return a human-readable saved-universe label while retaining its ID."""
 
-    if name == "US_STOCKS_DEMO":
-        return f"Test \u2014 {len(service.universe_symbols(name))} titres"
-    return f"{name} \u2014 {len(service.universe_symbols(name))} titres"
+    record = service.record(name)
+    if record.system:
+        return record.name
+    return f"{record.name} \u2014 {len(record.symbols)} titres"
 
 
 def universe_ui_preview(

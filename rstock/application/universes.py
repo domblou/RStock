@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from random import Random
-from typing import Mapping
+from typing import Iterable, Mapping
 
 
 MANUAL_SOURCE = "manual_list"
@@ -23,6 +31,16 @@ DEFAULT_UNIVERSES: dict[str, tuple[str, ...]] = {
         "JPM", "JNJ", "KO", "MCD", "PEP", "V", "WMT",
     ),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseRecord:
+    universe_id: str
+    name: str
+    symbols: tuple[str, ...]
+    source: str
+    updated_at: str | None
+    system: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,30 +85,222 @@ class ResolvedUniverse:
 
 
 class UniverseService:
-    """Resolve static universes without exposing universe logic to ML workflows."""
+    """Persist and resolve universes without exposing their origin to workflows."""
 
-    def __init__(self, universes: Mapping[str, tuple[str, ...]] | None = None) -> None:
+    def __init__(
+        self,
+        universes: Mapping[str, tuple[str, ...]] | None = None,
+        *,
+        root: Path | None = None,
+    ) -> None:
+        self._root = None if root is None else Path(root) / "data" / "universes"
         supplied = DEFAULT_UNIVERSES if universes is None else universes
-        self._universes = {
-            str(name): self._normalise_symbols(symbols)
-            for name, symbols in supplied.items()
+        self._system = {
+            str(identifier): UniverseRecord(
+                universe_id=str(identifier),
+                name=("Test — 15 titres" if identifier == "US_STOCKS_DEMO" else str(identifier)),
+                symbols=self._normalise_symbols(symbols),
+                source="Système",
+                updated_at=None,
+                system=True,
+            )
+            for identifier, symbols in supplied.items()
         }
+        self._memory_records: dict[str, UniverseRecord] = {}
 
     @staticmethod
-    def _normalise_symbols(symbols: object) -> tuple[str, ...]:
-        result = tuple(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
-        if len(set(result)) != len(result):
-            raise ValueError("Universe symbols must be unique")
-        return result
+    def _normalise_symbols(symbols: Iterable[object]) -> tuple[str, ...]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            normalized = str(symbol).strip().upper()
+            if normalized and normalized not in seen:
+                result.append(normalized)
+                seen.add(normalized)
+        return tuple(result)
+
+    @staticmethod
+    def parse_symbols(value: str | Iterable[object]) -> tuple[str, ...]:
+        """Normalize comma/newline text or an iterable and remove duplicates."""
+
+        if isinstance(value, str):
+            values = re.split(r"[,;\r\n]+", value)
+        else:
+            values = value
+        symbols = UniverseService._normalise_symbols(values)
+        if not symbols:
+            raise ValueError("Un univers doit contenir au moins un symbole")
+        return symbols
+
+    @property
+    def directory(self) -> Path | None:
+        return self._root
+
+    def _metadata_path(self) -> Path:
+        if self._root is None:
+            raise RuntimeError("Universe persistence is not configured")
+        return self._root / "universes.json"
+
+    @staticmethod
+    def _atomic_write(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _load_user_records(self) -> dict[str, UniverseRecord]:
+        if self._root is None:
+            return dict(self._memory_records)
+        path = self._metadata_path()
+        if not path.exists():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        records: dict[str, UniverseRecord] = {}
+        for item in payload.get("universes", []):
+            identifier = str(item["universe_id"])
+            csv_path = self._root / f"{identifier}.csv"
+            if not csv_path.exists():
+                continue
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
+                symbols = self.parse_symbols(row["symbol"] for row in csv.DictReader(stream))
+            records[identifier] = UniverseRecord(
+                universe_id=identifier,
+                name=str(item["name"]),
+                symbols=symbols,
+                source=str(item.get("source", "Manuel")),
+                updated_at=None if item.get("updated_at") is None else str(item["updated_at"]),
+            )
+        return records
+
+    def records(self) -> tuple[UniverseRecord, ...]:
+        combined = {**self._system, **self._load_user_records()}
+        return tuple(sorted(combined.values(), key=lambda item: item.name.casefold()))
+
+    def record(self, universe_id: str) -> UniverseRecord:
+        records = {item.universe_id: item for item in self.records()}
+        try:
+            return records[universe_id]
+        except KeyError as error:
+            raise ValueError(f"Unknown saved universe: {universe_id}") from error
+
+    def _save_user_records(self, records: Mapping[str, UniverseRecord]) -> None:
+        if self._root is None:
+            self._memory_records = dict(records)
+            return
+        payload = {
+            "universes": [
+                {
+                    "universe_id": record.universe_id,
+                    "name": record.name,
+                    "source": record.source,
+                    "updated_at": record.updated_at,
+                }
+                for record in sorted(records.values(), key=lambda item: item.universe_id)
+            ]
+        }
+        self._atomic_write(
+            self._metadata_path(), json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        )
+
+    def _write_symbols(self, record: UniverseRecord) -> None:
+        if self._root is None:
+            return
+        rows = "symbol\n" + "".join(f"{symbol}\n" for symbol in record.symbols)
+        self._atomic_write(self._root / f"{record.universe_id}.csv", rows)
+
+    @staticmethod
+    def _identifier(name: str, existing: set[str]) -> str:
+        base = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "UNIVERSE"
+        candidate = base
+        suffix = 2
+        while candidate in existing:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        return candidate
+
+    def create(
+        self, name: str, symbols: str | Iterable[object], *, source: str = "Manuel"
+    ) -> UniverseRecord:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Le nom de l’univers est obligatoire")
+        normalized = self.parse_symbols(symbols)
+        users = self._load_user_records()
+        identifier = self._identifier(clean_name, set(users) | set(self._system))
+        record = UniverseRecord(
+            identifier, clean_name, normalized, source, datetime.now(timezone.utc).isoformat()
+        )
+        self._write_symbols(record)
+        users[identifier] = record
+        self._save_user_records(users)
+        return record
+
+    def create_from_csv(
+        self, name: str, content: bytes | str, *, column: str = "symbol"
+    ) -> UniverseRecord:
+        text = content.decode("utf-8-sig") if isinstance(content, bytes) else content
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            raise ValueError("Le CSV ne contient aucun en-tête")
+        matching = next(
+            (field for field in reader.fieldnames if field.casefold() == column.casefold()), None
+        )
+        if matching is None:
+            raise ValueError(f"Colonne CSV introuvable : {column}")
+        return self.create(name, (row.get(matching, "") for row in reader), source="Import CSV")
+
+    def update(
+        self, universe_id: str, *, name: str, symbols: str | Iterable[object]
+    ) -> UniverseRecord:
+        if universe_id in self._system:
+            raise ValueError("Les univers système sont protégés")
+        users = self._load_user_records()
+        if universe_id not in users:
+            raise ValueError(f"Unknown saved universe: {universe_id}")
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Le nom de l’univers est obligatoire")
+        record = UniverseRecord(
+            universe_id,
+            clean_name,
+            self.parse_symbols(symbols),
+            users[universe_id].source,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        self._write_symbols(record)
+        users[universe_id] = record
+        self._save_user_records(users)
+        return record
+
+    def duplicate(self, universe_id: str) -> UniverseRecord:
+        source = self.record(universe_id)
+        return self.create(f"{source.name} (copie)", source.symbols, source="Copie")
+
+    def delete(self, universe_id: str) -> None:
+        if universe_id in self._system:
+            raise ValueError("Les univers système sont protégés")
+        users = self._load_user_records()
+        if universe_id not in users:
+            raise ValueError(f"Unknown saved universe: {universe_id}")
+        users.pop(universe_id)
+        self._save_user_records(users)
+        if self._root is not None:
+            (self._root / f"{universe_id}.csv").unlink(missing_ok=True)
 
     def universe_names(self) -> tuple[str, ...]:
-        return tuple(sorted(self._universes))
+        return tuple(record.universe_id for record in self.records())
 
     def universe_symbols(self, name: str) -> tuple[str, ...]:
-        try:
-            return self._universes[name]
-        except KeyError as error:
-            raise ValueError(f"Unknown saved universe: {name}") from error
+        return self.record(name).symbols
 
     def resolve(
         self,
@@ -102,6 +312,8 @@ class UniverseService:
 
         manual = self._normalise_symbols(manual_symbols)
         if selection.source == MANUAL_SOURCE:
+            if not manual:
+                raise ValueError("Un univers doit contenir au moins un symbole")
             return ResolvedUniverse(selection, manual)
         if selection.source not in {SAVED_SOURCE, SAMPLE_SOURCE}:
             raise ValueError(f"Unknown universe source: {selection.source}")
