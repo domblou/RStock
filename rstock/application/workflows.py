@@ -288,7 +288,15 @@ def _threshold_calibration(
     _phase(progress_callback, "result_writing", "completed")
     return {
         "job_type": spec.job_type.value,
+        "outcome": result.run_configuration["outcome"],
         "selected_thresholds": _json_value(result.calibration.selected_thresholds),
+        "threshold_diagnostics": _json_value(
+            result.run_configuration["threshold_diagnostics"]
+        ),
+        "missing_frozen_thresholds": _json_value(
+            result.run_configuration["missing_frozen_thresholds"]
+        ),
+        "holdout_skipped_reason": result.run_configuration["holdout_skipped_reason"],
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
     }

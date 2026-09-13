@@ -1,10 +1,12 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from rstock.config import DEFAULT_CONFIG
+from rstock.application.domain import ExperimentSpec, JobType
 from rstock.combinations import generate_symbol_sets
 from rstock.features import prepare_dataset
 from rstock.modeling import XGBoostParameters
@@ -270,6 +272,168 @@ def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch
     assert events == ["development", "selection_frozen", "holdout"]
     assert result.run_configuration["holdout_used_for_selection"] is False
     assert result.run_configuration["holdout_evaluated"] is True
+
+
+def _controlled_result_with_predictions(monkeypatch, predictions, config):
+    index = pd.bdate_range("2025-01-01", periods=12)
+    prepared = pd.DataFrame({"placeholder": np.arange(12)}, index=index)
+    generated = generate_symbol_sets(["AAA", "BBB"], 1)
+    holdout_called = False
+
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: predictions,
+    )
+
+    def unexpected_holdout(*args, **kwargs):
+        nonlocal holdout_called
+        holdout_called = True
+        raise AssertionError("Holdout must not run without both frozen directions")
+
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_holdout_probabilities",
+        unexpected_holdout,
+    )
+    result = run_controlled_threshold_calibration(
+        prepared,
+        generated,
+        config,
+        combinations_per_target=1,
+        min_train_size=2,
+        test_size=2,
+        step_size=2,
+        final_holdout_size=3,
+        evaluate_final_holdout=True,
+    )
+    return result, holdout_called
+
+
+@pytest.mark.parametrize("missing_direction", ["Up", "Down"])
+def test_no_eligible_direction_skips_frozen_holdout_without_crashing(
+    monkeypatch, missing_direction
+):
+    predictions = _predictions().copy()
+    predictions["Set"] = "AAA<-BBB"
+    predictions.loc[predictions["Direction"] == missing_direction, "Probability"] = 0.10
+
+    result, holdout_called = _controlled_result_with_predictions(
+        monkeypatch,
+        predictions,
+        _config(threshold_calibration_min_signals_per_window=2),
+    )
+
+    assert holdout_called is False
+    assert result.holdout_predictions.empty
+    assert result.holdout_metrics.empty
+    assert result.run_configuration["outcome"] == "completed_no_eligible_threshold"
+    assert result.run_configuration["holdout_evaluated"] is False
+    assert result.run_configuration["holdout_skipped_reason"] == "no_eligible_frozen_threshold"
+    assert any(
+        item["direction"] == missing_direction
+        for item in result.run_configuration["missing_frozen_thresholds"]
+    )
+
+
+def test_threshold_diagnostics_persist_candidate_rejection_details(monkeypatch, tmp_path):
+    predictions = _predictions().copy()
+    predictions["Set"] = "AAA<-BBB"
+    predictions.loc[predictions["Direction"] == "Up", "Probability"] = 0.10
+    config = _config(threshold_calibration_min_signals_per_window=2)
+
+    result, _ = _controlled_result_with_predictions(monkeypatch, predictions, config)
+    diagnostics = result.run_configuration["threshold_diagnostics"]["Up"]
+
+    assert diagnostics["candidate_threshold_count"] > 0
+    assert diagnostics["eligible_threshold_count"] == 0
+    assert diagnostics["min_signals_per_window"] == 2
+    assert diagnostics["min_window_fraction"] == 1.0
+    assert diagnostics["best_rejected_threshold"] is not None
+    assert diagnostics["candidates"]
+    assert {
+        "threshold", "total_signals", "min_signals_in_any_window",
+        "signal_counts_by_window", "eligible_window_fraction", "hit_rate",
+        "average_return", "median_return", "mfe", "mae", "stability",
+        "eligible", "rejection_reason",
+    } <= set(diagnostics["candidates"][0])
+    assert {
+        "RejectionReason", "SignalCountsByWindow", "MinSignalsInAnyWindow",
+        "EligibleWindowFraction", "HitRate", "AverageReturn", "MedianReturn",
+        "MFE", "MAE", "Stability",
+    } <= set(result.calibration.metrics_by_threshold)
+
+    from rstock.threshold_calibration import write_threshold_calibration_results
+
+    write_threshold_calibration_results(result, tmp_path)
+    assert (tmp_path / "threshold_diagnostics.json").exists()
+    assert (tmp_path / "threshold_diagnostics_by_set.json").exists()
+
+
+def test_both_eligible_directions_still_apply_frozen_thresholds(monkeypatch):
+    index = pd.bdate_range("2025-01-01", periods=12)
+    prepared = pd.DataFrame({"placeholder": np.arange(12)}, index=index)
+    generated = generate_symbol_sets(["AAA", "BBB"], 1)
+    predictions = _predictions().copy()
+    predictions["Set"] = "AAA<-BBB"
+    calls = []
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: predictions,
+    )
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_holdout_probabilities",
+        lambda *args, **kwargs: calls.append("holdout") or predictions,
+    )
+
+    result = run_controlled_threshold_calibration(
+        prepared, generated, _config(), combinations_per_target=1,
+        min_train_size=2, test_size=2, step_size=2, final_holdout_size=3,
+        evaluate_final_holdout=True,
+    )
+
+    assert calls == ["holdout"]
+    assert result.run_configuration["outcome"] == "completed"
+    assert result.run_configuration["holdout_evaluated"] is True
+    assert not result.holdout_metrics.empty
+
+
+def test_threshold_workflow_summary_reports_no_eligible_threshold(monkeypatch, tmp_path):
+    from rstock.application import workflows
+
+    controlled = SimpleNamespace(
+        calibration=SimpleNamespace(selected_thresholds={
+            "Up": {"status": "no_eligible_threshold", "threshold": None},
+            "Down": {"status": "selected", "threshold": 0.6},
+        }),
+        holdout_metrics=pd.DataFrame(),
+        run_configuration={
+            "outcome": "completed_no_eligible_threshold",
+            "threshold_diagnostics": {"Up": {"eligible_threshold_count": 0}},
+            "missing_frozen_thresholds": [{"set": "AAA<-BBB", "direction": "Up"}],
+            "holdout_skipped_reason": "no_eligible_frozen_threshold",
+        },
+    )
+    monkeypatch.setattr(
+        workflows, "_prepared_experiment",
+        lambda *args, **kwargs: (pd.DataFrame(), pd.DataFrame(), {}),
+    )
+    monkeypatch.setattr(
+        workflows, "run_controlled_threshold_calibration",
+        lambda *args, **kwargs: controlled,
+    )
+    monkeypatch.setattr(workflows, "write_threshold_calibration_results", lambda *args: None)
+    spec = ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"),
+    )
+
+    summary = workflows._threshold_calibration(spec, tmp_path, None, None)
+
+    assert summary["outcome"] == "completed_no_eligible_threshold"
+    assert summary["holdout_skipped_reason"] == "no_eligible_frozen_threshold"
+    assert summary["missing_frozen_thresholds"] == [
+        {"set": "AAA<-BBB", "direction": "Up"}
+    ]
 
 
 @pytest.mark.parametrize(

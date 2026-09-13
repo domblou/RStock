@@ -335,6 +335,13 @@ def summarize_and_select_thresholds(
             | (group["OppositeMoveFrequency"] > group["FavorableMoveFrequency"])
         )
         windows_meeting = int(meets_minimum.sum())
+        rejection_reason = None
+        if windows_meeting < required_windows:
+            rejection_reason = (
+                "no_window_meets_min_signals"
+                if windows_meeting == 0
+                else "minimum_window_fraction_not_met"
+            )
         rows.append(
             {
                 "Direction": direction,
@@ -346,9 +353,15 @@ def summarize_and_select_thresholds(
                 "WindowsMeetingMinSignals": windows_meeting,
                 "WindowCoverage": windows_meeting / windows,
                 "Eligible": windows_meeting >= required_windows,
+                "RejectionReason": rejection_reason,
                 "TotalSignals": int(group["SignalCount"].sum()),
                 "SignalCountMedian": float(group["SignalCount"].median()),
                 "SignalCountWorst": int(group["SignalCount"].min()),
+                "SignalCountsByWindow": json.dumps(
+                    [int(value) for value in group.sort_values("Window")["SignalCount"]]
+                ),
+                "MinSignalsInAnyWindow": int(group["SignalCount"].min()),
+                "EligibleWindowFraction": windows_meeting / windows,
                 "SignalProportionMedian": float(group["SignalProportion"].median()),
                 "SignalProportionStd": float(group["SignalProportion"].std(ddof=0)),
                 "PrecisionMedian": float(group["Precision"].median()),
@@ -403,7 +416,11 @@ def summarize_and_select_thresholds(
         summary.loc[ranked.index, "SelectionRank"] = np.arange(1, len(ranked) + 1)
         winner_index = ranked.index[0]
         summary.loc[winner_index, "Selected"] = True
+        summary.loc[
+            eligible.index.difference([winner_index]), "RejectionReason"
+        ] = "not_selected_by_stability_order"
         winner = summary.loc[winner_index]
+        summary.loc[winner_index, "RejectionReason"] = None
         selected[direction] = {
             "status": "selected",
             "threshold": float(winner["Threshold"]),
@@ -423,12 +440,98 @@ def summarize_and_select_thresholds(
             },
             "selection_order": THRESHOLD_SELECTION_ORDER,
         }
+    summary["HitRate"] = summary["FavorableMoveFrequencyMedian"]
+    summary["AverageReturn"] = summary["IntradayReturnMeanMedian"]
+    summary["MedianReturn"] = summary["IntradayReturnMedianMedian"]
+    summary["MFE"] = summary["MFEMeanMedian"]
+    summary["MAE"] = summary["MAEMeanMedian"]
+    summary["Stability"] = summary["DirectionalReturnMeanStd"]
     return summary.sort_values(
         ["Direction", "Eligible", "SelectionRank", "Threshold"],
         ascending=[True, False, True, True],
         na_position="last",
         kind="stable",
     ).reset_index(drop=True), selected
+
+
+def _finite_or_none(value: object) -> float | None:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return float(numeric) if pd.notna(numeric) and np.isfinite(numeric) else None
+
+
+def threshold_diagnostics(
+    calibration: ThresholdCalibrationResult, config: RStockConfig
+) -> dict[str, dict[str, object]]:
+    """Return JSON-safe per-direction diagnostics for every tested threshold."""
+
+    result: dict[str, dict[str, object]] = {}
+    for direction in ("Up", "Down"):
+        candidates = calibration.metrics_by_threshold[
+            calibration.metrics_by_threshold["Direction"] == direction
+        ].sort_values("Threshold", kind="stable")
+        eligible = candidates[candidates["Eligible"]]
+        rejected = candidates[~candidates["Eligible"]].sort_values(
+            ["WindowCoverage", "WindowsMeetingMinSignals", "Threshold"],
+            ascending=[False, False, True],
+            kind="stable",
+        )
+        candidate_details = [
+            {
+                "threshold": float(row["Threshold"]),
+                "total_signals": int(row["TotalSignals"]),
+                "min_signals_in_any_window": int(row["MinSignalsInAnyWindow"]),
+                "signal_counts_by_window": json.loads(row["SignalCountsByWindow"]),
+                "eligible_window_fraction": float(row["EligibleWindowFraction"]),
+                "hit_rate": _finite_or_none(row["HitRate"]),
+                "average_return": _finite_or_none(row["AverageReturn"]),
+                "median_return": _finite_or_none(row["MedianReturn"]),
+                "mfe": _finite_or_none(row["MFE"]),
+                "mae": _finite_or_none(row["MAE"]),
+                "stability": _finite_or_none(row["Stability"]),
+                "eligible": bool(row["Eligible"]),
+                "rejection_reason": row["RejectionReason"],
+            }
+            for _, row in candidates.iterrows()
+        ]
+        best_rejected = None
+        if not rejected.empty:
+            row = rejected.iloc[0]
+            best_rejected = {
+                "threshold": float(row["Threshold"]),
+                "rejection_reason": row["RejectionReason"],
+                "signal_counts_by_window": json.loads(row["SignalCountsByWindow"]),
+                "eligible_window_fraction": float(row["EligibleWindowFraction"]),
+            }
+        selection = calibration.selected_thresholds.get(direction, {})
+        result[direction] = {
+            "status": str(selection.get("status", "no_eligible_threshold")),
+            "candidate_threshold_count": len(candidates),
+            "eligible_threshold_count": len(eligible),
+            "min_signals_per_window": config.threshold_calibration_min_signals_per_window,
+            "min_window_fraction": config.threshold_calibration_min_window_fraction,
+            "selected_threshold": _finite_or_none(selection.get("threshold")),
+            "best_rejected_threshold": best_rejected,
+            "candidates": candidate_details,
+        }
+    return result
+
+
+def _missing_frozen_thresholds(
+    selections_by_set: Mapping[str, Mapping[str, Mapping[str, object]]]
+) -> list[dict[str, str]]:
+    """List every set/direction that cannot safely be applied to the holdout."""
+
+    missing: list[dict[str, str]] = []
+    for set_name, selections in selections_by_set.items():
+        for direction in ("Up", "Down"):
+            selection = selections.get(direction, {})
+            if selection.get("status") != "selected" or selection.get("threshold") is None:
+                missing.append({
+                    "set": str(set_name),
+                    "direction": direction,
+                    "reason": str(selection.get("status", "no_eligible_threshold")),
+                })
+    return missing
 
 
 def _baseline_comparison(summary: pd.DataFrame) -> pd.DataFrame:
@@ -690,6 +793,12 @@ def run_controlled_threshold_calibration(
         set_name: item.selected_thresholds
         for set_name, item in calibrations_by_set.items()
     }
+    diagnostics = threshold_diagnostics(calibration, config)
+    diagnostics_by_set = {
+        set_name: threshold_diagnostics(item, config)
+        for set_name, item in calibrations_by_set.items()
+    }
+    missing_thresholds = _missing_frozen_thresholds(selected_by_set)
     frozen_json = json.dumps(
         selected_by_set, sort_keys=True, separators=(",", ":")
     )
@@ -697,7 +806,22 @@ def run_controlled_threshold_calibration(
 
     holdout_predictions = pd.DataFrame()
     holdout_metrics = pd.DataFrame()
-    if evaluate_final_holdout:
+    holdout_evaluated = False
+    holdout_skipped_reason = None
+    if evaluate_final_holdout and missing_thresholds:
+        holdout_skipped_reason = "no_eligible_frozen_threshold"
+        report_progress(
+            progress_callback,
+            "final_holdout",
+            substage="completed",
+            details={
+                "phase_event": "completed",
+                "skipped": True,
+                "reason": holdout_skipped_reason,
+                "missing_thresholds": missing_thresholds,
+            },
+        )
+    elif evaluate_final_holdout:
         report_progress(progress_callback, "final_holdout", substage="started", details={"phase_event": "started"})
         raw_holdout = generate_holdout_probabilities(
             development,
@@ -713,6 +837,7 @@ def run_controlled_threshold_calibration(
             else apply_frozen_thresholds(raw_holdout, calibration.selected_thresholds)
         )
         holdout_metrics = evaluate_applied_thresholds(holdout_predictions, config)
+        holdout_evaluated = True
         report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed"})
     else:
         report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed", "skipped": True})
@@ -724,7 +849,14 @@ def run_controlled_threshold_calibration(
     run_configuration = {
         "protocol": "development_threshold_selection_then_optional_frozen_holdout",
         "holdout_used_for_selection": False,
-        "holdout_evaluated": evaluate_final_holdout,
+        "holdout_requested": evaluate_final_holdout,
+        "holdout_evaluated": holdout_evaluated,
+        "holdout_skipped_reason": holdout_skipped_reason,
+        "outcome": (
+            "completed_no_eligible_threshold"
+            if missing_thresholds else "completed"
+        ),
+        "missing_frozen_thresholds": missing_thresholds,
         "frozen_threshold_digest": frozen_digest,
         "xgboost_parameters": EXPERIMENTAL_XGBOOST_PARAMETERS.as_dict(),
         "selection_order": THRESHOLD_SELECTION_ORDER,
@@ -741,6 +873,8 @@ def run_controlled_threshold_calibration(
         "sampled_combinations": len(sampled),
         "selected_thresholds": calibration.selected_thresholds,
         "selected_thresholds_by_set": selected_by_set,
+        "threshold_diagnostics": diagnostics,
+        "threshold_diagnostics_by_set": diagnostics_by_set,
     }
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     return ControlledThresholdCalibrationResult(
@@ -793,6 +927,14 @@ def write_threshold_calibration_results(
     )
     (directory / "selected_thresholds_by_set.json").write_text(
         json.dumps(result.run_configuration["selected_thresholds_by_set"], indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "threshold_diagnostics.json").write_text(
+        json.dumps(result.run_configuration["threshold_diagnostics"], indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "threshold_diagnostics_by_set.json").write_text(
+        json.dumps(result.run_configuration["threshold_diagnostics_by_set"], indent=2) + "\n",
         encoding="utf-8",
     )
     (directory / "run_configuration.json").write_text(

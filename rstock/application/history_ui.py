@@ -158,7 +158,18 @@ def _summary_text(job_type: str, summary: Mapping[str, object]) -> str:
         )
     if job_type == "walk_forward":
         return f"{int(summary.get('eligible_combinations', 0))} combinaisons qualifiées"
-    if job_type.startswith("xgboost_") or job_type == "threshold_calibration":
+    if job_type == "threshold_calibration":
+        if summary.get("outcome") == "completed_no_eligible_threshold":
+            missing = summary.get("missing_frozen_thresholds", ())
+            directions = sorted({
+                str(item.get("direction"))
+                for item in missing
+                if isinstance(item, Mapping) and item.get("direction")
+            })
+            suffix = f" ({', '.join(directions)})" if directions else ""
+            return f"Aucun seuil admissible{suffix} · holdout ignoré"
+        return "Calibration terminée"
+    if job_type.startswith("xgboost_"):
         return "Calibration terminée"
     return "—"
 

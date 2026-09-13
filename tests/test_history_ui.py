@@ -161,6 +161,19 @@ def test_qualified_table_prefers_persisted_final_score_when_available():
     ]
 
 
+def test_threshold_calibration_history_summary_explains_missing_frozen_threshold():
+    row = history_row(
+        _run("threshold-run", "threshold_calibration"),
+        {"configuration": {}, "summary": {
+            "outcome": "completed_no_eligible_threshold",
+            "missing_frozen_thresholds": [{"direction": "Up"}],
+        }},
+        {},
+    )
+
+    assert row.summary == "Aucun seuil admissible (Up) · holdout ignoré"
+
+
 def test_existing_promotion_is_detected_without_changing_registry_logic():
     model = SimpleNamespace(
         source_walk_forward_run="wf-run", target="DIS", predictors=("PFE", "WMT"), status="candidate"
