@@ -182,8 +182,32 @@ python -m streamlit run rstock/application/streamlit_app.py
 ```
 
 Les jobs walk-forward, calibration XGBoost et calibration des seuils sont
-disponibles. La navigation prépare aussi les futures fonctions de surveillance,
-modèles, prédictions quotidiennes et signaux, sans exécution d'ordres.
+disponibles. Une combinaison qualifiée peut être promue depuis l'historique,
+entraînée comme nouvel artefact production, puis activée dans la page `Modèles`.
+La page `Surveillance` dérive automatiquement l'univers opérationnel des modèles
+actifs et permet de lancer la mise à jour marché, les prédictions Up/Down, le
+screening et le rattachement ultérieur des résultats réalisés. Aucun ordre de
+bourse n'est produit.
+
+Les données opérationnelles restent séparées des runs expérimentaux :
+
+```text
+production/
+├── model_registry.json
+├── artifacts/<model_id>/
+│   ├── up.ubj
+│   ├── down.ubj
+│   └── production.metadata.json
+└── history/
+    ├── predictions.csv
+    ├── signals.csv
+    └── realized_results.csv
+```
+
+Le registre JSON, les deux artefacts directionnels et les historiques CSV sont
+publiés atomiquement. Une exécution opérationnelle complète publie ensemble ses
+prédictions, signaux et résultats réalisés, afin qu'une annulation ne laisse pas
+un historique partiel.
 
 La CLI utilise les mêmes services applicatifs :
 
@@ -191,6 +215,15 @@ La CLI utilise les mêmes services applicatifs :
 python scripts/laboratory_cli.py create-config --job-type walk_forward --symbols AAPL MSFT --output experiment.json
 python scripts/laboratory_cli.py submit --config experiment.json
 python scripts/laboratory_cli.py list
+```
+
+Pour les jobs opérationnels, la CLI peut omettre `--symbols`; elle fige alors
+l'univers dérivé des modèles actifs dans le fichier de configuration. Pour un
+entraînement production, elle dérive les symboles du candidat choisi :
+
+```powershell
+python scripts/laboratory_cli.py create-config --job-type production_training --model-id model_abc123 --output production-training.json
+python scripts/laboratory_cli.py create-config --job-type operational_run --output daily-operation.json
 ```
 
 Les processus en attente partagent des slots locaux atomiques; un seul job lourd

@@ -30,3 +30,28 @@ def test_primary_native_pages_cover_the_laboratory_sections():
     ):
         assert f'title="{title}"' in source
     assert source.count("st.Page(") == 6
+
+
+def test_models_and_surveillance_pages_expose_the_operational_flow():
+    source = APP.read_text(encoding="utf-8")
+
+    assert "Catalogue futur" not in source
+    for label in (
+        "Promouvoir comme candidat production",
+        "Entraîner",
+        "Activer",
+        "Désactiver",
+        "Retirer",
+        "Mettre à jour le marché",
+        "Prédictions quotidiennes",
+        "Screening",
+        "Résultats réalisés",
+        "Exécution complète",
+    ):
+        assert label in source
+    for history_kind in (
+        "Backtest / walk-forward",
+        "Holdout",
+        "Production réelle",
+    ):
+        assert history_kind in source

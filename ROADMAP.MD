@@ -5,6 +5,13 @@ Oui. Je pense que le plus simple est de voir RStock comme ayant éventuellement 
 
 Aujourd’hui, tu es surtout en train de bâtir la première moitié.
 
+> État de `feature/production-workflow` : la V1 du passage laboratoire →
+> production est maintenant implémentée. Elle couvre la promotion, le registre
+> versionné, l'entraînement Up/Down sur l'historique admissible, l'activation,
+> l'univers opérationnel dérivé, la mise à jour marché, les prédictions, le
+> screening et le suivi séparé des résultats réalisés. L'automatisation horaire,
+> le portefeuille et le courtage restent volontairement hors scope.
+
 ### Flux complet que je viserais
 
 Imaginons que tu ouvres RStock un lundi matin.
@@ -372,18 +379,18 @@ Je placerais ton projet approximativement ici :
 
 ────────────────────────────
 
-⬜ Gestionnaire d'univers de titres
+✅ Sélection V1 d'univers de titres (manuel, sauvegardé, échantillon reproductible)
 Sélecteur de titres pour créer des univers
 ⬜ Bassins différents selon profondeur
 ⬜ Comparaison conviviale des expériences
-⬜ Promotion d'une expérience/configuration
-⬜ Registre des modèles/configurations
-⬜ Entraînement complet production
-⬜ Prédiction quotidienne
-⬜ Screening des signaux
-⬜ Dashboard surveillance
-⬜ Historique réel des signaux
-⬜ Suivi rendement / risque des signaux
+✅ Promotion d'une expérience/configuration
+✅ Registre des modèles/configurations
+✅ Entraînement complet production
+✅ Prédiction quotidienne Up/Down
+✅ Screening V1 des signaux
+✅ Dashboard Surveillance V1
+✅ Historique réel des signaux
+✅ Suivi descriptif rendement / risque des signaux
 ⬜ Positions / portefeuille éventuel
 ⬜ Automatisation quotidienne
 ```

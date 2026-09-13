@@ -22,6 +22,10 @@ class JobType(str, Enum):
     DAILY_PREDICTION = "daily_prediction"
     DATA_UPDATE = "data_update"
     DAILY_SCREENING = "daily_screening"
+    PRODUCTION_TRAINING = "production_training"
+    MARKET_UPDATE = "market_update"
+    REALIZED_VALIDATION = "realized_validation"
+    OPERATIONAL_RUN = "operational_run"
 
     @property
     def implemented(self) -> bool:
@@ -29,6 +33,12 @@ class JobType(str, Enum):
             JobType.WALK_FORWARD,
             JobType.XGBOOST_CALIBRATION,
             JobType.THRESHOLD_CALIBRATION,
+            JobType.PRODUCTION_TRAINING,
+            JobType.MARKET_UPDATE,
+            JobType.DAILY_PREDICTION,
+            JobType.DAILY_SCREENING,
+            JobType.REALIZED_VALIDATION,
+            JobType.OPERATIONAL_RUN,
         }
 
 
@@ -74,6 +84,7 @@ class ExperimentSpec:
     combinations_per_target: int = 3
     evaluate_final_holdout: bool = True
     universe_selection: UniverseSelection = UniverseSelection()
+    model_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
@@ -84,6 +95,8 @@ class ExperimentSpec:
             raise ValueError("Symbols must be unique")
         if self.combinations_per_target < 1:
             raise ValueError("combinations_per_target must be positive")
+        if self.job_type == JobType.PRODUCTION_TRAINING and not self.model_id:
+            raise ValueError("production_training requires model_id")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +109,7 @@ class ExperimentSpec:
             # symbols is the resolved, immutable list used by this run. The
             # nested selection records how that list was constructed for audit.
             "universe_selection": self.universe_selection.as_dict(),
+            "model_id": self.model_id,
             "rstock_config": _config_to_dict(self.config),
         }
 
@@ -111,6 +125,7 @@ class ExperimentSpec:
             combinations_per_target=int(values.get("combinations_per_target", 3)),
             evaluate_final_holdout=bool(values.get("evaluate_final_holdout", True)),
             universe_selection=UniverseSelection.from_dict(values.get("universe_selection")),
+            model_id=None if values.get("model_id") is None else str(values["model_id"]),
         )
 
     @property

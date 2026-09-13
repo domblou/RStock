@@ -14,6 +14,12 @@ from rstock.modeling import historical_xgboost_parameters
 from rstock.progress import CancellationCheck, ProgressCallback
 
 from .domain import ExperimentSpec, JobType
+from .production_repository import ProductionRepository
+from .production_services import (
+    OperationalUniverseService,
+    ProductionLifecycleService,
+    PromotionService,
+)
 from .repository import RunRepository
 from .runner import RunService, SubmissionResult
 
@@ -27,6 +33,22 @@ class MarketDataService:
         except (FileNotFoundError, ValueError):
             return []
         return sorted(str(symbol) for symbol in metadata.get("symbols", {}))
+
+    def freshness(
+        self, symbols: tuple[str, ...] | list[str], config: RStockConfig = DEFAULT_CONFIG
+    ) -> dict[str, str | None]:
+        try:
+            entries = market_data_service(config).store.read_metadata().get("symbols", {})
+        except (FileNotFoundError, ValueError):
+            entries = {}
+        return {
+            symbol: (
+                None
+                if symbol not in entries
+                else str(entries[symbol].get("last_date") or "") or None
+            )
+            for symbol in symbols
+        }
 
     def load(
         self,
@@ -56,25 +78,71 @@ class MarketDataService:
 class ModelService:
     """Stable facade for current model configuration and future model catalogues."""
 
+    def __init__(self, project_root: Path = DEFAULT_CONFIG.project_root) -> None:
+        self.repository = ProductionRepository(project_root)
+
     def parameters(self, config: RStockConfig) -> dict[str, int | float]:
         return historical_xgboost_parameters(config).as_dict()
 
     def capabilities(self) -> dict[str, bool]:
-        return {"catalogue": False, "activation": False, "comparison": False}
+        return {"catalogue": True, "activation": True, "comparison": True}
+
+    def models(self):
+        return self.repository.models()
+
+    def promote(
+        self, run_id: str, set_name: str, *,
+        xgboost_calibration_run: str | None = None,
+        threshold_calibration_run: str | None = None,
+    ):
+        return PromotionService(
+            RunRepository(self.repository.root.parent / "runs"), self.repository
+        ).promote(
+            run_id, set_name,
+            xgboost_calibration_run=xgboost_calibration_run,
+            threshold_calibration_run=threshold_calibration_run,
+        )
+
+    def activate(self, model_id: str):
+        return ProductionLifecycleService(self.repository).activate(model_id)
+
+    def deactivate(self, model_id: str):
+        return ProductionLifecycleService(self.repository).deactivate(model_id)
+
+    def retire(self, model_id: str):
+        return ProductionLifecycleService(self.repository).retire(model_id)
+
+    def operational_universe(self):
+        return OperationalUniverseService(self.repository).current()
 
 
 class PredictionService:
     """Extension point for scheduled and on-demand prediction workflows."""
 
+    def __init__(self, project_root: Path = DEFAULT_CONFIG.project_root) -> None:
+        self.repository = ProductionRepository(project_root)
+
     def capabilities(self) -> dict[str, bool]:
-        return {"daily_prediction": False, "batch_prediction": False}
+        return {"daily_prediction": True, "batch_prediction": True}
+
+    def history(self) -> pd.DataFrame:
+        return self.repository.read_table("predictions")
 
 
 class SignalService:
     """Extension point for persisted directional signals and future monitoring."""
 
+    def __init__(self, project_root: Path = DEFAULT_CONFIG.project_root) -> None:
+        self.repository = ProductionRepository(project_root)
+
     def capabilities(self) -> dict[str, bool]:
-        return {"signal_history": False, "screening": False, "broker_orders": False}
+        return {"signal_history": True, "screening": True, "broker_orders": False}
+
+    def history(self) -> pd.DataFrame:
+        return self.repository.read_table("signals")
+
+    def realized_results(self) -> pd.DataFrame:
+        return self.repository.read_table("realized_results")
 
 
 class ExperimentService:
@@ -116,9 +184,11 @@ def default_experiment_spec(
     symbols: list[str] | tuple[str, ...],
     *,
     project_root: Path = DEFAULT_CONFIG.project_root,
+    model_id: str | None = None,
 ) -> ExperimentSpec:
     return ExperimentSpec(
         job_type=job_type,
         config=replace(DEFAULT_CONFIG, project_root=Path(project_root).resolve()),
         symbols=tuple(symbols),
+        model_id=model_id,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 
+import pandas as pd
 import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
@@ -51,7 +52,7 @@ def _state() -> None:
 
 def _service() -> ExperimentService:
     return ExperimentService.local(
-        DEFAULT_CONFIG.project_root,
+        st.session_state.lab_config.project_root,
         max_concurrent_heavy_jobs=st.session_state.max_concurrent_heavy_jobs,
     )
 
@@ -435,40 +436,249 @@ def _history(service: ExperimentService) -> None:
     tabs[3].code("\n".join(detail["log_tail"]) or "Aucun message")
 
 
-def _placeholder(title: str, text: str) -> None:
-    st.title(title)
-    st.info(text)
+    if detail["status"]["job_type"] == JobType.WALK_FORWARD.value and detail["status"]["status"] == "completed":
+        project_root = st.session_state.lab_config.project_root
+        qualification_path = project_root / "runs" / str(selected) / "results" / "qualification.csv"
+        if qualification_path.exists():
+            qualified = pd.read_csv(qualification_path)
+            eligible = qualified["Eligible"].map(
+                lambda value: value is True
+                or str(value).strip().lower() in {"true", "1", "yes"}
+            )
+            qualified = qualified[eligible]
+            if not qualified.empty:
+                st.subheader("Promotion vers la production")
+                set_name = st.selectbox("Combinaison qualifiée", qualified["Set"].astype(str).tolist())
+                xgb_run = st.text_input("Run calibration XGBoost (optionnel)") or None
+                threshold_run = st.text_input("Run calibration seuils (optionnel)") or None
+                if st.button("Promouvoir comme candidat production"):
+                    model, created = ModelService(project_root).promote(
+                        str(selected), set_name,
+                        xgboost_calibration_run=xgb_run,
+                        threshold_calibration_run=threshold_run,
+                    )
+                    if created:
+                        st.success(f"Candidat créé : {model.model_id}")
+                    else:
+                        st.warning(f"Candidat identique déjà présent : {model.model_id}")
 
 
 def _dashboard_page() -> None:
     _dashboard(_service())
 
 
-def _surveillance_page() -> None:
-    capabilities = SignalService().capabilities() | PredictionService().capabilities()
-    _placeholder(
-        "Surveillance",
-        f"Préparée pour les workflows quotidiens. Capacités V1: {capabilities}",
-    )
-
-
 def _experiments_page() -> None:
     _experiments(_service())
 
 
-def _models_page() -> None:
-    _placeholder(
-        "Modèles",
-        f"Catalogue futur. Paramètres actifs: {ModelService().parameters(st.session_state.lab_config)}",
+def _settings_page() -> None:
+    _settings()
+
+
+def _submit_operational_job(
+    job_type: JobType, *, model_id: str | None = None
+) -> None:
+    project_root = st.session_state.lab_config.project_root
+    models = ModelService(project_root)
+    if model_id:
+        symbols = models.repository.get(model_id).symbols
+    else:
+        symbols = models.operational_universe().symbols
+    if len(symbols) < 2:
+        st.error("Au moins deux symboles opérationnels sont nécessaires.")
+        return
+    spec = ExperimentSpec(
+        job_type=job_type,
+        config=st.session_state.lab_config,
+        symbols=symbols,
+        calendar=st.session_state.lab_calendar,
+        model_id=model_id,
     )
+    submission = _service().submit(spec)
+    message = "Job créé" if submission.created else "Job identique déjà actif"
+    st.success(f"{message} : {submission.run_id}")
+
+
+def _surveillance_page() -> None:
+    st.title("Surveillance")
+    project_root = st.session_state.lab_config.project_root
+    models = ModelService(project_root)
+    universe = models.operational_universe()
+    predictions = PredictionService(project_root).history()
+    signal_service = SignalService(project_root)
+    signals = signal_service.history()
+    freshness = MarketDataService().freshness(universe.symbols, st.session_state.lab_config)
+    runs = _service().runs()
+    last_market = next(
+        (run.get("finished_at") or run.get("created_at") for run in runs if run["job_type"] in {JobType.MARKET_UPDATE.value, JobType.OPERATIONAL_RUN.value} and run["status"] == "completed"),
+        None,
+    )
+    last_prediction = (
+        predictions["created_at"].max()
+        if not predictions.empty and "created_at" in predictions
+        else None
+    )
+    operational_types = {
+        JobType.PRODUCTION_TRAINING.value,
+        JobType.MARKET_UPDATE.value,
+        JobType.DAILY_PREDICTION.value,
+        JobType.DAILY_SCREENING.value,
+        JobType.REALIZED_VALIDATION.value,
+        JobType.OPERATIONAL_RUN.value,
+    }
+    errors = [
+        run
+        for run in runs
+        if run["status"] == "failed" and run["job_type"] in operational_types
+    ]
+    columns = st.columns(6)
+    columns[0].metric("Modèles actifs", len(universe.model_ids))
+    columns[1].metric("Symboles surveillés", len(universe.symbols))
+    columns[2].metric(
+        "Signaux haussiers",
+        int((signals.get("category") == "bullish_signal").sum()) if not signals.empty else 0,
+    )
+    columns[3].metric("Dernière mise à jour", last_market or "—")
+    columns[4].metric("Dernière prédiction", last_prediction or "—")
+    columns[5].metric("Erreurs", len(errors))
+    if freshness:
+        st.caption(
+            "Fraîcheur des données : "
+            + ", ".join(f"{symbol}={date or 'manquant'}" for symbol, date in freshness.items())
+        )
+    with st.expander("Univers opérationnel"):
+        st.write(", ".join(universe.symbols) or "Aucun symbole")
+        if universe.used_by:
+            st.dataframe(
+                [{"Symbole": symbol, "Modèles": ", ".join(ids)} for symbol, ids in universe.used_by.items()],
+                hide_index=True, use_container_width=True,
+            )
+    action_columns = st.columns(5)
+    actions = [
+        ("Mettre à jour le marché", JobType.MARKET_UPDATE),
+        ("Prédictions quotidiennes", JobType.DAILY_PREDICTION),
+        ("Screening", JobType.DAILY_SCREENING),
+        ("Résultats réalisés", JobType.REALIZED_VALIDATION),
+        ("Exécution complète", JobType.OPERATIONAL_RUN),
+    ]
+    for column, (label, job_type) in zip(action_columns, actions, strict=True):
+        if column.button(label, disabled=len(universe.model_ids) == 0):
+            _submit_operational_job(job_type)
+    st.subheader("Dernières prédictions")
+    st.dataframe(predictions.tail(50), hide_index=True, use_container_width=True)
+    st.subheader("Signaux du jour / sans signal / erreurs")
+    st.dataframe(signals.tail(50), hide_index=True, use_container_width=True)
+    if not signals.empty:
+        signal_id = st.selectbox("Détail du signal", signals["signal_id"].astype(str).tolist())
+        signal = signals[signals["signal_id"].astype(str) == signal_id].iloc[-1].to_dict()
+        source_model = next(
+            (model for model in models.models() if model.model_id == signal["model_id"]),
+            None,
+        )
+        with st.expander("Pourquoi ce signal ?", expanded=False):
+            st.json({"signal": signal, "modèle_source": None if source_model is None else source_model.to_dict()})
+    if errors:
+        with st.expander("Erreurs opérationnelles récentes"):
+            st.json(errors[:10])
+    st.subheader("Jobs actifs")
+    _live_job_panel(_service())
+
+
+def _models_page() -> None:
+    st.title("Modèles")
+    service = ModelService(st.session_state.lab_config.project_root)
+    models = service.models()
+    if not models:
+        st.info("Aucun candidat production. Promouvez une combinaison qualifiée depuis Historique.")
+        return
+    st.dataframe(
+        [
+            {
+                "model_id": model.model_id, "cible": model.target,
+                "predictors": ", ".join(model.predictors), "statut": model.status.value,
+                "créé": model.created_at, "walk_forward": model.source_walk_forward_run,
+                "version": model.artifact_version,
+                "AUC dev médiane": model.development_metrics.get("ROCAUCMedian"),
+                "AUC holdout": model.holdout_metrics.get("FinalUpROCAUC"),
+            }
+            for model in models
+        ],
+        hide_index=True, use_container_width=True,
+    )
+    selected_id = st.selectbox("Modèle", [model.model_id for model in models])
+    selected = next(model for model in models if model.model_id == selected_id)
+    controls = st.columns(5)
+    if controls[0].button(
+        "Entraîner", disabled=selected.status.value in {"active", "retired"}
+    ):
+        _submit_operational_job(JobType.PRODUCTION_TRAINING, model_id=selected_id)
+    if controls[1].button("Activer", disabled=selected.status.value not in {"trained", "inactive"}):
+        service.activate(selected_id)
+        st.rerun()
+    if controls[2].button("Désactiver", disabled=selected.status.value != "active"):
+        service.deactivate(selected_id)
+        st.rerun()
+    if controls[3].button("Retirer", disabled=selected.status.value == "active"):
+        service.retire(selected_id)
+        st.rerun()
+    with st.expander("Voir détails"):
+        st.json(selected.to_dict())
+    st.subheader("Jobs actifs")
+    _live_job_panel(_service())
 
 
 def _history_page() -> None:
-    _history(_service())
-
-
-def _settings_page() -> None:
-    _settings()
+    st.title("Historique")
+    tabs = st.tabs(["Backtest / walk-forward", "Holdout", "Production réelle"])
+    with tabs[0]:
+        _history(_service())
+    with tabs[1]:
+        st.caption("Les métriques holdout restent attachées aux runs expérimentaux et aux modèles promus.")
+        models = ModelService(st.session_state.lab_config.project_root).models()
+        st.dataframe(
+            [{"model_id": model.model_id, **model.holdout_metrics} for model in models],
+            hide_index=True, use_container_width=True,
+        )
+    with tabs[2]:
+        signal_service = SignalService(st.session_state.lab_config.project_root)
+        predictions = PredictionService(
+            st.session_state.lab_config.project_root
+        ).history()
+        signals = signal_service.history()
+        results = signal_service.realized_results()
+        st.caption("Résultats opérationnels réels — jamais fusionnés avec le walk-forward ou le holdout.")
+        production_columns = st.columns(3)
+        production_columns[0].metric("Prédictions", len(predictions))
+        production_columns[1].metric(
+            "Signaux réels",
+            int((signals.get("category") == "bullish_signal").sum())
+            if not signals.empty
+            else 0,
+        )
+        production_columns[2].metric("Résultats arrivés à échéance", len(results))
+        if results.empty:
+            st.info("Échantillon de production insuffisant ou aucun résultat réalisé.")
+        else:
+            summary = results.groupby("model_id").agg(
+                signaux=("result_id", "count"), taux_succes=("up_target", "mean"),
+                retour_moyen=("intraday_return", "mean"), mfe_moyenne=("mfe", "mean"),
+                mae_moyenne=("mae", "mean"), fortes_baisses=("down_target", "mean"),
+            ).reset_index()
+            st.dataframe(summary, hide_index=True, use_container_width=True)
+            if (summary["signaux"] < 30).any():
+                st.warning(
+                    "Au moins un modèle compte moins de 30 signaux réalisés; "
+                    "ces statistiques restent descriptives."
+                )
+            distribution = pd.cut(
+                results["intraday_return"], bins=10, duplicates="drop"
+            ).value_counts(sort=False)
+            st.bar_chart(distribution.rename("Nombre de signaux"))
+            st.dataframe(results.tail(100), hide_index=True, use_container_width=True)
+        with st.expander("Historique des prédictions de production"):
+            st.dataframe(predictions.tail(200), hide_index=True, use_container_width=True)
+        with st.expander("Historique des signaux de production"):
+            st.dataframe(signals.tail(200), hide_index=True, use_container_width=True)
 
 
 def _primary_pages() -> list[st.Page]:

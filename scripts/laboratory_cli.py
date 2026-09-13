@@ -7,7 +7,11 @@ import json
 from pathlib import Path
 
 from rstock.application.domain import ExperimentSpec, JobType
-from rstock.application.services import ExperimentService, default_experiment_spec
+from rstock.application.services import (
+    ExperimentService,
+    ModelService,
+    default_experiment_spec,
+)
 from rstock.config import DEFAULT_CONFIG
 
 
@@ -19,7 +23,15 @@ def _parser() -> argparse.ArgumentParser:
 
     create = commands.add_parser("create-config")
     create.add_argument("--job-type", choices=[job.value for job in JobType if job.implemented], required=True)
-    create.add_argument("--symbols", nargs="+", required=True)
+    create.add_argument(
+        "--symbols",
+        nargs="+",
+        help="Required for experiments; operational jobs derive them when omitted",
+    )
+    create.add_argument(
+        "--model-id",
+        help="Required when creating a production_training configuration",
+    )
     create.add_argument("--output", type=Path, required=True)
 
     submit = commands.add_parser("submit")
@@ -37,8 +49,34 @@ def main() -> None:
     args = _parser().parse_args()
     root = args.project_root.resolve()
     if args.command == "create-config":
+        job_type = JobType(args.job_type)
+        symbols = tuple(args.symbols or ())
+        model_service = ModelService(root)
+        if job_type == JobType.PRODUCTION_TRAINING:
+            if not args.model_id:
+                _parser().error("--model-id is required for production_training")
+            derived = model_service.repository.get(args.model_id).symbols
+            if symbols and symbols != derived:
+                _parser().error("--symbols must match the selected production candidate")
+            symbols = derived
+        elif job_type in {
+            JobType.MARKET_UPDATE,
+            JobType.DAILY_PREDICTION,
+            JobType.DAILY_SCREENING,
+            JobType.REALIZED_VALIDATION,
+            JobType.OPERATIONAL_RUN,
+        }:
+            derived = model_service.operational_universe().symbols
+            if symbols and symbols != derived:
+                _parser().error("--symbols must match the current operational universe")
+            symbols = derived
+        elif not symbols:
+            _parser().error("--symbols is required for experimental jobs")
         spec = default_experiment_spec(
-            JobType(args.job_type), args.symbols, project_root=root
+            job_type,
+            symbols,
+            project_root=root,
+            model_id=args.model_id,
         )
         args.output.write_text(
             json.dumps(spec.to_dict(), indent=2, ensure_ascii=False) + "\n",
