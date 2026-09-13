@@ -162,6 +162,58 @@ def test_current_parameters_replace_only_the_technical_configuration(tmp_path):
     assert from_current.evaluate_final_holdout == from_run.evaluate_final_holdout
 
 
+def test_current_parameters_are_read_at_submission_after_the_draft_was_created(
+    tmp_path,
+):
+    draft = walk_forward_duplication_draft(
+        "run_original",
+        _detail(snapshot={"predictor_prefilter_enabled": False}),
+    )
+    updated_current_config = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        predictor_prefilter_enabled=True,
+    )
+
+    current_parameters = experiment_spec_from_duplication(
+        draft,
+        current_config=updated_current_config,
+        use_run_config=False,
+    )
+    run_parameters = experiment_spec_from_duplication(
+        draft,
+        current_config=updated_current_config,
+        use_run_config=True,
+    )
+
+    assert current_parameters.config.predictor_prefilter_enabled is True
+    assert run_parameters.config.predictor_prefilter_enabled is False
+    assert current_parameters.target_symbols == run_parameters.target_symbols
+    assert current_parameters.context_symbols == run_parameters.context_symbols
+    assert current_parameters.predictor_symbols == run_parameters.predictor_symbols
+
+
+def test_historical_null_context_metadata_remains_null_without_changing_symbols(tmp_path):
+    detail = _detail()
+    configuration = detail["configuration"]
+    configuration["context_sample_size"] = None
+    configuration["context_selection_method"] = None
+    configuration["context_seed"] = None
+    draft = walk_forward_duplication_draft("run_original", detail)
+    duplicated = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.context_sample_size is None
+    assert duplicated.context_selection_method is None
+    assert duplicated.context_seed is None
+    assert duplicated.target_symbols == ("DIS", "AMZN")
+    assert duplicated.context_symbols == ("NVDA",)
+    assert duplicated.predictor_symbols == ("DIS", "AMZN", "NVDA")
+
+
 def test_duplicate_keeps_top_ten_context_and_1900_combinations_after_universe_change(
     tmp_path,
 ):

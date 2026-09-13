@@ -358,6 +358,21 @@ def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
     assert 'width="stretch"' not in actions
 
 
+def test_normal_experiment_submission_persists_context_sampling_metadata():
+    source = APP.read_text(encoding="utf-8")
+    selector = source.split("def _experiment_universe_selector", 1)[1].split(
+        "def _experiments", 1
+    )[0]
+    experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
+
+    assert "lab_context_sample_size = context_sample_size" in selector
+    assert "lab_context_selection_method = context_method" in selector
+    assert "lab_context_seed = context_seed" in selector
+    assert "context_sample_size=st.session_state.lab_context_sample_size" in experiments
+    assert "context_selection_method=st.session_state.lab_context_selection_method" in experiments
+    assert "context_seed=st.session_state.lab_context_seed" in experiments
+
+
 def test_duplication_draft_is_only_offered_for_one_run_and_can_be_cancelled():
     source = APP.read_text(encoding="utf-8")
     history = source.split("def _history_runs_panel", 1)[1].split(

@@ -82,15 +82,18 @@ def duplication_submission_values(
 ) -> dict[str, object]:
     """Choose config source while preserving the duplicated universe inputs."""
 
-    config = (
-        config_from_historical_snapshot(
-            draft.get("rstock_config") if isinstance(draft.get("rstock_config"), Mapping) else None,
+    if use_run_config:
+        config = config_from_historical_snapshot(
+            draft.get("rstock_config")
+            if isinstance(draft.get("rstock_config"), Mapping)
+            else None,
             current_project_root=current_config.project_root,
         )
-        if use_run_config
-        else current_config
-    )
-    return {"config": config, **deepcopy(dict(draft))}
+    else:
+        # Deliberately use the session configuration passed at submission time;
+        # it must not be taken from the historical draft.
+        config = current_config
+    return {**deepcopy(dict(draft)), "config": config}
 
 
 def experiment_spec_from_duplication(

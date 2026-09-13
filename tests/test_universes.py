@@ -335,6 +335,71 @@ def test_context_top_n_snapshot_keeps_sampling_metadata_and_resolved_lists(tmp_p
     assert snapshot["predictor_symbols"] == ["AAA", "BBB", "CCC", "DDD"]
 
 
+def test_full_context_snapshot_keeps_null_sampling_metadata(tmp_path):
+    service = UniverseService({
+        "PRIMARY": ("AAA", "BBB"),
+        "CONTEXT": ("CCC", "DDD"),
+    })
+    primary = UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY")
+    resolved = service.resolve_experiment(primary, ("CONTEXT",))
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=resolved.predictor_symbols,
+        universe_selection=primary,
+        primary_universe_id=resolved.primary_universe_id,
+        context_universe_ids=resolved.context_universe_ids,
+        target_symbols=resolved.target_symbols,
+        context_symbols=resolved.context_symbols,
+        predictor_symbols=resolved.predictor_symbols,
+    )
+
+    snapshot = spec.to_dict()
+
+    assert snapshot["context_sample_size"] is None
+    assert snapshot["context_selection_method"] is None
+    assert snapshot["context_seed"] is None
+    assert snapshot["context_symbols"] == ["CCC", "DDD"]
+
+
+def test_seeded_context_snapshot_keeps_seed_and_resolved_lists(tmp_path):
+    service = UniverseService({
+        "PRIMARY": ("AAA",),
+        "CONTEXT": ("BBB", "CCC", "DDD", "EEE"),
+    })
+    primary = UniverseSelection(source=SAVED_SOURCE, universe="PRIMARY")
+    resolved = service.resolve_experiment(
+        primary,
+        ("CONTEXT",),
+        context_sample_size=2,
+        context_selection_method=SEEDED_SAMPLE,
+        context_seed=1234,
+    )
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=resolved.predictor_symbols,
+        universe_selection=primary,
+        primary_universe_id=resolved.primary_universe_id,
+        context_universe_ids=resolved.context_universe_ids,
+        context_sample_size=2,
+        context_selection_method=SEEDED_SAMPLE,
+        context_seed=1234,
+        target_symbols=resolved.target_symbols,
+        context_symbols=resolved.context_symbols,
+        predictor_symbols=resolved.predictor_symbols,
+    )
+
+    snapshot = spec.to_dict()
+    restored = ExperimentSpec.from_dict(snapshot)
+
+    assert snapshot["context_sample_size"] == 2
+    assert snapshot["context_selection_method"] == SEEDED_SAMPLE
+    assert snapshot["context_seed"] == 1234
+    assert restored.context_symbols == spec.context_symbols
+    assert restored.predictor_symbols == spec.predictor_symbols
+
+
 def test_no_context_keeps_legacy_symbols_behavior_and_context_run_is_frozen(tmp_path):
     service = UniverseService(root=tmp_path)
     primary = service.create("Primary", ("AAA", "BBB"))
