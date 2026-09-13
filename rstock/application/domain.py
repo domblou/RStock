@@ -11,6 +11,8 @@ from typing import Any
 
 from rstock.config import RStockConfig
 
+from .universes import UniverseSelection
+
 
 class JobType(str, Enum):
     WALK_FORWARD = "walk_forward"
@@ -71,6 +73,7 @@ class ExperimentSpec:
     calendar: str = "XNYS"
     combinations_per_target: int = 3
     evaluate_final_holdout: bool = True
+    universe_selection: UniverseSelection = UniverseSelection()
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
@@ -90,6 +93,9 @@ class ExperimentSpec:
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
             "evaluate_final_holdout": self.evaluate_final_holdout,
+            # symbols is the resolved, immutable list used by this run. The
+            # nested selection records how that list was constructed for audit.
+            "universe_selection": self.universe_selection.as_dict(),
             "rstock_config": _config_to_dict(self.config),
         }
 
@@ -104,6 +110,7 @@ class ExperimentSpec:
             calendar=str(values.get("calendar", "XNYS")),
             combinations_per_target=int(values.get("combinations_per_target", 3)),
             evaluate_final_holdout=bool(values.get("evaluate_final_holdout", True)),
+            universe_selection=UniverseSelection.from_dict(values.get("universe_selection")),
         )
 
     @property

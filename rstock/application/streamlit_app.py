@@ -16,16 +16,33 @@ from rstock.application.services import (
     PredictionService,
     SignalService,
 )
+from rstock.application.universes import (
+    MANUAL_SOURCE,
+    SAMPLE_SOURCE,
+    SAVED_SOURCE,
+    SEEDED_SAMPLE,
+    TOP_N,
+    UniverseSelection,
+    UniverseService,
+)
+from rstock.application.universe_ui import universe_display_name, universe_ui_preview
 from rstock.config import DEFAULT_CONFIG
 
 
 st.set_page_config(page_title="RStock Laboratory", page_icon="🧪", layout="wide")
 
 
+def _hidden_legacy_text_area(*args, **kwargs) -> str:
+    """Temporary non-rendering bridge for the retired standalone symbol field."""
+
+    return ""
+
+
 def _state() -> None:
     st.session_state.setdefault("lab_config", DEFAULT_CONFIG)
     cached = MarketDataService().available_symbols(DEFAULT_CONFIG)
     st.session_state.setdefault("lab_symbols", cached or ["AAPL", "MSFT"])
+    st.session_state.setdefault("lab_universe_selection", UniverseSelection())
     st.session_state.setdefault("lab_calendar", "XNYS")
     st.session_state.setdefault("lab_combinations_per_target", 3)
     st.session_state.setdefault("lab_evaluate_holdout", True)
@@ -117,6 +134,13 @@ def _experiments(service: ExperimentService) -> None:
         "Calibration des seuils": JobType.THRESHOLD_CALIBRATION,
     }
     choice = st.selectbox("Type de job", list(labels))
+    selection = st.session_state.lab_universe_selection
+    st.caption(
+        f"Univers : {selection.universe or 'liste manuelle'} · "
+        f"{len(st.session_state.lab_symbols)} symboles résolus"
+    )
+    with st.expander("Voir les symboles sélectionnés"):
+        st.code(", ".join(st.session_state.lab_symbols))
     st.caption("La configuration enregistrée dans Paramètres sera figée avant le lancement.")
     if st.button("Soumettre l’expérience", type="primary"):
         spec = ExperimentSpec(
@@ -126,6 +150,7 @@ def _experiments(service: ExperimentService) -> None:
             calendar=st.session_state.lab_calendar,
             combinations_per_target=st.session_state.lab_combinations_per_target,
             evaluate_final_holdout=st.session_state.lab_evaluate_holdout,
+            universe_selection=st.session_state.lab_universe_selection,
         )
         submitted = service.submit(spec)
         if submitted.created:
@@ -143,10 +168,86 @@ def _settings() -> None:
         defaults = asdict(DEFAULT_CONFIG)
         defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
         st.json(defaults)
-    with st.form("settings"):
-        symbols = st.text_area(
+    with st.container():
+        # Retained only to avoid altering the surrounding configuration layout.
+        symbols = _hidden_legacy_text_area(
             "Symboles (séparés par virgule)", value=", ".join(st.session_state.lab_symbols)
         )
+        st.subheader("Univers des titres")
+        universe_service = UniverseService()
+        current_selection = st.session_state.lab_universe_selection
+        source_labels = {
+            "Liste manuelle": MANUAL_SOURCE,
+            "Univers sauvegardé": SAVED_SOURCE,
+            "Échantillon d’un univers": SAMPLE_SOURCE,
+        }
+        source_labels = {
+            "Liste personnalis\u00e9e": MANUAL_SOURCE,
+            "Univers complet": SAVED_SOURCE,
+            "\u00c9chantillon d'un univers": SAMPLE_SOURCE,
+        }
+        current_label = next(
+            (label for label, value in source_labels.items() if value == current_selection.source),
+            "Liste personnalis\u00e9e",
+        )
+        source_label = st.radio(
+            "Mode de sélection", list(source_labels), index=list(source_labels).index(current_label), horizontal=True
+        )
+        source = source_labels[source_label]
+        universe_name = None
+        sample_size = None
+        selection_method = None
+        sample_seed = None
+        if source == MANUAL_SOURCE:
+            symbols = st.text_area(
+                "Symboles (séparés par virgule)", value=", ".join(st.session_state.lab_symbols)
+            )
+        else:
+            universe_names = universe_service.universe_names()
+            universe_name = st.selectbox(
+                "Univers",
+                universe_names,
+                index=(
+                    universe_names.index(current_selection.universe)
+                    if current_selection.universe in universe_names
+                    else 0
+                ),
+                format_func=lambda name: universe_display_name(name, universe_service),
+            )
+            if source == SAMPLE_SOURCE:
+                available = len(universe_service.universe_symbols(universe_name))
+                sample_size = st.number_input(
+                    "Nombre de symboles", min_value=1, max_value=available, value=min(available, current_selection.sample_size or available)
+                )
+                method_label = st.selectbox(
+                    "Méthode", ["Top N", "Échantillon reproductible"],
+                    index=0 if current_selection.selection_method != SEEDED_SAMPLE else 1,
+                )
+                selection_method = TOP_N if method_label == "Top N" else SEEDED_SAMPLE
+                if selection_method == SEEDED_SAMPLE:
+                    sample_seed = st.number_input("Seed", min_value=0, value=current_selection.seed or 1234)
+            symbols = ", ".join(universe_service.universe_symbols(universe_name))
+        manual_symbols = tuple(
+            item.strip().upper() for item in symbols.split(",") if item.strip()
+        )
+        preview_selection = UniverseSelection(
+            source=source,
+            universe=universe_name,
+            sample_size=None if sample_size is None else int(sample_size),
+            selection_method=selection_method,
+            seed=None if sample_seed is None else int(sample_seed),
+        )
+        try:
+            preview = universe_ui_preview(
+                preview_selection, universe_service, manual_symbols=manual_symbols
+            )
+        except ValueError as error:
+            preview = None
+            st.error(f"Univers invalide : {error}")
+        if preview is not None:
+            st.caption(f"{len(preview.resolved_symbols)} symboles sélectionnés")
+            with st.expander("Voir les symboles sélectionnés"):
+                st.code(", ".join(preview.resolved_symbols))
         calendar = st.text_input("Calendrier", value=st.session_state.lab_calendar)
         c1, c2, c3 = st.columns(3)
         history = c1.number_input("Historique (jours)", min_value=1, value=current.model_history_days)
@@ -213,8 +314,31 @@ def _settings() -> None:
             value=", ".join(str(value) for value in current.threshold_calibration_quantiles),
         )
 
-        if st.form_submit_button("Enregistrer les paramètres", type="primary"):
-            parsed_symbols = tuple(item.strip().upper() for item in symbols.split(",") if item.strip())
+        if st.button("Enregistrer les paramètres", type="primary"):
+            manual_symbols = tuple(
+                item.strip().upper() for item in symbols.split(",") if item.strip()
+            )
+            universe_selection = UniverseSelection(
+                source=source,
+                universe=universe_name,
+                sample_size=None if sample_size is None else int(sample_size),
+                selection_method=selection_method,
+                seed=None if sample_seed is None else int(sample_seed),
+            )
+            try:
+                resolved_universe = universe_service.resolve(
+                    universe_selection, manual_symbols=manual_symbols
+                )
+            except ValueError as error:
+                st.error(f"Univers invalide : {error}")
+                return
+            parsed_symbols = resolved_universe.symbols
+            # Submission consumes the already displayed preview, not a second
+            # independently constructed symbol list.
+            if preview is None:
+                return
+            universe_selection = preview.selection
+            parsed_symbols = preview.resolved_symbols
             parsed_quantiles = tuple(
                 float(item.strip()) for item in quantiles.split(",") if item.strip()
             )
@@ -256,11 +380,29 @@ def _settings() -> None:
                 threshold_calibration_quantiles=parsed_quantiles,
             )
             st.session_state.lab_symbols = list(parsed_symbols)
+            st.session_state.lab_universe_selection = universe_selection
             st.session_state.lab_calendar = calendar
             st.session_state.lab_combinations_per_target = int(combinations)
             st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
             st.session_state.lab_evaluate_holdout = evaluate_holdout
             st.success("Paramètres enregistrés pour les prochaines soumissions.")
+
+
+    resolved_selection = st.session_state.lab_universe_selection
+    mode_names = {
+        MANUAL_SOURCE: "Liste manuelle",
+        SAVED_SOURCE: "Univers sauvegardé",
+        SAMPLE_SOURCE: "Échantillon reproductible" if resolved_selection.selection_method == SEEDED_SAMPLE else "Top N",
+    }
+    st.subheader("Aperçu de l’univers résolu")
+    st.caption(
+        f"Univers : {resolved_selection.universe or 'liste manuelle'} · "
+        f"Mode : {mode_names[resolved_selection.source]} · "
+        f"Taille : {len(st.session_state.lab_symbols)}"
+        + (f" · Seed : {resolved_selection.seed}" if resolved_selection.seed is not None else "")
+    )
+    with st.expander("Voir les symboles sélectionnés"):
+        st.code(", ".join(st.session_state.lab_symbols))
 
 
 def _history(service: ExperimentService) -> None:
