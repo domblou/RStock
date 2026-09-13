@@ -6,15 +6,22 @@ import numpy as np
 import pandas as pd
 
 
-def _value(series: pd.Series, operation: str, *args: float) -> float:
-    clean = pd.to_numeric(series, errors="coerce").dropna()
-    if clean.empty:
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Return one cleaned numeric series for a risk input column."""
+
+    return pd.to_numeric(frame[column], errors="coerce").dropna()
+
+
+def _statistic(series: pd.Series, operation: str, *args: float) -> float:
+    """Calculate a scalar statistic from an already-cleaned numeric series."""
+
+    if series.empty:
         return np.nan
     if operation == "quantile":
-        return float(clean.quantile(args[0]))
+        return float(series.quantile(args[0]))
     if operation == "std":
-        return float(clean.std(ddof=0))
-    return float(getattr(clean, operation)())
+        return float(series.std(ddof=0))
+    return float(getattr(series, operation)())
 
 
 def intraday_risk_metrics(
@@ -24,9 +31,9 @@ def intraday_risk_metrics(
 ) -> dict[str, int | float]:
     """Describe signed returns and Open-to-High/Low excursions."""
 
-    returns = pd.to_numeric(frame["IntradayReturn"], errors="coerce").dropna()
-    mfe = pd.to_numeric(frame["MFE"], errors="coerce").dropna()
-    mae = pd.to_numeric(frame["MAE"], errors="coerce").dropna()
+    returns = _numeric_series(frame, "IntradayReturn")
+    mfe = _numeric_series(frame, "MFE")
+    mae = _numeric_series(frame, "MAE")
     gains = returns[returns > 0]
     losses = returns[returns < 0]
     mean_gain = float(gains.mean()) if not gains.empty else np.nan
@@ -38,29 +45,29 @@ def intraday_risk_metrics(
     )
     return {
         "Observations": int(len(returns)),
-        "IntradayReturnMean": _value(returns, "mean"),
-        "IntradayReturnMedian": _value(returns, "median"),
-        "IntradayReturnStd": _value(returns, "std"),
-        "IntradayReturnP10": _value(returns, "quantile", 0.10),
-        "IntradayReturnP25": _value(returns, "quantile", 0.25),
-        "IntradayReturnP75": _value(returns, "quantile", 0.75),
-        "IntradayReturnP90": _value(returns, "quantile", 0.90),
-        "IntradayReturnBest": _value(returns, "max"),
-        "IntradayReturnWorst": _value(returns, "min"),
+        "IntradayReturnMean": _statistic(returns, "mean"),
+        "IntradayReturnMedian": _statistic(returns, "median"),
+        "IntradayReturnStd": _statistic(returns, "std"),
+        "IntradayReturnP10": _statistic(returns, "quantile", 0.10),
+        "IntradayReturnP25": _statistic(returns, "quantile", 0.25),
+        "IntradayReturnP75": _statistic(returns, "quantile", 0.75),
+        "IntradayReturnP90": _statistic(returns, "quantile", 0.90),
+        "IntradayReturnBest": _statistic(returns, "max"),
+        "IntradayReturnWorst": _statistic(returns, "min"),
         "UpFrequency": float((returns >= up_threshold).mean()) if len(returns) else np.nan,
         "DownFrequency": float((returns <= -down_threshold).mean()) if len(returns) else np.nan,
         "MeanPositiveGain": mean_gain,
         "MeanNegativeLoss": mean_loss,
         "MeanGainLossRatio": float(gain_loss_ratio),
-        "ExpectedIntradayReturn": _value(returns, "mean"),
-        "MFEMean": _value(mfe, "mean"),
-        "MFEMedian": _value(mfe, "median"),
-        "MFEP10": _value(mfe, "quantile", 0.10),
-        "MFEP90": _value(mfe, "quantile", 0.90),
-        "MAEMean": _value(mae, "mean"),
-        "MAEMedian": _value(mae, "median"),
-        "MAEP10": _value(mae, "quantile", 0.10),
-        "MAEP90": _value(mae, "quantile", 0.90),
+        "ExpectedIntradayReturn": _statistic(returns, "mean"),
+        "MFEMean": _statistic(mfe, "mean"),
+        "MFEMedian": _statistic(mfe, "median"),
+        "MFEP10": _statistic(mfe, "quantile", 0.10),
+        "MFEP90": _statistic(mfe, "quantile", 0.90),
+        "MAEMean": _statistic(mae, "mean"),
+        "MAEMedian": _statistic(mae, "median"),
+        "MAEP10": _statistic(mae, "quantile", 0.10),
+        "MAEP90": _statistic(mae, "quantile", 0.90),
         "MAEBelowThresholdFrequency": (
             float((mae <= -down_threshold).mean()) if len(mae) else np.nan
         ),
@@ -80,16 +87,23 @@ def conditional_signal_metrics(
     """Describe realised risk only when a model emits a positive signal."""
 
     selected = frame[frame[signal_column] == 1]
-    metrics = intraday_risk_metrics(selected, up_threshold, down_threshold)
-    wanted = {
-        "Observations": "Count",
-        "IntradayReturnMean": "IntradayReturnMean",
-        "IntradayReturnMedian": "IntradayReturnMedian",
-        "UpFrequency": "UpFrequency",
-        "DownFrequency": "DownFrequency",
-        "MAEMean": "MAEMean",
-        "MFEMean": "MFEMean",
-        "MeanPositiveGain": "MeanPositiveGain",
-        "MeanNegativeLoss": "MeanNegativeLoss",
+    returns = _numeric_series(selected, "IntradayReturn")
+    mfe = _numeric_series(selected, "MFE")
+    mae = _numeric_series(selected, "MAE")
+    gains = returns[returns > 0]
+    losses = returns[returns < 0]
+    return {
+        f"{prefix}Count": int(len(returns)),
+        f"{prefix}IntradayReturnMean": _statistic(returns, "mean"),
+        f"{prefix}IntradayReturnMedian": _statistic(returns, "median"),
+        f"{prefix}UpFrequency": (
+            float((returns >= up_threshold).mean()) if len(returns) else np.nan
+        ),
+        f"{prefix}DownFrequency": (
+            float((returns <= -down_threshold).mean()) if len(returns) else np.nan
+        ),
+        f"{prefix}MAEMean": _statistic(mae, "mean"),
+        f"{prefix}MFEMean": _statistic(mfe, "mean"),
+        f"{prefix}MeanPositiveGain": _statistic(gains, "mean"),
+        f"{prefix}MeanNegativeLoss": _statistic(losses, "mean"),
     }
-    return {f"{prefix}{target}": metrics[source] for source, target in wanted.items()}

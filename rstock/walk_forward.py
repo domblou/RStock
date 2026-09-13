@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -265,9 +266,13 @@ def _aggregate_predictions(
     predictions: pd.DataFrame,
     windows: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    windows_by_set = {
+        set_name: group for set_name, group in windows.groupby("Set", sort=False)
+    }
+    empty_windows = windows.iloc[0:0]
     by_set: list[dict[str, object]] = []
     for set_name, group in predictions.groupby("Set", sort=False):
-        window_group = windows[windows["Set"] == set_name]
+        window_group = windows_by_set.get(set_name, empty_windows)
         record: dict[str, object] = {
             "Set": set_name,
             "Observation": group.iloc[0]["Observation"],
@@ -729,18 +734,44 @@ def evaluate_walk_forward(
     report_progress(progress_callback, "walk_forward", substage="completed", details={"phase_event": "completed", "combinations": len(task_rows), "windows": len(window_records)})
 
     report_progress(progress_callback, "aggregation", substage="started", details={"phase_event": "started"})
+    aggregation_started_at = perf_counter()
     windows_frame = pd.DataFrame(window_records)
     predictions_frame = pd.DataFrame(prediction_records)
+    aggregation_timings = {
+        "dataframe_creation": perf_counter() - aggregation_started_at,
+    }
     if predictions_frame.empty:
         raise ValueError("Walk-forward evaluation produced no predictions")
+    aggregate_predictions_started_at = perf_counter()
     aggregate_by_set, aggregate_global = _aggregate_predictions(
         predictions_frame, windows_frame
     )
+    aggregation_timings["aggregate_predictions"] = (
+        perf_counter() - aggregate_predictions_started_at
+    )
+    aggregate_windows_started_at = perf_counter()
     aggregate_by_window = _aggregate_windows(predictions_frame, windows_frame)
+    aggregation_timings["aggregate_windows"] = (
+        perf_counter() - aggregate_windows_started_at
+    )
+    aggregate_risk_started_at = perf_counter()
     risk_by_window, risk_by_set, risk_global = _aggregate_risk(
         predictions_frame, config
     )
-    report_progress(progress_callback, "aggregation", substage="completed", details={"phase_event": "completed", "windows": len(windows_frame)})
+    aggregation_timings["aggregate_risk"] = perf_counter() - aggregate_risk_started_at
+    report_progress(
+        progress_callback,
+        "aggregation",
+        substage="completed",
+        details={
+            "phase_event": "completed",
+            "windows": len(windows_frame),
+            "timings_seconds": {
+                name: round(duration, 3)
+                for name, duration in aggregation_timings.items()
+            },
+        },
+    )
     report_progress(progress_callback, "qualification", substage="started", details={"phase_event": "started"})
     qualification = qualify_combinations(windows_frame, predictions_frame, config)
     eligibility = qualification[["Set", "Eligible", "EligibleRank"]]

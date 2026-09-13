@@ -60,6 +60,7 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
     prepared = prepare_dataset(stock, ["AAA", "BBB"])
     generated = generate_symbol_sets(["AAA", "BBB"], 1)
 
+    progress_events = []
     result = evaluate_walk_forward(
         prepared,
         generated,
@@ -69,6 +70,7 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
         test_size=5,
         step_size=5,
         final_holdout_size=5,
+        progress_callback=progress_events.append,
     )
 
     assert len(result.windows) == 6
@@ -103,6 +105,19 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
     assert (result.windows["TestEnd"] < result.final_holdout["FinalTestStart"].min()).all()
     assert result.final_holdout["FinalTestStart"].min() == index[-5]
     assert set(result.final_holdout_predictions["Date"]) == set(index[-5:])
+    aggregation_complete = next(
+        event
+        for event in progress_events
+        if event.stage == "aggregation" and event.substage == "completed"
+    )
+    timings = aggregation_complete.details["timings_seconds"]
+    assert set(timings) == {
+        "dataframe_creation",
+        "aggregate_predictions",
+        "aggregate_windows",
+        "aggregate_risk",
+    }
+    assert all(isinstance(duration, float) and duration >= 0 for duration in timings.values())
 
     output = tmp_path / "walk-forward-output"
     write_walk_forward_results(result, output)
