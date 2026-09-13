@@ -9,7 +9,29 @@ import pandas as pd
 import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
+from rstock.application.history_ui import (
+    EXPERIMENT_JOB_TYPES,
+    JOB_LABELS,
+    PRODUCTION_JOB_TYPES,
+    already_promoted,
+    filter_runs,
+    history_row,
+    paginate_runs,
+    qualified_combinations_table,
+)
 from rstock.application.runner import running_duration
+from rstock.application.surveillance import (
+    OperationalTableView,
+    build_predictions_view,
+    build_realized_results_view,
+    build_signals_view,
+    realized_main_table,
+    validation_feedback,
+)
+from rstock.application.surveillance_refresh import (
+    OPERATIONAL_JOB_TYPES,
+    surveillance_refresh_decision,
+)
 from rstock.application.services import (
     ExperimentService,
     MarketDataService,
@@ -406,61 +428,203 @@ def _settings() -> None:
         st.code(", ".join(st.session_state.lab_symbols))
 
 
-def _history(service: ExperimentService) -> None:
-    st.title("Historique")
-    runs = service.runs()
-    if not runs:
-        st.info("Aucun run enregistré.")
+def _history_model_contexts(project_root) -> dict[str, str]:
+    return {
+        model.model_id: f"{model.target} ← {' + '.join(model.predictors)}"
+        for model in ModelService(project_root).models()
+    }
+
+
+def _history_filters(
+    runs: list[dict[str, object]],
+    *,
+    allowed_types: frozenset[str],
+    models: dict[str, str],
+    service: ExperimentService,
+    key_prefix: str,
+) -> list[dict[str, object]]:
+    columns = st.columns(4)
+    job_options = ["Tous", *sorted(allowed_types, key=lambda item: JOB_LABELS[item])]
+    selected_type = columns[0].selectbox(
+        "Type de run",
+        job_options,
+        format_func=lambda item: "Tous" if item == "Tous" else JOB_LABELS[item],
+        key=f"{key_prefix}-type",
+    )
+    statuses = ["Tous", *sorted({str(run["status"]) for run in runs})]
+    selected_status = columns[1].selectbox("Statut", statuses, key=f"{key_prefix}-status")
+    period = columns[2].selectbox(
+        "Période", ["Aujourd’hui", "7 jours", "30 jours", "Tout"], key=f"{key_prefix}-period"
+    )
+    model_options = [None, *sorted(models)]
+    selected_model = columns[3].selectbox(
+        "Modèle",
+        model_options,
+        format_func=lambda item: "Tous" if item is None else models[item],
+        key=f"{key_prefix}-model",
+    )
+    return list(filter_runs(
+        runs,
+        allowed_types=allowed_types,
+        job_type=selected_type,
+        status=selected_status,
+        period=period,
+        model_id=selected_model,
+        detail_loader=service.run if selected_model is not None else None,
+    ))
+
+
+def _render_walk_forward_promotion(
+    run_id: str,
+    *,
+    project_root,
+) -> None:
+    results = project_root / "runs" / run_id / "results"
+    qualification_path = results / "qualification.csv"
+    if not qualification_path.exists():
+        st.info("Les combinaisons qualifiées ne sont pas disponibles pour ce run.")
         return
-    table = []
-    for run in runs:
-        summary = service.run(str(run["run_id"]))["summary"]
-        preview = json.dumps(summary, ensure_ascii=False, default=str)
-        table.append(
-            {
-                "run_id": run["run_id"],
-                "type": run["job_type"],
-                "créé": run["created_at"],
-                "durée_s": run.get("duration_seconds"),
-                "statut": run["status"],
-                "principales métriques": preview[:240],
-            }
+    qualification = pd.read_csv(qualification_path)
+    holdout_path = results / "final_holdout.csv"
+    holdout = pd.read_csv(holdout_path) if holdout_path.exists() else pd.DataFrame()
+    combinations = qualified_combinations_table(qualification, holdout)
+    st.subheader("Combinaisons qualifiées")
+    if combinations.empty:
+        st.info("Aucune combinaison ne satisfait les critères de qualification.")
+        return
+    selection = st.dataframe(
+        combinations,
+        hide_index=True,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"qualified-combinations-{run_id}",
+    )
+    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+    selected_key = f"selected-qualified-combination-{run_id}"
+    if selected_rows:
+        st.session_state[selected_key] = combinations.iloc[selected_rows[0]]["Combinaison"]
+    set_name = st.session_state.get(selected_key)
+    if set_name not in set(combinations["Combinaison"]):
+        st.caption("Sélectionnez une combinaison dans le tableau pour la promouvoir.")
+        return
+    selected = combinations[combinations["Combinaison"] == set_name].iloc[0]
+    st.caption(f"Sélection : {selected['Cible']} ← {selected['Predictors']}")
+    model_service = ModelService(project_root)
+    existing = already_promoted(
+        walk_forward_run=run_id,
+        set_name=str(set_name),
+        models=model_service.models(),
+    )
+    if existing is not None:
+        st.info(f"Déjà promue — statut : {existing.status.value}.")
+        return
+    with st.expander("Sources de calibration optionnelles"):
+        xgb_run = st.text_input("Run calibration XGBoost", key=f"xgb-source-{run_id}") or None
+        threshold_run = st.text_input("Run calibration seuils", key=f"threshold-source-{run_id}") or None
+    if st.button("Promouvoir comme candidat production", type="primary", key=f"promote-{run_id}"):
+        try:
+            model, created = model_service.promote(
+                run_id,
+                str(set_name),
+                xgboost_calibration_run=xgb_run,
+                threshold_calibration_run=threshold_run,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            st.error(f"Promotion impossible : {error}")
+        else:
+            if created:
+                st.success(f"Candidat production créé : {model.target} ← {' + '.join(model.predictors)}")
+            else:
+                st.info(f"Combinaison déjà promue — statut : {model.status.value}.")
+
+
+def _render_history_detail(
+    run_id: str,
+    *,
+    status: dict[str, object],
+    detail: dict[str, object],
+    context: str,
+    summary_text: str,
+) -> None:
+    st.divider()
+    st.subheader("Détail du run")
+    columns = st.columns(5)
+    columns[0].metric("Type", JOB_LABELS.get(str(status["job_type"]), str(status["job_type"])))
+    columns[1].metric("Date", history_row(status, detail, {}).date_time)
+    columns[2].metric("Statut", str(status["status"]))
+    columns[3].metric("Durée", history_row(status, detail, {}).duration)
+    columns[4].metric("Contexte", context)
+    st.markdown("**Résumé du run**")
+    st.write(summary_text)
+    st.caption(f"ID technique : {run_id}")
+    if (
+        status["job_type"] == JobType.WALK_FORWARD.value
+        and status["status"] == "completed"
+    ):
+        _render_walk_forward_promotion(
+            run_id, project_root=st.session_state.lab_config.project_root
         )
-    st.dataframe(table, use_container_width=True, hide_index=True)
-    selected = st.selectbox("Ouvrir un run", [run["run_id"] for run in runs])
-    detail = service.run(selected)
-    tabs = st.tabs(["Résumé", "Configuration", "Fichiers", "Logs"])
+    tabs = st.tabs(["Résultats", "Configuration", "Fichiers", "Logs"])
     tabs[0].json(detail["summary"])
     tabs[1].json(detail["configuration"])
     tabs[2].write(detail["files"] or "Aucun résultat publié")
     tabs[3].code("\n".join(detail["log_tail"]) or "Aucun message")
 
 
-    if detail["status"]["job_type"] == JobType.WALK_FORWARD.value and detail["status"]["status"] == "completed":
-        project_root = st.session_state.lab_config.project_root
-        qualification_path = project_root / "runs" / str(selected) / "results" / "qualification.csv"
-        if qualification_path.exists():
-            qualified = pd.read_csv(qualification_path)
-            eligible = qualified["Eligible"].map(
-                lambda value: value is True
-                or str(value).strip().lower() in {"true", "1", "yes"}
-            )
-            qualified = qualified[eligible]
-            if not qualified.empty:
-                st.subheader("Promotion vers la production")
-                set_name = st.selectbox("Combinaison qualifiée", qualified["Set"].astype(str).tolist())
-                xgb_run = st.text_input("Run calibration XGBoost (optionnel)") or None
-                threshold_run = st.text_input("Run calibration seuils (optionnel)") or None
-                if st.button("Promouvoir comme candidat production"):
-                    model, created = ModelService(project_root).promote(
-                        str(selected), set_name,
-                        xgboost_calibration_run=xgb_run,
-                        threshold_calibration_run=threshold_run,
-                    )
-                    if created:
-                        st.success(f"Candidat créé : {model.model_id}")
-                    else:
-                        st.warning(f"Candidat identique déjà présent : {model.model_id}")
+def _history_runs_panel(
+    service: ExperimentService,
+    *,
+    allowed_types: frozenset[str],
+    key_prefix: str,
+) -> None:
+    runs = service.runs()
+    models = _history_model_contexts(st.session_state.lab_config.project_root)
+    filtered = _history_filters(
+        runs, allowed_types=allowed_types, models=models, service=service, key_prefix=key_prefix
+    )
+    if not filtered:
+        st.info("Aucun run ne correspond aux filtres.")
+        return
+    page_controls = st.columns([1, 1, 4])
+    page_size = page_controls[0].selectbox("Runs par page", [25, 50], key=f"{key_prefix}-page-size")
+    total_pages = max(1, (len(filtered) + int(page_size) - 1) // int(page_size))
+    page_key = f"{key_prefix}-page"
+    if int(st.session_state.get(page_key, 1)) > total_pages:
+        st.session_state[page_key] = total_pages
+    page = page_controls[1].number_input(
+        "Page", min_value=1, max_value=total_pages, value=1, step=1, key=page_key
+    )
+    visible, total_pages = paginate_runs(filtered, page=int(page) - 1, page_size=int(page_size))
+    page_controls[2].caption(f"{len(filtered)} runs · page {int(page)} / {total_pages}")
+    rows = [history_row(run, service.run(str(run["run_id"])), models) for run in visible]
+    selection = st.dataframe(
+        pd.DataFrame([row.display() for row in rows]),
+        hide_index=True,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"{key_prefix}-grid",
+    )
+    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+    selected_key = f"{key_prefix}-selected-run"
+    if selected_rows:
+        st.session_state[selected_key] = rows[selected_rows[0]].run_id
+    selected = st.session_state.get(selected_key)
+    filtered_ids = {str(run["run_id"]) for run in filtered}
+    if selected not in filtered_ids:
+        st.session_state.pop(selected_key, None)
+        return
+    selected_status = next(run for run in filtered if str(run["run_id"]) == selected)
+    selected_detail = service.run(str(selected))
+    selected_row = history_row(selected_status, selected_detail, models)
+    _render_history_detail(
+        str(selected),
+        status=selected_status,
+        detail=selected_detail,
+        context=selected_row.context,
+        summary_text=selected_row.summary,
+    )
 
 
 def _dashboard_page() -> None:
@@ -499,7 +663,140 @@ def _submit_operational_job(
     st.success(f"{message} : {submission.run_id}")
 
 
-def _surveillance_page() -> None:
+def _selected_rows(event: object) -> list[int]:
+    return list(getattr(getattr(event, "selection", None), "rows", []))
+
+
+def _technical_record(view: OperationalTableView, selected: list[int]) -> dict[str, object] | None:
+    if not selected or selected[0] >= len(view.technical):
+        return None
+    return json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso"))
+
+
+def _render_predictions_tab(predictions: pd.DataFrame) -> None:
+    view = build_predictions_view(predictions)
+    if view.table.empty:
+        st.info("Aucune prédiction disponible.")
+        return
+    event = st.dataframe(
+        view.table, hide_index=True, use_container_width=True,
+        on_select="rerun", selection_mode="single-row", key="surveillance-predictions",
+    )
+    technical = _technical_record(view, _selected_rows(event))
+    if technical is not None:
+        with st.expander("Détails techniques", expanded=False):
+            st.json(technical)
+
+
+def _render_signals_tab(signals: pd.DataFrame, models: ModelService) -> None:
+    view = build_signals_view(signals)
+    selected_signal = None
+    if view.signals.table.empty:
+        st.info("Aucun signal haussier aujourd’hui.")
+    else:
+        event = st.dataframe(
+            view.signals.table, hide_index=True, use_container_width=True,
+            on_select="rerun", selection_mode="single-row", key="surveillance-signals",
+        )
+        selected_signal = _technical_record(view.signals, _selected_rows(event))
+
+    no_signal_selection: list[int] = []
+    with st.expander(f"Voir les prédictions sans signal ({len(view.no_signal.table)})"):
+        if view.no_signal.table.empty:
+            st.caption("Aucune prédiction sans signal.")
+        else:
+            event = st.dataframe(
+                view.no_signal.table, hide_index=True, use_container_width=True,
+                on_select="rerun", selection_mode="single-row", key="surveillance-no-signals",
+            )
+            no_signal_selection = _selected_rows(event)
+
+    selected_no_signal = _technical_record(view.no_signal, no_signal_selection)
+    selected = selected_signal or selected_no_signal
+    if selected is not None:
+        st.markdown("**Détail du signal**")
+        source_model = next(
+            (model for model in models.models() if model.model_id == selected.get("model_id")),
+            None,
+        )
+        with st.expander("Pourquoi ce signal ?", expanded=False):
+            st.json({
+                "signal": selected,
+                "modèle_source": None if source_model is None else source_model.to_dict(),
+            })
+
+
+def _realized_results_panel(
+    predictions: pd.DataFrame,
+    signals: pd.DataFrame,
+) -> None:
+    """Render realized results, pending predictions and validation feedback."""
+
+    project_root = st.session_state.lab_config.project_root
+    signal_service = SignalService(project_root)
+    realized = signal_service.realized_results()
+    model_service = ModelService(project_root)
+    history_targets = (
+        set(predictions["target"].dropna().astype(str))
+        if not predictions.empty and "target" in predictions
+        else set()
+    )
+    freshness_symbols = tuple(
+        sorted(set(model_service.operational_universe().symbols) | history_targets)
+    )
+    freshness = MarketDataService().freshness(
+        freshness_symbols,
+        st.session_state.lab_config,
+    )
+    view = build_realized_results_view(predictions, signals, realized, freshness)
+
+    pending_columns = st.columns(2)
+    pending_columns[0].metric("Prédictions en attente", view.pending_count)
+    pending_columns[1].metric(
+        "Prochaine date à valider", view.next_validation_date or "—"
+    )
+
+    validation_jobs = [
+        run
+        for run in _service().runs()
+        if run["job_type"]
+        in {JobType.REALIZED_VALIDATION.value, JobType.OPERATIONAL_RUN.value}
+    ]
+    if validation_jobs:
+        latest = validation_jobs[0]
+        if latest["status"] in {"pending", "running"}:
+            st.info("Validation des résultats en cours…")
+        elif latest["status"] == "failed":
+            st.error(f"La dernière validation a échoué : {latest.get('error') or 'erreur inconnue'}")
+        elif latest["status"] == "completed":
+            summary = _service().run(str(latest["run_id"]))["summary"]
+            level, message = validation_feedback(
+                int(summary.get("realized_results", 0)), view
+            )
+            getattr(st, level)(message)
+
+    if view.table.empty:
+        st.caption("Aucun résultat réalisé disponible pour l’instant.")
+    else:
+        main_table = realized_main_table(view.table)
+        event = st.dataframe(
+            main_table, hide_index=True, use_container_width=True,
+            on_select="rerun", selection_mode="single-row", key="surveillance-realized",
+        )
+        selected = _selected_rows(event)
+        if selected and selected[0] < len(view.technical):
+            with st.expander("Détails techniques", expanded=False):
+                st.json(json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso")))
+    if not view.pending.empty:
+        with st.expander("Voir les prédictions en attente"):
+            st.dataframe(
+                build_predictions_view(view.pending, limit=len(view.pending)).table,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
+def _render_surveillance_page(*, polling: bool) -> None:
     st.title("Surveillance")
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
@@ -518,18 +815,10 @@ def _surveillance_page() -> None:
         if not predictions.empty and "created_at" in predictions
         else None
     )
-    operational_types = {
-        JobType.PRODUCTION_TRAINING.value,
-        JobType.MARKET_UPDATE.value,
-        JobType.DAILY_PREDICTION.value,
-        JobType.DAILY_SCREENING.value,
-        JobType.REALIZED_VALIDATION.value,
-        JobType.OPERATIONAL_RUN.value,
-    }
     errors = [
         run
         for run in runs
-        if run["status"] == "failed" and run["job_type"] in operational_types
+        if run["status"] == "failed" and run["job_type"] in OPERATIONAL_JOB_TYPES
     ]
     columns = st.columns(6)
     columns[0].metric("Modèles actifs", len(universe.model_ids))
@@ -564,24 +853,37 @@ def _surveillance_page() -> None:
     for column, (label, job_type) in zip(action_columns, actions, strict=True):
         if column.button(label, disabled=len(universe.model_ids) == 0):
             _submit_operational_job(job_type)
-    st.subheader("Dernières prédictions")
-    st.dataframe(predictions.tail(50), hide_index=True, use_container_width=True)
-    st.subheader("Signaux du jour / sans signal / erreurs")
-    st.dataframe(signals.tail(50), hide_index=True, use_container_width=True)
-    if not signals.empty:
-        signal_id = st.selectbox("Détail du signal", signals["signal_id"].astype(str).tolist())
-        signal = signals[signals["signal_id"].astype(str) == signal_id].iloc[-1].to_dict()
-        source_model = next(
-            (model for model in models.models() if model.model_id == signal["model_id"]),
-            None,
-        )
-        with st.expander("Pourquoi ce signal ?", expanded=False):
-            st.json({"signal": signal, "modèle_source": None if source_model is None else source_model.to_dict()})
+            # The first rerun installs the conditional polling fragment; later
+            # reruns are driven by that fragment only while work is active.
+            st.rerun()
+    st.divider()
+    content_tabs = st.tabs(["Prédictions", "Signaux", "Résultats réalisés"])
+    with content_tabs[0]:
+        _render_predictions_tab(predictions)
+    with content_tabs[1]:
+        _render_signals_tab(signals, models)
+    with content_tabs[2]:
+        _realized_results_panel(predictions, signals)
     if errors:
         with st.expander("Erreurs opérationnelles récentes"):
             st.json(errors[:10])
     st.subheader("Jobs actifs")
-    _live_job_panel(_service())
+    _job_panel(_service())
+    if surveillance_refresh_decision(runs, polling=polling).final_rerun:
+        st.rerun(scope="app")
+
+
+if hasattr(st, "fragment"):
+    _polling_surveillance_page = st.fragment(run_every=2)(_render_surveillance_page)
+
+
+def _surveillance_page() -> None:
+    runs = _service().runs()
+    decision = surveillance_refresh_decision(runs, polling=False)
+    if decision.poll and hasattr(st, "fragment"):
+        _polling_surveillance_page(polling=True)
+    else:
+        _render_surveillance_page(polling=False)
 
 
 def _models_page() -> None:
@@ -631,7 +933,9 @@ def _history_page() -> None:
     st.title("Historique")
     tabs = st.tabs(["Backtest / walk-forward", "Holdout", "Production réelle"])
     with tabs[0]:
-        _history(_service())
+        _history_runs_panel(
+            _service(), allowed_types=EXPERIMENT_JOB_TYPES, key_prefix="experimental-history"
+        )
     with tabs[1]:
         st.caption("Les métriques holdout restent attachées aux runs expérimentaux et aux modèles promus.")
         models = ModelService(st.session_state.lab_config.project_root).models()
@@ -640,6 +944,10 @@ def _history_page() -> None:
             hide_index=True, use_container_width=True,
         )
     with tabs[2]:
+        _history_runs_panel(
+            _service(), allowed_types=PRODUCTION_JOB_TYPES, key_prefix="production-history"
+        )
+        st.divider()
         signal_service = SignalService(st.session_state.lab_config.project_root)
         predictions = PredictionService(
             st.session_state.lab_config.project_root
@@ -660,20 +968,21 @@ def _history_page() -> None:
             st.info("Échantillon de production insuffisant ou aucun résultat réalisé.")
         else:
             summary = results.groupby("model_id").agg(
-                signaux=("result_id", "count"), taux_succes=("up_target", "mean"),
+                prédictions_réalisées=("result_id", "count"),
+                taux_succes=("up_target", "mean"),
                 retour_moyen=("intraday_return", "mean"), mfe_moyenne=("mfe", "mean"),
                 mae_moyenne=("mae", "mean"), fortes_baisses=("down_target", "mean"),
             ).reset_index()
             st.dataframe(summary, hide_index=True, use_container_width=True)
-            if (summary["signaux"] < 30).any():
+            if (summary["prédictions_réalisées"] < 30).any():
                 st.warning(
-                    "Au moins un modèle compte moins de 30 signaux réalisés; "
+                    "Au moins un modèle compte moins de 30 prédictions réalisées; "
                     "ces statistiques restent descriptives."
                 )
             distribution = pd.cut(
                 results["intraday_return"], bins=10, duplicates="drop"
             ).value_counts(sort=False)
-            st.bar_chart(distribution.rename("Nombre de signaux"))
+            st.bar_chart(distribution.rename("Nombre de prédictions"))
             st.dataframe(results.tail(100), hide_index=True, use_container_width=True)
         with st.expander("Historique des prédictions de production"):
             st.dataframe(predictions.tail(200), hide_index=True, use_container_width=True)

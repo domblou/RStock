@@ -422,7 +422,6 @@ def _operational_run(
         market_store.read,
         cancellation_check=cancellation_check,
         additional_predictions=predictions,
-        additional_signals=signals,
         persist=False,
     )
     _phase(progress_callback, "realized_validation", "completed", results=len(realized))

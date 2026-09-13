@@ -22,6 +22,7 @@ from rstock.application.production_services import (
     RealizedResultService,
 )
 from rstock.application.repository import RunRepository, utc_now
+from rstock.application.surveillance import build_realized_results_view
 from rstock.application.worker import execute_run
 from rstock.application.workflows import WorkflowRegistry, _market_update, _operational_run
 from rstock.config import DEFAULT_CONFIG
@@ -264,12 +265,27 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
         index=[prediction_date],
     )
     realized = RealizedResultService(repository).update(lambda _: prices)
+    repeated = RealizedResultService(repository).update(lambda _: prices)
     assert realized.iloc[0]["intraday_return"] == pytest.approx(0.02)
+    assert realized.iloc[0]["open"] == 100.0
+    assert realized.iloc[0]["high"] == 103.0
+    assert realized.iloc[0]["low"] == 98.0
+    assert realized.iloc[0]["close"] == 102.0
     assert realized.iloc[0]["up_target"] == 1
+    assert repeated.empty
     assert not repository.read_table("predictions").empty
     assert not repository.read_table("signals").empty
     assert not repository.read_table("realized_results").empty
+    assert len(repository.read_table("realized_results")) == 1
     assert repository.read_table("predictions").columns.tolist() != repository.read_table("realized_results").columns.tolist()
+    displayed = build_realized_results_view(
+        repository.read_table("predictions"),
+        repository.read_table("signals"),
+        repository.read_table("realized_results"),
+    ).table.iloc[0]
+    assert displayed["intraday_return"] == "2.00%"
+    assert displayed["up_target_hit"] == "Oui"
+    assert displayed["down_target_hit"] == "Non"
 
 
 def test_training_cancellation_between_directions_leaves_no_partial_artifacts(
@@ -306,6 +322,51 @@ def test_training_cancellation_between_directions_leaves_no_partial_artifacts(
     assert fitted == 1
     assert not repository.artifact_directory("model_test").exists()
     assert repository.get("model_test").status == ProductionModelStatus.CANDIDATE
+
+
+def test_realized_result_is_attached_to_no_signal_prediction(tmp_path):
+    repository = ProductionRepository(tmp_path)
+    repository.add(_model())
+    prediction_date = pd.Timestamp("2026-09-14")
+    prediction = pd.DataFrame([{
+        "prediction_id": "no-signal-prediction",
+        "prediction_date": "2026-09-14",
+        "as_of_date": "2026-09-11",
+        "target": "AAA",
+        "predictors": '["BBB"]',
+        "model_id": "model_test",
+        "model_version": 1,
+        "up_probability": 0.4,
+        "down_probability": 0.2,
+        "up_threshold": 0.6,
+        "down_threshold": 0.4,
+        "signal_status": "no_signal",
+        "status": "predicted",
+        "error": None,
+        "created_at": utc_now(),
+    }])
+    repository.append_table("predictions", prediction, key="prediction_id")
+    repository.append_table(
+        "signals",
+        pd.DataFrame([{
+            "signal_id": "no-signal-prediction",
+            "prediction_id": "no-signal-prediction",
+            "prediction_date": "2026-09-14",
+            "model_id": "model_test",
+            "target": "AAA",
+            "category": "no_signal",
+        }]),
+        key="signal_id",
+    )
+    prices = pd.DataFrame(
+        {"Open": [100.0], "High": [101.0], "Low": [98.0], "Close": [99.0]},
+        index=[prediction_date],
+    )
+
+    realized = RealizedResultService(repository).update(lambda _: prices)
+
+    assert realized["prediction_id"].tolist() == ["no-signal-prediction"]
+    assert len(repository.read_table("realized_results")) == 1
 
 
 def test_prediction_error_is_isolated_per_active_model(monkeypatch, tmp_path):

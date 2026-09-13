@@ -1,0 +1,155 @@
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pandas as pd
+
+from rstock.application.history_ui import (
+    EXPERIMENT_JOB_TYPES,
+    PRODUCTION_JOB_TYPES,
+    already_promoted,
+    filter_runs,
+    history_row,
+    paginate_runs,
+    qualified_combinations_table,
+)
+
+
+NOW = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+
+
+def _run(identifier, job_type, status="completed", days=0, duration=12):
+    return {
+        "run_id": identifier,
+        "job_type": job_type,
+        "status": status,
+        "created_at": (NOW - timedelta(days=days)).isoformat(),
+        "duration_seconds": duration,
+    }
+
+
+def _detail(*, model_id=None, symbols=("AAA", "BBB"), summary=None):
+    return {
+        "configuration": {
+            "model_id": model_id,
+            "symbols": list(symbols),
+            "rstock_config": {"permutation_depth": 2},
+        },
+        "summary": summary or {},
+    }
+
+
+def test_filters_cover_type_status_period_and_model():
+    runs = [
+        _run("wf-today", "walk_forward"),
+        _run("train-week", "production_training", days=3),
+        _run("prediction-old", "daily_prediction", status="failed", days=31),
+    ]
+    details = {
+        "wf-today": _detail(),
+        "train-week": _detail(model_id="model-1"),
+        "prediction-old": _detail(model_id="model-2"),
+    }
+
+    today = filter_runs(
+        runs, allowed_types=EXPERIMENT_JOB_TYPES, period="Aujourd’hui", now=NOW
+    )
+    model = filter_runs(
+        runs,
+        allowed_types=PRODUCTION_JOB_TYPES,
+        status="completed",
+        period="7 jours",
+        model_id="model-1",
+        detail_loader=lambda identifier: details[identifier],
+        now=NOW,
+    )
+
+    assert [run["run_id"] for run in today] == ["wf-today"]
+    assert [run["run_id"] for run in model] == ["train-week"]
+
+
+def test_today_uses_the_local_calendar_day_for_utc_persisted_runs():
+    eastern = timezone(timedelta(hours=-4))
+    local_now = datetime(2026, 9, 12, 23, 41, tzinfo=eastern)
+    runs = [{
+        "run_id": "late-local-run",
+        "job_type": "walk_forward",
+        "status": "completed",
+        # 23:20 on September 12 in Eastern time, but September 13 in UTC.
+        "created_at": "2026-09-13T03:20:09+00:00",
+    }]
+
+    filtered = filter_runs(
+        runs, allowed_types=EXPERIMENT_JOB_TYPES, period="Aujourd’hui", now=local_now
+    )
+
+    assert [run["run_id"] for run in filtered] == ["late-local-run"]
+
+
+def test_history_rows_are_human_readable_without_exposing_run_id():
+    row = history_row(
+        _run("opaque-guid", "market_update"),
+        _detail(summary={"requested_symbols": ["AAA", "BBB", "CCC"], "updated_symbols": ["AAA", "BBB", "CCC"]}),
+        {},
+    )
+
+    assert row.context == "3 symboles"
+    assert row.summary == "3 symboles mis à jour"
+    assert "opaque-guid" not in row.display().values()
+    assert set(row.display()) == {"Date / heure", "Type", "Contexte", "Statut", "Durée", "Résumé"}
+
+
+def test_production_rows_have_human_context_and_summary():
+    models = {"model-1": "DIS ← PFE + WMT"}
+    training = history_row(
+        _run("training", "production_training"),
+        _detail(model_id="model-1", summary={"model_id": "model-1"}),
+        models,
+    )
+    screening = history_row(
+        _run("screening", "daily_screening"),
+        _detail(summary={"predictions": 2, "categories": {"no_signal": 2}}),
+        models,
+    )
+
+    assert training.context == "DIS ← PFE + WMT"
+    assert training.summary == "1 modèle entraîné"
+    assert screening.context == "2 modèles actifs"
+    assert screening.summary == "0 signaux · 2 sans signal"
+
+
+def test_pagination_bounds_visible_runs():
+    runs = [_run(f"run-{index}", "walk_forward") for index in range(60)]
+
+    page, pages = paginate_runs(runs, page=1, page_size=25)
+
+    assert pages == 3
+    assert len(page) == 25
+    assert page[0]["run_id"] == "run-25"
+
+
+def test_qualified_table_combines_development_holdout_and_is_sortable():
+    qualification = pd.DataFrame([
+        {"Set": "DIS<-PFE+WMT", "Observation": "DIS", "Predictors": '["PFE","WMT"]', "Eligible": True, "ROCAUCMedian": 0.61, "IneligibilityReasons": "[]"},
+        {"Set": "AAA<-BBB", "Observation": "AAA", "Predictors": '["BBB"]', "Eligible": False, "ROCAUCMedian": 0.9, "IneligibilityReasons": '["median_auc"]'},
+    ])
+    holdout = pd.DataFrame([{"Set": "DIS<-PFE+WMT", "FinalUpROCAUC": 0.58}])
+
+    table = qualified_combinations_table(qualification, holdout)
+
+    assert table.to_dict("records") == [{
+        "Combinaison": "DIS<-PFE+WMT", "Cible": "DIS", "Predictors": "PFE + WMT",
+        "AUC dev médiane": 0.61, "AUC holdout": 0.58,
+        "Stabilité / qualification": "Qualifiée",
+    }]
+
+
+def test_existing_promotion_is_detected_without_changing_registry_logic():
+    model = SimpleNamespace(
+        source_walk_forward_run="wf-run", target="DIS", predictors=("PFE", "WMT"), status="candidate"
+    )
+
+    existing = already_promoted(
+        walk_forward_run="wf-run", set_name="DIS<-PFE+WMT", models=[model]
+    )
+
+    assert existing is model

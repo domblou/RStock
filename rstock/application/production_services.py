@@ -492,26 +492,13 @@ class RealizedResultService:
         *,
         cancellation_check: CancellationCheck | None = None,
         additional_predictions: pd.DataFrame | None = None,
-        additional_signals: pd.DataFrame | None = None,
         persist: bool = True,
     ) -> pd.DataFrame:
         predictions = self.repository.read_table("predictions")
-        signals = self.repository.read_table("signals")
         if additional_predictions is not None and not additional_predictions.empty:
             predictions = pd.concat(
                 [predictions, additional_predictions], ignore_index=True
             ).drop_duplicates("prediction_id", keep="first")
-        if additional_signals is not None and not additional_signals.empty:
-            signals = pd.concat(
-                [signals, additional_signals], ignore_index=True
-            ).drop_duplicates("signal_id", keep="first")
-        signal_prediction_ids = set(
-            signals.loc[
-                signals.get("category", pd.Series(index=signals.index, dtype=str))
-                == "bullish_signal",
-                "prediction_id",
-            ].astype(str)
-        ) if not signals.empty and "prediction_id" in signals else set()
         previous = self.repository.read_table("realized_results")
         completed = set(previous.get("prediction_id", pd.Series(dtype=str)).astype(str))
         models = {model.model_id: model for model in self.repository.models()}
@@ -521,7 +508,6 @@ class RealizedResultService:
             prediction_id = str(item["prediction_id"])
             if (
                 prediction_id in completed
-                or prediction_id not in signal_prediction_ids
                 or item.get("status") != "predicted"
             ):
                 continue
@@ -542,7 +528,9 @@ class RealizedResultService:
             rows.append({
                 "result_id": prediction_id, "prediction_id": prediction_id,
                 "model_id": item["model_id"], "target": item["target"],
-                "prediction_date": item["prediction_date"], "intraday_return": intraday,
+                "prediction_date": item["prediction_date"],
+                "open": opened, "high": high, "low": low, "close": closed,
+                "intraday_return": intraday,
                 "mfe": high / opened - 1.0, "mae": low / opened - 1.0,
                 "up_target": int(intraday >= model.up_target_threshold),
                 "down_target": int(intraday <= -model.down_target_threshold),
