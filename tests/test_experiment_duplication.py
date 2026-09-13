@@ -4,10 +4,14 @@ import pytest
 
 from rstock.application.domain import ExperimentSpec, JobType
 from rstock.application.experiment_duplication import (
+    JOB_TYPE_LABELS,
     config_from_historical_snapshot,
     duplication_combination_count,
+    duplication_job_label,
     duplication_submission_values,
     experiment_spec_from_duplication,
+    normalize_duplication_job_type,
+    validate_duplication_job,
     walk_forward_duplication_draft,
 )
 from rstock.application.universes import (
@@ -70,6 +74,36 @@ def test_walk_forward_duplication_draft_copies_all_experiment_inputs():
 
     draft["rstock_config"]["xgb_seed"] = 12
     assert detail["configuration"]["rstock_config"]["xgb_seed"] == 99
+
+
+def test_historical_walk_forward_string_has_the_safe_ui_label():
+    draft = walk_forward_duplication_draft("run_original", _detail())
+
+    assert draft["job_type"] == "walk_forward"
+    assert normalize_duplication_job_type(draft["job_type"]) is JobType.WALK_FORWARD
+    assert duplication_job_label(draft["job_type"]) == "Walk-forward"
+
+
+@pytest.mark.parametrize(
+    ("job_type", "label"),
+    [
+        (JobType.WALK_FORWARD, "Walk-forward"),
+        (JobType.XGBOOST_CALIBRATION, "Calibration XGBoost"),
+        (JobType.THRESHOLD_CALIBRATION, "Calibration des seuils"),
+    ],
+)
+def test_duplication_job_labels_accept_enums_and_ui_choices(job_type, label):
+    assert normalize_duplication_job_type(job_type) is job_type
+    assert duplication_job_label(job_type) == label
+    assert JOB_TYPE_LABELS[job_type] == label
+
+
+def test_unknown_historical_job_type_is_logged_and_uses_a_safe_label(caplog):
+    with caplog.at_level("WARNING"):
+        label = duplication_job_label("legacy_walk_forward_v0")
+
+    assert label == "Walk-forward"
+    assert "Unknown duplication job type" in caplog.text
 
 
 def test_only_walk_forward_runs_can_be_duplicated():
@@ -191,6 +225,88 @@ def test_current_parameters_are_read_at_submission_after_the_draft_was_created(
     assert current_parameters.target_symbols == run_parameters.target_symbols
     assert current_parameters.context_symbols == run_parameters.context_symbols
     assert current_parameters.predictor_symbols == run_parameters.predictor_symbols
+
+
+@pytest.mark.parametrize(
+    "job_type",
+    [JobType.THRESHOLD_CALIBRATION, JobType.XGBOOST_CALIBRATION],
+)
+def test_duplication_can_change_walk_forward_to_a_compatible_experimental_job(
+    tmp_path, job_type
+):
+    detail = _detail(snapshot={"xgb_seed": 99})
+    draft = walk_forward_duplication_draft("run_original", detail)
+    current = replace(DEFAULT_CONFIG, project_root=tmp_path, xgb_seed=17)
+
+    from_run = experiment_spec_from_duplication(
+        draft,
+        current_config=current,
+        use_run_config=True,
+        job_type=job_type,
+    )
+    from_current = experiment_spec_from_duplication(
+        draft,
+        current_config=current,
+        use_run_config=False,
+        job_type=job_type.value,
+    )
+
+    assert from_run.job_type is job_type
+    assert from_current.job_type is job_type
+    assert from_run.config.xgb_seed == 99
+    assert from_current.config is current
+    for field in ("target_symbols", "context_symbols", "predictor_symbols"):
+        assert getattr(from_run, field) == tuple(draft[field])
+        assert getattr(from_current, field) == tuple(draft[field])
+    assert detail == _detail(snapshot={"xgb_seed": 99})
+
+
+def test_duplication_defaults_to_the_source_job_type():
+    draft = walk_forward_duplication_draft("run_original", _detail())
+
+    assert validate_duplication_job(draft) is JobType.WALK_FORWARD
+
+
+def test_duplication_rejects_an_incompatible_job_type_without_mutating_draft(tmp_path):
+    draft = walk_forward_duplication_draft("run_original", _detail())
+    original = {key: value.copy() if isinstance(value, list) else value for key, value in draft.items()}
+
+    with pytest.raises(ValueError, match="supports only"):
+        experiment_spec_from_duplication(
+            draft,
+            current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+            use_run_config=True,
+            job_type=JobType.DAILY_PREDICTION,
+        )
+
+    assert draft == original
+
+
+def test_submission_rejects_unknown_job_type_cleanly(tmp_path):
+    draft = walk_forward_duplication_draft("run_original", _detail())
+
+    with pytest.raises(ValueError, match="Unknown duplication job type"):
+        experiment_spec_from_duplication(
+            draft,
+            current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+            use_run_config=True,
+            job_type="legacy_walk_forward_v0",
+        )
+
+
+def test_threshold_calibration_duplication_rejects_an_incomplete_frozen_population(
+    tmp_path,
+):
+    draft = walk_forward_duplication_draft("run_original", _detail())
+    draft["predictor_symbols"] = ["DIS", "NVDA"]
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        experiment_spec_from_duplication(
+            draft,
+            current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+            use_run_config=True,
+            job_type=JobType.THRESHOLD_CALIBRATION,
+        )
 
 
 def test_historical_null_context_metadata_remains_null_without_changing_symbols(tmp_path):

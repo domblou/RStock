@@ -423,7 +423,22 @@ def test_duplication_mode_bypasses_editable_universe_form():
     assert "Soumettre la duplication" in locked
     assert 'button("Annuler"' in locked
     assert "experiment_spec_from_duplication" in locked
+    assert 'st.selectbox(\n            "Type de job"' in locked
+    assert "DUPLICATION_JOB_TYPE_KEY" in locked
+    assert "JOB_TYPE_BY_LABEL" in locked
     assert "if _render_locked_duplication_mode(service):" in experiments
+
+
+def test_duplication_summary_uses_arrow_safe_display_values_and_safe_job_fallback():
+    source = APP.read_text(encoding="utf-8")
+    locked = source.split("def _render_locked_duplication_mode", 1)[1].split(
+        "def _service", 1
+    )[0]
+
+    assert 'summary["Valeur"] = summary["Valeur"].astype(str)' in locked
+    assert "normalize_duplication_job_type" in locked
+    assert "job_type_fallback_message" in locked
+    assert "next(" not in locked
 
 
 def test_successful_duplication_returns_to_the_regular_experiments_view():

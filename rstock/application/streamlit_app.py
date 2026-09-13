@@ -14,9 +14,13 @@ import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.experiment_duplication import (
+    JOB_TYPE_BY_LABEL,
+    JOB_TYPE_LABELS,
     duplication_combination_count,
     duplication_submission_values,
     experiment_spec_from_duplication,
+    normalize_duplication_job_type,
+    validate_duplication_job,
     walk_forward_duplication_draft,
 )
 from rstock.application.history_ui import (
@@ -88,6 +92,7 @@ st.set_page_config(page_title="RStock Laboratory", page_icon="🧪", layout="wid
 LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "rstock_logo.png"
 DUPLICATION_DRAFT_KEY = "experiment-duplication-draft"
 DUPLICATION_CONFIG_CHOICE_KEY = "experiment-duplication-config-choice"
+DUPLICATION_JOB_TYPE_KEY = "experiment-duplication-job-type"
 EXPERIMENT_NAVIGATION_KEY = "requested-primary-page"
 _PRIMARY_PAGES: list[st.Page] | None = None
 
@@ -148,6 +153,7 @@ def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> N
         run_id, detail
     )
     st.session_state[DUPLICATION_CONFIG_CHOICE_KEY] = "Paramètres du run"
+    st.session_state[DUPLICATION_JOB_TYPE_KEY] = JOB_TYPE_LABELS[JobType.WALK_FORWARD]
     st.session_state[EXPERIMENT_NAVIGATION_KEY] = "Expériences"
     st.rerun()
 
@@ -178,10 +184,31 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
         context_mode += f" · N={draft['context_sample_size']}"
     if draft.get("context_seed") is not None:
         context_mode += f" · seed={draft['context_seed']}"
+    stored_label = st.session_state.get(DUPLICATION_JOB_TYPE_KEY)
+    raw_job_type = stored_label if stored_label is not None else draft.get("job_type")
+    normalized_job_type = normalize_duplication_job_type(raw_job_type)
+    job_type_fallback_message = None
+    if normalized_job_type is None:
+        normalized_job_type = JobType.WALK_FORWARD
+        job_type_fallback_message = (
+            f"Type de job historique inconnu ({raw_job_type!r}) : "
+            "Walk-forward est utilisé comme valeur de secours."
+        )
+    selected_label = JOB_TYPE_LABELS[normalized_job_type]
+    # Existing browser sessions may still contain the prior internal enum value.
+    # Normalize it before the widget requires one of its display labels.
+    st.session_state[DUPLICATION_JOB_TYPE_KEY] = selected_label
+    selected_job_type = JOB_TYPE_BY_LABEL[selected_label]
+    try:
+        validate_duplication_job(draft, selected_job_type)
+        duplication_error = None
+        expected_combinations = duplication_combination_count(draft, selected_config)
+    except (TypeError, ValueError) as error:
+        duplication_error = str(error)
+        expected_combinations = "—"
     summary = pd.DataFrame(
         [
             ("Run source", draft["source_run_id"]),
-            ("Type de job", "Walk-forward"),
             ("Univers principal", draft["primary_universe_id"] or "—"),
             ("Mode de sélection", primary_mode),
             ("Cibles", len(draft["target_symbols"])),
@@ -192,7 +219,7 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             ("Profondeur", selected_config.permutation_depth),
             (
                 "Combinaisons attendues",
-                duplication_combination_count(draft, selected_config),
+                expected_combinations,
             ),
             ("Calendrier", draft["calendar"]),
             ("Holdout final", "Oui" if draft["evaluate_final_holdout"] else "Non"),
@@ -201,7 +228,19 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
     )
     with st.container(border=True):
         st.caption("Duplication en lecture seule — le run source ne sera pas modifié.")
+        selected_label = st.selectbox(
+            "Type de job",
+            list(JOB_TYPE_BY_LABEL),
+            index=list(JOB_TYPE_BY_LABEL).index(selected_label),
+            key=DUPLICATION_JOB_TYPE_KEY,
+        )
+        selected_job_type = JOB_TYPE_BY_LABEL[selected_label]
+        summary["Valeur"] = summary["Valeur"].astype(str)
         st.dataframe(summary, hide_index=True, width="stretch")
+        if job_type_fallback_message:
+            st.warning(job_type_fallback_message)
+        if duplication_error:
+            st.error(f"Duplication impossible : {duplication_error}")
         choice = st.radio(
             "Paramètres à utiliser",
             ["Paramètres du run", "Paramètres actuels"],
@@ -210,17 +249,22 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
         )
         actions = st.columns([2, 1, 5])
         if actions[0].button(
-            "Soumettre la duplication", type="primary", width="stretch"
+            "Soumettre la duplication",
+            type="primary",
+            width="stretch",
+            disabled=duplication_error is not None,
         ):
             spec = experiment_spec_from_duplication(
                 draft,
                 current_config=st.session_state.lab_config,
                 use_run_config=choice == "Paramètres du run",
+                job_type=selected_job_type,
             )
             submitted = service.submit(spec)
             if submitted.created:
                 st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
                 st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
+                st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
                 st.session_state["duplication-submitted-run-id"] = submitted.run_id
                 st.rerun()
             else:
@@ -228,6 +272,7 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
         if actions[1].button("Annuler", width="stretch"):
             st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
             st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
+            st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
             st.rerun()
     st.subheader("Jobs actifs")
     _live_job_panel(service)

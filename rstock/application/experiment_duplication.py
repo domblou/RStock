@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import asdict, fields
 from math import comb
@@ -14,6 +15,49 @@ from .domain import ExperimentSpec, JobType
 from .universes import UniverseSelection
 
 
+LOGGER = logging.getLogger(__name__)
+
+DUPLICATION_JOB_TYPES = (
+    JobType.WALK_FORWARD,
+    JobType.XGBOOST_CALIBRATION,
+    JobType.THRESHOLD_CALIBRATION,
+)
+
+JOB_TYPE_LABELS = {
+    JobType.WALK_FORWARD: "Walk-forward",
+    JobType.XGBOOST_CALIBRATION: "Calibration XGBoost",
+    JobType.THRESHOLD_CALIBRATION: "Calibration des seuils",
+}
+JOB_TYPE_BY_LABEL = {label: job_type for job_type, label in JOB_TYPE_LABELS.items()}
+
+
+def normalize_duplication_job_type(value: object) -> JobType | None:
+    """Normalize enum, serialized and legacy job-type forms for the duplication UI."""
+
+    if isinstance(value, JobType):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        normalized = raw.casefold().replace("-", "_").replace(" ", "_")
+        for job_type, label in JOB_TYPE_LABELS.items():
+            if normalized in {
+                job_type.value.casefold(),
+                job_type.name.casefold(),
+                f"jobtype.{job_type.name}".casefold(),
+                label.casefold().replace("-", "_").replace(" ", "_"),
+            }:
+                return job_type
+    LOGGER.warning("Unknown duplication job type: %r", value)
+    return None
+
+
+def duplication_job_label(value: object) -> str:
+    """Return a safe UI label, falling back to walk-forward for legacy drafts."""
+
+    job_type = normalize_duplication_job_type(value)
+    return JOB_TYPE_LABELS.get(job_type, JOB_TYPE_LABELS[JobType.WALK_FORWARD])
+
+
 def walk_forward_duplication_draft(
     run_id: str, detail: Mapping[str, object]
 ) -> dict[str, object]:
@@ -22,7 +66,7 @@ def walk_forward_duplication_draft(
     configuration = detail.get("configuration", {})
     if not isinstance(configuration, Mapping):
         raise ValueError("Run configuration is unavailable")
-    if configuration.get("job_type") != JobType.WALK_FORWARD.value:
+    if normalize_duplication_job_type(configuration.get("job_type")) != JobType.WALK_FORWARD:
         raise ValueError("Only walk-forward runs can be duplicated")
 
     symbols = tuple(str(item) for item in configuration.get("symbols", ()) if item)
@@ -96,16 +140,61 @@ def duplication_submission_values(
     return {**deepcopy(dict(draft)), "config": config}
 
 
+def _selected_duplication_job_type(job_type: JobType | str | None, draft: Mapping[str, object]) -> JobType:
+    """Resolve the selected type and reject jobs outside the locked workflow set."""
+
+    raw = draft.get("job_type") if job_type is None else job_type
+    selected = normalize_duplication_job_type(raw)
+    if selected is None:
+        raise ValueError(f"Unknown duplication job type: {raw!r}")
+    if selected not in DUPLICATION_JOB_TYPES:
+        raise ValueError(
+            "This duplication supports only walk-forward, XGBoost calibration, "
+            "or threshold calibration"
+        )
+    return selected
+
+
+def validate_duplication_job(
+    draft: Mapping[str, object], job_type: JobType | str | None = None
+) -> JobType:
+    """Validate that a selected experimental job can use the frozen population."""
+
+    selected = _selected_duplication_job_type(job_type, draft)
+    targets = tuple(str(item) for item in draft.get("target_symbols", ()) if item)
+    context = tuple(str(item) for item in draft.get("context_symbols", ()) if item)
+    predictors = tuple(str(item) for item in draft.get("predictor_symbols", ()) if item)
+    frozen_predictors = tuple(dict.fromkeys((*targets, *context)))
+    if len(targets) < 1:
+        raise ValueError("The source run has no frozen target symbols")
+    if len(predictors) < 2:
+        raise ValueError("The source run needs at least two frozen predictor symbols")
+    if set(targets) & set(context):
+        raise ValueError("The frozen context overlaps the frozen target symbols")
+    if predictors != frozen_predictors:
+        raise ValueError(
+            "The frozen predictor symbols are inconsistent with targets and context"
+        )
+    if int(draft.get("combinations_per_target", 0)) < 1:
+        raise ValueError("The source run has an invalid combinations-per-target value")
+    return selected
+
+
 def experiment_spec_from_duplication(
-    draft: Mapping[str, object], *, current_config: RStockConfig, use_run_config: bool
+    draft: Mapping[str, object],
+    *,
+    current_config: RStockConfig,
+    use_run_config: bool,
+    job_type: JobType | str | None = None,
 ) -> ExperimentSpec:
     """Build a new immutable spec from the frozen run inputs only."""
 
+    selected_job_type = validate_duplication_job(draft, job_type)
     values = duplication_submission_values(
         draft, current_config=current_config, use_run_config=use_run_config
     )
     return ExperimentSpec(
-        job_type=JobType.WALK_FORWARD,
+        job_type=selected_job_type,
         config=values["config"],
         symbols=tuple(str(item) for item in values["predictor_symbols"]),
         calendar=str(values["calendar"]),
