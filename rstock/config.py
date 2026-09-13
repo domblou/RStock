@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+import tempfile
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,3 +149,207 @@ class RStockConfig:
 
 
 DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])
+
+USER_SETTINGS_SCHEMA_VERSION = 1
+USER_SETTINGS_RELATIVE_PATH = Path("data") / "config" / "user_settings.json"
+UI_SETTINGS_DEFAULTS: dict[str, object] = {
+    "lab_calendar": "XNYS",
+    "lab_combinations_per_target": 3,
+    "lab_evaluate_holdout": True,
+    "max_concurrent_heavy_jobs": 1,
+}
+
+
+def user_settings_path(project_root: Path) -> Path:
+    """Return the portable location of the persisted UI settings file."""
+
+    return project_root / USER_SETTINGS_RELATIVE_PATH
+
+
+def _coerce_config_value(name: str, value: object, default_value: object) -> object:
+    """Validate a JSON value before applying it to ``RStockConfig``."""
+
+    if name == "selected_symbols":
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+            return tuple(value)
+        raise ValueError("selected_symbols must be a list of strings or null")
+
+    if name == "threshold_calibration_quantiles":
+        if isinstance(value, (list, tuple)):
+            return tuple(float(item) for item in value)
+        raise ValueError("threshold_calibration_quantiles must be a list")
+
+    if isinstance(default_value, bool):
+        if isinstance(value, bool):
+            return value
+        raise ValueError(f"{name} must be a boolean")
+
+    if isinstance(default_value, int) and not isinstance(default_value, bool):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        raise ValueError(f"{name} must be an integer")
+
+    if isinstance(default_value, float):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        raise ValueError(f"{name} must be numeric")
+
+    if isinstance(default_value, str):
+        if isinstance(value, str):
+            return value
+        raise ValueError(f"{name} must be a string")
+
+    if isinstance(default_value, tuple):
+        if isinstance(value, (list, tuple)):
+            return tuple(value)
+        raise ValueError(f"{name} must be a list")
+
+    return value
+
+
+def _coerce_ui_value(name: str, value: object) -> object:
+    if name == "lab_calendar":
+        if isinstance(value, str) and value.strip():
+            return value
+        raise ValueError("lab_calendar must be a non-empty string")
+    if name in {"lab_combinations_per_target", "max_concurrent_heavy_jobs"}:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+        raise ValueError(f"{name} must be an integer >= 1")
+    if name == "lab_evaluate_holdout":
+        if isinstance(value, bool):
+            return value
+        raise ValueError("lab_evaluate_holdout must be a boolean")
+    raise ValueError(f"unknown UI setting: {name}")
+
+
+def load_user_settings(
+    default_config: RStockConfig,
+) -> tuple[RStockConfig, dict[str, object], str | None]:
+    """Load persisted settings while keeping defaults for missing/invalid fields.
+
+    ``project_root`` is deliberately never read from disk so the same settings
+    remain portable between Windows and Linux deployments.
+    """
+
+    ui_settings = dict(UI_SETTINGS_DEFAULTS)
+    path = user_settings_path(default_config.project_root)
+    if not path.exists():
+        return default_config, ui_settings, None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return default_config, ui_settings, f"Paramètres persistés illisibles : {error}"
+
+    if not isinstance(payload, dict):
+        return default_config, ui_settings, "Paramètres persistés invalides : objet JSON attendu."
+
+    config_payload = payload.get("config", {})
+    ui_payload = payload.get("ui", {})
+    warnings: list[str] = []
+
+    if not isinstance(config_payload, dict):
+        warnings.append("section config invalide")
+        config_payload = {}
+    if not isinstance(ui_payload, dict):
+        warnings.append("section ui invalide")
+        ui_payload = {}
+
+    config_field_names = {item.name for item in fields(RStockConfig)}
+    overrides: dict[str, object] = {}
+    for name, value in config_payload.items():
+        if name == "project_root" or name not in config_field_names:
+            continue
+        try:
+            overrides[name] = _coerce_config_value(
+                name, value, getattr(default_config, name)
+            )
+        except (TypeError, ValueError):
+            warnings.append(f"valeur ignorée pour {name}")
+
+    try:
+        loaded_config = replace(default_config, **overrides)
+    except (TypeError, ValueError) as error:
+        return default_config, ui_settings, f"Paramètres persistés invalides : {error}"
+
+    for name, value in ui_payload.items():
+        if name not in UI_SETTINGS_DEFAULTS:
+            continue
+        try:
+            ui_settings[name] = _coerce_ui_value(name, value)
+        except ValueError:
+            warnings.append(f"valeur UI ignorée pour {name}")
+
+    warning = None
+    if warnings:
+        warning = "Certains paramètres persistés ont été ignorés : " + ", ".join(warnings) + "."
+    return loaded_config, ui_settings, warning
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+def save_user_settings(
+    config: RStockConfig,
+    ui_settings: Mapping[str, object],
+    *,
+    default_config: RStockConfig = DEFAULT_CONFIG,
+) -> Path:
+    """Persist user-overridden settings atomically and return the file path."""
+
+    config_values: dict[str, object] = {}
+    for item in fields(RStockConfig):
+        name = item.name
+        if name == "project_root":
+            continue
+        value = getattr(config, name)
+        default_value = getattr(default_config, name)
+        if value != default_value:
+            config_values[name] = _json_value(value)
+
+    ui_values: dict[str, object] = {}
+    for name, default_value in UI_SETTINGS_DEFAULTS.items():
+        raw_value = ui_settings.get(name, default_value)
+        value = _coerce_ui_value(name, raw_value)
+        if value != default_value:
+            ui_values[name] = _json_value(value)
+
+    payload = {
+        "schema_version": USER_SETTINGS_SCHEMA_VERSION,
+        "config": config_values,
+        "ui": ui_values,
+    }
+
+    path = user_settings_path(config.project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f"{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary_path = Path(handle.name)
+        os.replace(temporary_path, path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+    return path
+

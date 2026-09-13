@@ -68,7 +68,12 @@ from rstock.application.universes import (
     UniverseService,
 )
 from rstock.application.universe_ui import universe_display_name, universe_ui_preview
-from rstock.config import DEFAULT_CONFIG
+from rstock.config import (
+    DEFAULT_CONFIG,
+    UI_SETTINGS_DEFAULTS,
+    load_user_settings,
+    save_user_settings,
+)
 
 
 st.set_page_config(page_title="RStock Laboratory", page_icon="🧪", layout="wide")
@@ -103,17 +108,23 @@ def _compact_datetime(value: object) -> str:
 
 
 def _state() -> None:
-    st.session_state.setdefault("lab_config", DEFAULT_CONFIG)
-    cached = MarketDataService().available_symbols(DEFAULT_CONFIG)
+    if "lab_config" not in st.session_state:
+        loaded_config, ui_settings, load_warning = load_user_settings(DEFAULT_CONFIG)
+        st.session_state.lab_config = loaded_config
+        for name, value in ui_settings.items():
+            st.session_state.setdefault(name, value)
+        if load_warning:
+            st.session_state["_settings_load_warning"] = load_warning
+
+    for name, value in UI_SETTINGS_DEFAULTS.items():
+        st.session_state.setdefault(name, value)
+
+    cached = MarketDataService().available_symbols(st.session_state.lab_config)
     st.session_state.setdefault("lab_symbols", cached or ["AAPL", "MSFT"])
     st.session_state.setdefault("lab_universe_selection", UniverseSelection())
     st.session_state.setdefault("lab_context_universe_ids", [])
     st.session_state.setdefault("lab_target_symbols", [])
     st.session_state.setdefault("lab_context_symbols", [])
-    st.session_state.setdefault("lab_calendar", "XNYS")
-    st.session_state.setdefault("lab_combinations_per_target", 3)
-    st.session_state.setdefault("lab_evaluate_holdout", True)
-    st.session_state.setdefault("max_concurrent_heavy_jobs", 1)
 
 
 def _service() -> ExperimentService:
@@ -377,6 +388,9 @@ def _experiments(service: ExperimentService) -> None:
 
 def _settings() -> None:
     _page_header("Paramètres")
+    load_warning = st.session_state.pop("_settings_load_warning", None)
+    if load_warning:
+        st.warning(load_warning)
     current = st.session_state.lab_config
     with st.expander("Valeurs RStock par défaut"):
         defaults = asdict(DEFAULT_CONFIG)
@@ -497,7 +511,7 @@ def _settings() -> None:
             parsed_quantiles = tuple(
                 float(item.strip()) for item in quantiles.split(",") if item.strip()
             )
-            st.session_state.lab_config = replace(
+            new_config = replace(
                 current,
                 model_history_days=int(history),
                 permutation_depth=int(permutation),
@@ -543,11 +557,29 @@ def _settings() -> None:
                 threshold_calibration_min_window_fraction=float(min_window_fraction),
                 threshold_calibration_quantiles=parsed_quantiles,
             )
+            st.session_state.lab_config = new_config
             st.session_state.lab_calendar = calendar
             st.session_state.lab_combinations_per_target = int(combinations)
             st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
             st.session_state.lab_evaluate_holdout = evaluate_holdout
-            st.success("Paramètres enregistrés pour les prochaines soumissions.")
+
+            ui_settings = {
+                "lab_calendar": st.session_state.lab_calendar,
+                "lab_combinations_per_target": st.session_state.lab_combinations_per_target,
+                "lab_evaluate_holdout": st.session_state.lab_evaluate_holdout,
+                "max_concurrent_heavy_jobs": st.session_state.max_concurrent_heavy_jobs,
+            }
+            try:
+                save_user_settings(
+                    new_config, ui_settings, default_config=DEFAULT_CONFIG
+                )
+            except (OSError, TypeError, ValueError) as error:
+                st.error(
+                    "Paramètres appliqués à la session, mais la persistance a échoué : "
+                    f"{error}"
+                )
+            else:
+                st.success("Paramètres enregistrés.")
 
 
 def _history_model_contexts(project_root) -> dict[str, str]:
