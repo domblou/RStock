@@ -327,6 +327,36 @@ def test_history_supports_single_run_detail_and_multi_run_comparison_navigation(
     assert 'st.tabs(["Synthèse", "Métriques", "Combinaisons", "Validation", "Technique"])' in source
 
 
+def test_history_can_duplicate_one_walk_forward_run_into_experiments():
+    source = APP.read_text(encoding="utf-8")
+    history = source.split("def _history_runs_panel", 1)[1].split(
+        "def _experiments_page", 1
+    )[0]
+    experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
+
+    assert "Dupliquer l’expérience" in history
+    assert "JobType.WALK_FORWARD.value" in history
+    assert "_start_walk_forward_duplication" in history
+    assert "Paramètres à utiliser" in experiments
+    assert "Annuler la duplication" in source
+    assert "duplication_submission_values" in experiments
+    assert "st.switch_page(target_page)" in source
+
+
+def test_duplication_draft_is_only_offered_for_one_run_and_can_be_cancelled():
+    source = APP.read_text(encoding="utf-8")
+    history = source.split("def _history_runs_panel", 1)[1].split(
+        "def _experiments_page", 1
+    )[0]
+    controls = source.split("def _duplication_submission_config", 1)[1].split(
+        "def _service", 1
+    )[0]
+
+    assert 'if action == "detail"' in history
+    assert "JobType.WALK_FORWARD.value" in history
+    assert 'st.session_state.pop(DUPLICATION_DRAFT_KEY, None)' in controls
+
+
 def test_comparison_metrics_keeps_quality_and_duration_in_separate_charts():
     source = APP.read_text(encoding="utf-8")
     comparison = source.split("def _render_run_comparison_view", 1)[1].split(

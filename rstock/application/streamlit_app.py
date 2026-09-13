@@ -13,6 +13,10 @@ import pandas as pd
 import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
+from rstock.application.experiment_duplication import (
+    duplication_submission_values,
+    walk_forward_duplication_draft,
+)
 from rstock.application.history_ui import (
     EXPERIMENT_JOB_TYPES,
     JOB_LABELS,
@@ -79,6 +83,10 @@ from rstock.config import (
 st.set_page_config(page_title="RStock Laboratory", page_icon="🧪", layout="wide")
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "rstock_logo.png"
+DUPLICATION_DRAFT_KEY = "experiment-duplication-draft"
+DUPLICATION_CONFIG_CHOICE_KEY = "experiment-duplication-config-choice"
+EXPERIMENT_NAVIGATION_KEY = "requested-primary-page"
+_PRIMARY_PAGES: list[st.Page] | None = None
 
 
 def _page_header(title: str) -> None:
@@ -125,6 +133,90 @@ def _state() -> None:
     st.session_state.setdefault("lab_context_universe_ids", [])
     st.session_state.setdefault("lab_target_symbols", [])
     st.session_state.setdefault("lab_context_symbols", [])
+
+
+def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> None:
+    """Store a fresh editable draft, leaving the persisted run untouched."""
+
+    st.session_state[DUPLICATION_DRAFT_KEY] = walk_forward_duplication_draft(
+        run_id, detail
+    )
+    st.session_state[DUPLICATION_CONFIG_CHOICE_KEY] = "Paramètres du run"
+    st.session_state[EXPERIMENT_NAVIGATION_KEY] = "Expériences"
+    st.rerun()
+
+
+def _apply_duplication_draft_to_experiment_state(draft: dict[str, object]) -> None:
+    """Seed experiment widgets once from a historical snapshot."""
+
+    if draft.get("ui_applied"):
+        return
+    selection = UniverseSelection.from_dict(draft.get("universe_selection"))
+    primary_universe_id = draft.get("primary_universe_id") or selection.universe
+    if primary_universe_id:
+        selection = UniverseSelection(
+            source=selection.source,
+            universe=str(primary_universe_id),
+            sample_size=selection.sample_size,
+            selection_method=selection.selection_method,
+            seed=selection.seed,
+        )
+    st.session_state.lab_universe_selection = selection
+    st.session_state.lab_context_universe_ids = list(draft.get("context_universe_ids", ()))
+    st.session_state.lab_target_symbols = list(draft.get("target_symbols", ()))
+    st.session_state.lab_context_symbols = list(draft.get("context_symbols", ()))
+    st.session_state.lab_symbols = list(draft.get("predictor_symbols", ()))
+    st.session_state.lab_calendar = str(draft.get("calendar", "XNYS"))
+    st.session_state.lab_combinations_per_target = int(
+        draft.get("combinations_per_target", 3)
+    )
+    st.session_state.lab_evaluate_holdout = bool(
+        draft.get("evaluate_final_holdout", True)
+    )
+    for key in (
+        "experiment-job-type",
+        "experiment-universe-mode",
+        "experiment-saved-universe",
+        "experiment-sample-size",
+        "experiment-sample-method",
+        "experiment-sample-seed",
+        "experiment-context-universes",
+        "experiment-context-mode",
+        "experiment-context-sample-size",
+        "experiment-context-sample-method",
+        "experiment-context-sample-seed",
+    ):
+        st.session_state.pop(key, None)
+    draft["ui_applied"] = True
+
+
+def _duplication_submission_config() -> object | None:
+    """Render the compact duplication controls and select its configuration."""
+
+    draft = st.session_state.get(DUPLICATION_DRAFT_KEY)
+    if not isinstance(draft, dict):
+        return None
+    _apply_duplication_draft_to_experiment_state(draft)
+    with st.container(border=True):
+        columns = st.columns([4, 1])
+        columns[0].caption(
+            f"Duplication du run walk-forward {draft.get('source_run_id', 'historique')} — modifiez les choix avant soumission."
+        )
+        if columns[1].button("Annuler la duplication", key="cancel-experiment-duplication"):
+            st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
+            st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
+            st.rerun()
+        choice = st.radio(
+            "Paramètres à utiliser",
+            ["Paramètres du run", "Paramètres actuels"],
+            horizontal=True,
+            key=DUPLICATION_CONFIG_CHOICE_KEY,
+        )
+    return duplication_submission_values(
+        draft,
+        current_config=st.session_state.lab_config,
+        use_run_config=choice == "Paramètres du run",
+    )
 
 
 def _service() -> ExperimentService:
@@ -354,18 +446,26 @@ def _experiment_universe_selector() -> bool:
 
 def _experiments(service: ExperimentService) -> None:
     _page_header("Expériences")
+    # Le choix « Paramètres à utiliser » est rendu par ce panneau partagé
+    # via duplication_submission_values.
+    duplication_values = _duplication_submission_config()
     labels = {
         "Walk-forward": JobType.WALK_FORWARD,
         "Calibration XGBoost": JobType.XGBOOST_CALIBRATION,
         "Calibration des seuils": JobType.THRESHOLD_CALIBRATION,
     }
-    choice = st.selectbox("Type de job", list(labels))
+    choice = st.selectbox("Type de job", list(labels), key="experiment-job-type")
     valid_universe = _experiment_universe_selector()
     st.caption("La liste résolue et la configuration seront figées avant le lancement.")
     if st.button("Soumettre l’expérience", type="primary", disabled=not valid_universe):
+        config = (
+            duplication_values["config"]
+            if duplication_values is not None
+            else st.session_state.lab_config
+        )
         spec = ExperimentSpec(
             job_type=labels[choice],
-            config=st.session_state.lab_config,
+            config=config,
             symbols=tuple(st.session_state.lab_symbols),
             calendar=st.session_state.lab_calendar,
             combinations_per_target=st.session_state.lab_combinations_per_target,
@@ -1089,8 +1189,21 @@ def _history_runs_panel(
         return
     action = selected_run_action(selected)
     if action == "detail":
-        if st.button("Ouvrir le run", type="primary", key=f"open-history-{key_prefix}"):
+        selected_run_id = selected[0]
+        selected_run = next(
+            run for run in filtered if str(run["run_id"]) == selected_run_id
+        )
+        actions = st.columns([1, 1, 5])
+        if actions[0].button(
+            "Ouvrir le run", type="primary", key=f"open-history-{key_prefix}"
+        ):
             _history_navigation("detail", selected)
+        if str(selected_run["job_type"]) == JobType.WALK_FORWARD.value and actions[1].button(
+            "Dupliquer l’expérience",
+            type="primary",
+            key=f"duplicate-history-{key_prefix}",
+        ):
+            _start_walk_forward_duplication(selected_run_id, service.run(selected_run_id))
         return
     if action == "comparison":
         selected_types = {
@@ -1807,7 +1920,10 @@ def _history_page() -> None:
 def _primary_pages() -> list[st.Page]:
     """Flat V1 navigation; this factory can later return grouped page mappings."""
 
-    return [
+    global _PRIMARY_PAGES
+    if _PRIMARY_PAGES is not None:
+        return _PRIMARY_PAGES
+    _PRIMARY_PAGES = [
         st.Page(_surveillance_page, title="Surveillance", icon=":material/monitoring:", default=True),
         st.Page(_experiments_page, title="Expériences", icon=":material/science:"),
         st.Page(_models_page, title="Modèles", icon=":material/model_training:"),
@@ -1815,8 +1931,16 @@ def _primary_pages() -> list[st.Page]:
         st.Page(_universes_page, title="Univers", icon=":material/list_alt:"),
         st.Page(_settings_page, title="Paramètres", icon=":material/settings:"),
     ]
+    return _PRIMARY_PAGES
 
 
 _state()
 selected_page = st.navigation(_primary_pages(), position="top")
+requested_page = st.session_state.pop(EXPERIMENT_NAVIGATION_KEY, None)
+if requested_page is not None:
+    target_page = next(
+        (page for page in _primary_pages() if page.title == requested_page), None
+    )
+    if target_page is not None:
+        st.switch_page(target_page)
 selected_page.run()
