@@ -220,7 +220,8 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             if submitted.created:
                 st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
                 st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
-                st.success(f"Run créé : {submitted.run_id}")
+                st.session_state["duplication-submitted-run-id"] = submitted.run_id
+                st.rerun()
             else:
                 st.warning(f"Configuration déjà active : {submitted.run_id}")
         if actions[1].button("Annuler", width="stretch"):
@@ -462,6 +463,9 @@ def _experiment_universe_selector() -> bool:
 
 def _experiments(service: ExperimentService) -> None:
     _page_header("Expériences")
+    duplicated_run_id = st.session_state.pop("duplication-submitted-run-id", None)
+    if duplicated_run_id is not None:
+        st.success(f"Run créé : {duplicated_run_id}")
     # Paramètres à utiliser et duplication_submission_values sont gérés ici.
     if _render_locked_duplication_mode(service):
         return

@@ -387,6 +387,18 @@ def test_duplication_mode_bypasses_editable_universe_form():
     assert "if _render_locked_duplication_mode(service):" in experiments
 
 
+def test_successful_duplication_returns_to_the_regular_experiments_view():
+    source = APP.read_text(encoding="utf-8")
+    locked = source.split("def _render_locked_duplication_mode", 1)[1].split(
+        "def _service", 1
+    )[0]
+    experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
+
+    assert 'st.session_state["duplication-submitted-run-id"] = submitted.run_id' in locked
+    assert "st.rerun()" in locked
+    assert 'st.session_state.pop("duplication-submitted-run-id", None)' in experiments
+
+
 def test_comparison_metrics_keeps_quality_and_duration_in_separate_charts():
     source = APP.read_text(encoding="utf-8")
     comparison = source.split("def _render_run_comparison_view", 1)[1].split(
