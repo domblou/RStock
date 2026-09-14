@@ -25,6 +25,8 @@ STATUS_TRANSITIONS = {
 
 JSON_WRITE_ATTEMPTS = 5
 JSON_WRITE_BACKOFF_SECONDS = 0.02
+JSON_READ_ATTEMPTS = 4
+JSON_READ_BACKOFF_SECONDS = 0.01
 
 
 def utc_now() -> str:
@@ -37,6 +39,7 @@ class RunRepository:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self._write_lock = threading.Lock()
+        self._progress_cache: dict[str, dict[str, Any]] = {}
 
     def run_directory(self, run_id: str) -> Path:
         if not run_id or Path(run_id).name != run_id:
@@ -91,7 +94,49 @@ class RunRepository:
 
     def read_json(self, run_id: str, name: str) -> dict[str, Any]:
         path = self.run_directory(run_id) / name
+        if name != "progress.json":
+            return self._read_json_path(path)
+        for attempt in range(JSON_READ_ATTEMPTS):
+            try:
+                values = self._read_json_path(path)
+            except OSError as error:
+                if not self._temporary_lock(error):
+                    raise
+                if attempt < JSON_READ_ATTEMPTS - 1:
+                    time.sleep(JSON_READ_BACKOFF_SECONDS * (2**attempt))
+                    continue
+                cached = self._progress_cache.get(run_id)
+                if cached is not None:
+                    return dict(cached)
+                return self._temporarily_unavailable_progress()
+            else:
+                self._progress_cache[run_id] = dict(values)
+                return values
+        raise AssertionError("Progress JSON read loop exited unexpectedly")
+
+    @staticmethod
+    def _read_json_path(path: Path) -> dict[str, Any]:
+        """Decode JSON normally so malformed content remains visible to callers."""
+
         return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _temporarily_unavailable_progress() -> dict[str, Any]:
+        """Safe display state used only after transient Windows read-lock retries."""
+
+        return {
+            "stage": "progress_temporarily_unavailable",
+            "substage": None,
+            "completed_units": None,
+            "total_units": None,
+            "percent": None,
+            "stage_percent": None,
+            "workflow_percent": None,
+            "elapsed_seconds": None,
+            "eta_seconds": None,
+            "phase_history": [],
+            "temporarily_unavailable": True,
+        }
 
     @staticmethod
     def _temporary_lock(error: OSError) -> bool:
@@ -157,6 +202,8 @@ class RunRepository:
             for attempt in range(JSON_WRITE_ATTEMPTS):
                 try:
                     self._atomic_json_write(destination, payload)
+                    if name == "progress.json":
+                        self._progress_cache[run_id] = dict(values)
                     return True
                 except OSError as error:
                     if not self._temporary_lock(error):

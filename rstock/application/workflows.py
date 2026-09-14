@@ -31,6 +31,7 @@ from rstock.walk_forward import evaluate_walk_forward, write_walk_forward_result
 
 from .domain import ExperimentSpec, JobType
 from .production_repository import ProductionRepository
+from .repository import RunRepository
 from .production_services import (
     DailyPredictionService,
     OperationalUniverseService,
@@ -121,6 +122,55 @@ def _prepared_experiment(
     )
     _phase(progress_callback, "combination_generation", "completed", combinations=len(generated))
     return prepared, generated, calendars
+
+
+def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFrame | None:
+    """Reuse qualified source sets for a duplicated threshold calibration.
+
+    A prefiltered walk-forward run and a calibration rebuilt from the full
+    universe do not evaluate the same models.  When duplication records its
+    source, the frozen qualified set list is the only valid calibration input.
+    """
+
+    source_run = spec.source_walk_forward_run
+    if not source_run:
+        return None
+    runs = RunRepository(spec.config.project_root / "runs")
+    status = runs.status(source_run)
+    if status.get("job_type") != JobType.WALK_FORWARD.value:
+        raise ValueError("Threshold calibration source must be a walk-forward run")
+    if status.get("status") != "completed":
+        raise ValueError("Threshold calibration source walk-forward is not completed")
+    source_spec = runs.load_spec(source_run)
+    frozen_fields = (
+        "target_symbols", "context_symbols", "predictor_symbols", "calendar",
+    )
+    if any(getattr(source_spec, name) != getattr(spec, name) for name in frozen_fields):
+        raise ValueError("Threshold calibration source has a different frozen population")
+    path = runs.run_directory(source_run) / "results" / "qualification.csv"
+    if not path.exists():
+        raise ValueError("Source walk-forward qualification artifact is unavailable")
+    qualification = pd.read_csv(path)
+    eligible = qualification[
+        qualification.get("Eligible", pd.Series(False, index=qualification.index))
+        .map(lambda value: value is True or str(value).strip().lower() in {"true", "1", "yes"})
+    ]
+    rows: list[list[object]] = []
+    for value in eligible.get("Set", pd.Series(dtype=object)):
+        try:
+            symbols = json.loads(str(value))
+        except json.JSONDecodeError as error:
+            raise ValueError("Source walk-forward contains an invalid set identifier") from error
+        if not isinstance(symbols, list) or len(symbols) < 2:
+            raise ValueError("Source walk-forward contains an invalid qualified set")
+        rows.append([str(symbol) for symbol in symbols])
+    if not rows:
+        raise ValueError("Source walk-forward has no qualified combinations")
+    width = max(len(row) for row in rows)
+    return pd.DataFrame(
+        [row + [None] * (width - len(row)) for row in rows],
+        columns=[f"V{index}" for index in range(width)],
+    )
 
 
 def _walk_forward(
@@ -274,6 +324,9 @@ def _threshold_calibration(
     prepared, generated, _ = _prepared_experiment(
         spec, progress_callback, cancellation_check
     )
+    source_generated = _qualified_sets_from_walk_forward_source(spec)
+    if source_generated is not None:
+        generated = source_generated
     result = run_controlled_threshold_calibration(
         prepared,
         generated,
@@ -299,6 +352,10 @@ def _threshold_calibration(
         "holdout_skipped_reason": result.run_configuration["holdout_skipped_reason"],
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
+        "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_qualified_combinations": (
+            None if source_generated is None else len(source_generated)
+        ),
     }
 
 

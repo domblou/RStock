@@ -233,6 +233,10 @@ def filter_threshold_calibration_results(
     *,
     direction: str = "Up",
     min_signals: int = 0,
+    min_precision: float | None = None,
+    min_holdout_auc: float | None = None,
+    max_opposite_move_frequency: float | None = None,
+    min_directional_return: float | None = None,
     sort_by: str = "Précision holdout",
 ) -> pd.DataFrame:
     """Apply display-only threshold result filters with deterministic sorting."""
@@ -245,6 +249,21 @@ def filter_threshold_calibration_results(
             pd.to_numeric(table["Signaux holdout"], errors="coerce").fillna(0)
             >= min_signals
         ]
+    criteria = (
+        ("Précision holdout", min_precision, lambda values, limit: values >= limit),
+        ("AUC holdout", min_holdout_auc, lambda values, limit: values >= limit),
+        (
+            "Fréquence mouvement opposé", max_opposite_move_frequency,
+            lambda values, limit: values <= limit,
+        ),
+        (
+            "Rendement directionnel moyen", min_directional_return,
+            lambda values, limit: values >= limit,
+        ),
+    )
+    for column, limit, predicate in criteria:
+        if limit is not None and column in table:
+            table = table[predicate(pd.to_numeric(table[column], errors="coerce"), limit)]
     if sort_by not in table:
         sort_by = "Précision holdout"
     return table.sort_values(

@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 import threading
@@ -339,6 +340,54 @@ def test_persistent_lock_skips_only_progress_and_allows_later_recovery(monkeypat
     monkeypatch.setattr(repository_module.os, "replace", original_replace)
     assert repository.write_json(run_id, "progress.json", {"stage": "recovered"})
     assert repository.progress(run_id) == {"stage": "recovered"}
+
+
+def test_progress_read_retries_a_temporary_windows_permission_error(monkeypatch, tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    original_read = repository._read_json_path
+    calls = 0
+
+    def temporarily_locked(path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError(32, "Sharing violation", str(path))
+        return original_read(path)
+
+    monkeypatch.setattr(repository, "_read_json_path", temporarily_locked)
+    monkeypatch.setattr(repository_module.time, "sleep", lambda _: None)
+
+    assert repository.progress(run_id)["stage"] == "pending"
+    assert calls == 2
+
+
+def test_persistent_progress_read_lock_returns_cached_or_safe_display_state(monkeypatch, tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    cached = repository.progress(run_id)
+
+    def persistently_locked(path):
+        raise PermissionError(32, "Sharing violation", str(path))
+
+    monkeypatch.setattr(repository, "_read_json_path", persistently_locked)
+    monkeypatch.setattr(repository_module.time, "sleep", lambda _: None)
+
+    assert repository.progress(run_id) == cached
+    fresh = RunRepository(tmp_path / "runs")
+    monkeypatch.setattr(fresh, "_read_json_path", persistently_locked)
+    assert fresh.progress(run_id)["temporarily_unavailable"] is True
+
+
+def test_invalid_progress_json_is_not_hidden_by_lock_tolerance(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    (repository.run_directory(run_id) / "progress.json").write_text(
+        "{not valid json", encoding="utf-8"
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        repository.progress(run_id)
 
 
 def test_pending_cancellation_is_durable(tmp_path):

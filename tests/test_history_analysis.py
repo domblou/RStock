@@ -284,3 +284,38 @@ def test_threshold_calibration_filters_direction_and_missing_legacy_metrics():
     assert filtered["Direction"].tolist() == ["Up"]
     assert down["Direction"].tolist() == ["Down"]
     assert pd.isna(filtered.iloc[0]["AUC holdout"])
+
+
+def test_threshold_calibration_quality_filters_combine_with_direction_and_signals():
+    table = pd.DataFrame([
+        {
+            "Combinaison": "AAA<-BBB", "Direction": "Up", "Signaux holdout": 12,
+            "Précision holdout": 0.72, "AUC holdout": 0.67,
+            "Fréquence mouvement opposé": 0.20,
+            "Rendement directionnel moyen": 0.012,
+        },
+        {
+            "Combinaison": "CCC<-DDD", "Direction": "Up", "Signaux holdout": 12,
+            "Précision holdout": 0.72, "AUC holdout": 0.67,
+            "Fréquence mouvement opposé": 0.45,
+            "Rendement directionnel moyen": 0.012,
+        },
+        {
+            "Combinaison": "EEE<-FFF", "Direction": "Down", "Signaux holdout": 20,
+            "Précision holdout": 0.95, "AUC holdout": 0.90,
+            "Fréquence mouvement opposé": 0.05,
+            "Rendement directionnel moyen": 0.03,
+        },
+    ])
+
+    filtered = filter_threshold_calibration_results(
+        table,
+        direction="Up",
+        min_signals=10,
+        min_precision=0.70,
+        min_holdout_auc=0.65,
+        max_opposite_move_frequency=0.25,
+        min_directional_return=0.01,
+    )
+
+    assert filtered["Combinaison"].tolist() == ["AAA<-BBB"]

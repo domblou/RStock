@@ -105,6 +105,13 @@ class ModelService:
             selected_threshold_direction=selected_threshold_direction,
         )
 
+    def resolve_walk_forward_source(
+        self, threshold_calibration_run: str, set_name: str
+    ) -> str | None:
+        return PromotionService(
+            RunRepository(self.repository.root.parent / "runs"), self.repository
+        ).resolve_walk_forward_source(threshold_calibration_run, set_name)
+
     def activate(self, model_id: str):
         return ProductionLifecycleService(self.repository).activate(model_id)
 

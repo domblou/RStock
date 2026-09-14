@@ -245,6 +245,48 @@ class PromotionService:
         )
         return self.production.add(model), True
 
+    def resolve_walk_forward_source(
+        self, threshold_calibration_run: str, set_name: str
+    ) -> str | None:
+        """Find an unambiguous legacy source without relaxing qualification.
+
+        New duplicated calibrations persist ``source_walk_forward_run``.  Older
+        runs did not; they can be linked only when a completed walk-forward has
+        the same frozen population *and* qualified the selected exact set.
+        """
+
+        calibration = self.runs.load_spec(threshold_calibration_run)
+        calibration_status = self.runs.status(threshold_calibration_run)
+        calibration_created_at = str(calibration_status.get("created_at", ""))
+        explicit = calibration.source_walk_forward_run
+        if explicit:
+            return explicit
+        frozen_fields = (
+            "target_symbols", "context_symbols", "predictor_symbols", "calendar",
+        )
+        for status in self.runs.list_runs():
+            candidate_id = str(status.get("run_id", ""))
+            if (
+                str(status.get("created_at", "")) > calibration_created_at
+                or status.get("job_type") != JobType.WALK_FORWARD.value
+                or status.get("status") != JobStatus.COMPLETED.value
+            ):
+                continue
+            candidate = self.runs.load_spec(candidate_id)
+            if any(
+                getattr(candidate, name) != getattr(calibration, name)
+                for name in frozen_fields
+            ):
+                continue
+            qualification_path = self.runs.run_directory(candidate_id) / "results" / "qualification.csv"
+            if not qualification_path.exists():
+                continue
+            qualification = pd.read_csv(qualification_path)
+            matched = qualification[qualification.get("Set", pd.Series(dtype=str)).astype(str) == set_name]
+            if not matched.empty and _is_true(matched.iloc[0].get("Eligible")):
+                return candidate_id
+        return None
+
     def _require_completed_run(self, run_id: str, job_type: JobType) -> None:
         status = self.runs.status(run_id)
         if status.get("job_type") != job_type.value:

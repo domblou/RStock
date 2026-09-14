@@ -200,7 +200,8 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
     selected_label = JOB_TYPE_LABELS[normalized_job_type]
     # Existing browser sessions may still contain the prior internal enum value.
     # Normalize it before the widget requires one of its display labels.
-    st.session_state[DUPLICATION_JOB_TYPE_KEY] = selected_label
+    if st.session_state.get(DUPLICATION_JOB_TYPE_KEY) != selected_label:
+        st.session_state[DUPLICATION_JOB_TYPE_KEY] = selected_label
     selected_job_type = JOB_TYPE_BY_LABEL[selected_label]
     try:
         validate_duplication_job(draft, selected_job_type)
@@ -234,7 +235,6 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
         selected_label = st.selectbox(
             "Type de job",
             list(JOB_TYPE_BY_LABEL),
-            index=list(JOB_TYPE_BY_LABEL).index(selected_label),
             key=DUPLICATION_JOB_TYPE_KEY,
         )
         selected_job_type = JOB_TYPE_BY_LABEL[selected_label]
@@ -931,8 +931,37 @@ def _render_threshold_calibration_promotion(
         sort_options,
         key=f"threshold-sort-{run_id}",
     )
+    quality_filters = st.columns(4)
+    min_precision_value = quality_filters[0].number_input(
+        "Précision holdout minimale", min_value=0.0, max_value=1.0, value=0.0,
+        step=0.01, key=f"threshold-min-precision-{run_id}",
+    )
+    min_auc_value = quality_filters[1].number_input(
+        "AUC holdout minimale", min_value=0.0, max_value=1.0, value=0.0,
+        step=0.01, key=f"threshold-min-auc-{run_id}",
+    )
+    max_opposite_value = quality_filters[2].number_input(
+        "Fréquence maximale de mouvement opposé", min_value=0.0, max_value=1.0,
+        value=1.0, step=0.01, key=f"threshold-max-opposite-{run_id}",
+    )
+    min_return_value = quality_filters[3].number_input(
+        "Rendement directionnel moyen minimal", value=0.0, step=0.001,
+        format="%.3f", key=f"threshold-min-directional-return-{run_id}",
+        help="0,00 conserve l'affichage non filtré par défaut.",
+    )
     filtered = filter_threshold_calibration_results(
-        results, direction=direction, min_signals=int(min_signals), sort_by=sort_by
+        results,
+        direction=direction,
+        min_signals=int(min_signals),
+        min_precision=(None if min_precision_value <= 0 else float(min_precision_value)),
+        min_holdout_auc=(None if min_auc_value <= 0 else float(min_auc_value)),
+        max_opposite_move_frequency=(
+            None if max_opposite_value >= 1 else float(max_opposite_value)
+        ),
+        min_directional_return=(
+            None if min_return_value == 0 else float(min_return_value)
+        ),
+        sort_by=sort_by,
     )
     selection = st.dataframe(
         filtered, hide_index=True, width="stretch", on_select="rerun",
@@ -960,10 +989,14 @@ def _render_threshold_calibration_promotion(
         st.info("Cette combinaison ne possède pas de seuils gelés admissibles pour Up et Down.")
         return
     source_run = configuration.get("source_walk_forward_run")
+    model_service = ModelService(project_root)
+    if not source_run:
+        source_run = model_service.resolve_walk_forward_source(run_id, set_name)
     if not source_run:
         st.info(
-            "La provenance walk-forward est absente de ce run historique ; "
-            "la promotion directe n'est pas disponible."
+            "Aucun run walk-forward antérieur avec la même population n'a "
+            "qualifié cette combinaison. Cette calibration historique ne peut "
+            "pas être promue sans contourner les règles de qualification."
         )
         return
     st.caption(
@@ -972,7 +1005,7 @@ def _render_threshold_calibration_promotion(
     )
     if st.button("Promouvoir le modèle", type="primary", key=f"promote-threshold-{run_id}-{set_name}-{selected_direction}"):
         try:
-            model, created = ModelService(project_root).promote(
+            model, created = model_service.promote(
                 str(source_run), set_name,
                 threshold_calibration_run=run_id,
                 selected_threshold_direction=selected_direction,

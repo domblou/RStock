@@ -229,6 +229,26 @@ def test_threshold_run_promotion_uses_its_per_set_threshold_and_provenance(tmp_p
     assert model.training_metadata["selected_threshold_direction"] == "Down"
 
 
+def test_legacy_threshold_run_resolves_only_a_matching_qualified_walk_forward(tmp_path):
+    runs, walk_forward_run = _promotion_run(tmp_path)
+    threshold = runs.create(ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"),
+        primary_universe_id="PRIMARY",
+        context_universe_ids=("CONTEXT",),
+        target_symbols=("AAA",),
+        context_symbols=("BBB",),
+        predictor_symbols=("AAA", "BBB"),
+    ))
+    runs.transition(threshold, JobStatus.RUNNING)
+    runs.transition(threshold, JobStatus.COMPLETED)
+    service = PromotionService(runs, ProductionRepository(tmp_path))
+
+    assert service.resolve_walk_forward_source(threshold, "AAA<-BBB") == walk_forward_run
+    assert service.resolve_walk_forward_source(threshold, "AAA<-CCC") is None
+
+
 def test_training_publishes_two_new_full_history_artifacts(monkeypatch, tmp_path):
     repository = ProductionRepository(tmp_path)
     repository.add(_model())

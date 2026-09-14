@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from rstock.config import DEFAULT_CONFIG
-from rstock.application.domain import ExperimentSpec, JobType
+from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.combinations import generate_symbol_sets
 from rstock.features import prepare_dataset
 from rstock.modeling import XGBoostParameters
@@ -434,6 +434,41 @@ def test_threshold_workflow_summary_reports_no_eligible_threshold(monkeypatch, t
     assert summary["missing_frozen_thresholds"] == [
         {"set": "AAA<-BBB", "direction": "Up"}
     ]
+
+
+def test_threshold_calibration_reuses_qualified_sets_from_its_walk_forward_source(tmp_path):
+    from rstock.application import workflows
+    from rstock.application.repository import RunRepository
+
+    runs = RunRepository(tmp_path / "runs")
+    source_spec = ExperimentSpec(
+        JobType.WALK_FORWARD,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB", "CCC"),
+        target_symbols=("AAA",),
+        context_symbols=("BBB", "CCC"),
+    )
+    source_run = runs.create(source_spec)
+    results = runs.run_directory(source_run) / "results"
+    results.mkdir()
+    pd.DataFrame([
+        {"Set": '["AAA","BBB"]', "Eligible": True},
+        {"Set": '["AAA","CCC"]', "Eligible": False},
+    ]).to_csv(results / "qualification.csv", index=False)
+    runs.transition(source_run, JobStatus.RUNNING)
+    runs.transition(source_run, JobStatus.COMPLETED)
+    calibration_spec = ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB", "CCC"),
+        target_symbols=("AAA",),
+        context_symbols=("BBB", "CCC"),
+        source_walk_forward_run=source_run,
+    )
+
+    generated = workflows._qualified_sets_from_walk_forward_source(calibration_spec)
+
+    assert generated.to_dict("records") == [{"V0": "AAA", "V1": "BBB"}]
 
 
 @pytest.mark.parametrize(

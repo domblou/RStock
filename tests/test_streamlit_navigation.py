@@ -441,6 +441,19 @@ def test_duplication_summary_uses_arrow_safe_display_values_and_safe_job_fallbac
     assert "next(" not in locked
 
 
+def test_duplication_job_type_selectbox_uses_session_state_without_an_index_default():
+    source = APP.read_text(encoding="utf-8")
+    locked = source.split("def _render_locked_duplication_mode", 1)[1].split(
+        "def _service", 1
+    )[0]
+    widget = locked.split('st.selectbox(\n            "Type de job"', 1)[1].split(
+        ")\n        selected_job_type", 1
+    )[0]
+
+    assert "key=DUPLICATION_JOB_TYPE_KEY" in widget
+    assert "index=" not in widget
+
+
 def test_successful_duplication_returns_to_the_regular_experiments_view():
     source = APP.read_text(encoding="utf-8")
     locked = source.split("def _render_locked_duplication_mode", 1)[1].split(
