@@ -564,6 +564,10 @@ def test_threshold_calibration_selected_row_exposes_read_only_holdout_sensitivit
     assert "Analyse de sensibilité au seuil — Holdout" in panel
     assert "load_threshold_holdout_predictions" in panel
     assert "threshold_sensitivity_table(" in panel
+    assert "threshold_sensitivity_summary(" in panel
+    assert "Synthèse de sensibilité des seuils" in panel
+    assert "Diagnostic du choix du seuil — calibration" in panel
+    assert "threshold_calibration_choice_diagnostic_table(" in panel
     assert "Analyse de sensibilité indisponible pour ce run historique." in panel
     assert "Sélection calibration · seuil" in panel
     assert "directional_return_mean" in panel

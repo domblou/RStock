@@ -48,6 +48,30 @@ THRESHOLD_SENSITIVITY_BASE_COLUMNS = (
     "Fréquence mouvement opposé", "MFE moyen", "MAE moyen",
     "Seuil calibré actuel",
 )
+THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS = (
+    "Cible", "Combinaison", "Direction", "Seuil calibré",
+    "Meilleur seuil robuste", "Delta seuil",
+    "Signaux au seuil calibré", "Signaux au meilleur seuil robuste",
+    "Précision au seuil calibré", "Précision au meilleur seuil robuste",
+    "Delta précision",
+    "Rendement directionnel moyen au seuil calibré",
+    "Rendement directionnel moyen au meilleur seuil robuste",
+    "Delta rendement",
+    "Fréquence mouvement opposé au seuil calibré",
+    "Fréquence mouvement opposé au meilleur seuil robuste",
+    "Diagnostic",
+)
+CALIBRATION_SELECTION_SUMMARY_COLUMNS = (
+    "Combinaison", "Direction", "Raison sélection calibration",
+    "Rang du seuil calibré", "Nombre de candidats admissibles",
+)
+CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS = (
+    "Seuil", "Sélectionné", "Admissible", "Nombre total de signaux",
+    "Fraction de fenêtres admissibles", "Précision calibration",
+    "Stabilité précision", "Rendement directionnel moyen",
+    "Stabilité rendement", "Fréquence mouvement opposé", "F1",
+    "Raison de rejet / sélection",
+)
 
 
 def threshold_sensitivity_best_column(minimum_robust_signals: int) -> str:
@@ -309,6 +333,95 @@ def threshold_sensitivity_table(
     return result
 
 
+def threshold_sensitivity_summary(
+    visible_results: pd.DataFrame,
+    holdout_predictions: pd.DataFrame,
+    *,
+    up_target_threshold: float = 0.01,
+    down_target_threshold: float = 0.01,
+    minimum_robust_signals: int,
+    sensitivity_threshold_min: float = DEFAULT_SENSITIVITY_THRESHOLD_MIN,
+    sensitivity_threshold_max: float = DEFAULT_SENSITIVITY_THRESHOLD_MAX,
+    sensitivity_threshold_step: float = DEFAULT_SENSITIVITY_THRESHOLD_STEP,
+) -> pd.DataFrame:
+    """Summarize the read-only sensitivity projection for visible result rows."""
+
+    required = {"Cible", "Combinaison", "Direction", "Seuil calibré"}
+    if visible_results.empty or not required.issubset(visible_results.columns):
+        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS)
+    rows: list[dict[str, object]] = []
+    visible = visible_results.drop_duplicates(["Combinaison", "Direction"])
+    best_column = threshold_sensitivity_best_column(minimum_robust_signals)
+    for _, visible_row in visible.iterrows():
+        sensitivity = threshold_sensitivity_table(
+            holdout_predictions,
+            set_name=str(visible_row["Combinaison"]),
+            direction=str(visible_row["Direction"]),
+            calibrated_threshold=visible_row["Seuil calibré"],
+            up_target_threshold=up_target_threshold,
+            down_target_threshold=down_target_threshold,
+            minimum_robust_signals=minimum_robust_signals,
+            sensitivity_threshold_min=sensitivity_threshold_min,
+            sensitivity_threshold_max=sensitivity_threshold_max,
+            sensitivity_threshold_step=sensitivity_threshold_step,
+        )
+        calibrated = sensitivity[
+            sensitivity["Seuil calibré actuel"] == "✓"
+        ] if not sensitivity.empty else pd.DataFrame()
+        robust = sensitivity[
+            sensitivity[best_column] == "✓"
+        ] if not sensitivity.empty else pd.DataFrame()
+        calibrated_row = calibrated.iloc[0] if not calibrated.empty else None
+        robust_row = robust.iloc[0] if not robust.empty else None
+        calibrated_threshold = (
+            float(calibrated_row["Seuil"]) if calibrated_row is not None else np.nan
+        )
+        robust_threshold = (
+            float(robust_row["Seuil"]) if robust_row is not None else np.nan
+        )
+        delta_threshold = robust_threshold - calibrated_threshold
+        if robust_row is None or robust_row["Nombre de signaux"] < minimum_robust_signals:
+            diagnostic = "unstable"
+        elif abs(delta_threshold) <= sensitivity_threshold_step / 2:
+            diagnostic = "near_optimal"
+        elif delta_threshold > 0:
+            diagnostic = "higher_threshold_better"
+        else:
+            diagnostic = "lower_threshold_better"
+
+        def value(row: pd.Series | None, column: str) -> object:
+            return np.nan if row is None else row[column]
+
+        calibrated_precision = value(calibrated_row, "Précision")
+        robust_precision = value(robust_row, "Précision")
+        calibrated_return = value(calibrated_row, "Rendement directionnel moyen")
+        robust_return = value(robust_row, "Rendement directionnel moyen")
+        rows.append({
+            "Cible": visible_row["Cible"],
+            "Combinaison": visible_row["Combinaison"],
+            "Direction": visible_row["Direction"],
+            "Seuil calibré": calibrated_threshold,
+            "Meilleur seuil robuste": robust_threshold,
+            "Delta seuil": delta_threshold,
+            "Signaux au seuil calibré": value(calibrated_row, "Nombre de signaux"),
+            "Signaux au meilleur seuil robuste": value(robust_row, "Nombre de signaux"),
+            "Précision au seuil calibré": calibrated_precision,
+            "Précision au meilleur seuil robuste": robust_precision,
+            "Delta précision": robust_precision - calibrated_precision,
+            "Rendement directionnel moyen au seuil calibré": calibrated_return,
+            "Rendement directionnel moyen au meilleur seuil robuste": robust_return,
+            "Delta rendement": robust_return - calibrated_return,
+            "Fréquence mouvement opposé au seuil calibré": value(
+                calibrated_row, "Fréquence mouvement opposé"
+            ),
+            "Fréquence mouvement opposé au meilleur seuil robuste": value(
+                robust_row, "Fréquence mouvement opposé"
+            ),
+            "Diagnostic": diagnostic,
+        })
+    return pd.DataFrame(rows, columns=THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS)
+
+
 def _set_parts(set_name: object) -> tuple[str, str]:
     """Return a readable target/predictor pair from a persisted set identifier."""
 
@@ -381,6 +494,77 @@ def threshold_calibration_table(
     if "model_selection_score" in source or "Score" in source:
         columns.append("Score")
     return pd.DataFrame(rows).loc[:, columns]
+
+
+def threshold_calibration_selection_summary(
+    visible_results: pd.DataFrame, metrics_by_set: pd.DataFrame
+) -> pd.DataFrame:
+    """Summarize persisted calibration-selection diagnostics for visible rows."""
+
+    required = {"Combinaison", "Direction"}
+    if visible_results.empty or not required.issubset(visible_results.columns):
+        return pd.DataFrame(columns=CALIBRATION_SELECTION_SUMMARY_COLUMNS)
+    if metrics_by_set.empty or not {"Set", "Direction"}.issubset(metrics_by_set):
+        return pd.DataFrame(columns=CALIBRATION_SELECTION_SUMMARY_COLUMNS)
+    rows: list[dict[str, object]] = []
+    for _, visible in visible_results.drop_duplicates(["Combinaison", "Direction"]).iterrows():
+        candidates = metrics_by_set[
+            (metrics_by_set["Set"].astype(str) == str(visible["Combinaison"]))
+            & (metrics_by_set["Direction"].astype(str) == str(visible["Direction"]))
+        ]
+        selected = candidates[_boolean(candidates.get(
+            "Selected", pd.Series(False, index=candidates.index)
+        ))]
+        selected_row = selected.iloc[0] if not selected.empty else None
+        reason = None if selected_row is None else selected_row.get("SelectionReason")
+        if pd.isna(reason):
+            reason = "—"
+        rank = None if selected_row is None else selected_row.get("SelectionRank")
+        rows.append({
+            "Combinaison": visible["Combinaison"],
+            "Direction": visible["Direction"],
+            "Raison sélection calibration": reason,
+            "Rang du seuil calibré": rank,
+            "Nombre de candidats admissibles": int(_boolean(candidates.get(
+                "Eligible", pd.Series(False, index=candidates.index)
+            )).sum()),
+        })
+    return pd.DataFrame(rows, columns=CALIBRATION_SELECTION_SUMMARY_COLUMNS)
+
+
+def threshold_calibration_choice_diagnostic_table(
+    metrics_by_set: pd.DataFrame, *, set_name: str, direction: str
+) -> pd.DataFrame:
+    """Project persisted candidate diagnostics for one calibration choice."""
+
+    if metrics_by_set.empty or not {"Set", "Direction"}.issubset(metrics_by_set):
+        return pd.DataFrame(columns=CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS)
+    candidates = metrics_by_set[
+        (metrics_by_set["Set"].astype(str) == str(set_name))
+        & (metrics_by_set["Direction"].astype(str) == str(direction))
+    ].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS)
+    selected = _boolean(candidates.get("Selected", pd.Series(False, index=candidates.index)))
+    reason = candidates.get("SelectionReason", pd.Series(pd.NA, index=candidates.index))
+    reason = reason.where(reason.notna(), candidates.get(
+        "RejectionReason", pd.Series(pd.NA, index=candidates.index)
+    )).fillna("—")
+    table = pd.DataFrame({
+        "Seuil": candidates.get("Threshold"),
+        "Sélectionné": selected,
+        "Admissible": _boolean(candidates.get("Eligible", pd.Series(False, index=candidates.index))),
+        "Nombre total de signaux": candidates.get("TotalSignals"),
+        "Fraction de fenêtres admissibles": candidates.get("EligibleWindowFraction"),
+        "Précision calibration": candidates.get("Precision"),
+        "Stabilité précision": candidates.get("PrecisionStd"),
+        "Rendement directionnel moyen": candidates.get("DirectionalReturnMean"),
+        "Stabilité rendement": candidates.get("DirectionalReturnMeanStd"),
+        "Fréquence mouvement opposé": candidates.get("OppositeMoveFrequency"),
+        "F1": candidates.get("F1Median"),
+        "Raison de rejet / sélection": reason,
+    })
+    return table.sort_values("Seuil", kind="stable").reset_index(drop=True)
 
 
 def filter_threshold_calibration_results(

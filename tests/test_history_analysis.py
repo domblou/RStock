@@ -15,8 +15,11 @@ from rstock.application.history_analysis import (
     predictor_prefilter_summary,
     selected_run_action,
     threshold_calibration_table,
+    threshold_calibration_choice_diagnostic_table,
+    threshold_calibration_selection_summary,
     threshold_sensitivity_best_column,
     threshold_sensitivity_grid,
+    threshold_sensitivity_summary,
     threshold_sensitivity_table,
 )
 from rstock.config import DEFAULT_CONFIG
@@ -426,6 +429,112 @@ def test_sensitivity_settings_do_not_change_calibration_grid_or_selection():
 
     pd.testing.assert_frame_equal(grid_before, adaptive_threshold_grid(predictions, config))
     assert calibrate_thresholds(predictions, config).selected_thresholds == selected_before
+
+
+def test_threshold_sensitivity_summary_uses_visible_rows_and_computes_deltas():
+    holdout = pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.10, "Target": 0, "IntradayReturn": -0.02},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.20, "Target": 0, "IntradayReturn": -0.01},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.30, "Target": 1, "IntradayReturn": 0.02},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.40, "Target": 1, "IntradayReturn": 0.03},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.50, "Target": 1, "IntradayReturn": 0.04},
+        {"Set": "CCC<-DDD", "Direction": "Up", "Probability": 0.10, "Target": 0, "IntradayReturn": -0.02},
+        {"Set": "CCC<-DDD", "Direction": "Up", "Probability": 0.20, "Target": 1, "IntradayReturn": 0.02},
+        {"Set": "CCC<-DDD", "Direction": "Up", "Probability": 0.30, "Target": 0, "IntradayReturn": -0.01},
+        {"Set": "CCC<-DDD", "Direction": "Up", "Probability": 0.40, "Target": 1, "IntradayReturn": 0.03},
+        {"Set": "CCC<-DDD", "Direction": "Up", "Probability": 0.50, "Target": 1, "IntradayReturn": 0.04},
+    ])
+    visible = pd.DataFrame([
+        {"Cible": "AAA", "Combinaison": "AAA<-BBB", "Direction": "Up", "Seuil calibré": 0.20},
+        {"Cible": "CCC", "Combinaison": "CCC<-DDD", "Direction": "Up", "Seuil calibré": 0.30},
+    ])
+    original_holdout = holdout.copy(deep=True)
+    original_visible = visible.copy(deep=True)
+
+    summary = threshold_sensitivity_summary(
+        visible,
+        holdout,
+        minimum_robust_signals=2,
+        sensitivity_threshold_min=0.10,
+        sensitivity_threshold_max=0.50,
+        sensitivity_threshold_step=0.10,
+    )
+
+    assert summary["Combinaison"].tolist() == ["AAA<-BBB", "CCC<-DDD"]
+    first = summary.iloc[0]
+    assert first["Meilleur seuil robuste"] == 0.30
+    assert first["Delta seuil"] == pytest.approx(0.10)
+    assert first["Signaux au seuil calibré"] == 4
+    assert first["Signaux au meilleur seuil robuste"] == 3
+    assert first["Précision au seuil calibré"] == pytest.approx(0.75)
+    assert first["Précision au meilleur seuil robuste"] == pytest.approx(1.0)
+    assert first["Delta précision"] == pytest.approx(0.25)
+    assert first["Delta rendement"] == pytest.approx(0.01)
+    assert first["Diagnostic"] == "higher_threshold_better"
+    assert holdout.equals(original_holdout)
+    assert visible.equals(original_visible)
+
+    filtered_summary = threshold_sensitivity_summary(
+        visible.iloc[[1]],
+        holdout,
+        minimum_robust_signals=2,
+        sensitivity_threshold_min=0.10,
+        sensitivity_threshold_max=0.50,
+        sensitivity_threshold_step=0.10,
+    )
+    assert filtered_summary["Combinaison"].tolist() == ["CCC<-DDD"]
+
+
+def test_calibration_choice_diagnostics_use_persisted_candidates_for_visible_rows():
+    metrics = pd.DataFrame([
+        {
+            "Set": "AAA<-BBB", "Direction": "Up", "Threshold": 0.30,
+            "Selected": False, "Eligible": True, "SelectionRank": 2,
+            "SelectionReason": None, "RejectionReason": "not_selected_by_economic_order",
+            "TotalSignals": 24, "EligibleWindowFraction": 1.0,
+            "Precision": 0.70, "PrecisionStd": 0.03,
+            "DirectionalReturnMean": 0.02, "DirectionalReturnMeanStd": 0.01,
+            "OppositeMoveFrequency": 0.15, "F1Median": 0.65,
+        },
+        {
+            "Set": "AAA<-BBB", "Direction": "Up", "Threshold": 0.40,
+            "Selected": True, "Eligible": True, "SelectionRank": 1,
+            "SelectionReason": "robust_sample_preferred", "RejectionReason": None,
+            "TotalSignals": 18, "EligibleWindowFraction": 1.0,
+            "Precision": 0.75, "PrecisionStd": 0.02,
+            "DirectionalReturnMean": 0.03, "DirectionalReturnMeanStd": 0.01,
+            "OppositeMoveFrequency": 0.10, "F1Median": 0.70,
+        },
+        {
+            "Set": "CCC<-DDD", "Direction": "Up", "Threshold": 0.40,
+            "Selected": True, "Eligible": True, "SelectionRank": 1,
+            "SelectionReason": "robust_sample_preferred", "RejectionReason": None,
+            "TotalSignals": 20, "EligibleWindowFraction": 1.0,
+            "Precision": 0.80, "PrecisionStd": 0.02,
+            "DirectionalReturnMean": 0.04, "DirectionalReturnMeanStd": 0.01,
+            "OppositeMoveFrequency": 0.08, "F1Median": 0.75,
+        },
+    ])
+    visible = pd.DataFrame([
+        {"Combinaison": "AAA<-BBB", "Direction": "Up"},
+    ])
+    original = metrics.copy(deep=True)
+
+    compact = threshold_calibration_selection_summary(visible, metrics)
+    detailed = threshold_calibration_choice_diagnostic_table(
+        metrics, set_name="AAA<-BBB", direction="Up"
+    )
+
+    assert compact.to_dict("records") == [{
+        "Combinaison": "AAA<-BBB", "Direction": "Up",
+        "Raison sélection calibration": "robust_sample_preferred",
+        "Rang du seuil calibré": 1,
+        "Nombre de candidats admissibles": 2,
+    }]
+    assert detailed["Seuil"].tolist() == [0.30, 0.40]
+    assert detailed.loc[detailed["Sélectionné"], "Raison de rejet / sélection"].iloc[0] == "robust_sample_preferred"
+    assert detailed.loc[~detailed["Sélectionné"], "Raison de rejet / sélection"].iloc[0] == "not_selected_by_economic_order"
+    assert metrics.equals(original)
 
 
 def test_threshold_sensitivity_is_unavailable_without_persisted_probabilities():

@@ -50,6 +50,9 @@ from rstock.application.history_analysis import (
     run_universe_summary,
     selected_run_action,
     threshold_calibration_table,
+    threshold_calibration_choice_diagnostic_table,
+    threshold_calibration_selection_summary,
+    threshold_sensitivity_summary,
     threshold_sensitivity_table,
 )
 from rstock.application.runner import running_duration
@@ -1030,6 +1033,53 @@ def _render_threshold_calibration_promotion(
         filtered, hide_index=True, width="stretch", on_select="rerun",
         selection_mode="single-row", key=f"threshold-results-{run_id}",
     )
+    rstock_config = configuration.get("rstock_config", {})
+    rstock_config = rstock_config if isinstance(rstock_config, dict) else {}
+    minimum_robust_signals = int(
+        rstock_config.get(
+            "threshold_calibration_min_robust_signals",
+            DEFAULT_CONFIG.threshold_calibration_min_robust_signals,
+        )
+    )
+    st.subheader("Synthèse de sensibilité des seuils")
+    sensitivity_summary = threshold_sensitivity_summary(
+        filtered,
+        load_threshold_holdout_predictions(project_root, run_id),
+        up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
+        down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
+        minimum_robust_signals=minimum_robust_signals,
+        sensitivity_threshold_min=float(st.session_state.sensitivity_threshold_min),
+        sensitivity_threshold_max=float(st.session_state.sensitivity_threshold_max),
+        sensitivity_threshold_step=float(st.session_state.sensitivity_threshold_step),
+    )
+    selection_summary = threshold_calibration_selection_summary(filtered, metrics)
+    if not sensitivity_summary.empty:
+        sensitivity_summary = sensitivity_summary.merge(
+            selection_summary,
+            on=["Combinaison", "Direction"],
+            how="left",
+        )
+    if sensitivity_summary.empty:
+        st.caption("Aucune sensibilité holdout disponible pour les combinaisons visibles.")
+    else:
+        st.dataframe(
+            sensitivity_summary,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Seuil calibré": st.column_config.NumberColumn(format="%.4f"),
+                "Meilleur seuil robuste": st.column_config.NumberColumn(format="%.4f"),
+                "Delta seuil": st.column_config.NumberColumn(format="%+.4f"),
+                "Précision au seuil calibré": st.column_config.NumberColumn(format="percent"),
+                "Précision au meilleur seuil robuste": st.column_config.NumberColumn(format="percent"),
+                "Delta précision": st.column_config.NumberColumn(format="%+.2%"),
+                "Rendement directionnel moyen au seuil calibré": st.column_config.NumberColumn(format="percent"),
+                "Rendement directionnel moyen au meilleur seuil robuste": st.column_config.NumberColumn(format="percent"),
+                "Delta rendement": st.column_config.NumberColumn(format="%+.2%"),
+                "Fréquence mouvement opposé au seuil calibré": st.column_config.NumberColumn(format="percent"),
+                "Fréquence mouvement opposé au meilleur seuil robuste": st.column_config.NumberColumn(format="percent"),
+            },
+        )
     selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
     selected_key = f"selected-threshold-result-{run_id}"
     if selected_rows:
@@ -1050,6 +1100,28 @@ def _render_threshold_calibration_promotion(
         calibrated_threshold=chosen.get("Seuil calibré"),
         configuration=configuration,
     )
+    st.subheader("Diagnostic du choix du seuil — calibration")
+    choice_diagnostics = threshold_calibration_choice_diagnostic_table(
+        metrics, set_name=set_name, direction=selected_direction
+    )
+    if choice_diagnostics.empty:
+        st.caption("Diagnostics de calibration indisponibles pour cette combinaison.")
+    else:
+        st.dataframe(
+            choice_diagnostics,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Seuil": st.column_config.NumberColumn(format="%.4f"),
+                "Fraction de fenêtres admissibles": st.column_config.NumberColumn(format="percent"),
+                "Précision calibration": st.column_config.NumberColumn(format="percent"),
+                "Stabilité précision": st.column_config.NumberColumn(format="percent"),
+                "Rendement directionnel moyen": st.column_config.NumberColumn(format="percent"),
+                "Stabilité rendement": st.column_config.NumberColumn(format="percent"),
+                "Fréquence mouvement opposé": st.column_config.NumberColumn(format="percent"),
+                "F1": st.column_config.NumberColumn(format="%.3f"),
+            },
+        )
     frozen = selected_by_set.get(set_name, {})
     directional_selection = frozen.get(selected_direction, {})
     if isinstance(directional_selection, dict):
