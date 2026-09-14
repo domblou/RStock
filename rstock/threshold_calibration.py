@@ -56,16 +56,18 @@ DOWN_THRESHOLD_SELECTION_ORDER = (
 )
 
 
-def threshold_selection_order(min_robust_signals: int) -> str:
+def threshold_selection_order(
+    min_robust_signals: int, precision_tolerance: float = 0.01
+) -> str:
     """Describe the explicit, configuration-dependent Up selection order."""
 
     return (
         "Up Eligible requires temporal coverage, positive directional return, and "
         "OppositeMoveFrequency <= 0.30; "
-        f"RobustSample (TotalSignals >= {min_robust_signals}) desc; "
-        "Precision desc; TotalSignals desc; PrecisionStd asc; "
-        "DirectionalReturnMean desc; OppositeMoveFrequency asc; "
-        "DirectionalReturnMeanStd asc; F1Median desc; Threshold asc"
+        f"RobustSample (TotalSignals >= {min_robust_signals}) preferred; "
+        f"Precision within {precision_tolerance:g} of the best preferred precision; "
+        "DirectionalReturnMean desc; OppositeMoveFrequency asc; PrecisionStd asc; "
+        "DirectionalReturnMeanStd asc; TotalSignals desc; F1Median desc; Threshold asc"
     )
 
 REQUIRED_PREDICTION_COLUMNS = {
@@ -174,6 +176,11 @@ def validate_threshold_calibration_config(config: RStockConfig) -> None:
         raise ValueError("threshold_calibration_min_signals_per_window must be positive")
     if config.threshold_calibration_min_robust_signals < 1:
         raise ValueError("threshold_calibration_min_robust_signals must be positive")
+    if (
+        not np.isfinite(config.threshold_calibration_precision_tolerance)
+        or config.threshold_calibration_precision_tolerance < 0
+    ):
+        raise ValueError("threshold_calibration_precision_tolerance must be non-negative")
     if not 0 < config.threshold_calibration_min_window_fraction <= 1:
         raise ValueError("threshold_calibration_min_window_fraction must be in (0, 1]")
     if config.threshold_calibration_grid_decimals < 1:
@@ -394,6 +401,12 @@ def summarize_and_select_thresholds(
                 "Eligible": eligible,
                 "RejectionReason": ";".join(rejection_reasons) or None,
                 "SelectionReason": None,
+                "BestPrecision": np.nan,
+                "PrecisionTolerance": (
+                    config.threshold_calibration_precision_tolerance
+                    if direction == "Up" else np.nan
+                ),
+                "WithinPrecisionTolerance": False,
                 "TotalSignals": total_signals,
                 "RobustSample": total_signals >= robust_minimum,
                 "SignalCountMedian": float(group["SignalCount"].median()),
@@ -440,26 +453,38 @@ def summarize_and_select_thresholds(
                 "status": "no_eligible_threshold",
                 "threshold": None,
                 "selection_order": (
-                    threshold_selection_order(robust_minimum)
+                    threshold_selection_order(
+                        robust_minimum,
+                        config.threshold_calibration_precision_tolerance,
+                    )
                     if direction == "Up"
                     else DOWN_THRESHOLD_SELECTION_ORDER
                 ),
             }
             continue
         if direction == "Up":
-            ranked = eligible.sort_values(
+            robust = eligible[eligible["RobustSample"]]
+            preferred = robust if not robust.empty else eligible
+            best_precision = float(preferred["Precision"].max())
+            tolerance = config.threshold_calibration_precision_tolerance
+            within_tolerance = preferred[
+                preferred["Precision"] >= best_precision - tolerance
+            ]
+            summary.loc[group.index, "BestPrecision"] = best_precision
+            summary.loc[
+                within_tolerance.index, "WithinPrecisionTolerance"
+            ] = True
+            ranked = within_tolerance.sort_values(
                 [
-                    "RobustSample",
-                    "Precision",
-                    "TotalSignals",
-                    "PrecisionStd",
                     "DirectionalReturnMean",
                     "OppositeMoveFrequency",
+                    "PrecisionStd",
                     "DirectionalReturnMeanStd",
+                    "TotalSignals",
                     "F1Median",
                     "Threshold",
                 ],
-                ascending=[False, False, False, True, False, True, True, False, True],
+                ascending=[False, True, True, True, False, False, True],
                 kind="stable",
             )
             not_selected_reason = "not_selected_by_economic_order"
@@ -485,9 +510,16 @@ def summarize_and_select_thresholds(
         summary.loc[winner_index, "RejectionReason"] = None
         selection_reason = (
             (
-                "robust_sample_preferred"
-                if bool(winner["RobustSample"])
-                else f"fallback_below_{robust_minimum}_total_signals"
+                "precision_tolerance_economic_selection"
+                if (
+                    config.threshold_calibration_precision_tolerance > 0
+                    and len(ranked) > 1
+                )
+                else (
+                    "robust_sample_preferred"
+                    if bool(winner["RobustSample"])
+                    else f"fallback_below_{robust_minimum}_total_signals"
+                )
             )
             if direction == "Up"
             else "legacy_down_stability_order"
@@ -517,7 +549,10 @@ def summarize_and_select_thresholds(
             },
             "selection_reason": selection_reason,
             "selection_order": (
-                threshold_selection_order(robust_minimum)
+                threshold_selection_order(
+                    robust_minimum,
+                    config.threshold_calibration_precision_tolerance,
+                )
                 if direction == "Up"
                 else DOWN_THRESHOLD_SELECTION_ORDER
             ),
@@ -575,6 +610,11 @@ def threshold_diagnostics(
                     row.get("OppositeMoveFrequency")
                 ),
                 "precision_stability": _finite_or_none(row.get("PrecisionStd")),
+                "best_precision": _finite_or_none(row.get("BestPrecision")),
+                "precision_tolerance": _finite_or_none(row.get("PrecisionTolerance")),
+                "within_precision_tolerance": bool(
+                    row.get("WithinPrecisionTolerance", False)
+                ),
                 "return_stability": _finite_or_none(
                     row.get("DirectionalReturnMeanStd")
                 ),
@@ -606,6 +646,15 @@ def threshold_diagnostics(
             "min_signals_per_window": config.threshold_calibration_min_signals_per_window,
             "min_robust_signals": config.threshold_calibration_min_robust_signals,
             "min_window_fraction": config.threshold_calibration_min_window_fraction,
+            "best_precision": _finite_or_none(
+                candidates["BestPrecision"].iloc[0]
+                if "BestPrecision" in candidates and not candidates.empty
+                else None
+            ),
+            "precision_tolerance": (
+                config.threshold_calibration_precision_tolerance
+                if direction == "Up" else None
+            ),
             "selected_threshold": _finite_or_none(selection.get("threshold")),
             "selection_reason": selection.get("selection_reason"),
             "best_rejected_threshold": best_rejected,
@@ -1050,7 +1099,8 @@ def run_controlled_threshold_calibration(
         "frozen_threshold_digest": frozen_digest,
         "xgboost_parameters": EXPERIMENTAL_XGBOOST_PARAMETERS.as_dict(),
         "selection_order": threshold_selection_order(
-            config.threshold_calibration_min_robust_signals
+            config.threshold_calibration_min_robust_signals,
+            config.threshold_calibration_precision_tolerance,
         ),
         "minimum_signals_per_window": (
             config.threshold_calibration_min_signals_per_window

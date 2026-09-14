@@ -97,6 +97,8 @@ class RStockConfig:
     # This is deliberately separate from the per-window eligibility requirement.
     threshold_calibration_min_robust_signals: int = 10
     threshold_calibration_min_window_fraction: float = 1.0
+    # Precision band used before the Up economic tie-breaker.
+    threshold_calibration_precision_tolerance: float = 0.01
     threshold_calibration_quantiles: tuple[float, ...] = (
         0.50,
         0.60,

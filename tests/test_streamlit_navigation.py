@@ -599,6 +599,17 @@ def test_sensitivity_threshold_settings_are_rendered_and_used_for_holdout_analys
         assert key in analysis
 
 
+def test_up_precision_tolerance_setting_is_rendered_and_saved_with_calibration():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings()", 1)[1].split(
+        "def _history_model_contexts", 1
+    )[0]
+
+    assert "Tolérance de précision — sélection Up" in settings
+    assert "threshold_calibration_precision_tolerance" in settings
+    assert "1 point de pourcentage" in settings
+
+
 def test_successful_duplication_returns_to_the_regular_experiments_view():
     source = APP.read_text(encoding="utf-8")
     locked = source.split("def _render_locked_duplication_mode", 1)[1].split(

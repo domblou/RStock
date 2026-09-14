@@ -721,6 +721,19 @@ def _settings() -> None:
             "Quantiles de la grille",
             value=", ".join(str(value) for value in current.threshold_calibration_quantiles),
         )
+        precision_tolerance = st.number_input(
+            "Tolérance de précision — sélection Up",
+            min_value=0.0,
+            max_value=1.0,
+            value=current.threshold_calibration_precision_tolerance,
+            step=0.005,
+            format="%.3f",
+            help=(
+                "Les seuils dont la précision est à moins de cette valeur de la "
+                "meilleure précision admissible sont considérés comme équivalents "
+                "avant le départage économique. 0,01 = 1 point de pourcentage."
+            ),
+        )
         sensitivity_1, sensitivity_2, sensitivity_3 = st.columns(3)
         sensitivity_threshold_min = sensitivity_1.number_input(
             "Seuil min — analyse de sensibilité",
@@ -802,6 +815,7 @@ def _settings() -> None:
                 threshold_calibration_min_signals_per_window=int(min_signals),
                 threshold_calibration_min_robust_signals=int(min_robust_signals),
                 threshold_calibration_min_window_fraction=float(min_window_fraction),
+                threshold_calibration_precision_tolerance=float(precision_tolerance),
                 threshold_calibration_quantiles=parsed_quantiles,
             )
             st.session_state.lab_config = new_config

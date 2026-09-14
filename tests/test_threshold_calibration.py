@@ -243,6 +243,66 @@ def test_higher_precision_wins_between_robust_candidates_before_return():
     assert selected["Up"]["calibration_metrics"]["precision"] == pytest.approx(0.66)
 
 
+def test_zero_precision_tolerance_keeps_the_highest_precision_up_candidate():
+    metrics = pd.concat([
+        _threshold_candidate(0.50, [10, 10], precision=0.70, directional_return=0.01, opposite=0.20),
+        _threshold_candidate(0.60, [10, 10], precision=0.698, directional_return=0.04, opposite=0.10),
+    ], ignore_index=True)
+
+    summary, selected = summarize_and_select_thresholds(
+        metrics, _config(threshold_calibration_precision_tolerance=0.0)
+    )
+
+    assert selected["Up"]["threshold"] == 0.50
+    assert summary.loc[summary["Threshold"] == 0.50, "WithinPrecisionTolerance"].iloc[0]
+    assert not summary.loc[summary["Threshold"] == 0.60, "WithinPrecisionTolerance"].iloc[0]
+
+
+def test_precision_tolerance_allows_economic_up_tie_breaker():
+    metrics = pd.concat([
+        _threshold_candidate(0.50, [10, 10], precision=0.70, directional_return=0.01, opposite=0.20),
+        _threshold_candidate(0.60, [10, 10], precision=0.698, directional_return=0.04, opposite=0.10),
+    ], ignore_index=True)
+
+    summary, selected = summarize_and_select_thresholds(
+        metrics, _config(threshold_calibration_precision_tolerance=0.01)
+    )
+
+    assert selected["Up"]["threshold"] == 0.60
+    assert selected["Up"]["selection_reason"] == "precision_tolerance_economic_selection"
+    assert summary["WithinPrecisionTolerance"].all()
+    assert summary["BestPrecision"].tolist() == pytest.approx([0.70, 0.70])
+
+
+def test_up_candidate_outside_precision_tolerance_cannot_win_economic_tie_breaker():
+    metrics = pd.concat([
+        _threshold_candidate(0.50, [10, 10], precision=0.70, directional_return=0.01, opposite=0.20),
+        _threshold_candidate(0.60, [10, 10], precision=0.689, directional_return=0.04, opposite=0.10),
+    ], ignore_index=True)
+
+    summary, selected = summarize_and_select_thresholds(
+        metrics, _config(threshold_calibration_precision_tolerance=0.01)
+    )
+
+    assert selected["Up"]["threshold"] == 0.50
+    assert not summary.loc[summary["Threshold"] == 0.60, "WithinPrecisionTolerance"].iloc[0]
+
+
+def test_down_selection_is_unchanged_by_up_precision_tolerance():
+    metrics = pd.concat([
+        _threshold_candidate(0.50, [10, 10], precision=0.60, directional_return=0.01, opposite=0.20),
+        _threshold_candidate(0.60, [10, 10], precision=0.70, directional_return=0.01, opposite=0.20),
+    ], ignore_index=True)
+    metrics["Direction"] = "Down"
+
+    _, selected = summarize_and_select_thresholds(
+        metrics, _config(threshold_calibration_precision_tolerance=0.50)
+    )
+
+    assert selected["Down"]["threshold"] == 0.60
+    assert selected["Down"]["selection_reason"] == "legacy_down_stability_order"
+
+
 def test_below_configured_robust_minimum_is_a_deterministic_fallback():
     metrics = pd.concat([
         _threshold_candidate(0.65, [4, 4], precision=0.64, directional_return=0.01, opposite=0.20),
@@ -622,6 +682,7 @@ def test_threshold_diagnostics_persist_candidate_rejection_details(monkeypatch, 
         "average_return", "median_return", "mfe", "mae", "stability",
         "precision", "directional_return_mean", "opposite_move_frequency",
         "precision_stability", "return_stability", "robust_sample",
+        "best_precision", "precision_tolerance", "within_precision_tolerance",
         "eligible", "rejection_reason", "selected", "selection_reason",
     } <= set(diagnostics["candidates"][0])
     assert {
@@ -769,6 +830,7 @@ def test_threshold_calibration_reuses_qualified_sets_from_its_walk_forward_sourc
         {"threshold_calibration_min_robust_signals": 0},
         {"threshold_calibration_min_window_fraction": 0.0},
         {"threshold_calibration_min_window_fraction": 1.1},
+        {"threshold_calibration_precision_tolerance": -0.01},
         {"threshold_calibration_quantiles": (0.0, 0.5)},
     ],
 )

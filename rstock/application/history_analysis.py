@@ -70,7 +70,7 @@ CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS = (
     "Fraction de fenêtres admissibles", "Précision calibration",
     "Stabilité précision", "Rendement directionnel moyen",
     "Stabilité rendement", "Fréquence mouvement opposé", "F1",
-    "Raison de rejet / sélection",
+    "Dans tolérance précision", "Raison de rejet / sélection",
 )
 
 
@@ -562,6 +562,9 @@ def threshold_calibration_choice_diagnostic_table(
         "Stabilité rendement": candidates.get("DirectionalReturnMeanStd"),
         "Fréquence mouvement opposé": candidates.get("OppositeMoveFrequency"),
         "F1": candidates.get("F1Median"),
+        "Dans tolérance précision": _boolean(candidates.get(
+            "WithinPrecisionTolerance", pd.Series(False, index=candidates.index)
+        )),
         "Raison de rejet / sélection": reason,
     })
     return table.sort_values("Seuil", kind="stable").reset_index(drop=True)
