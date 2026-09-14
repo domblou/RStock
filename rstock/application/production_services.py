@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import replace
 from typing import Any, Callable
 
 import numpy as np
@@ -12,6 +13,7 @@ import pandas as pd
 
 from rstock.calendars import next_market_session
 from rstock.config import RStockConfig
+from rstock.data import prefix_symbol_columns
 from rstock.features import (
     intraday_down_target_column,
     intraday_lag_column,
@@ -19,6 +21,7 @@ from rstock.features import (
     intraday_target_column,
     predictor_columns,
     prediction_source_observations,
+    prepare_dataset,
     prepare_prediction_row,
 )
 from rstock.modeling import XGBoostParameters, fit_booster, predict_probabilities
@@ -484,6 +487,146 @@ class DailyPredictionService:
         if persist and not frame.empty:
             self.repository.append_table("predictions", frame, key="prediction_id")
         return frame
+
+    def replay(
+        self,
+        price_loader: Callable[[str], pd.DataFrame | None],
+        config: RStockConfig,
+        *,
+        start_date: Any,
+        end_date: Any,
+    ) -> pd.DataFrame:
+        """Replay active models using only information preceding each target session.
+
+        The persisted production boosters cannot safely be applied backwards:
+        they were trained using observations that may postdate the simulated
+        session.  Each replay fit therefore uses an expanding sample ending at
+        ``as_of_date``, while preserving the model's frozen feature definition,
+        XGBoost parameters, and decision thresholds.
+        """
+
+        start = pd.Timestamp(start_date).normalize()
+        end = pd.Timestamp(end_date).normalize()
+        rows: list[dict[str, Any]] = []
+        training_config_by_model: dict[str, RStockConfig] = {}
+        for model in self.repository.active_models():
+            try:
+                market_frames: list[pd.DataFrame] = []
+                for symbol in model.symbols:
+                    prices = price_loader(symbol)
+                    if prices is None or prices.empty:
+                        raise ValueError(f"missing market history for {symbol}")
+                    market_frames.append(prefix_symbol_columns(prices, symbol))
+                market_data = pd.concat(market_frames, axis=1).sort_index()
+                prepared = prepare_dataset(
+                    market_data,
+                    model.symbols,
+                    intraday_target_threshold=model.up_target_threshold,
+                    lag_depth=model.lag_depth,
+                    intraday_down_threshold=model.down_target_threshold,
+                )
+                metadata = json.loads(
+                    (self.repository.artifact_directory(model.model_id)
+                     / "production.metadata.json").read_text(encoding="utf-8")
+                )
+                if (
+                    metadata.get("model_id") != model.model_id
+                    or metadata.get("artifact_version") != model.artifact_version
+                    or metadata.get("feature_version") != model.feature_version
+                ):
+                    raise ValueError("incompatible production metadata")
+                names = list(metadata.get("predictor_columns") or [])
+                if not names:
+                    raise ValueError("missing persisted predictor definition")
+                outcomes = {
+                    "up": intraday_target_column(model.target),
+                    "down": intraday_down_target_column(model.target),
+                }
+                directional_parameters = {
+                    "up": XGBoostParameters(**model.xgboost_parameters),
+                    "down": XGBoostParameters(**(
+                        model.down_xgboost_parameters or model.xgboost_parameters
+                    )),
+                }
+                training_config = training_config_by_model.setdefault(
+                    model.model_id,
+                    replace(
+                        config,
+                        xgb_seed=model.xgboost_seed,
+                        xgb_nthread=model.xgboost_threads,
+                    ),
+                )
+                target_dates = prepared.index[
+                    (prepared.index >= start) & (prepared.index <= end)
+                ]
+                for target_date in target_dates:
+                    try:
+                        prior_dates = prepared.index[prepared.index < target_date]
+                        if prior_dates.empty:
+                            raise ValueError("no prior market observation")
+                        as_of = prior_dates.max()
+                        current = prepare_prediction_row(
+                            prepared,
+                            as_of_date=as_of,
+                            target_date=target_date,
+                            lag_depth=model.lag_depth,
+                        )
+                        if any(
+                            name not in current or current[name].isna().any()
+                            for name in names
+                        ):
+                            raise ValueError("missing predictors")
+                        training = prepared.loc[
+                            prepared.index <= as_of,
+                            [*names, *outcomes.values()],
+                        ].dropna()
+                        if training.empty:
+                            raise ValueError("no complete historical training observations")
+                        probabilities: dict[str, float] = {}
+                        for direction, outcome in outcomes.items():
+                            booster = fit_booster(
+                                training,
+                                names,
+                                outcome,
+                                training_config,
+                                parameters=directional_parameters[direction],
+                            )
+                            probabilities[direction] = float(
+                                predict_probabilities(booster, current, names)[0]
+                            )
+                        prediction_id = hashlib.sha256(
+                            f"historical:{model.model_id}:{model.artifact_version}:"
+                            f"{pd.Timestamp(target_date).date()}".encode()
+                        ).hexdigest()[:20]
+                        rows.append({
+                            "prediction_id": prediction_id,
+                            "prediction_date": pd.Timestamp(target_date).date().isoformat(),
+                            "as_of_date": pd.Timestamp(as_of).date().isoformat(),
+                            "target": model.target,
+                            "predictors": json.dumps(model.predictors),
+                            "model_id": model.model_id,
+                            "model_version": model.artifact_version,
+                            "up_probability": probabilities["up"],
+                            "down_probability": probabilities["down"],
+                            "up_threshold": model.signal_threshold,
+                            "down_threshold": model.down_threshold,
+                            "signal_status": (
+                                "bullish_signal"
+                                if probabilities["up"] >= model.signal_threshold
+                                and probabilities["down"] < model.down_threshold
+                                else "no_signal"
+                            ),
+                            "status": "predicted",
+                            "error": None,
+                            "created_at": utc_now(),
+                        })
+                    except Exception as error:
+                        rows.append(self._error_row(
+                            model, f"{type(error).__name__}: {error}", target_date
+                        ))
+            except Exception as error:
+                rows.append(self._error_row(model, f"{type(error).__name__}: {error}"))
+        return pd.DataFrame(rows)
 
     def _predict_model(
         self,

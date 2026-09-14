@@ -495,20 +495,17 @@ def _experiment_universe_selector() -> bool:
     st.session_state.lab_target_symbols = list(target_symbols)
     st.session_state.lab_context_symbols = list(context_symbols)
     st.session_state.lab_symbols = list(predictor_symbols)
-    st.caption(f"Univers principal : {universe_id}")
-    st.caption(f"Cibles résolues : {len(target_symbols)}")
+    context_label = ", ".join(selected_contexts) if selected_contexts else "Aucun"
     st.caption(
-        "Univers de contexte : "
-        + (", ".join(selected_contexts) if selected_contexts else "Aucun")
+        f"Univers principal : {universe_id} · {len(target_symbols)} cibles · "
+        f"Contexte : {context_label} · {len(context_symbols)} symboles · "
+        f"{len(predictor_symbols)} prédicteurs"
     )
-    st.caption(f"Symboles contexte : {len(context_symbols)}")
-    st.caption(f"Prédicteurs disponibles : {len(predictor_symbols)} symboles uniques")
     with st.expander("Voir les symboles sélectionnés"):
         st.write("Cibles")
         st.code(", ".join(target_symbols))
         st.write("Contexte")
         st.code(", ".join(context_symbols) or "Aucun")
-    st.caption("La création et la modification des listes se font dans la page Univers.")
     return True
 
 
@@ -527,7 +524,6 @@ def _experiments(service: ExperimentService) -> None:
     }
     choice = st.selectbox("Type de job", list(labels))
     valid_universe = _experiment_universe_selector()
-    st.caption("La liste résolue et la configuration seront figées avant le lancement.")
     if st.button("Soumettre l’expérience", type="primary", disabled=not valid_universe):
         spec = ExperimentSpec(
             job_type=labels[choice],
@@ -545,12 +541,19 @@ def _experiments(service: ExperimentService) -> None:
             target_symbols=tuple(st.session_state.lab_target_symbols),
             context_symbols=tuple(st.session_state.lab_context_symbols),
             predictor_symbols=tuple(st.session_state.lab_symbols),
+            run_description=(
+                f"profondeur {st.session_state.lab_config.permutation_depth}"
+            ),
         )
         submitted = service.submit(spec)
         if submitted.created:
             st.success(f"Run créé: {submitted.run_id}")
         else:
             st.warning(f"Configuration déjà active: {submitted.run_id}")
+    st.caption(
+        "Les listes se gèrent dans Univers; la sélection résolue et la "
+        "configuration sont figées au lancement."
+    )
     st.subheader("Jobs actifs")
     _live_job_panel(service)
 
@@ -1044,15 +1047,13 @@ def _render_history_detail(
     summary_text: str,
 ) -> None:
     st.divider()
-    st.subheader("Détail du run")
+    st.subheader(summary_text if summary_text != "—" else "Détail du run")
     columns = st.columns(5)
     columns[0].metric("Type", JOB_LABELS.get(str(status["job_type"]), str(status["job_type"])))
     columns[1].metric("Date", history_row(status, detail, {}).date_time)
     columns[2].metric("Statut", str(status["status"]))
     columns[3].metric("Durée", history_row(status, detail, {}).duration)
     columns[4].metric("Contexte", context)
-    st.markdown("**Résumé du run**")
-    st.write(summary_text)
     st.caption(f"ID technique : {run_id}")
     if (
         status["job_type"] == JobType.WALK_FORWARD.value
@@ -1201,6 +1202,7 @@ def _render_run_detail_view(
 ) -> None:
     detail = service.run(run_id)
     status = detail["status"]
+    _page_header("Historique")
     if status["job_type"] != JobType.WALK_FORWARD.value:
         st.caption("Historique > Détail du run")
         if st.button("← Retour à Historique"):
@@ -1213,20 +1215,18 @@ def _render_run_detail_view(
         return
     analytics = _load_run_analytics(run_id, status, detail)
     universe_summary = run_universe_summary(detail["configuration"])
+    history = history_row(status, detail, {})
     st.caption("Historique > Détail du run")
     if st.button("← Retour à Historique", key="history-back-detail"):
         _clear_history_navigation()
-    st.title(f"Walk-forward — {len(analytics.symbols)} symboles — profondeur {analytics.depth}")
-    st.caption(f"Univers principal : {universe_summary['primary_universe_id']}")
-    st.caption(f"Cibles : {universe_summary['target_count']}")
-    st.caption(
-        "Univers de contexte : "
-        + (", ".join(universe_summary["context_universe_ids"]) or "Aucun")
+    st.subheader(
+        f"Walk-forward — {len(analytics.symbols)} symboles — profondeur {analytics.depth}"
     )
-    st.caption(f"Prédicteurs disponibles : {universe_summary['predictor_count']}")
+    context_universes = ", ".join(universe_summary["context_universe_ids"]) or "Aucun"
     st.caption(
-        f"{history_row(status, detail, {}).date_time} · {history_row(status, detail, {}).duration} · "
-        f"Statut : {analytics.status}"
+        f"{universe_summary['primary_universe_id']} · {universe_summary['target_count']} cibles · "
+        f"{context_universes} · {universe_summary['predictor_count']} prédicteurs · "
+        f"{history.date_time} · {history.duration} · {analytics.status}"
     )
     metrics = st.columns(6)
     metrics[0].metric("Combinaisons testées", analytics.tested_count if analytics.tested_count is not None else "—")
@@ -1333,14 +1333,20 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
     }
     if len(set(labels.values())) != len(labels):
         labels = {key: f"{value} · {key[-4:]}" for key, value in labels.items()}
+    _page_header("Historique")
     st.caption("Historique > Comparaison de runs")
     if st.button("← Retour à Historique", key="history-back-comparison"):
         _clear_history_navigation()
-    st.title("Comparaison de runs — Walk-forward")
+    st.subheader("Comparaison de runs — Walk-forward")
     cards = st.columns(len(analytics))
-    for column, analysis in zip(cards, analytics, strict=True):
-        column.markdown(
-            f"**{labels[analysis.run_id]}**\n\n{len(analysis.symbols)} symboles · profondeur {analysis.depth}\n\n{analysis.status}"
+    for index, (column, analysis, detail) in enumerate(
+        zip(cards, analytics, details, strict=True), start=1
+    ):
+        history = history_row(detail["status"], detail, {})
+        column.caption(
+            f"Run {chr(64 + index)} · {history.date_time} · "
+            f"{len(analysis.symbols)} symboles · profondeur {analysis.depth} · "
+            f"{analysis.status}"
         )
     summary = comparison_table(analytics, labels)
     tabs = st.tabs(["Synthèse", "Métriques", "Combinaisons", "Validation", "Technique"])
@@ -1421,6 +1427,7 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
             st.dataframe(differences, hide_index=True, width="stretch")
         for detail, analysis in zip(details, analytics, strict=True):
             with st.expander(labels[analysis.run_id]):
+                st.caption(f"ID technique : {analysis.run_id}")
                 st.json(detail["configuration"])
 
 
@@ -2332,6 +2339,7 @@ def _simulation_page() -> None:
         "simulation-end-date": default_end,
         "simulation-amount": 10_000.0,
         "simulation-exit-mode": "Clôture du jour",
+        "simulation-mode": "Résultats réalisés",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -2348,22 +2356,34 @@ def _simulation_page() -> None:
             "Mode de sortie", ["Clôture du jour"], disabled=True,
             key="simulation-exit-mode",
         )
-        controls[4].markdown(
-            "**Tous les modèles actifs**  \n"
-            "Chaque signal Up représente une transaction indépendante."
+        simulation_mode = controls[4].selectbox(
+            "Mode de simulation",
+            ["Historique", "Résultats réalisés"],
+            key="simulation-mode",
         )
         launch = controls[5].button(
             "Lancer la simulation", type="primary", width="stretch"
         )
         st.caption(
             "Les trades sans prix Open ou Close sont conservés dans le détail, "
-            "mais exclus des calculs financiers."
+            "mais exclus des calculs financiers. Chaque signal Up représente une "
+            "transaction indépendante. Tous les modèles actifs sont utilisés."
         )
     if launch:
         try:
-            st.session_state["simulation-result"] = SimulationService.local(
+            service = SimulationService.local(
                 project_root, st.session_state.lab_config
-            ).run(start_date, end_date, float(amount))
+            )
+            if simulation_mode == "Historique":
+                result = service.run_historical(
+                    start_date,
+                    end_date,
+                    st.session_state.lab_config,
+                    float(amount),
+                )
+            else:
+                result = service.run(start_date, end_date, float(amount))
+            st.session_state["simulation-result"] = result
         except ValueError as error:
             st.error(str(error))
             st.session_state.pop("simulation-result", None)

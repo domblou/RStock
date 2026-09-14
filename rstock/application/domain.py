@@ -94,6 +94,7 @@ class ExperimentSpec:
     context_symbols: tuple[str, ...] = ()
     predictor_symbols: tuple[str, ...] = ()
     source_walk_forward_run: str | None = None
+    run_description: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
@@ -115,6 +116,8 @@ class ExperimentSpec:
         object.__setattr__(self, "target_symbols", targets)
         object.__setattr__(self, "context_symbols", context)
         object.__setattr__(self, "predictor_symbols", predictors)
+        description = None if self.run_description is None else str(self.run_description).strip()
+        object.__setattr__(self, "run_description", description or None)
         # ``symbols`` remains the backward-compatible market-data universe.
         object.__setattr__(self, "symbols", predictors)
         if len(self.symbols) < 2:
@@ -138,6 +141,7 @@ class ExperimentSpec:
             "context_symbols": list(self.context_symbols),
             "predictor_symbols": list(self.predictor_symbols),
             "source_walk_forward_run": self.source_walk_forward_run,
+            "run_description": self.run_description,
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
             "evaluate_final_holdout": self.evaluate_final_holdout,
@@ -191,6 +195,10 @@ class ExperimentSpec:
                 None
                 if values.get("source_walk_forward_run") is None
                 else str(values["source_walk_forward_run"])
+            ),
+            run_description=(
+                None if values.get("run_description") is None
+                else str(values["run_description"])
             ),
         )
 

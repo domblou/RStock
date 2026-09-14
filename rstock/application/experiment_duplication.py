@@ -58,6 +58,41 @@ def duplication_job_label(value: object) -> str:
     return JOB_TYPE_LABELS.get(job_type, JOB_TYPE_LABELS[JobType.WALK_FORWARD])
 
 
+def _description_suffix(value: object) -> str | None:
+    """Keep a stored description while allowing the copied job label to change."""
+
+    if not isinstance(value, str) or not (description := value.strip()):
+        return None
+    for label in JOB_TYPE_LABELS.values():
+        for separator in (" — ", " - "):
+            prefix = f"{label}{separator}"
+            if description.casefold().startswith(prefix.casefold()):
+                return description[len(prefix):].strip() or None
+    return description
+
+
+def _source_run_description(
+    configuration: Mapping[str, object], detail: Mapping[str, object]
+) -> str | None:
+    """Read a persisted source label without inventing one for legacy runs."""
+
+    summary = detail.get("summary")
+    sources = (configuration, summary if isinstance(summary, Mapping) else {})
+    for source in sources:
+        for field in (
+            "run_description",
+            "experiment_description",
+            "description",
+            "display_name",
+            "name",
+            "title",
+        ):
+            description = _description_suffix(source.get(field))
+            if description:
+                return description
+    return None
+
+
 def walk_forward_duplication_draft(
     run_id: str, detail: Mapping[str, object]
 ) -> dict[str, object]:
@@ -86,6 +121,7 @@ def walk_forward_duplication_draft(
         "combinations_per_target": int(configuration.get("combinations_per_target", 3)),
         "evaluate_final_holdout": bool(configuration.get("evaluate_final_holdout", True)),
         "rstock_config": deepcopy(configuration.get("rstock_config") or {}),
+        "run_description": _source_run_description(configuration, detail),
     }
 
 
@@ -232,5 +268,9 @@ def experiment_spec_from_duplication(
             }
             and draft.get("source_run_id")
             else None
+        ),
+        run_description=(
+            None if values.get("run_description") is None
+            else str(values["run_description"])
         ),
     )

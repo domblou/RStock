@@ -63,7 +63,7 @@ def test_surveillance_is_the_default_page_without_dashboard_navigation():
     assert "_dashboard_page" not in source
 
 
-def test_simulation_page_uses_persisted_active_signals_and_dedicated_service():
+def test_simulation_page_offers_both_modes_with_realized_results_as_default():
     source = APP.read_text(encoding="utf-8")
     page = source.split("def _simulation_page", 1)[1].split(
         "def _primary_pages", 1
@@ -72,8 +72,16 @@ def test_simulation_page_uses_persisted_active_signals_and_dedicated_service():
     assert '_page_header("Simulation")' in page
     assert 'SignalService(project_root).active_history()' in page
     assert "SimulationService.local(" in page
+    assert '"simulation-mode": "Résultats réalisés"' in page
+    assert '"Mode de simulation"' in page
+    assert '["Historique", "Résultats réalisés"]' in page
+    assert "service.run_historical(" in page
+    assert "service.run(start_date, end_date" in page
     assert '"Lancer la simulation"' in page
     assert 'key="simulation-exit-mode"' in page
+    assert "Chaque signal Up représente une " in page
+    assert "transaction indépendante. Tous les modèles actifs sont utilisés." in page
+    assert "**Tous les modèles actifs**" not in page
     assert 'st.Page(_simulation_page, title="Simulation"' in source
 
 
@@ -132,9 +140,30 @@ def test_experiments_only_selects_saved_universes_without_manual_entry():
     assert "context_sample_size=context_sample_size" in selector
     assert "context_selection_method=context_method" in selector
     assert "resolve_experiment(" in selector
-    assert "Cibles résolues" in selector
-    assert "Symboles contexte" in selector
-    assert "Prédicteurs disponibles" in selector
+    assert "Univers principal : {universe_id}" in selector
+    assert "Contexte : {context_label}" in selector
+    assert 'with st.expander("Voir les symboles sélectionnés")' in selector
+    assert "Cibles résolues" not in selector
+    assert "Symboles contexte" not in selector
+    assert "Prédicteurs disponibles" not in selector
+
+
+def test_experiment_summary_is_compact_and_submission_help_is_secondary():
+    source = APP.read_text(encoding="utf-8")
+    selector = source.split("def _experiment_universe_selector", 1)[1].split(
+        "def _experiments", 1
+    )[0]
+    experiments = source.split("def _experiments", 1)[1].split(
+        "def _settings", 1
+    )[0]
+
+    assert selector.count("st.caption(") == 2  # empty-context feedback + summary
+    assert "La création et la modification des listes" not in selector
+    assert "La liste résolue et la configuration seront figées" not in experiments
+    assert "Les listes se gèrent dans Univers; la sélection résolue" in experiments
+    assert experiments.index('button("Soumettre l’expérience"') < experiments.index(
+        "Les listes se gèrent dans Univers;"
+    )
 
 
 def test_universe_page_exposes_persisted_type_without_weakening_system_protection():
@@ -172,10 +201,12 @@ def test_experiment_submission_and_history_expose_frozen_universe_roles():
     ):
         assert f"{field}=" in experiments
     assert "run_universe_summary" in detail
-    assert "Univers principal" in detail
-    assert "Cibles" in detail
-    assert "Univers de contexte" in detail
-    assert "Prédicteurs disponibles" in detail
+    assert '_page_header("Historique")' in detail
+    assert "Historique > Détail du run" in detail
+    assert "st.subheader(" in detail
+    assert "{universe_summary['target_count']} cibles" in detail
+    assert "{universe_summary['predictor_count']} prédicteurs" in detail
+    assert "Univers de contexte" not in detail
 
 
 def test_models_and_surveillance_pages_expose_the_operational_flow():
@@ -379,6 +410,32 @@ def test_history_supports_single_run_detail_and_multi_run_comparison_navigation(
     assert "← Retour à Historique" in source
     assert 'st.tabs(["Résumé", "Analyse", "Combinaisons", "Validation", "Technique"])' in source
     assert 'st.tabs(["Synthèse", "Métriques", "Combinaisons", "Validation", "Technique"])' in source
+
+
+def test_history_comparison_header_uses_compact_parent_identity_and_run_summaries():
+    source = APP.read_text(encoding="utf-8")
+    comparison = source.split("def _render_run_comparison_view", 1)[1].split(
+        "def _history_runs_panel", 1
+    )[0]
+
+    assert '_page_header("Historique")' in comparison
+    assert "Historique > Comparaison de runs" in comparison
+    assert 'st.subheader("Comparaison de runs — Walk-forward")' in comparison
+    assert "Run {chr(64 + index)}" in comparison
+    assert "symboles · profondeur" in comparison
+    assert "column.caption(" in comparison
+    assert "ID technique : {analysis.run_id}" in comparison
+    assert "st.title(\"Comparaison de runs" not in comparison
+
+
+def test_generic_history_detail_uses_the_persisted_summary_as_its_title():
+    source = APP.read_text(encoding="utf-8")
+    detail = source.split("def _render_history_detail", 1)[1].split(
+        "def _history_navigation", 1
+    )[0]
+
+    assert 'st.subheader(summary_text if summary_text != "—" else "Détail du run")' in detail
+    assert 'st.caption(f"ID technique : {run_id}")' in detail
 
 
 def test_history_can_duplicate_one_walk_forward_run_into_experiments():

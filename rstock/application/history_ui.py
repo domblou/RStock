@@ -136,7 +136,14 @@ def _model_context(model_id: object, models: Mapping[str, str]) -> str:
     return models.get(str(model_id), str(model_id) if model_id else "—")
 
 
-def _summary_text(job_type: str, summary: Mapping[str, object]) -> str:
+def _summary_text(
+    job_type: str,
+    summary: Mapping[str, object],
+    configuration: Mapping[str, object],
+) -> str:
+    description = configuration.get("run_description")
+    if isinstance(description, str) and description.strip():
+        return f"{JOB_LABELS.get(job_type, job_type)} — {description.strip()}"
     if job_type == "market_update":
         return f"{len(summary.get('updated_symbols', ())) } symboles mis à jour"
     if job_type == "daily_prediction":
@@ -210,7 +217,7 @@ def history_row(
         context=_context_text(job_type, configuration, summary, models),
         status=str(status["status"]),
         duration=short_duration(status.get("duration_seconds")),
-        summary=_summary_text(job_type, summary),
+        summary=_summary_text(job_type, summary, configuration),
     )
 
 

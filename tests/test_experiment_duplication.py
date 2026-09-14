@@ -76,6 +76,49 @@ def test_walk_forward_duplication_draft_copies_all_experiment_inputs():
     assert detail["configuration"]["rstock_config"]["xgb_seed"] == 99
 
 
+@pytest.mark.parametrize(
+    ("job_type", "expected_label"),
+    [
+        (JobType.WALK_FORWARD, "Walk-forward — profondeur 2"),
+        (JobType.XGBOOST_CALIBRATION, "Calibration XGBoost — profondeur 2"),
+        (JobType.THRESHOLD_CALIBRATION, "Calibration des seuils — profondeur 2"),
+    ],
+)
+def test_duplication_persists_the_source_description_with_the_selected_job_label(
+    job_type, expected_label, tmp_path
+):
+    detail = _detail()
+    detail["configuration"]["run_description"] = "Walk-forward — profondeur 2"
+    draft = walk_forward_duplication_draft("run_original", detail)
+
+    duplicated = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+        job_type=job_type,
+    )
+
+    assert draft["run_description"] == "profondeur 2"
+    assert duplicated.run_description == "profondeur 2"
+    assert duplicated.to_dict()["run_description"] == "profondeur 2"
+    assert f"{JOB_TYPE_LABELS[job_type]} — {duplicated.run_description}" == expected_label
+
+
+def test_legacy_duplication_without_a_description_remains_compatible(tmp_path):
+    detail = _detail(snapshot={"xgb_seed": 99})
+    draft = walk_forward_duplication_draft("run_original", detail)
+
+    duplicated = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+        job_type=JobType.THRESHOLD_CALIBRATION,
+    )
+
+    assert draft["run_description"] is None
+    assert duplicated.run_description is None
+
+
 def test_historical_walk_forward_string_has_the_safe_ui_label():
     draft = walk_forward_duplication_draft("run_original", _detail())
 

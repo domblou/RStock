@@ -14,6 +14,7 @@ from rstock.config import RStockConfig
 from rstock.market_cache import market_data_service
 
 from .production_repository import ProductionRepository
+from .production_services import DailyPredictionService, ProductionSignalService
 
 
 TRADE_COLUMNS = (
@@ -97,12 +98,57 @@ class SimulationService:
     ) -> SimulationResult:
         start = _date(start_date, "Date de début")
         end = _date(end_date, "Date de fin")
+        self._validate_parameters(start, end, amount_per_signal)
+        signals = self.repository.read_active_model_table("signals")
+        predictions = self.repository.read_table("predictions")
+        return self._simulate_signals(
+            signals, predictions, start, end, amount_per_signal
+        )
+
+    def run_historical(
+        self,
+        start_date: date | str | pd.Timestamp,
+        end_date: date | str | pd.Timestamp,
+        config: RStockConfig,
+        amount_per_signal: float = 10_000.0,
+    ) -> SimulationResult:
+        """Replay current active models, then use the common financial engine."""
+
+        start = _date(start_date, "Date de début")
+        end = _date(end_date, "Date de fin")
+        self._validate_parameters(start, end, amount_per_signal)
+        predictions = DailyPredictionService(self.repository).replay(
+            self.price_loader,
+            config,
+            start_date=start,
+            end_date=end,
+        )
+        signals = ProductionSignalService(self.repository).screen(
+            predictions, persist=False
+        )
+        return self._simulate_signals(
+            signals, predictions, start, end, amount_per_signal
+        )
+
+    @staticmethod
+    def _validate_parameters(
+        start: pd.Timestamp, end: pd.Timestamp, amount_per_signal: float
+    ) -> None:
         if start > end:
             raise ValueError("La date de début doit précéder ou égaler la date de fin")
         if not np.isfinite(amount_per_signal) or amount_per_signal <= 0:
             raise ValueError("Le montant par signal doit être positif")
 
-        signals = self.repository.read_active_model_table("signals")
+    def _simulate_signals(
+        self,
+        signals: pd.DataFrame,
+        predictions: pd.DataFrame,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        amount_per_signal: float,
+    ) -> SimulationResult:
+        """Convert persisted or replayed signals through one financial engine."""
+
         if signals.empty or "prediction_date" not in signals:
             return self._result(pd.DataFrame(columns=TRADE_COLUMNS))
         work = signals.copy()
@@ -114,7 +160,6 @@ class SimulationService:
             & trade_dates.between(start, end, inclusive="both")
         ].copy()
         work["_trade_date"] = trade_dates.loc[work.index]
-        predictions = self.repository.read_table("predictions")
         prediction_lookup = (
             predictions.drop_duplicates("prediction_id", keep="last").set_index("prediction_id")
             if not predictions.empty and "prediction_id" in predictions

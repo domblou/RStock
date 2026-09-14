@@ -98,6 +98,21 @@ def test_history_rows_are_human_readable_without_exposing_run_id():
     assert set(row.display()) == {"Date / heure", "Type", "Contexte", "Statut", "Durée", "Résumé"}
 
 
+def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallback():
+    described = _detail(summary={"outcome": "completed"})
+    described["configuration"]["run_description"] = "profondeur 2"
+
+    calibration = history_row(
+        _run("calibration", "threshold_calibration"), described, {}
+    )
+    legacy = history_row(
+        _run("legacy", "threshold_calibration"), _detail(), {}
+    )
+
+    assert calibration.summary == "Calibration des seuils — profondeur 2"
+    assert legacy.summary == "Calibration terminée"
+
+
 def test_production_rows_have_human_context_and_summary():
     models = {"model-1": "DIS ← PFE + WMT"}
     training = history_row(

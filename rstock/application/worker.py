@@ -165,6 +165,8 @@ def execute_run(
             progress_callback=reporter,
             cancellation_check=lambda: repository.cancellation_requested(run_id),
         )
+        if spec.run_description:
+            summary = {**summary, "run_description": spec.run_description}
         check_cancellation(lambda: repository.cancellation_requested(run_id))
         results = repository.run_directory(run_id) / "results"
         reporter.phase_started("publishing")
