@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
+
+from rstock.evaluation import classification_metrics
 
 
 COMBINATION_COLUMNS = (
@@ -34,6 +37,16 @@ THRESHOLD_CALIBRATION_COLUMNS = (
     "F1", "AUC holdout", "Rendement directionnel moyen",
     "Rendement médian", "MFE moyen", "MAE moyen",
     "Fréquence mouvement opposé",
+)
+
+DEFAULT_THRESHOLD_SENSITIVITY_THRESHOLDS = (
+    0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60,
+)
+THRESHOLD_SENSITIVITY_COLUMNS = (
+    "Seuil", "Nombre de signaux", "Précision", "Recall", "F1",
+    "Rendement directionnel moyen", "Rendement médian",
+    "Fréquence mouvement opposé", "MFE moyen", "MAE moyen",
+    "Seuil calibré actuel", "Meilleure précision (≥ 5 signaux)",
 )
 
 
@@ -152,6 +165,106 @@ def load_threshold_calibration_artifacts(
     except (OSError, json.JSONDecodeError):
         selected = {}
     return metrics, holdout, selected if isinstance(selected, dict) else {}
+
+
+def load_threshold_holdout_predictions(project_root: Path, run_id: str) -> pd.DataFrame:
+    """Load immutable holdout probabilities when a run published them."""
+
+    path = Path(project_root) / "runs" / run_id / "results" / "holdout_predictions.csv"
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def threshold_sensitivity_table(
+    holdout_predictions: pd.DataFrame,
+    *,
+    set_name: str,
+    direction: str,
+    calibrated_threshold: object,
+    thresholds: Sequence[float] = DEFAULT_THRESHOLD_SENSITIVITY_THRESHOLDS,
+    up_target_threshold: float = 0.01,
+    down_target_threshold: float = 0.01,
+    minimum_signals_for_best: int = 5,
+) -> pd.DataFrame:
+    """Project existing holdout probabilities across display-only thresholds.
+
+    This deliberately does not call calibration or model-fitting code.  It is
+    a local projection of the stored probability rows for one combination.
+    """
+
+    required = {
+        "Set", "Direction", "Probability", "Target", "IntradayReturn",
+    }
+    if not required.issubset(holdout_predictions.columns):
+        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_COLUMNS)
+    work = holdout_predictions[
+        (holdout_predictions["Set"].astype(str) == str(set_name))
+        & (holdout_predictions["Direction"].astype(str) == str(direction))
+    ].copy()
+    if work.empty:
+        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_COLUMNS)
+    probability = pd.to_numeric(work["Probability"], errors="coerce")
+    target = pd.to_numeric(work["Target"], errors="coerce")
+    returns = pd.to_numeric(work["IntradayReturn"], errors="coerce")
+    valid = probability.notna() & target.isin([0, 1])
+    work = work.loc[valid].copy()
+    probability = probability.loc[valid]
+    target = target.loc[valid].astype(int)
+    returns = returns.loc[valid]
+    if work.empty:
+        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_COLUMNS)
+
+    try:
+        current = float(calibrated_threshold)
+    except (TypeError, ValueError):
+        current = None
+    grid = {round(float(value), 10) for value in thresholds if 0 <= float(value) <= 1}
+    if current is not None and 0 <= current <= 1:
+        grid.add(round(current, 10))
+    rows: list[dict[str, object]] = []
+    for threshold in sorted(grid):
+        predicted = (probability >= threshold).astype(int)
+        metrics = classification_metrics(target, predicted, probability)
+        selected = work.loc[predicted.astype(bool)].copy()
+        selected_returns = returns.loc[selected.index].dropna()
+        directional_returns = (
+            selected_returns if direction == "Up" else -selected_returns
+        )
+        if direction == "Up":
+            opposite = selected_returns <= -down_target_threshold
+        else:
+            opposite = selected_returns >= up_target_threshold
+        mfe = pd.to_numeric(selected.get("MFE", pd.Series(dtype=float)), errors="coerce").dropna()
+        mae = pd.to_numeric(selected.get("MAE", pd.Series(dtype=float)), errors="coerce").dropna()
+        rows.append({
+            "Seuil": threshold,
+            "Nombre de signaux": int(predicted.sum()),
+            "Précision": metrics.precision,
+            "Recall": metrics.recall,
+            "F1": metrics.f1,
+            "Rendement directionnel moyen": (
+                float(directional_returns.mean()) if not directional_returns.empty else np.nan
+            ),
+            "Rendement médian": (
+                float(selected_returns.median()) if not selected_returns.empty else np.nan
+            ),
+            "Fréquence mouvement opposé": (
+                float(opposite.mean()) if not selected_returns.empty else np.nan
+            ),
+            "MFE moyen": float(mfe.mean()) if not mfe.empty else np.nan,
+            "MAE moyen": float(mae.mean()) if not mae.empty else np.nan,
+            "Seuil calibré actuel": "✓" if current is not None and np.isclose(threshold, current) else "",
+            "Meilleure précision (≥ 5 signaux)": "",
+        })
+    result = pd.DataFrame(rows, columns=THRESHOLD_SENSITIVITY_COLUMNS)
+    eligible = result[result["Nombre de signaux"] >= minimum_signals_for_best]
+    if not eligible.empty:
+        best = eligible.sort_values(
+            ["Précision", "Nombre de signaux", "Seuil"],
+            ascending=[False, False, True],
+            kind="stable",
+        ).index[0]
+        result.loc[best, "Meilleure précision (≥ 5 signaux)"] = "✓"
+    return result
 
 
 def _set_parts(set_name: object) -> tuple[str, str]:

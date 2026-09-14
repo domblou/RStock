@@ -15,6 +15,7 @@ from rstock.application.history_analysis import (
     predictor_prefilter_summary,
     selected_run_action,
     threshold_calibration_table,
+    threshold_sensitivity_table,
 )
 
 
@@ -319,3 +320,50 @@ def test_threshold_calibration_quality_filters_combine_with_direction_and_signal
     )
 
     assert filtered["Combinaison"].tolist() == ["AAA<-BBB"]
+
+
+def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation():
+    holdout = pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.20, "Target": 0, "IntradayReturn": -0.02, "MFE": 0.01, "MAE": -0.03},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.30, "Target": 1, "IntradayReturn": 0.01, "MFE": 0.02, "MAE": -0.01},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.50, "Target": 1, "IntradayReturn": 0.02, "MFE": 0.03, "MAE": -0.01},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.70, "Target": 0, "IntradayReturn": -0.03, "MFE": 0.01, "MAE": -0.04},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.80, "Target": 1, "IntradayReturn": 0.04, "MFE": 0.05, "MAE": -0.01},
+    ])
+    original = holdout.copy(deep=True)
+
+    sensitivity = threshold_sensitivity_table(
+        holdout,
+        set_name="AAA<-BBB",
+        direction="Up",
+        calibrated_threshold=0.73,
+        thresholds=(0.30, 0.50, 0.95),
+    )
+    at_half = sensitivity.loc[sensitivity["Seuil"] == 0.50].iloc[0]
+    at_high = sensitivity.loc[sensitivity["Seuil"] == 0.95].iloc[0]
+
+    assert sensitivity["Seuil"].tolist() == sorted(sensitivity["Seuil"].tolist())
+    assert 0.73 in sensitivity["Seuil"].tolist()
+    assert sensitivity.loc[
+        sensitivity["Seuil"] == 0.73, "Seuil calibré actuel"
+    ].iloc[0] == "✓"
+    assert at_half["Nombre de signaux"] == 3
+    assert at_half["Précision"] == pytest.approx(2 / 3)
+    assert at_half["Rendement directionnel moyen"] == pytest.approx(0.01)
+    assert at_half["Rendement médian"] == pytest.approx(0.02)
+    assert at_half["Fréquence mouvement opposé"] == pytest.approx(1 / 3)
+    assert at_high["Nombre de signaux"] == 0
+    assert at_high["Précision"] == 0.0
+    assert sensitivity["Meilleure précision (≥ 5 signaux)"].eq("✓").sum() == 0
+    assert holdout.equals(original)
+
+
+def test_threshold_sensitivity_is_unavailable_without_persisted_probabilities():
+    sensitivity = threshold_sensitivity_table(
+        pd.DataFrame({"Set": ["AAA<-BBB"]}),
+        set_name="AAA<-BBB",
+        direction="Up",
+        calibrated_threshold=0.5,
+    )
+
+    assert sensitivity.empty

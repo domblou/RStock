@@ -554,6 +554,19 @@ def test_threshold_calibration_filter_defaults_are_session_safe():
     assert '"Précision holdout minimale", min_value=0.0, max_value=1.0,' in panel
 
 
+def test_threshold_calibration_selected_row_exposes_read_only_holdout_sensitivity():
+    source = APP.read_text(encoding="utf-8")
+    panel = source.split("def _render_threshold_calibration_promotion", 1)[1].split(
+        "def _render_history_detail", 1
+    )[0]
+
+    assert "_render_threshold_sensitivity_analysis(" in panel
+    assert "Analyse de sensibilité au seuil — Holdout" in panel
+    assert "load_threshold_holdout_predictions" in panel
+    assert "threshold_sensitivity_table(" in panel
+    assert "Analyse de sensibilité indisponible pour ce run historique." in panel
+
+
 def test_successful_duplication_returns_to_the_regular_experiments_view():
     source = APP.read_text(encoding="utf-8")
     locked = source.split("def _render_locked_duplication_mode", 1)[1].split(

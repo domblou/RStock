@@ -44,11 +44,13 @@ from rstock.application.history_analysis import (
     filter_threshold_calibration_results,
     load_model_selection_artifact,
     load_threshold_calibration_artifacts,
+    load_threshold_holdout_predictions,
     load_walk_forward_artifacts,
     predictor_prefilter_summary,
     run_universe_summary,
     selected_run_action,
     threshold_calibration_table,
+    threshold_sensitivity_table,
 )
 from rstock.application.runner import running_duration
 from rstock.application.surveillance import (
@@ -998,6 +1000,14 @@ def _render_threshold_calibration_promotion(
         return
     set_name = str(chosen.get("Combinaison", ""))
     selected_direction = str(chosen.get("Direction", ""))
+    _render_threshold_sensitivity_analysis(
+        project_root,
+        run_id,
+        set_name=set_name,
+        direction=selected_direction,
+        calibrated_threshold=chosen.get("Seuil calibré"),
+        configuration=configuration,
+    )
     frozen = selected_by_set.get(set_name, {})
     if not all(
         isinstance(frozen.get(item), dict)
@@ -1036,6 +1046,54 @@ def _render_threshold_calibration_promotion(
                 st.success(f"Candidat production créé : {model.target} ← {' + '.join(model.predictors)}")
             else:
                 st.info(f"Combinaison déjà promue — statut : {model.status.value}.")
+
+
+def _render_threshold_sensitivity_analysis(
+    project_root: Path,
+    run_id: str,
+    *,
+    set_name: str,
+    direction: str,
+    calibrated_threshold: object,
+    configuration: dict[str, object],
+) -> None:
+    """Render a read-only holdout threshold projection for one selected set."""
+
+    st.subheader("Analyse de sensibilité au seuil")
+    st.caption("Analyse de sensibilité au seuil — Holdout")
+    rstock_config = configuration.get("rstock_config", {})
+    rstock_config = rstock_config if isinstance(rstock_config, dict) else {}
+    sensitivity = threshold_sensitivity_table(
+        load_threshold_holdout_predictions(project_root, run_id),
+        set_name=set_name,
+        direction=direction,
+        calibrated_threshold=calibrated_threshold,
+        up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
+        down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
+    )
+    if sensitivity.empty:
+        st.info("Analyse de sensibilité indisponible pour ce run historique.")
+        return
+    st.caption(
+        "✓ identifie le seuil calibré actuel et le meilleur seuil par précision "
+        "avec au moins 5 signaux. Cette analyse ne modifie pas le run."
+    )
+    st.dataframe(
+        sensitivity,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Seuil": st.column_config.NumberColumn(format="%.4f"),
+            "Précision": st.column_config.NumberColumn(format="percent"),
+            "Recall": st.column_config.NumberColumn(format="percent"),
+            "F1": st.column_config.NumberColumn(format="%.3f"),
+            "Rendement directionnel moyen": st.column_config.NumberColumn(format="percent"),
+            "Rendement médian": st.column_config.NumberColumn(format="percent"),
+            "Fréquence mouvement opposé": st.column_config.NumberColumn(format="percent"),
+            "MFE moyen": st.column_config.NumberColumn(format="percent"),
+            "MAE moyen": st.column_config.NumberColumn(format="percent"),
+        },
+    )
 
 
 def _render_history_detail(
