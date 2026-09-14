@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from rstock.calibration import run_controlled_calibration, write_calibration_results
+from rstock.calendars import offset_market_session
 from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
@@ -88,6 +89,51 @@ def _prepared_inputs(
         cancellation_check=cancellation_check,
     )
     check_cancellation(cancellation_check)
+    offset = spec.config.walk_forward_end_offset_sessions
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValueError(
+            "Décalage de fin walk-forward invalide : "
+            f"offset demandé={offset!r}; un entier >= 0 est requis."
+        )
+    effective_end_date: pd.Timestamp | None = None
+    if offset > 0:
+        available_observations = len(downloaded.prices)
+        if downloaded.prices.empty:
+            raise ValueError(
+                "Décalage de fin walk-forward impossible : "
+                f"offset demandé={offset}; date de fin effective=indéterminée; "
+                "observations disponibles=0; aucune donnée de marché disponible."
+            )
+        try:
+            effective_end_date = offset_market_session(
+                downloaded.prices.index.max(), spec.calendar, offset
+            )
+        except (ValueError, IndexError, KeyError) as error:
+            raise ValueError(
+                "Décalage de fin walk-forward impossible : "
+                f"offset demandé={offset}; date de fin effective=indéterminée; "
+                f"observations disponibles={available_observations}; "
+                f"le calendrier {spec.calendar} ne contient pas assez de séances."
+            ) from error
+        downloaded, calendars = MarketDataService().load(
+            spec,
+            history_days=spec.config.model_history_days,
+            as_of=effective_end_date.date(),
+            progress_callback=_phase_callback(progress_callback, "data_preparation"),
+            cancellation_check=cancellation_check,
+        )
+        if downloaded.prices.empty:
+            raise ValueError(
+                "Décalage de fin walk-forward impossible : "
+                f"offset demandé={offset}; "
+                f"date de fin effective={effective_end_date.date().isoformat()}; "
+                "observations disponibles=0; aucune donnée historique n'est "
+                "disponible pour la période décalée."
+            )
+        downloaded.prices = downloaded.prices.loc[
+            downloaded.prices.index <= effective_end_date
+        ].copy()
+        check_cancellation(cancellation_check)
     report_progress(progress_callback, "data_preparation", substage="prepare_dataset")
     prepared = prepare_dataset(
         downloaded.prices,
@@ -96,6 +142,26 @@ def _prepared_inputs(
         spec.config.lag_depth,
         spec.config.intraday_down_threshold,
     )
+    if effective_end_date is None and not prepared.empty:
+        effective_end_date = pd.Timestamp(prepared.index.max()).normalize()
+    if effective_end_date is not None:
+        prepared.attrs["effective_end_date"] = effective_end_date.isoformat()
+    prepared.attrs["walk_forward_end_offset_sessions"] = offset
+    if offset > 0:
+        minimum_observations = (
+            spec.config.walk_forward_min_train_size
+            + spec.config.final_holdout_size
+            + 1
+        )
+        if len(prepared) < minimum_observations:
+            raise ValueError(
+                "Décalage de fin walk-forward impossible : "
+                f"offset demandé={offset}; "
+                f"date de fin effective={effective_end_date.date().isoformat()}; "
+                f"observations disponibles={len(prepared)}; "
+                f"au moins {minimum_observations} observations sont requises pour "
+                "le train minimal et le holdout final."
+            )
     _phase(progress_callback, "data_preparation", "completed", symbols=len(downloaded.symbols))
     available = set(downloaded.symbols)
     predictor_symbols = [
@@ -103,6 +169,19 @@ def _prepared_inputs(
     ]
     target_symbols = [symbol for symbol in spec.target_symbols if symbol in available]
     return prepared, predictor_symbols, target_symbols, calendars
+
+
+def _persist_walk_forward_period(
+    run_configuration: dict[str, object], prepared: pd.DataFrame, config: object
+) -> dict[str, object]:
+    period = {
+        "walk_forward_end_offset_sessions": int(
+            getattr(config, "walk_forward_end_offset_sessions", 0)
+        ),
+        "effective_end_date": prepared.attrs.get("effective_end_date"),
+    }
+    run_configuration.update(period)
+    return period
 
 
 def _prepared_experiment(
@@ -243,6 +322,7 @@ def _walk_forward(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
+    period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     if prefilter is not None:
         result.run_configuration["predictor_prefilter"] = {
             "enabled": True,
@@ -280,6 +360,7 @@ def _walk_forward(
         "metrics": _json_value(result.aggregate_global.iloc[0].to_dict()),
         "eligible_combinations": int(result.qualification["Eligible"].sum()),
         "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
     }
     if prefilter is not None:
         summary["total_combinations"] = len(generated)
@@ -304,6 +385,7 @@ def _xgboost_calibration(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
+    period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     _phase(progress_callback, "result_writing", "started")
     write_calibration_results(result, output)
     _phase(progress_callback, "result_writing", "completed")
@@ -312,6 +394,7 @@ def _xgboost_calibration(
         "selected_configurations": _json_value(result.selected_configurations),
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
     }
 
 
@@ -336,6 +419,7 @@ def _threshold_calibration(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
+    period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     _phase(progress_callback, "result_writing", "started")
     write_threshold_calibration_results(result, output)
     _phase(progress_callback, "result_writing", "completed")
@@ -361,6 +445,7 @@ def _threshold_calibration(
         ),
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
         "source_walk_forward_run": spec.source_walk_forward_run,
         "source_qualified_combinations": (
             None if source_generated is None else len(source_generated)

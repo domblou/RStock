@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,8 @@ class MarketDataService:
         self,
         spec: ExperimentSpec,
         *,
+        history_days: int | None = None,
+        as_of: date | None = None,
         progress_callback: ProgressCallback | None = None,
         cancellation_check: CancellationCheck | None = None,
     ) -> tuple[MarketDataResult, dict[str, str]]:
@@ -67,7 +70,8 @@ class MarketDataService:
         )
         result = market_data_service(spec.config).get_market_data(
             universe,
-            spec.config.model_history_days,
+            spec.config.model_history_days if history_days is None else history_days,
+            as_of=as_of,
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
         )

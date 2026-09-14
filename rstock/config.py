@@ -61,6 +61,7 @@ class RStockConfig:
     walk_forward_step_size: int = 63
     walk_forward_max_symbols: int = 4
     final_holdout_size: int = 63
+    walk_forward_end_offset_sessions: int = 0
 
     # Calibration parameters for stability qualification. They are fixed before
     # the final holdout is evaluated and must not be tuned from holdout results.
@@ -205,6 +206,8 @@ def _coerce_config_value(name: str, value: object, default_value: object) -> obj
 
     if isinstance(default_value, int) and not isinstance(default_value, bool):
         if isinstance(value, int) and not isinstance(value, bool):
+            if name == "walk_forward_end_offset_sessions" and value < 0:
+                raise ValueError(f"{name} must be an integer >= 0")
             return value
         raise ValueError(f"{name} must be an integer")
 

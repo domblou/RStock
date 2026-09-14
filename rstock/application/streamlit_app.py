@@ -584,11 +584,22 @@ def _settings() -> None:
         down_threshold = c3.number_input("Seuil intraday baisse", min_value=0.0, value=current.intraday_down_threshold, format="%.4f")
 
         st.subheader("Walk-forward")
-        w1, w2, w3, w4 = st.columns(4)
+        w1, w2, w3, w4, w5 = st.columns(5)
         min_train = w1.number_input("Train minimal", min_value=1, value=current.walk_forward_min_train_size)
         test_size = w2.number_input("Taille test", min_value=1, value=current.walk_forward_test_size)
         step = w3.number_input("Step", min_value=1, value=current.walk_forward_step_size)
         holdout = w4.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
+        end_offset = w5.number_input(
+            "Décalage de fin (jours de marché)",
+            min_value=0,
+            value=current.walk_forward_end_offset_sessions,
+            help=(
+                "Décale artificiellement la date de fin du walk-forward de N séances "
+                "de marché. Permet de rejouer la même méthodologie sur une période "
+                "historique différente sans modifier la taille des fenêtres. "
+                "0 = données les plus récentes."
+            ),
+        )
 
         st.subheader("Pré-filtrage des prédicteurs")
         prefilter_enabled = st.checkbox(
@@ -777,6 +788,7 @@ def _settings() -> None:
                 walk_forward_test_size=int(test_size),
                 walk_forward_step_size=int(step),
                 final_holdout_size=int(holdout),
+                walk_forward_end_offset_sessions=int(end_offset),
                 predictor_prefilter_enabled=bool(prefilter_enabled),
                 predictor_prefilter_top_n=int(prefilter_top_n),
                 predictor_prefilter_min_median_auc=float(prefilter_median_auc),
