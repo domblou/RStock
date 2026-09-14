@@ -113,6 +113,32 @@ def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallbac
     assert legacy.summary == "Calibration terminée"
 
 
+def test_threshold_calibration_keeps_the_walk_forward_context_after_duplication():
+    symbols = tuple(f"SYM{index:03d}" for index in range(115))
+    walk_forward = _detail(symbols=symbols)
+    calibration = _detail(symbols=symbols)
+    calibration["configuration"]["source_walk_forward_run"] = "walk-forward-source"
+    calibration["configuration"]["run_description"] = "Rejeu historique"
+
+    source_row = history_row(_run("walk-forward-source", "walk_forward"), walk_forward, {})
+    calibration_row = history_row(
+        _run("threshold-calibration", "threshold_calibration"), calibration, {}
+    )
+
+    assert source_row.context == "115 symboles · profondeur 2"
+    assert calibration_row.context == source_row.context
+    assert calibration_row.summary == "Calibration des seuils — Rejeu historique"
+
+
+def test_legacy_calibration_without_inherited_depth_has_a_safe_context_fallback():
+    detail = _detail(symbols=("AAA", "BBB"))
+    detail["configuration"]["rstock_config"] = {}
+
+    row = history_row(_run("legacy-calibration", "threshold_calibration"), detail, {})
+
+    assert row.context == "2 symboles · profondeur —"
+
+
 def test_production_rows_have_human_context_and_summary():
     models = {"model-1": "DIS ← PFE + WMT"}
     training = history_row(

@@ -28,10 +28,11 @@ def test_primary_native_pages_cover_the_laboratory_sections():
         "Historique",
         "Univers",
         "Paramètres",
+        "Documentation",
     ):
         assert f'title="{title}"' in source
     assert 'title="Simulation"' in source
-    assert source.count("st.Page(") == 7
+    assert source.count("st.Page(") == 8
 
 
 def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
@@ -41,6 +42,7 @@ def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
     assert LOGO.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     header = source.split("def _page_header", 1)[1].split("def _state", 1)[0]
     assert 'rstock_logo.png' in source
+    assert 'page_title="RStock"' in source
     assert 'display: flex' in header
     assert 'align-items: center' in header
     assert 'gap: 8px' in header
@@ -83,6 +85,22 @@ def test_simulation_page_offers_both_modes_with_realized_results_as_default():
     assert "transaction indépendante. Tous les modèles actifs sont utilisés." in page
     assert "**Tous les modèles actifs**" not in page
     assert 'st.Page(_simulation_page, title="Simulation"' in source
+
+
+def test_documentation_follows_simulation_and_loads_the_markdown_guide_read_only():
+    source = APP.read_text(encoding="utf-8")
+
+    assert 'st.Page(_simulation_page, title="Simulation"' in source
+    assert 'st.Page(_documentation_page, title="Documentation"' in source
+    assert source.index('st.Page(_simulation_page, title="Simulation"') < source.index(
+        'st.Page(_documentation_page, title="Documentation"'
+    )
+    page = source.split("def _documentation_page", 1)[1].split(
+        "def _primary_pages", 1
+    )[0]
+    assert "USER_GUIDE_PATH.read_text(encoding=\"utf-8\")" in page
+    assert "st.expander(" in page
+    assert "st.markdown(content)" in page
 
 
 def test_universe_management_is_separate_from_settings_and_selection_is_in_experiments():

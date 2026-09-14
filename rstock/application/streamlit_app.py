@@ -52,6 +52,7 @@ from rstock.application.history_analysis import (
     threshold_calibration_table,
     threshold_calibration_choice_diagnostic_table,
     threshold_calibration_selection_summary,
+    threshold_promotion_guidance,
     threshold_sensitivity_summary,
     threshold_sensitivity_table,
 )
@@ -97,9 +98,11 @@ from rstock.config import (
 )
 
 
-st.set_page_config(page_title="RStock Laboratory", page_icon="🧪", layout="wide")
+THUMBNAIL_PATH = Path(__file__).resolve().parents[2] / "assets" / "rstock-thumbnail.png"
+st.set_page_config(page_title="RStock", page_icon=str(THUMBNAIL_PATH), layout="wide")
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "rstock_logo.png"
+USER_GUIDE_PATH = Path(__file__).resolve().parents[1] / "docs" / "user_guide.md"
 DUPLICATION_DRAFT_KEY = "experiment-duplication-draft"
 DUPLICATION_CONFIG_CHOICE_KEY = "experiment-duplication-config-choice"
 DUPLICATION_JOB_TYPE_KEY = "experiment-duplication-job-type"
@@ -990,6 +993,28 @@ def _render_threshold_calibration_promotion(
     if results.empty:
         st.info("Aucun résultat par combinaison n'est disponible pour ce run.")
         return
+    rstock_config = configuration.get("rstock_config", {})
+    rstock_config = rstock_config if isinstance(rstock_config, dict) else {}
+    minimum_robust_signals = int(
+        rstock_config.get(
+            "threshold_calibration_min_robust_signals",
+            DEFAULT_CONFIG.threshold_calibration_min_robust_signals,
+        )
+    )
+    holdout_predictions = load_threshold_holdout_predictions(project_root, run_id)
+    promotion_sensitivity = threshold_sensitivity_summary(
+        results,
+        holdout_predictions,
+        up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
+        down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
+        minimum_robust_signals=minimum_robust_signals,
+        sensitivity_threshold_min=float(st.session_state.sensitivity_threshold_min),
+        sensitivity_threshold_max=float(st.session_state.sensitivity_threshold_max),
+        sensitivity_threshold_step=float(st.session_state.sensitivity_threshold_step),
+    )
+    results = threshold_promotion_guidance(
+        results, promotion_sensitivity, selected_by_set
+    )
     filter_defaults = {
         f"threshold-direction-{run_id}": "Up",
         f"threshold-min-signals-{run_id}": 20,
@@ -997,11 +1022,12 @@ def _render_threshold_calibration_promotion(
         f"threshold-min-auc-{run_id}": 0.60,
         f"threshold-max-opposite-{run_id}": 0.30,
         f"threshold-min-directional-return-{run_id}": 0.00,
+        f"threshold-promotion-status-{run_id}": "Tous",
         f"threshold-sort-{run_id}": "Précision holdout",
     }
     for key, value in filter_defaults.items():
         st.session_state.setdefault(key, value)
-    filters = st.columns(3)
+    filters = st.columns(4)
     direction = filters[0].selectbox(
         "Direction", ["Up", "Down", "Toutes"],
         key=f"threshold-direction-{run_id}",
@@ -1013,6 +1039,8 @@ def _render_threshold_calibration_promotion(
     sort_options = [
         "Précision holdout", "AUC holdout", "Rendement directionnel moyen"
     ]
+    if "Score promotion" in results:
+        sort_options.append("Score promotion")
     if "Score" in results:
         sort_options.append("Score")
     sort_key = f"threshold-sort-{run_id}"
@@ -1022,6 +1050,11 @@ def _render_threshold_calibration_promotion(
         "Trier par",
         sort_options,
         key=f"threshold-sort-{run_id}",
+    )
+    promotion_status = filters[3].selectbox(
+        "Statut promotion",
+        ["Tous", "Candidat fort", "À examiner", "Non candidat"],
+        key=f"threshold-promotion-status-{run_id}",
     )
     quality_filters = st.columns(4)
     min_precision_value = quality_filters[0].number_input(
@@ -1053,24 +1086,18 @@ def _render_threshold_calibration_promotion(
         min_directional_return=(
             None if min_return_value == 0 else float(min_return_value)
         ),
+        promotion_status=promotion_status,
         sort_by=sort_by,
     )
+    displayed = filtered.drop(columns=["Raison promotion"], errors="ignore")
     selection = st.dataframe(
-        filtered, hide_index=True, width="stretch", on_select="rerun",
+        displayed, hide_index=True, width="stretch", on_select="rerun",
         selection_mode="single-row", key=f"threshold-results-{run_id}",
-    )
-    rstock_config = configuration.get("rstock_config", {})
-    rstock_config = rstock_config if isinstance(rstock_config, dict) else {}
-    minimum_robust_signals = int(
-        rstock_config.get(
-            "threshold_calibration_min_robust_signals",
-            DEFAULT_CONFIG.threshold_calibration_min_robust_signals,
-        )
     )
     st.subheader("Synthèse de sensibilité des seuils")
     sensitivity_summary = threshold_sensitivity_summary(
         filtered,
-        load_threshold_holdout_predictions(project_root, run_id),
+        holdout_predictions,
         up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
         down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
         minimum_robust_signals=minimum_robust_signals,
@@ -1116,6 +1143,10 @@ def _render_threshold_calibration_promotion(
     if not isinstance(chosen, dict):
         st.caption("Sélectionnez une combinaison pour la promouvoir.")
         return
+    st.caption(
+        "Aide à la décision de promotion : "
+        f"{chosen.get('Raison promotion', 'Métriques insuffisantes.')}"
+    )
     set_name = str(chosen.get("Combinaison", ""))
     selected_direction = str(chosen.get("Direction", ""))
     _render_threshold_sensitivity_analysis(
@@ -2627,6 +2658,43 @@ def _simulation_page() -> None:
         st.info("Configurez la période puis lancez la simulation.")
 
 
+def _documentation_sections(markdown: str) -> list[tuple[str, str]]:
+    """Split the user guide into its top-level Markdown sections."""
+
+    sections: list[tuple[str, str]] = []
+    title: str | None = None
+    body: list[str] = []
+    for line in markdown.splitlines():
+        if line.startswith("# "):
+            if title is not None:
+                sections.append((title, "\n".join(body).strip()))
+            title = line[2:].strip()
+            body = []
+        elif title is not None:
+            body.append(line)
+    if title is not None:
+        sections.append((title, "\n".join(body).strip()))
+    return sections[1:]
+
+
+def _documentation_page() -> None:
+    _page_header("Documentation")
+    st.caption("Guide fonctionnel du processus RStock, en consultation seulement.")
+    try:
+        guide = USER_GUIDE_PATH.read_text(encoding="utf-8")
+    except OSError as error:
+        st.error(f"Documentation indisponible : {error}")
+        return
+    sections = _documentation_sections(guide)
+    if not sections:
+        st.warning("La documentation ne contient aucune section à afficher.")
+        return
+    st.markdown("**Sommaire** · " + " · ".join(title for title, _ in sections))
+    for index, (title, content) in enumerate(sections):
+        with st.expander(title, expanded=index == 0):
+            st.markdown(content)
+
+
 def _primary_pages() -> list[st.Page]:
     """Flat V1 navigation; this factory can later return grouped page mappings."""
 
@@ -2641,6 +2709,7 @@ def _primary_pages() -> list[st.Page]:
         st.Page(_universes_page, title="Univers", icon=":material/list_alt:"),
         st.Page(_settings_page, title="Paramètres", icon=":material/settings:"),
         st.Page(_simulation_page, title="Simulation", icon=":material/monitoring:"),
+        st.Page(_documentation_page, title="Documentation", icon=":material/menu_book:"),
     ]
     return _PRIMARY_PAGES
 

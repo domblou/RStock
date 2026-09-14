@@ -391,6 +391,7 @@ Sélecteur de titres pour créer des univers
 ✅ Dashboard Surveillance V1
 ✅ Historique réel des signaux
 ✅ Suivi descriptif rendement / risque des signaux
+⬜ Promotion et disqualification automatique de modèle
 ⬜ Calculer les profits non réalisés sur signaux positifs
 ⬜ Positions / portefeuille éventuel
 ⬜ Automatisation quotidienne

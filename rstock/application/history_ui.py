@@ -234,7 +234,7 @@ def _context_text(
     if job_type == "operational_run":
         return f"{int(summary.get('updated_symbols', 0))} symboles opérationnels"
     symbols = _symbols(configuration)
-    if job_type == "walk_forward":
+    if job_type in EXPERIMENT_JOB_TYPES:
         return f"{len(symbols)} symboles · profondeur {configuration.get('rstock_config', {}).get('permutation_depth', '—')}"
     return f"{len(symbols)} symboles" if symbols else "—"
 

@@ -17,6 +17,7 @@ from rstock.application.history_analysis import (
     threshold_calibration_table,
     threshold_calibration_choice_diagnostic_table,
     threshold_calibration_selection_summary,
+    threshold_promotion_guidance,
     threshold_sensitivity_best_column,
     threshold_sensitivity_grid,
     threshold_sensitivity_summary,
@@ -327,6 +328,69 @@ def test_threshold_calibration_quality_filters_combine_with_direction_and_signal
     )
 
     assert filtered["Combinaison"].tolist() == ["AAA<-BBB"]
+
+
+def test_threshold_promotion_guidance_blocks_ineligible_holdout_rows_without_mutation():
+    results = pd.DataFrame([{
+        "Combinaison": "AAA<-BBB", "Cible": "AAA", "Predictors": "BBB",
+        "Direction": "Up", "Seuil calibré": 0.60, "Signaux holdout": 19,
+        "AUC holdout": 0.70, "Précision holdout": 0.75,
+        "Rendement directionnel moyen": 0.02,
+        "Fréquence mouvement opposé": 0.10,
+    }])
+    original = results.copy(deep=True)
+
+    guided = threshold_promotion_guidance(
+        results,
+        pd.DataFrame([{
+            "Combinaison": "AAA<-BBB", "Direction": "Up", "Diagnostic": "near_optimal"
+        }]),
+        {"AAA<-BBB": {"Up": {"status": "selected", "threshold": 0.60}}},
+    )
+
+    assert guided.iloc[0]["Statut promotion"] == "Non candidat"
+    assert pd.isna(guided.iloc[0]["Score promotion"])
+    assert "Trop peu de signaux" in guided.iloc[0]["Raison promotion"]
+    assert guided.columns[:6].tolist() == [
+        "Combinaison", "Cible", "Predictors", "Direction", "Statut promotion", "Score promotion"
+    ]
+    pd.testing.assert_frame_equal(results, original)
+
+
+def test_threshold_promotion_score_is_normalized_and_maps_statuses_and_filters():
+    rows = [
+        ("STRONG<-BBB", 0.70, 0.75, 0.015, 0.15, 60, "near_optimal"),
+        ("REVIEW<-BBB", 0.68, 0.72, 0.015, 0.15, 60, "lower_threshold_better"),
+        ("LOW<-BBB", 0.56, 0.51, 0.001, 0.29, 21, "unstable"),
+    ]
+    results = pd.DataFrame([{
+        "Combinaison": set_name, "Cible": set_name.split("<-")[0], "Predictors": "BBB",
+        "Direction": "Up", "Seuil calibré": 0.60, "AUC holdout": auc,
+        "Précision holdout": precision, "Rendement directionnel moyen": directional_return,
+        "Fréquence mouvement opposé": opposite, "Signaux holdout": signals,
+    } for set_name, auc, precision, directional_return, opposite, signals, _ in rows])
+    sensitivity = pd.DataFrame([{
+        "Combinaison": set_name, "Direction": "Up", "Diagnostic": diagnostic
+    } for set_name, *_, diagnostic in rows])
+    selected = {
+        set_name: {"Up": {"status": "selected", "threshold": 0.60}}
+        for set_name, *_ in rows
+    }
+
+    guided = threshold_promotion_guidance(results, sensitivity, selected)
+    statuses = dict(zip(guided["Combinaison"], guided["Statut promotion"], strict=True))
+    scores = dict(zip(guided["Combinaison"], guided["Score promotion"], strict=True))
+
+    assert statuses == {
+        "STRONG<-BBB": "Candidat fort",
+        "REVIEW<-BBB": "À examiner",
+        "LOW<-BBB": "Non candidat",
+    }
+    assert scores["STRONG<-BBB"] == pytest.approx(76.7)
+    assert all(0 <= score <= 100 for score in scores.values())
+    assert filter_threshold_calibration_results(
+        guided, direction="Toutes", min_signals=0, promotion_status="Candidat fort"
+    )["Combinaison"].tolist() == ["STRONG<-BBB"]
 
 
 def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation():
