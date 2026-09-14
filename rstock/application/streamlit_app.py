@@ -114,7 +114,7 @@ def _page_header(title: str) -> None:
         f"""
         <div style="display: flex; align-items: center; gap: 8px; margin: 0 0 0.35rem; line-height: 1;">
           <img src="data:image/png;base64,{encoded_logo}" alt="RStock"
-               style="display: block; width: 120px; height: auto; flex: 0 0 auto;" />
+               style="display: block; width: 130px; height: auto; flex: 0 0 auto;" />
           <h1 style="margin: 0; padding: 0; font-size: 2rem; line-height: 1.12; transform: translateY(4px);">
             {html.escape(title)}</h1>
         </div>
@@ -2382,9 +2382,9 @@ def _primary_pages() -> list[st.Page]:
         return _PRIMARY_PAGES
     _PRIMARY_PAGES = [
         st.Page(_surveillance_page, title="Surveillance", icon=":material/monitoring:", default=True),
-        st.Page(_experiments_page, title="Expériences", icon=":material/science:"),
         st.Page(_models_page, title="Modèles", icon=":material/model_training:"),
         st.Page(_history_page, title="Historique", icon=":material/history:"),
+        st.Page(_experiments_page, title="Expériences", icon=":material/science:"),
         st.Page(_universes_page, title="Univers", icon=":material/list_alt:"),
         st.Page(_settings_page, title="Paramètres", icon=":material/settings:"),
         st.Page(_simulation_page, title="Simulation", icon=":material/monitoring:"),

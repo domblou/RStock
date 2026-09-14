@@ -44,7 +44,7 @@ def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
     assert 'display: flex' in header
     assert 'align-items: center' in header
     assert 'gap: 8px' in header
-    assert 'width: 120px' in header
+    assert 'width: 130px' in header
     assert 'height: auto' in header
     assert 'transform: translateY(4px)' in header
     assert 'except OSError:' in header
