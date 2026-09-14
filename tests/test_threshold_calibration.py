@@ -390,14 +390,14 @@ def _controlled_result_with_predictions(monkeypatch, predictions, config):
         lambda *args, **kwargs: predictions,
     )
 
-    def unexpected_holdout(*args, **kwargs):
+    def fake_holdout(*args, **kwargs):
         nonlocal holdout_called
         holdout_called = True
-        raise AssertionError("Holdout must not run without both frozen directions")
+        return predictions.copy()
 
     monkeypatch.setattr(
         "rstock.threshold_calibration.generate_holdout_probabilities",
-        unexpected_holdout,
+        fake_holdout,
     )
     result = run_controlled_threshold_calibration(
         prepared,
@@ -413,8 +413,31 @@ def _controlled_result_with_predictions(monkeypatch, predictions, config):
     return result, holdout_called
 
 
+def _per_set_predictions(missing_by_set):
+    frames = []
+    for set_name, missing_directions in missing_by_set.items():
+        predictions = _economically_viable_predictions().copy()
+        predictions["Set"] = set_name
+        for direction in missing_directions:
+            predictions.loc[
+                predictions["Direction"] == direction, "Probability"
+            ] = 0.10
+        frames.append(predictions)
+    return pd.concat(frames, ignore_index=True)
+
+
+def _partial_holdout_result(monkeypatch, missing_by_set):
+    predictions = _per_set_predictions(missing_by_set)
+    result, holdout_called = _controlled_result_with_predictions(
+        monkeypatch,
+        predictions,
+        _config(threshold_calibration_min_signals_per_window=2),
+    )
+    return result, holdout_called
+
+
 @pytest.mark.parametrize("missing_direction", ["Up", "Down"])
-def test_no_eligible_direction_skips_frozen_holdout_without_crashing(
+def test_no_eligible_direction_runs_partial_frozen_holdout_without_crashing(
     monkeypatch, missing_direction
 ):
     predictions = _economically_viable_predictions().copy()
@@ -427,16 +450,155 @@ def test_no_eligible_direction_skips_frozen_holdout_without_crashing(
         _config(threshold_calibration_min_signals_per_window=2),
     )
 
-    assert holdout_called is False
-    assert result.holdout_predictions.empty
-    assert result.holdout_metrics.empty
-    assert result.run_configuration["outcome"] == "completed_no_eligible_threshold"
-    assert result.run_configuration["holdout_evaluated"] is False
-    assert result.run_configuration["holdout_skipped_reason"] == "no_eligible_frozen_threshold"
+    available_direction = "Down" if missing_direction == "Up" else "Up"
+    assert holdout_called is True
+    assert set(result.holdout_predictions["Direction"]) == {available_direction}
+    assert set(result.holdout_metrics["Direction"]) == {available_direction}
+    assert result.run_configuration["outcome"] == "completed_partial_holdout"
+    assert result.run_configuration["holdout_evaluated"] is True
+    assert result.run_configuration["holdout_skipped_reason"] is None
     assert any(
         item["direction"] == missing_direction
         for item in result.run_configuration["missing_frozen_thresholds"]
     )
+    counts = result.run_configuration["holdout_combination_counts"]
+    assert counts[missing_direction]["evaluated_combinations"] == 0
+    assert counts[available_direction]["evaluated_combinations"] == 1
+
+
+@pytest.mark.parametrize(
+    ("missing_by_set", "expected_outcome", "expected_up", "expected_down"),
+    [
+        ({"set-a": set(), "set-b": set()}, "completed", 2, 2),
+        ({"set-a": {"Up"}, "set-b": set()}, "completed_partial_holdout", 1, 2),
+        ({"set-a": {"Down"}, "set-b": set()}, "completed_partial_holdout", 2, 1),
+        (
+            {"set-a": {"Up", "Down"}, "set-b": set()},
+            "completed_partial_holdout", 1, 1,
+        ),
+        (
+            {"set-a": {"Up"}, "set-b": {"Up"}},
+            "completed_partial_holdout", 0, 2,
+        ),
+    ],
+)
+def test_holdout_filters_each_set_and_direction_independently(
+    monkeypatch, missing_by_set, expected_outcome, expected_up, expected_down
+):
+    result, holdout_called = _partial_holdout_result(monkeypatch, missing_by_set)
+
+    assert holdout_called is True
+    assert result.run_configuration["outcome"] == expected_outcome
+    counts = result.run_configuration["holdout_combination_counts"]
+    assert counts["Up"]["evaluated_combinations"] == expected_up
+    assert counts["Down"]["evaluated_combinations"] == expected_down
+    assert counts["Up"]["total_combinations"] == len(missing_by_set)
+    assert counts["Down"]["total_combinations"] == len(missing_by_set)
+    expected_missing_up = sum("Up" in missing for missing in missing_by_set.values())
+    expected_missing_down = sum(
+        "Down" in missing for missing in missing_by_set.values()
+    )
+    assert result.run_configuration["missing_threshold_count_up"] == expected_missing_up
+    assert (
+        result.run_configuration["missing_threshold_count_down"]
+        == expected_missing_down
+    )
+    assert counts["Up"]["exclusion_reasons"].get("no_eligible_threshold", 0) == (
+        expected_missing_up
+    )
+    assert counts["Down"]["exclusion_reasons"].get("no_eligible_threshold", 0) == (
+        expected_missing_down
+    )
+    actual_pairs = set(
+        result.holdout_predictions[["Set", "Direction"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    metric_pairs = set(
+        result.holdout_metrics[["Set", "Direction"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    expected_pairs = {
+        (set_name, direction)
+        for set_name, missing in missing_by_set.items()
+        for direction in ("Up", "Down")
+        if direction not in missing
+    }
+    assert actual_pairs == expected_pairs
+    assert metric_pairs == expected_pairs
+
+
+def test_no_eligible_set_direction_skips_the_entire_holdout(monkeypatch):
+    predictions = _per_set_predictions({
+        "set-a": {"Up", "Down"},
+        "set-b": {"Up", "Down"},
+    })
+    holdout_called = False
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: predictions,
+    )
+
+    def unexpected_holdout(*args, **kwargs):
+        nonlocal holdout_called
+        holdout_called = True
+        raise AssertionError("Holdout must not run without any frozen threshold")
+
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_holdout_probabilities",
+        unexpected_holdout,
+    )
+    index = pd.bdate_range("2025-01-01", periods=12)
+    prepared = pd.DataFrame({"placeholder": np.arange(12)}, index=index)
+    result = run_controlled_threshold_calibration(
+        prepared,
+        generate_symbol_sets(["AAA", "BBB"], 1),
+        _config(threshold_calibration_min_signals_per_window=2),
+        combinations_per_target=1,
+        min_train_size=2,
+        test_size=2,
+        step_size=2,
+        final_holdout_size=3,
+        evaluate_final_holdout=True,
+    )
+
+    assert holdout_called is False
+    assert result.run_configuration["outcome"] == "completed_no_eligible_threshold"
+    assert result.run_configuration["holdout_evaluated"] is False
+    assert result.run_configuration["holdout_skipped_reason"] == "no_eligible_frozen_threshold"
+    assert result.holdout_predictions.empty
+    assert result.holdout_metrics.empty
+
+
+def test_partial_holdout_artifacts_exclude_missing_pairs_without_global_fallback(
+    monkeypatch, tmp_path
+):
+    from rstock.threshold_calibration import write_threshold_calibration_results
+
+    result, _ = _partial_holdout_result(
+        monkeypatch, {"set-a": {"Up"}, "set-b": set()}
+    )
+    assert result.calibration.selected_thresholds["Up"]["status"] == "selected"
+    assert not (
+        (result.holdout_predictions["Set"] == "set-a")
+        & (result.holdout_predictions["Direction"] == "Up")
+    ).any()
+
+    write_threshold_calibration_results(result, tmp_path)
+    persisted_predictions = pd.read_csv(tmp_path / "holdout_predictions.csv")
+    persisted_metrics = pd.read_csv(tmp_path / "holdout_metrics.csv")
+    expected_pairs = {("set-a", "Down"), ("set-b", "Up"), ("set-b", "Down")}
+    assert set(
+        persisted_predictions[["Set", "Direction"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    ) == expected_pairs
+    assert set(
+        persisted_metrics[["Set", "Direction"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    ) == expected_pairs
 
 
 def test_threshold_diagnostics_persist_candidate_rejection_details(monkeypatch, tmp_path):
@@ -518,6 +680,24 @@ def test_threshold_workflow_summary_reports_no_eligible_threshold(monkeypatch, t
             "threshold_diagnostics": {"Up": {"eligible_threshold_count": 0}},
             "missing_frozen_thresholds": [{"set": "AAA<-BBB", "direction": "Up"}],
             "holdout_skipped_reason": "no_eligible_frozen_threshold",
+            "holdout_combination_counts": {
+                "Up": {
+                    "total_combinations": 1,
+                    "eligible_combinations": 0,
+                    "evaluated_combinations": 0,
+                    "skipped_combinations": 1,
+                    "exclusion_reasons": {"no_eligible_threshold": 1},
+                },
+                "Down": {
+                    "total_combinations": 1,
+                    "eligible_combinations": 1,
+                    "evaluated_combinations": 0,
+                    "skipped_combinations": 1,
+                    "exclusion_reasons": {"no_holdout_predictions": 1},
+                },
+            },
+            "missing_threshold_count_up": 1,
+            "missing_threshold_count_down": 0,
         },
     )
     monkeypatch.setattr(
@@ -542,6 +722,9 @@ def test_threshold_workflow_summary_reports_no_eligible_threshold(monkeypatch, t
     assert summary["missing_frozen_thresholds"] == [
         {"set": "AAA<-BBB", "direction": "Up"}
     ]
+    assert summary["missing_threshold_count_up"] == 1
+    assert summary["missing_threshold_count_down"] == 0
+    assert summary["holdout_combination_counts"]["Up"]["skipped_combinations"] == 1
 
 
 def test_threshold_calibration_reuses_qualified_sets_from_its_walk_forward_source(tmp_path):

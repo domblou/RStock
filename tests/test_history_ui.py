@@ -186,7 +186,60 @@ def test_threshold_calibration_history_summary_explains_missing_frozen_threshold
         {},
     )
 
-    assert row.summary == "Aucun seuil admissible (Up) · holdout ignoré"
+    assert row.summary == "Holdout ignoré — 1 seuil gelé manquant (Up)"
+
+
+def test_threshold_calibration_history_summary_reports_partial_holdout_by_direction():
+    row = history_row(
+        _run("threshold-run", "threshold_calibration"),
+        {"configuration": {}, "summary": {
+            "outcome": "completed_partial_holdout",
+            "holdout_combination_counts": {
+                "Up": {
+                    "total_combinations": 300,
+                    "evaluated_combinations": 267,
+                    "skipped_combinations": 33,
+                    "exclusion_reasons": {"no_eligible_threshold": 33},
+                },
+                "Down": {
+                    "total_combinations": 300,
+                    "evaluated_combinations": 300,
+                    "skipped_combinations": 0,
+                    "exclusion_reasons": {},
+                },
+            },
+        }},
+        {},
+    )
+
+    assert row.summary == (
+        "Holdout partiel — Up : 267/300 combinaisons évaluées · "
+        "33 ignorées sans seuil admissible · "
+        "Down : 300/300 combinaisons évaluées"
+    )
+
+
+def test_threshold_calibration_history_summary_reports_when_no_pair_is_eligible():
+    row = history_row(
+        _run("threshold-run", "threshold_calibration"),
+        {"configuration": {}, "summary": {
+            "outcome": "completed_no_eligible_threshold",
+            "holdout_combination_counts": {
+                direction: {
+                    "total_combinations": 2,
+                    "evaluated_combinations": 0,
+                    "skipped_combinations": 2,
+                    "exclusion_reasons": {"no_eligible_threshold": 2},
+                }
+                for direction in ("Up", "Down")
+            },
+        }},
+        {},
+    )
+
+    assert row.summary == (
+        "Aucune combinaison admissible (Up, Down) · holdout ignoré"
+    )
 
 
 def test_existing_promotion_is_detected_without_changing_registry_logic():

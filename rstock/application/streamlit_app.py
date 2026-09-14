@@ -2453,6 +2453,8 @@ def _simulation_page() -> None:
             ["Historique", "Résultats réalisés"],
             key="simulation-mode",
         )
+        # Reserve the label's height so the action lines up with the inputs.
+        controls[5].markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
         launch = controls[5].button(
             "Lancer la simulation", type="primary", width="stretch"
         )

@@ -804,17 +804,82 @@ def apply_frozen_thresholds_by_set(
     predictions: pd.DataFrame,
     selected_thresholds_by_set: Mapping[str, Mapping[str, Mapping[str, object]]],
 ) -> pd.DataFrame:
-    """Apply each combination's already-selected thresholds without re-selection."""
+    """Apply valid per-set/direction thresholds and omit unavailable pairs."""
 
     if "Set" not in predictions:
         raise ValueError("Threshold application predictions require Set")
-    frames = []
+    frames: list[pd.DataFrame] = []
     for set_name, group in predictions.groupby("Set", sort=True):
         selected = selected_thresholds_by_set.get(str(set_name))
         if selected is None:
-            raise ValueError(f"No frozen thresholds are available for {set_name}")
-        frames.append(apply_frozen_thresholds(group, selected))
-    return pd.concat(frames, ignore_index=True) if frames else predictions.copy()
+            continue
+        for direction, directional in group.groupby("Direction", sort=True):
+            selection = selected.get(str(direction), {})
+            threshold = selection.get("threshold")
+            if selection.get("status") != "selected" or threshold is None:
+                continue
+            applied = directional.copy()
+            applied["Threshold"] = float(threshold)
+            applied["Prediction"] = binary_predictions(
+                applied["Probability"], float(threshold)
+            )
+            frames.append(applied)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+    empty = predictions.iloc[0:0].copy()
+    empty["Threshold"] = pd.Series(dtype=float)
+    empty["Prediction"] = pd.Series(dtype="Int64")
+    return empty
+
+
+def _holdout_combination_counts(
+    selected_thresholds_by_set: Mapping[str, Mapping[str, Mapping[str, object]]],
+    holdout_predictions: pd.DataFrame,
+) -> dict[str, dict[str, object]]:
+    """Summarize evaluated and excluded combinations independently by direction."""
+
+    if holdout_predictions.empty:
+        evaluated_pairs: set[tuple[str, str]] = set()
+    elif "Set" in holdout_predictions:
+        evaluated_pairs = {
+            (str(set_name), str(direction))
+            for set_name, direction in holdout_predictions[["Set", "Direction"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        }
+    else:
+        evaluated_pairs = {
+            ("__pooled__", str(direction))
+            for direction in holdout_predictions["Direction"].drop_duplicates()
+        }
+    counts: dict[str, dict[str, object]] = {}
+    for direction in ("Up", "Down"):
+        exclusions: dict[str, int] = {}
+        eligible = 0
+        evaluated = 0
+        for set_name, selections in selected_thresholds_by_set.items():
+            selection = selections.get(direction, {})
+            threshold = selection.get("threshold")
+            if selection.get("status") == "selected" and threshold is not None:
+                eligible += 1
+                if (str(set_name), direction) in evaluated_pairs:
+                    evaluated += 1
+                else:
+                    exclusions["no_holdout_predictions"] = (
+                        exclusions.get("no_holdout_predictions", 0) + 1
+                    )
+            else:
+                reason = str(selection.get("status", "no_eligible_threshold"))
+                exclusions[reason] = exclusions.get(reason, 0) + 1
+        total = len(selected_thresholds_by_set)
+        counts[direction] = {
+            "total_combinations": total,
+            "eligible_combinations": eligible,
+            "evaluated_combinations": evaluated,
+            "skipped_combinations": total - evaluated,
+            "exclusion_reasons": exclusions,
+        }
+    return counts
 
 
 def evaluate_applied_thresholds(
@@ -906,7 +971,10 @@ def run_controlled_threshold_calibration(
     holdout_metrics = pd.DataFrame()
     holdout_evaluated = False
     holdout_skipped_reason = None
-    if evaluate_final_holdout and missing_thresholds:
+    available_threshold_pairs = (
+        len(selected_by_set) * 2 - len(missing_thresholds)
+    )
+    if evaluate_final_holdout and available_threshold_pairs == 0:
         holdout_skipped_reason = "no_eligible_frozen_threshold"
         report_progress(
             progress_callback,
@@ -936,7 +1004,16 @@ def run_controlled_threshold_calibration(
         )
         holdout_metrics = evaluate_applied_thresholds(holdout_predictions, config)
         holdout_evaluated = True
-        report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed"})
+        report_progress(
+            progress_callback,
+            "final_holdout",
+            substage="completed",
+            details={
+                "phase_event": "completed",
+                "partial": bool(missing_thresholds),
+                "missing_thresholds": missing_thresholds,
+            },
+        )
     else:
         report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed", "skipped": True})
 
@@ -944,6 +1021,15 @@ def run_controlled_threshold_calibration(
     sampled_output.insert(
         0, "Set", [symbol_set_id(row) for _, row in sampled.iterrows()]
     )
+    holdout_counts = _holdout_combination_counts(
+        selected_by_set, holdout_predictions
+    )
+    missing_by_direction = {
+        direction: sum(
+            item["direction"] == direction for item in missing_thresholds
+        )
+        for direction in ("Up", "Down")
+    }
     run_configuration = {
         "protocol": "development_threshold_selection_then_optional_frozen_holdout",
         "holdout_used_for_selection": False,
@@ -952,9 +1038,15 @@ def run_controlled_threshold_calibration(
         "holdout_skipped_reason": holdout_skipped_reason,
         "outcome": (
             "completed_no_eligible_threshold"
-            if missing_thresholds else "completed"
+            if evaluate_final_holdout and available_threshold_pairs == 0
+            else "completed_partial_holdout"
+            if evaluate_final_holdout and missing_thresholds
+            else "completed"
         ),
         "missing_frozen_thresholds": missing_thresholds,
+        "holdout_combination_counts": holdout_counts,
+        "missing_threshold_count_up": missing_by_direction["Up"],
+        "missing_threshold_count_down": missing_by_direction["Down"],
         "frozen_threshold_digest": frozen_digest,
         "xgboost_parameters": EXPERIMENTAL_XGBOOST_PARAMETERS.as_dict(),
         "selection_order": threshold_selection_order(

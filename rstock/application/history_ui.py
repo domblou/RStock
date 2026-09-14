@@ -136,6 +136,35 @@ def _model_context(model_id: object, models: Mapping[str, str]) -> str:
     return models.get(str(model_id), str(model_id) if model_id else "—")
 
 
+def _partial_holdout_text(summary: Mapping[str, object]) -> str | None:
+    counts = summary.get("holdout_combination_counts")
+    if not isinstance(counts, Mapping):
+        return None
+    directions: list[str] = []
+    for direction in ("Up", "Down"):
+        values = counts.get(direction)
+        if not isinstance(values, Mapping):
+            continue
+        total = int(values.get("total_combinations", 0))
+        evaluated = int(values.get("evaluated_combinations", 0))
+        skipped = int(values.get("skipped_combinations", total - evaluated))
+        text = f"{direction} : {evaluated}/{total} combinaisons évaluées"
+        if skipped:
+            reasons = values.get("exclusion_reasons", {})
+            missing = (
+                int(reasons.get("no_eligible_threshold", 0))
+                if isinstance(reasons, Mapping)
+                else 0
+            )
+            text += (
+                f" · {skipped} ignorées sans seuil admissible"
+                if missing == skipped
+                else f" · {skipped} ignorées"
+            )
+        directions.append(text)
+    return " · ".join(directions) if directions else None
+
+
 def _summary_text(
     job_type: str,
     summary: Mapping[str, object],
@@ -166,7 +195,13 @@ def _summary_text(
     if job_type == "walk_forward":
         return f"{int(summary.get('eligible_combinations', 0))} combinaisons qualifiées"
     if job_type == "threshold_calibration":
+        if summary.get("outcome") == "completed_partial_holdout":
+            partial = _partial_holdout_text(summary)
+            return f"Holdout partiel — {partial}" if partial else "Holdout partiel"
         if summary.get("outcome") == "completed_no_eligible_threshold":
+            counts = summary.get("holdout_combination_counts")
+            if isinstance(counts, Mapping) and counts:
+                return "Aucune combinaison admissible (Up, Down) · holdout ignoré"
             missing = summary.get("missing_frozen_thresholds", ())
             directions = sorted({
                 str(item.get("direction"))
@@ -174,7 +209,9 @@ def _summary_text(
                 if isinstance(item, Mapping) and item.get("direction")
             })
             suffix = f" ({', '.join(directions)})" if directions else ""
-            return f"Aucun seuil admissible{suffix} · holdout ignoré"
+            missing_count = len(missing) if isinstance(missing, Sequence) else 0
+            label = "seuil gelé manquant" if missing_count == 1 else "seuils gelés manquants"
+            return f"Holdout ignoré — {missing_count} {label}{suffix}"
         return "Calibration terminée"
     if job_type.startswith("xgboost_"):
         return "Calibration terminée"

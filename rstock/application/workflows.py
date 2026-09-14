@@ -350,6 +350,15 @@ def _threshold_calibration(
             result.run_configuration["missing_frozen_thresholds"]
         ),
         "holdout_skipped_reason": result.run_configuration["holdout_skipped_reason"],
+        "holdout_combination_counts": _json_value(
+            result.run_configuration.get("holdout_combination_counts", {})
+        ),
+        "missing_threshold_count_up": result.run_configuration.get(
+            "missing_threshold_count_up", 0
+        ),
+        "missing_threshold_count_down": result.run_configuration.get(
+            "missing_threshold_count_down", 0
+        ),
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
         "source_walk_forward_run": spec.source_walk_forward_run,
