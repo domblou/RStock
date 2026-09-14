@@ -313,6 +313,66 @@ def test_activation_requires_artifacts_and_recalculates_operational_universe(tmp
     assert universe.used_by["BBB"] == ("model_test", "model_two")
     lifecycle.deactivate("model_two")
     assert OperationalUniverseService(repository).current().symbols == ("AAA", "BBB")
+    lifecycle.activate("model_two")
+    assert OperationalUniverseService(repository).current().symbols == (
+        "AAA", "BBB", "CCC", "DDD"
+    )
+    lifecycle.deactivate("model_two")
+    lifecycle.retire("model_two")
+    assert OperationalUniverseService(repository).current().symbols == ("AAA", "BBB")
+
+
+def test_active_model_source_excludes_inactive_and_retired_from_surveillance(tmp_path):
+    repository = ProductionRepository(tmp_path)
+    active = replace(
+        _model("model_active"), status=ProductionModelStatus.ACTIVE, artifact_version=1
+    )
+    inactive = replace(
+        _model("model_inactive", target="CCC"),
+        status=ProductionModelStatus.INACTIVE,
+        artifact_version=1,
+    )
+    retired = replace(
+        _model("model_retired", target="DDD"),
+        status=ProductionModelStatus.RETIRED,
+        artifact_version=1,
+    )
+    for model in (active, inactive, retired):
+        repository.add(model)
+    predictions = pd.DataFrame([
+        {
+            "prediction_id": f"prediction-{model.model_id}",
+            "model_id": model.model_id,
+            "target": model.target,
+            "status": "predicted",
+            "up_probability": 0.8,
+            "down_probability": 0.2,
+            "up_threshold": 0.6,
+            "down_threshold": 0.4,
+        }
+        for model in (active, inactive, retired)
+    ])
+    repository.append_table("predictions", predictions, key="prediction_id")
+
+    signals = ProductionSignalService(repository).screen(predictions)
+
+    assert [model.model_id for model in repository.active_models()] == ["model_active"]
+    assert repository.read_active_model_table("predictions")["model_id"].tolist() == [
+        "model_active"
+    ]
+    assert signals["model_id"].tolist() == ["model_active"]
+
+    repository.update(replace(active, status=ProductionModelStatus.INACTIVE))
+    assert repository.active_models() == []
+    assert repository.read_active_model_table("predictions").empty
+    assert ProductionSignalService(repository).screen(predictions, persist=False).empty
+    assert DailyPredictionService(repository).generate(
+        pd.DataFrame(), replace(DEFAULT_CONFIG, project_root=tmp_path), persist=False
+    ).empty
+
+    # Lifecycle changes never remove already-persisted audit history.
+    assert len(repository.read_table("predictions")) == 3
+    assert repository.read_table("signals")["model_id"].tolist() == ["model_active"]
 
 
 def test_market_update_uses_only_frozen_operational_symbols(monkeypatch, tmp_path):

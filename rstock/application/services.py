@@ -90,6 +90,9 @@ class ModelService:
     def models(self):
         return self.repository.models()
 
+    def active_models(self):
+        return self.repository.active_models()
+
     def promote(
         self, run_id: str, set_name: str, *,
         xgboost_calibration_run: str | None = None,
@@ -137,6 +140,9 @@ class PredictionService:
     def history(self) -> pd.DataFrame:
         return self.repository.read_table("predictions")
 
+    def active_history(self) -> pd.DataFrame:
+        return self.repository.read_active_model_table("predictions")
+
 
 class SignalService:
     """Extension point for persisted directional signals and future monitoring."""
@@ -150,8 +156,14 @@ class SignalService:
     def history(self) -> pd.DataFrame:
         return self.repository.read_table("signals")
 
+    def active_history(self) -> pd.DataFrame:
+        return self.repository.read_active_model_table("signals")
+
     def realized_results(self) -> pd.DataFrame:
         return self.repository.read_table("realized_results")
+
+    def active_realized_results(self) -> pd.DataFrame:
+        return self.repository.read_active_model_table("realized_results")
 
 
 class ExperimentService:

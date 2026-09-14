@@ -72,6 +72,12 @@ class ProductionModel:
         return tuple(dict.fromkeys((self.target, *self.predictors)))
 
     @property
+    def is_active(self) -> bool:
+        """Single status rule for every active-production consumer."""
+
+        return self.status == ProductionModelStatus.ACTIVE
+
+    @property
     def signal_threshold(self) -> float:
         """Use the frozen calibrated Up threshold, else the model's global fallback."""
 

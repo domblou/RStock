@@ -6,6 +6,7 @@ import base64
 import html
 import json
 from dataclasses import asdict, replace
+from datetime import timedelta
 from pathlib import Path
 
 import altair as alt
@@ -71,6 +72,7 @@ from rstock.application.services import (
     PredictionService,
     SignalService,
 )
+from rstock.application.simulation import SimulationResult, SimulationService
 from rstock.application.universes import (
     CONTEXT_UNIVERSE_TYPE,
     SAMPLE_SOURCE,
@@ -912,13 +914,24 @@ def _render_threshold_calibration_promotion(
     if results.empty:
         st.info("Aucun résultat par combinaison n'est disponible pour ce run.")
         return
+    filter_defaults = {
+        f"threshold-direction-{run_id}": "Up",
+        f"threshold-min-signals-{run_id}": 20,
+        f"threshold-min-precision-{run_id}": 0.50,
+        f"threshold-min-auc-{run_id}": 0.60,
+        f"threshold-max-opposite-{run_id}": 0.30,
+        f"threshold-min-directional-return-{run_id}": 0.00,
+        f"threshold-sort-{run_id}": "Précision holdout",
+    }
+    for key, value in filter_defaults.items():
+        st.session_state.setdefault(key, value)
     filters = st.columns(3)
     direction = filters[0].selectbox(
-        "Direction", ["Up", "Down", "Toutes"], index=0,
+        "Direction", ["Up", "Down", "Toutes"],
         key=f"threshold-direction-{run_id}",
     )
     min_signals = filters[1].number_input(
-        "Signaux holdout minimum", min_value=0, value=0, step=1,
+        "Signaux holdout minimum", min_value=0, step=1,
         key=f"threshold-min-signals-{run_id}",
     )
     sort_options = [
@@ -926,6 +939,9 @@ def _render_threshold_calibration_promotion(
     ]
     if "Score" in results:
         sort_options.append("Score")
+    sort_key = f"threshold-sort-{run_id}"
+    if st.session_state[sort_key] not in sort_options:
+        st.session_state[sort_key] = sort_options[0]
     sort_by = filters[2].selectbox(
         "Trier par",
         sort_options,
@@ -933,19 +949,19 @@ def _render_threshold_calibration_promotion(
     )
     quality_filters = st.columns(4)
     min_precision_value = quality_filters[0].number_input(
-        "Précision holdout minimale", min_value=0.0, max_value=1.0, value=0.0,
+        "Précision holdout minimale", min_value=0.0, max_value=1.0,
         step=0.01, key=f"threshold-min-precision-{run_id}",
     )
     min_auc_value = quality_filters[1].number_input(
-        "AUC holdout minimale", min_value=0.0, max_value=1.0, value=0.0,
+        "AUC holdout minimale", min_value=0.0, max_value=1.0,
         step=0.01, key=f"threshold-min-auc-{run_id}",
     )
     max_opposite_value = quality_filters[2].number_input(
         "Fréquence maximale de mouvement opposé", min_value=0.0, max_value=1.0,
-        value=1.0, step=0.01, key=f"threshold-max-opposite-{run_id}",
+        step=0.01, key=f"threshold-max-opposite-{run_id}",
     )
     min_return_value = quality_filters[3].number_input(
-        "Rendement directionnel moyen minimal", value=0.0, step=0.001,
+        "Rendement directionnel moyen minimal", step=0.001,
         format="%.3f", key=f"threshold-min-directional-return-{run_id}",
         help="0,00 conserve l'affichage non filtré par défaut.",
     )
@@ -1772,6 +1788,18 @@ def _selected_rows(event: object) -> list[int]:
     return list(getattr(getattr(event, "selection", None), "rows", []))
 
 
+def _invalidate_surveillance_selection_state() -> None:
+    """Drop row selections whose model population changed lifecycle status."""
+
+    for key in (
+        "surveillance-predictions",
+        "surveillance-signals",
+        "surveillance-no-signals",
+        "surveillance-realized",
+    ):
+        st.session_state.pop(key, None)
+
+
 def _technical_record(view: OperationalTableView, selected: list[int]) -> dict[str, object] | None:
     if not selected or selected[0] >= len(view.technical):
         return None
@@ -1854,7 +1882,7 @@ def _render_signals_tab(
     if selected is not None:
         st.markdown("**Détail du signal**")
         source_model = next(
-            (model for model in models.models() if model.model_id == selected.get("model_id")),
+            (model for model in models.active_models() if model.model_id == selected.get("model_id")),
             None,
         )
         _render_prediction_audit_details(
@@ -1875,7 +1903,7 @@ def _realized_results_panel(
 
     project_root = st.session_state.lab_config.project_root
     signal_service = SignalService(project_root)
-    realized = signal_service.realized_results()
+    realized = signal_service.active_realized_results()
     model_service = ModelService(project_root)
     history_targets = (
         set(predictions["target"].dropna().astype(str))
@@ -1940,9 +1968,9 @@ def _render_surveillance_page(*, polling: bool) -> None:
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
     universe = models.operational_universe()
-    predictions = PredictionService(project_root).history()
+    predictions = PredictionService(project_root).active_history()
     signal_service = SignalService(project_root)
-    signals = signal_service.history()
+    signals = signal_service.active_history()
     freshness = MarketDataService().freshness(universe.symbols, st.session_state.lab_config)
     runs = _service().runs()
     last_market = next(
@@ -2100,12 +2128,15 @@ def _models_page() -> None:
         _submit_operational_job(JobType.PRODUCTION_TRAINING, model_id=selected_id)
     if controls[1].button("Activer", disabled=selected.status.value not in {"trained", "inactive"}):
         service.activate(selected_id)
+        _invalidate_surveillance_selection_state()
         st.rerun()
     if controls[2].button("Désactiver", disabled=selected.status.value != "active"):
         service.deactivate(selected_id)
+        _invalidate_surveillance_selection_state()
         st.rerun()
     if controls[3].button("Retirer", disabled=selected.status.value == "active"):
         service.retire(selected_id)
+        _invalidate_surveillance_selection_state()
         st.rerun()
     with st.expander("Voir détails"):
         st.json(selected.to_dict())
@@ -2187,6 +2218,162 @@ def _history_page() -> None:
             st.dataframe(signals.tail(200), hide_index=True, width="stretch")
 
 
+def _simulation_currency(value: float) -> str:
+    return f"{value:+,.2f} $".replace(",", " ")
+
+
+def _simulation_percent(value: float | None) -> str:
+    return "—" if value is None else f"{value:.2%}"
+
+
+def _render_simulation_results(result: SimulationResult) -> None:
+    metrics = result.metrics
+    kpis = st.columns(6)
+    kpis[0].metric("Profit / perte total(e)", _simulation_currency(metrics.total_profit_loss))
+    kpis[1].metric("Taux de trades gagnants", _simulation_percent(metrics.winning_trade_rate))
+    kpis[2].metric("Trades calculés", metrics.calculated_trades)
+    kpis[3].metric("Rendement moyen / trade", _simulation_percent(metrics.average_return))
+    kpis[4].metric("Signaux trouvés", metrics.signals_found)
+    kpis[5].metric("Trades exclus", metrics.excluded_trades)
+
+    charts = st.columns([3, 2])
+    with charts[0]:
+        st.subheader("Évolution du résultat cumulé")
+        if result.cumulative_results.empty:
+            st.caption("Aucun trade calculé sur la période.")
+        else:
+            cumulative_chart = (
+                alt.Chart(result.cumulative_results)
+                .mark_line(point=True, color="#1677ff")
+                .encode(
+                    x=alt.X("Date:T", title="Date des trades"),
+                    y=alt.Y("Résultat cumulé:Q", title="Profit / perte cumulé ($)"),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Date"),
+                        alt.Tooltip("Résultat cumulé:Q", title="Résultat", format=",.2f"),
+                    ],
+                )
+            )
+            st.altair_chart(cumulative_chart, width="stretch")
+    with charts[1]:
+        st.subheader("Répartition des résultats")
+        distribution_chart = (
+            alt.Chart(result.result_distribution)
+            .mark_bar()
+            .encode(
+                x=alt.X("Résultat:N", title=None),
+                y=alt.Y("Trades:Q", title="Nombre de trades"),
+                color=alt.Color(
+                    "Résultat:N",
+                    scale=alt.Scale(domain=["Trades gagnants", "Trades perdants"], range=["#21a366", "#ef5b57"]),
+                    legend=None,
+                ),
+                tooltip=["Résultat", "Trades"],
+            )
+        )
+        st.altair_chart(distribution_chart, width="stretch")
+
+    synthesis = st.columns(4)
+    synthesis[0].metric("Gain moyen", _simulation_percent(metrics.average_winning_return))
+    synthesis[1].metric("Perte moyenne", _simulation_percent(metrics.average_losing_return))
+    synthesis[2].metric("Meilleur trade", _simulation_percent(metrics.best_trade))
+    synthesis[3].metric("Pire trade", _simulation_percent(metrics.worst_trade))
+
+    details, quality = st.columns([3, 1])
+    with details:
+        st.subheader("Détail des trades")
+        st.download_button(
+            "Télécharger (CSV)",
+            result.trades.to_csv(index=False).encode("utf-8-sig"),
+            file_name="rstock_simulation.csv",
+            mime="text/csv",
+        )
+        st.dataframe(
+            result.trades,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "P(Up)": st.column_config.NumberColumn(format="%.4f"),
+                "Seuil Up": st.column_config.NumberColumn(format="%.4f"),
+                "Prix achat": st.column_config.NumberColumn(format="%.2f $"),
+                "Prix vente": st.column_config.NumberColumn(format="%.2f $"),
+                "Rendement": st.column_config.NumberColumn(format="percent"),
+                "Montant investi": st.column_config.NumberColumn(format="%.2f $"),
+                "Profit / perte": st.column_config.NumberColumn(format="%.2f $"),
+            },
+        )
+    with quality:
+        st.subheader("Qualité des données")
+        st.metric("Prix manquants", metrics.missing_prices)
+        st.metric("Signaux ignorés", metrics.excluded_trades)
+        st.metric("Couverture des prix", _simulation_percent(metrics.price_coverage))
+        if metrics.signals_found == 0:
+            st.info("Aucun signal haussier actif dans la période sélectionnée.")
+        elif metrics.price_coverage >= 0.9:
+            st.success("Données globalement conformes pour la simulation.")
+        else:
+            st.warning("Couverture partielle : certains trades ont été exclus.")
+
+
+def _simulation_page() -> None:
+    _page_header("Simulation")
+    st.caption("Évaluez les signaux haussiers actifs avec les prix réels Open/Close.")
+    project_root = st.session_state.lab_config.project_root
+    signals = SignalService(project_root).active_history()
+    available_dates = pd.to_datetime(
+        signals.get("prediction_date", pd.Series(dtype=object)), errors="coerce"
+    ).dropna()
+    default_end = (
+        available_dates.max().date() if not available_dates.empty else pd.Timestamp.today().date()
+    )
+    default_start = default_end - timedelta(days=365)
+    defaults = {
+        "simulation-start-date": default_start,
+        "simulation-end-date": default_end,
+        "simulation-amount": 10_000.0,
+        "simulation-exit-mode": "Clôture du jour",
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+    with st.container(border=True):
+        controls = st.columns([1, 1, 1, 1, 1.4, 1])
+        start_date = controls[0].date_input("Date de début", key="simulation-start-date")
+        end_date = controls[1].date_input("Date de fin", key="simulation-end-date")
+        amount = controls[2].number_input(
+            "Montant par signal", min_value=0.01, step=1_000.0,
+            key="simulation-amount",
+        )
+        controls[3].selectbox(
+            "Mode de sortie", ["Clôture du jour"], disabled=True,
+            key="simulation-exit-mode",
+        )
+        controls[4].markdown(
+            "**Tous les modèles actifs**  \n"
+            "Chaque signal Up représente une transaction indépendante."
+        )
+        launch = controls[5].button(
+            "Lancer la simulation", type="primary", width="stretch"
+        )
+        st.caption(
+            "Les trades sans prix Open ou Close sont conservés dans le détail, "
+            "mais exclus des calculs financiers."
+        )
+    if launch:
+        try:
+            st.session_state["simulation-result"] = SimulationService.local(
+                project_root, st.session_state.lab_config
+            ).run(start_date, end_date, float(amount))
+        except ValueError as error:
+            st.error(str(error))
+            st.session_state.pop("simulation-result", None)
+    result = st.session_state.get("simulation-result")
+    if isinstance(result, SimulationResult):
+        _render_simulation_results(result)
+    else:
+        st.info("Configurez la période puis lancez la simulation.")
+
+
 def _primary_pages() -> list[st.Page]:
     """Flat V1 navigation; this factory can later return grouped page mappings."""
 
@@ -2200,6 +2387,7 @@ def _primary_pages() -> list[st.Page]:
         st.Page(_history_page, title="Historique", icon=":material/history:"),
         st.Page(_universes_page, title="Univers", icon=":material/list_alt:"),
         st.Page(_settings_page, title="Paramètres", icon=":material/settings:"),
+        st.Page(_simulation_page, title="Simulation", icon=":material/monitoring:"),
     ]
     return _PRIMARY_PAGES
 

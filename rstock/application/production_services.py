@@ -448,7 +448,7 @@ class OperationalUniverseService:
         self.repository = repository
 
     def current(self) -> OperationalUniverse:
-        active = [model for model in self.repository.models() if model.status == ProductionModelStatus.ACTIVE]
+        active = self.repository.active_models()
         used_by: dict[str, list[str]] = {}
         for model in active:
             for symbol in model.symbols:
@@ -473,9 +473,7 @@ class DailyPredictionService:
         persist: bool = True,
     ) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []
-        for model in self.repository.models():
-            if model.status != ProductionModelStatus.ACTIVE:
-                continue
+        for model in self.repository.active_models():
             try:
                 rows.append(self._predict_model(model, prepared, market_data))
             except Exception as error:
@@ -582,7 +580,17 @@ class ProductionSignalService:
         cancellation_check: CancellationCheck | None = None,
         persist: bool = True,
     ) -> pd.DataFrame:
-        frame = self.repository.read_table("predictions") if predictions is None else predictions.copy()
+        frame = (
+            self.repository.read_active_model_table("predictions")
+            if predictions is None
+            else predictions.copy()
+        )
+        active_ids = self.repository.active_model_ids()
+        if not frame.empty:
+            if "model_id" not in frame:
+                frame = frame.iloc[0:0].copy()
+            else:
+                frame = frame[frame["model_id"].astype(str).isin(active_ids)].copy()
         rows = []
         for item in frame.to_dict("records"):
             check_cancellation(cancellation_check)

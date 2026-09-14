@@ -462,11 +462,7 @@ def _daily_prediction(
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
     repository = ProductionRepository(spec.config.project_root)
-    active = [
-        model
-        for model in repository.models()
-        if model.status.value == "active"
-    ]
+    active = repository.active_models()
     operational = OperationalUniverseService(repository).current()
     if tuple(spec.symbols) != operational.symbols:
         raise ValueError(
@@ -547,11 +543,7 @@ def _operational_run(
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
     repository = ProductionRepository(spec.config.project_root)
-    active = [
-        model
-        for model in repository.models()
-        if model.status.value == "active"
-    ]
+    active = repository.active_models()
     operational = OperationalUniverseService(repository).current()
     if tuple(spec.symbols) != operational.symbols:
         raise ValueError(

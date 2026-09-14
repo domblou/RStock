@@ -87,6 +87,14 @@ class ProductionRepository:
             raise ValueError("Unsupported production registry schema")
         return [ProductionModel.from_dict(item) for item in payload["models"]]
 
+    def active_models(self) -> list[ProductionModel]:
+        """Return the sole model population allowed in active surveillance."""
+
+        return [model for model in self.models() if model.is_active]
+
+    def active_model_ids(self) -> frozenset[str]:
+        return frozenset(model.model_id for model in self.active_models())
+
     def _write_models(self, models: list[ProductionModel]) -> None:
         payload = {
             "schema_version": 1,
@@ -135,6 +143,17 @@ class ProductionRepository:
             return pd.read_csv(path)
         except pd.errors.EmptyDataError:
             return pd.DataFrame()
+
+    def read_active_model_table(self, name: str) -> pd.DataFrame:
+        """Read a surveillance view without altering persisted history."""
+
+        frame = self.read_table(name)
+        if frame.empty:
+            return frame
+        if "model_id" not in frame:
+            return frame.iloc[0:0].copy()
+        active_ids = self.active_model_ids()
+        return frame[frame["model_id"].astype(str).isin(active_ids)].copy()
 
     def write_table(self, name: str, frame: pd.DataFrame) -> None:
         with self.transaction():

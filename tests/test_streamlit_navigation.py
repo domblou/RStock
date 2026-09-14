@@ -30,7 +30,8 @@ def test_primary_native_pages_cover_the_laboratory_sections():
         "Paramètres",
     ):
         assert f'title="{title}"' in source
-    assert source.count("st.Page(") == 6
+    assert 'title="Simulation"' in source
+    assert source.count("st.Page(") == 7
 
 
 def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
@@ -60,6 +61,20 @@ def test_surveillance_is_the_default_page_without_dashboard_navigation():
     assert 'st.Page(_surveillance_page, title="Surveillance", icon=":material/monitoring:", default=True)' in source
     assert "title=\"Dashboard\"" not in source
     assert "_dashboard_page" not in source
+
+
+def test_simulation_page_uses_persisted_active_signals_and_dedicated_service():
+    source = APP.read_text(encoding="utf-8")
+    page = source.split("def _simulation_page", 1)[1].split(
+        "def _primary_pages", 1
+    )[0]
+
+    assert '_page_header("Simulation")' in page
+    assert 'SignalService(project_root).active_history()' in page
+    assert "SimulationService.local(" in page
+    assert '"Lancer la simulation"' in page
+    assert 'key="simulation-exit-mode"' in page
+    assert 'st.Page(_simulation_page, title="Simulation"' in source
 
 
 def test_universe_management_is_separate_from_settings_and_selection_is_in_experiments():
@@ -270,6 +285,21 @@ def test_surveillance_uses_internal_tabs_and_on_demand_technical_details():
     assert "Pourquoi ce signal ?" in source
 
 
+def test_surveillance_uses_active_views_and_clears_stale_row_selections():
+    source = APP.read_text(encoding="utf-8")
+    surveillance = source.split("def _render_surveillance_page", 1)[1].split(
+        "def _surveillance_page", 1
+    )[0]
+    models = source.split("def _models_page", 1)[1].split(
+        "def _history_page", 1
+    )[0]
+
+    assert ".active_history()" in surveillance
+    assert "active_realized_results()" in source
+    assert "models.active_models()" in source
+    assert models.count("_invalidate_surveillance_selection_state()") == 3
+
+
 def test_surveillance_kpis_keep_last_update_wide_and_prediction_secondary():
     source = APP.read_text(encoding="utf-8")
     surveillance = source.split("def _render_surveillance_page", 1)[1].split(
@@ -452,6 +482,19 @@ def test_duplication_job_type_selectbox_uses_session_state_without_an_index_defa
 
     assert "key=DUPLICATION_JOB_TYPE_KEY" in widget
     assert "index=" not in widget
+
+
+def test_threshold_calibration_filter_defaults_are_session_safe():
+    source = APP.read_text(encoding="utf-8")
+    panel = source.split("def _render_threshold_calibration_promotion", 1)[1].split(
+        "def _render_history_detail", 1
+    )[0]
+
+    for value in ('"Up"', ": 20", ": 0.50", ": 0.60", ": 0.30", ": 0.00"):
+        assert value in panel
+    assert "st.session_state.setdefault(key, value)" in panel
+    assert '"Signaux holdout minimum", min_value=0, step=1' in panel
+    assert '"Précision holdout minimale", min_value=0.0, max_value=1.0,' in panel
 
 
 def test_successful_duplication_returns_to_the_regular_experiments_view():
