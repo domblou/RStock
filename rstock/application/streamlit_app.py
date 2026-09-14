@@ -693,7 +693,7 @@ def _settings() -> None:
         evaluate_holdout = q3.checkbox("Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout)
 
         st.subheader("Calibration des seuils")
-        t1, t2 = st.columns(2)
+        t1, t2, t3 = st.columns(3)
         min_signals = t1.number_input(
             "Signaux minimaux par fenêtre",
             min_value=1,
@@ -704,6 +704,15 @@ def _settings() -> None:
             min_value=0.01,
             max_value=1.0,
             value=current.threshold_calibration_min_window_fraction,
+        )
+        min_robust_signals = t3.number_input(
+            "Signaux totaux minimum pour un seuil robuste",
+            min_value=1,
+            value=current.threshold_calibration_min_robust_signals,
+            help=(
+                "Nombre total de signaux requis pour préférer un seuil robuste. "
+                "Ce seuil est distinct du minimum de signaux requis par fenêtre."
+            ),
         )
         quantiles = st.text_input(
             "Quantiles de la grille",
@@ -762,6 +771,7 @@ def _settings() -> None:
                 xgb_nthread=int(nthread),
                 xgb_seed=int(seed),
                 threshold_calibration_min_signals_per_window=int(min_signals),
+                threshold_calibration_min_robust_signals=int(min_robust_signals),
                 threshold_calibration_min_window_fraction=float(min_window_fraction),
                 threshold_calibration_quantiles=parsed_quantiles,
             )
@@ -1009,6 +1019,23 @@ def _render_threshold_calibration_promotion(
         configuration=configuration,
     )
     frozen = selected_by_set.get(set_name, {})
+    directional_selection = frozen.get(selected_direction, {})
+    if isinstance(directional_selection, dict):
+        calibration_metrics = directional_selection.get("calibration_metrics", {})
+        calibration_metrics = (
+            calibration_metrics if isinstance(calibration_metrics, dict) else {}
+        )
+        if directional_selection.get("status") == "selected":
+            st.caption(
+                "Sélection calibration · seuil : "
+                f"{directional_selection.get('threshold', '—')} · précision : "
+                f"{_format_metric(calibration_metrics.get('precision'), percent=True)} · "
+                f"{directional_selection.get('total_signals', '—')} signaux · rendement : "
+                f"{_format_metric(calibration_metrics.get('directional_return_mean'), percent=True)} · "
+                "mouvement opposé : "
+                f"{_format_metric(calibration_metrics.get('opposite_move_frequency'), percent=True)} · "
+                f"raison : {directional_selection.get('selection_reason', '—')}"
+            )
     if not all(
         isinstance(frozen.get(item), dict)
         and frozen[item].get("status") == "selected"
@@ -1063,6 +1090,12 @@ def _render_threshold_sensitivity_analysis(
     st.caption("Analyse de sensibilité au seuil — Holdout")
     rstock_config = configuration.get("rstock_config", {})
     rstock_config = rstock_config if isinstance(rstock_config, dict) else {}
+    minimum_robust_signals = int(
+        rstock_config.get(
+            "threshold_calibration_min_robust_signals",
+            DEFAULT_CONFIG.threshold_calibration_min_robust_signals,
+        )
+    )
     sensitivity = threshold_sensitivity_table(
         load_threshold_holdout_predictions(project_root, run_id),
         set_name=set_name,
@@ -1070,13 +1103,14 @@ def _render_threshold_sensitivity_analysis(
         calibrated_threshold=calibrated_threshold,
         up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
         down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
+        minimum_robust_signals=minimum_robust_signals,
     )
     if sensitivity.empty:
         st.info("Analyse de sensibilité indisponible pour ce run historique.")
         return
     st.caption(
         "✓ identifie le seuil calibré actuel et le meilleur seuil par précision "
-        "avec au moins 5 signaux. Cette analyse ne modifie pas le run."
+        f"avec au moins {minimum_robust_signals} signaux. Cette analyse ne modifie pas le run."
     )
     st.dataframe(
         sensitivity,

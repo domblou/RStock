@@ -55,6 +55,17 @@ def _predictions() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _economically_viable_predictions() -> pd.DataFrame:
+    """Calibration fixture whose high scores align with directional returns."""
+
+    predictions = _predictions().copy()
+    up_scores = [0.80, 0.10, 0.70, 0.20, 0.75, 0.15, 0.65, 0.25]
+    down_scores = [0.10, 0.80, 0.20, 0.70, 0.15, 0.75, 0.25, 0.65]
+    predictions.loc[predictions["Direction"] == "Up", "Probability"] = up_scores
+    predictions.loc[predictions["Direction"] == "Down", "Probability"] = down_scores
+    return predictions
+
+
 def _config(**changes):
     values = {
         "threshold_calibration_min_signals_per_window": 1,
@@ -63,6 +74,30 @@ def _config(**changes):
         **changes,
     }
     return replace(DEFAULT_CONFIG, **values)
+
+
+def _threshold_candidate(
+    threshold, signal_counts, *, precision, directional_return, opposite,
+    precision_by_window=None,
+):
+    precision_values = precision_by_window or [precision] * len(signal_counts)
+    return pd.DataFrame([
+        {
+            "Direction": "Up", "Threshold": threshold, "Window": window,
+            "Observations": 50, "SignalCount": count,
+            "SignalProportion": count / 50,
+            "Precision": precision_value, "Recall": 0.5, "F1": 0.55,
+            "IntradayReturnMean": directional_return,
+            "IntradayReturnMedian": directional_return,
+            "DirectionalReturnMean": directional_return,
+            "FavorableMoveFrequency": precision_value,
+            "OppositeMoveFrequency": opposite,
+            "MFEMean": 0.02, "MAEMean": -0.01,
+        }
+        for window, (count, precision_value) in enumerate(
+            zip(signal_counts, precision_values, strict=True), start=1
+        )
+    ])
 
 
 def test_experimental_xgboost_parameters_are_frozen_as_requested():
@@ -131,7 +166,7 @@ def test_threshold_metrics_include_classification_returns_and_directional_risk()
 
 
 def test_selection_is_separate_reproducible_and_enforces_minimum_signals():
-    predictions = _predictions()
+    predictions = _economically_viable_predictions()
     config = _config(threshold_calibration_min_signals_per_window=2)
     grid = pd.DataFrame(
         {
@@ -154,8 +189,78 @@ def test_selection_is_separate_reproducible_and_enforces_minimum_signals():
     assert not tail["Eligible"].any()
 
 
+def test_configurable_robust_sample_minimum_prefers_adequate_sample():
+    metrics = pd.concat([
+        _threshold_candidate(0.70, [3, 2], precision=0.70, directional_return=0.02, opposite=0.10),
+        _threshold_candidate(0.55, [10, 10], precision=0.60, directional_return=0.015, opposite=0.15),
+    ], ignore_index=True)
+
+    summary, selected = summarize_and_select_thresholds(
+        metrics, _config(threshold_calibration_min_robust_signals=10)
+    )
+
+    assert selected["Up"]["threshold"] == 0.55
+    assert selected["Up"]["selection_reason"] == "robust_sample_preferred"
+    assert summary.loc[summary["Threshold"] == 0.70, "RobustSample"].iloc[0] == False
+
+    _, lowered_minimum = summarize_and_select_thresholds(
+        metrics, _config(threshold_calibration_min_robust_signals=5)
+    )
+    assert lowered_minimum["Up"]["threshold"] == 0.70
+
+
+@pytest.mark.parametrize(
+    ("directional_return", "opposite", "reason"),
+    [
+        (-0.001, 0.10, "non_positive_directional_return"),
+        (0.010, 0.31, "opposite_move_frequency_above_0.30"),
+    ],
+)
+def test_economic_constraints_reject_negative_return_or_excess_opposite_moves(
+    directional_return, opposite, reason
+):
+    metrics = _threshold_candidate(
+        0.60, [10, 10], precision=0.80,
+        directional_return=directional_return, opposite=opposite,
+    )
+
+    summary, selected = summarize_and_select_thresholds(metrics, _config())
+
+    assert selected["Up"]["status"] == "no_eligible_threshold"
+    assert summary.iloc[0]["Eligible"] == False
+    assert reason in summary.iloc[0]["RejectionReason"]
+
+
+def test_higher_precision_wins_between_robust_candidates_before_return():
+    metrics = pd.concat([
+        _threshold_candidate(0.50, [10, 10], precision=0.62, directional_return=0.01, opposite=0.20),
+        _threshold_candidate(0.60, [8, 7], precision=0.66, directional_return=0.008, opposite=0.25),
+    ], ignore_index=True)
+
+    _, selected = summarize_and_select_thresholds(metrics, _config())
+
+    assert selected["Up"]["threshold"] == 0.60
+    assert selected["Up"]["calibration_metrics"]["precision"] == pytest.approx(0.66)
+
+
+def test_below_configured_robust_minimum_is_a_deterministic_fallback():
+    metrics = pd.concat([
+        _threshold_candidate(0.65, [4, 4], precision=0.64, directional_return=0.01, opposite=0.20),
+        _threshold_candidate(0.70, [3, 2], precision=0.68, directional_return=0.01, opposite=0.20),
+    ], ignore_index=True)
+
+    config = _config(threshold_calibration_min_robust_signals=9)
+    first_summary, first_selected = summarize_and_select_thresholds(metrics, config)
+    second_summary, second_selected = summarize_and_select_thresholds(metrics, config)
+
+    assert first_selected["Up"]["threshold"] == 0.70
+    assert first_selected["Up"]["selection_reason"] == "fallback_below_9_total_signals"
+    assert first_selected == second_selected
+    pd.testing.assert_frame_equal(first_summary, second_summary)
+
+
 def test_calibration_compares_reference_and_frozen_threshold_application():
-    predictions = _predictions()
+    predictions = _economically_viable_predictions()
     calibration = calibrate_thresholds(predictions, _config())
 
     assert set(calibration.selected_thresholds) == {"Up", "Down"}
@@ -176,7 +281,7 @@ def test_calibration_compares_reference_and_frozen_threshold_application():
 
 
 def test_calibration_is_independent_per_model_set_and_keeps_signal_diagnostics():
-    predictions = _predictions()
+    predictions = _economically_viable_predictions()
     first = predictions.copy()
     first["Set"] = "AAA<-BBB"
     second = predictions.copy()
@@ -227,7 +332,7 @@ def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch
     prepared = pd.DataFrame({"placeholder": np.arange(12)}, index=index)
     generated = generate_symbol_sets(["AAA", "BBB"], 1)
     events = []
-    development_predictions = _predictions()
+    development_predictions = _economically_viable_predictions()
 
     def fake_development(development, *args, **kwargs):
         events.append("development")
@@ -312,7 +417,7 @@ def _controlled_result_with_predictions(monkeypatch, predictions, config):
 def test_no_eligible_direction_skips_frozen_holdout_without_crashing(
     monkeypatch, missing_direction
 ):
-    predictions = _predictions().copy()
+    predictions = _economically_viable_predictions().copy()
     predictions["Set"] = "AAA<-BBB"
     predictions.loc[predictions["Direction"] == missing_direction, "Probability"] = 0.10
 
@@ -353,12 +458,15 @@ def test_threshold_diagnostics_persist_candidate_rejection_details(monkeypatch, 
         "threshold", "total_signals", "min_signals_in_any_window",
         "signal_counts_by_window", "eligible_window_fraction", "hit_rate",
         "average_return", "median_return", "mfe", "mae", "stability",
-        "eligible", "rejection_reason",
+        "precision", "directional_return_mean", "opposite_move_frequency",
+        "precision_stability", "return_stability", "robust_sample",
+        "eligible", "rejection_reason", "selected", "selection_reason",
     } <= set(diagnostics["candidates"][0])
     assert {
         "RejectionReason", "SignalCountsByWindow", "MinSignalsInAnyWindow",
         "EligibleWindowFraction", "HitRate", "AverageReturn", "MedianReturn",
-        "MFE", "MAE", "Stability",
+        "MFE", "MAE", "Stability", "Precision", "DirectionalReturnMean",
+        "OppositeMoveFrequency", "RobustSample", "SelectionReason",
     } <= set(result.calibration.metrics_by_threshold)
 
     from rstock.threshold_calibration import write_threshold_calibration_results
@@ -372,7 +480,7 @@ def test_both_eligible_directions_still_apply_frozen_thresholds(monkeypatch):
     index = pd.bdate_range("2025-01-01", periods=12)
     prepared = pd.DataFrame({"placeholder": np.arange(12)}, index=index)
     generated = generate_symbol_sets(["AAA", "BBB"], 1)
-    predictions = _predictions().copy()
+    predictions = _economically_viable_predictions().copy()
     predictions["Set"] = "AAA<-BBB"
     calls = []
     monkeypatch.setattr(
@@ -475,6 +583,7 @@ def test_threshold_calibration_reuses_qualified_sets_from_its_walk_forward_sourc
     "changes",
     [
         {"threshold_calibration_min_signals_per_window": 0},
+        {"threshold_calibration_min_robust_signals": 0},
         {"threshold_calibration_min_window_fraction": 0.0},
         {"threshold_calibration_min_window_fraction": 1.1},
         {"threshold_calibration_quantiles": (0.0, 0.5)},

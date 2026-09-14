@@ -15,6 +15,7 @@ from rstock.application.history_analysis import (
     predictor_prefilter_summary,
     selected_run_action,
     threshold_calibration_table,
+    threshold_sensitivity_best_column,
     threshold_sensitivity_table,
 )
 
@@ -338,6 +339,7 @@ def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation
         direction="Up",
         calibrated_threshold=0.73,
         thresholds=(0.30, 0.50, 0.95),
+        minimum_robust_signals=5,
     )
     at_half = sensitivity.loc[sensitivity["Seuil"] == 0.50].iloc[0]
     at_high = sensitivity.loc[sensitivity["Seuil"] == 0.95].iloc[0]
@@ -354,7 +356,7 @@ def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation
     assert at_half["Fréquence mouvement opposé"] == pytest.approx(1 / 3)
     assert at_high["Nombre de signaux"] == 0
     assert at_high["Précision"] == 0.0
-    assert sensitivity["Meilleure précision (≥ 5 signaux)"].eq("✓").sum() == 0
+    assert sensitivity[threshold_sensitivity_best_column(5)].eq("✓").sum() == 0
     assert holdout.equals(original)
 
 
@@ -364,6 +366,28 @@ def test_threshold_sensitivity_is_unavailable_without_persisted_probabilities():
         set_name="AAA<-BBB",
         direction="Up",
         calibrated_threshold=0.5,
+        minimum_robust_signals=10,
     )
 
     assert sensitivity.empty
+
+
+def test_threshold_sensitivity_uses_the_configured_robust_signal_minimum():
+    holdout = pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.30, "Target": 1, "IntradayReturn": 0.01},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.40, "Target": 1, "IntradayReturn": 0.02},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.50, "Target": 0, "IntradayReturn": -0.01},
+    ])
+
+    relaxed = threshold_sensitivity_table(
+        holdout, set_name="AAA<-BBB", direction="Up", calibrated_threshold=0.5,
+        thresholds=(0.5,), minimum_robust_signals=1,
+    )
+    strict = threshold_sensitivity_table(
+        holdout, set_name="AAA<-BBB", direction="Up", calibrated_threshold=0.5,
+        thresholds=(0.5,), minimum_robust_signals=2,
+    )
+
+    assert threshold_sensitivity_best_column(1) in relaxed.columns
+    assert relaxed[threshold_sensitivity_best_column(1)].tolist() == ["✓"]
+    assert strict[threshold_sensitivity_best_column(2)].tolist() == [""]

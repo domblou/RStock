@@ -47,12 +47,26 @@ EXPERIMENTAL_XGBOOST_PARAMETERS = XGBoostParameters(
     reg_lambda=1.0,
 )
 
-THRESHOLD_SELECTION_ORDER = (
+THRESHOLD_MAX_OPPOSITE_MOVE_FREQUENCY = 0.30
+DOWN_THRESHOLD_SELECTION_ORDER = (
     "Eligible desc; WindowsMeetingMinSignals desc; CatastrophicWindows asc; "
     "PrecisionMedian desc; DirectionalReturnMeanMedian desc; "
     "OppositeMoveFrequencyMedian asc; PrecisionStd asc; F1Median desc; "
     "abs(Threshold - 0.5) asc; Threshold desc"
 )
+
+
+def threshold_selection_order(min_robust_signals: int) -> str:
+    """Describe the explicit, configuration-dependent Up selection order."""
+
+    return (
+        "Up Eligible requires temporal coverage, positive directional return, and "
+        "OppositeMoveFrequency <= 0.30; "
+        f"RobustSample (TotalSignals >= {min_robust_signals}) desc; "
+        "Precision desc; TotalSignals desc; PrecisionStd asc; "
+        "DirectionalReturnMean desc; OppositeMoveFrequency asc; "
+        "DirectionalReturnMeanStd asc; F1Median desc; Threshold asc"
+    )
 
 REQUIRED_PREDICTION_COLUMNS = {
     "Direction",
@@ -158,6 +172,8 @@ def _threshold_development_process_task(
 def validate_threshold_calibration_config(config: RStockConfig) -> None:
     if config.threshold_calibration_min_signals_per_window < 1:
         raise ValueError("threshold_calibration_min_signals_per_window must be positive")
+    if config.threshold_calibration_min_robust_signals < 1:
+        raise ValueError("threshold_calibration_min_robust_signals must be positive")
     if not 0 < config.threshold_calibration_min_window_fraction <= 1:
         raise ValueError("threshold_calibration_min_window_fraction must be in (0, 1]")
     if config.threshold_calibration_grid_decimals < 1:
@@ -313,11 +329,12 @@ def evaluate_threshold_grid(
 def summarize_and_select_thresholds(
     metrics_by_window: pd.DataFrame, config: RStockConfig
 ) -> tuple[pd.DataFrame, dict[str, dict[str, object]]]:
-    """Apply the predeclared stability-first threshold selection ordering."""
+    """Select an economically viable threshold using calibration windows only."""
 
     validate_threshold_calibration_config(config)
     rows: list[dict[str, object]] = []
     minimum = config.threshold_calibration_min_signals_per_window
+    robust_minimum = config.threshold_calibration_min_robust_signals
     for (direction, threshold), group in metrics_by_window.groupby(
         ["Direction", "Threshold"], sort=True
     ):
@@ -329,19 +346,41 @@ def summarize_and_select_thresholds(
         directional_return = pd.to_numeric(
             group["DirectionalReturnMean"], errors="coerce"
         )
+        signal_counts = pd.to_numeric(group["SignalCount"], errors="coerce").fillna(0)
+
+        def signal_weighted_mean(column: str) -> float:
+            values = pd.to_numeric(group[column], errors="coerce")
+            valid = values.notna() & signal_counts.gt(0)
+            if not valid.any():
+                return np.nan
+            return float(np.average(values[valid], weights=signal_counts[valid]))
+
+        total_signals = int(signal_counts.sum())
+        precision = signal_weighted_mean("Precision")
+        economic_return = signal_weighted_mean("DirectionalReturnMean")
+        opposite_frequency = signal_weighted_mean("OppositeMoveFrequency")
         catastrophic = (
             (group["Precision"] <= 0)
             | (directional_return <= 0)
             | (group["OppositeMoveFrequency"] > group["FavorableMoveFrequency"])
         )
         windows_meeting = int(meets_minimum.sum())
-        rejection_reason = None
+        rejection_reasons: list[str] = []
         if windows_meeting < required_windows:
-            rejection_reason = (
+            rejection_reasons.append(
                 "no_window_meets_min_signals"
                 if windows_meeting == 0
                 else "minimum_window_fraction_not_met"
             )
+        if direction == "Up":
+            if not np.isfinite(economic_return) or economic_return <= 0:
+                rejection_reasons.append("non_positive_directional_return")
+            if (
+                not np.isfinite(opposite_frequency)
+                or opposite_frequency > THRESHOLD_MAX_OPPOSITE_MOVE_FREQUENCY
+            ):
+                rejection_reasons.append("opposite_move_frequency_above_0.30")
+        eligible = not rejection_reasons
         rows.append(
             {
                 "Direction": direction,
@@ -352,9 +391,11 @@ def summarize_and_select_thresholds(
                 "RequiredWindowsMeetingMinSignals": required_windows,
                 "WindowsMeetingMinSignals": windows_meeting,
                 "WindowCoverage": windows_meeting / windows,
-                "Eligible": windows_meeting >= required_windows,
-                "RejectionReason": rejection_reason,
-                "TotalSignals": int(group["SignalCount"].sum()),
+                "Eligible": eligible,
+                "RejectionReason": ";".join(rejection_reasons) or None,
+                "SelectionReason": None,
+                "TotalSignals": total_signals,
+                "RobustSample": total_signals >= robust_minimum,
                 "SignalCountMedian": float(group["SignalCount"].median()),
                 "SignalCountWorst": int(group["SignalCount"].min()),
                 "SignalCountsByWindow": json.dumps(
@@ -365,6 +406,7 @@ def summarize_and_select_thresholds(
                 "SignalProportionMedian": float(group["SignalProportion"].median()),
                 "SignalProportionStd": float(group["SignalProportion"].std(ddof=0)),
                 "PrecisionMedian": float(group["Precision"].median()),
+                "Precision": precision,
                 "PrecisionStd": float(group["Precision"].std(ddof=0)),
                 "PrecisionWorst": float(group["Precision"].min()),
                 "RecallMedian": float(group["Recall"].median()),
@@ -372,6 +414,7 @@ def summarize_and_select_thresholds(
                 "IntradayReturnMeanMedian": float(group["IntradayReturnMean"].median()),
                 "IntradayReturnMedianMedian": float(group["IntradayReturnMedian"].median()),
                 "DirectionalReturnMeanMedian": float(directional_return.median()),
+                "DirectionalReturnMean": economic_return,
                 "DirectionalReturnMeanStd": float(directional_return.std(ddof=0)),
                 "FavorableMoveFrequencyMedian": float(
                     group["FavorableMoveFrequency"].median()
@@ -379,6 +422,7 @@ def summarize_and_select_thresholds(
                 "OppositeMoveFrequencyMedian": float(
                     group["OppositeMoveFrequency"].median()
                 ),
+                "OppositeMoveFrequency": opposite_frequency,
                 "MFEMeanMedian": float(group["MFEMean"].median()),
                 "MAEMeanMedian": float(group["MAEMean"].median()),
                 "CatastrophicWindows": int(catastrophic.sum()),
@@ -395,32 +439,60 @@ def summarize_and_select_thresholds(
             selected[direction] = {
                 "status": "no_eligible_threshold",
                 "threshold": None,
-                "selection_order": THRESHOLD_SELECTION_ORDER,
+                "selection_order": (
+                    threshold_selection_order(robust_minimum)
+                    if direction == "Up"
+                    else DOWN_THRESHOLD_SELECTION_ORDER
+                ),
             }
             continue
-        ranked = eligible.sort_values(
-            [
-                "WindowsMeetingMinSignals",
-                "CatastrophicWindows",
-                "PrecisionMedian",
-                "DirectionalReturnMeanMedian",
-                "OppositeMoveFrequencyMedian",
-                "PrecisionStd",
-                "F1Median",
-                "DistanceFromReference",
-                "Threshold",
-            ],
-            ascending=[False, True, False, False, True, True, False, True, False],
-            kind="stable",
-        )
+        if direction == "Up":
+            ranked = eligible.sort_values(
+                [
+                    "RobustSample",
+                    "Precision",
+                    "TotalSignals",
+                    "PrecisionStd",
+                    "DirectionalReturnMean",
+                    "OppositeMoveFrequency",
+                    "DirectionalReturnMeanStd",
+                    "F1Median",
+                    "Threshold",
+                ],
+                ascending=[False, False, False, True, False, True, True, False, True],
+                kind="stable",
+            )
+            not_selected_reason = "not_selected_by_economic_order"
+        else:
+            ranked = eligible.sort_values(
+                [
+                    "WindowsMeetingMinSignals", "CatastrophicWindows",
+                    "PrecisionMedian", "DirectionalReturnMeanMedian",
+                    "OppositeMoveFrequencyMedian", "PrecisionStd", "F1Median",
+                    "DistanceFromReference", "Threshold",
+                ],
+                ascending=[False, True, False, False, True, True, False, True, False],
+                kind="stable",
+            )
+            not_selected_reason = "not_selected_by_stability_order"
         summary.loc[ranked.index, "SelectionRank"] = np.arange(1, len(ranked) + 1)
         winner_index = ranked.index[0]
         summary.loc[winner_index, "Selected"] = True
         summary.loc[
             eligible.index.difference([winner_index]), "RejectionReason"
-        ] = "not_selected_by_stability_order"
+        ] = not_selected_reason
         winner = summary.loc[winner_index]
         summary.loc[winner_index, "RejectionReason"] = None
+        selection_reason = (
+            (
+                "robust_sample_preferred"
+                if bool(winner["RobustSample"])
+                else f"fallback_below_{robust_minimum}_total_signals"
+            )
+            if direction == "Up"
+            else "legacy_down_stability_order"
+        )
+        summary.loc[winner_index, "SelectionReason"] = selection_reason
         selected[direction] = {
             "status": "selected",
             "threshold": float(winner["Threshold"]),
@@ -437,8 +509,18 @@ def summarize_and_select_thresholds(
                 "mae_mean": float(winner["MAEMeanMedian"]),
                 "return_stability": float(winner["DirectionalReturnMeanStd"]),
                 "precision_stability": float(winner["PrecisionStd"]),
+                "precision": float(winner["Precision"]),
+                "directional_return_mean": float(winner["DirectionalReturnMean"]),
+                "opposite_move_frequency": float(winner["OppositeMoveFrequency"]),
+                "robust_sample": bool(winner["RobustSample"]),
+                "robust_signal_minimum": robust_minimum,
             },
-            "selection_order": THRESHOLD_SELECTION_ORDER,
+            "selection_reason": selection_reason,
+            "selection_order": (
+                threshold_selection_order(robust_minimum)
+                if direction == "Up"
+                else DOWN_THRESHOLD_SELECTION_ORDER
+            ),
         }
     summary["HitRate"] = summary["FavorableMoveFrequencyMedian"]
     summary["AverageReturn"] = summary["IntradayReturnMeanMedian"]
@@ -483,13 +565,27 @@ def threshold_diagnostics(
                 "signal_counts_by_window": json.loads(row["SignalCountsByWindow"]),
                 "eligible_window_fraction": float(row["EligibleWindowFraction"]),
                 "hit_rate": _finite_or_none(row["HitRate"]),
+                "precision": _finite_or_none(row.get("Precision")),
                 "average_return": _finite_or_none(row["AverageReturn"]),
+                "directional_return_mean": _finite_or_none(
+                    row.get("DirectionalReturnMean")
+                ),
                 "median_return": _finite_or_none(row["MedianReturn"]),
+                "opposite_move_frequency": _finite_or_none(
+                    row.get("OppositeMoveFrequency")
+                ),
+                "precision_stability": _finite_or_none(row.get("PrecisionStd")),
+                "return_stability": _finite_or_none(
+                    row.get("DirectionalReturnMeanStd")
+                ),
+                "robust_sample": bool(row.get("RobustSample", False)),
                 "mfe": _finite_or_none(row["MFE"]),
                 "mae": _finite_or_none(row["MAE"]),
                 "stability": _finite_or_none(row["Stability"]),
                 "eligible": bool(row["Eligible"]),
                 "rejection_reason": row["RejectionReason"],
+                "selected": bool(row.get("Selected", False)),
+                "selection_reason": row.get("SelectionReason"),
             }
             for _, row in candidates.iterrows()
         ]
@@ -508,8 +604,10 @@ def threshold_diagnostics(
             "candidate_threshold_count": len(candidates),
             "eligible_threshold_count": len(eligible),
             "min_signals_per_window": config.threshold_calibration_min_signals_per_window,
+            "min_robust_signals": config.threshold_calibration_min_robust_signals,
             "min_window_fraction": config.threshold_calibration_min_window_fraction,
             "selected_threshold": _finite_or_none(selection.get("threshold")),
+            "selection_reason": selection.get("selection_reason"),
             "best_rejected_threshold": best_rejected,
             "candidates": candidate_details,
         }
@@ -859,10 +957,13 @@ def run_controlled_threshold_calibration(
         "missing_frozen_thresholds": missing_thresholds,
         "frozen_threshold_digest": frozen_digest,
         "xgboost_parameters": EXPERIMENTAL_XGBOOST_PARAMETERS.as_dict(),
-        "selection_order": THRESHOLD_SELECTION_ORDER,
+        "selection_order": threshold_selection_order(
+            config.threshold_calibration_min_robust_signals
+        ),
         "minimum_signals_per_window": (
             config.threshold_calibration_min_signals_per_window
         ),
+        "minimum_robust_signals": config.threshold_calibration_min_robust_signals,
         "minimum_window_fraction": config.threshold_calibration_min_window_fraction,
         "threshold_quantiles": list(config.threshold_calibration_quantiles),
         "threshold_grid_decimals": config.threshold_calibration_grid_decimals,

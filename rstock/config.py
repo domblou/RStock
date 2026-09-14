@@ -93,6 +93,9 @@ class RStockConfig:
 
     # Decision-threshold calibration is performed only on development predictions.
     threshold_calibration_min_signals_per_window: int = 20
+    # Total signals required before a threshold is preferred as a robust sample.
+    # This is deliberately separate from the per-window eligibility requirement.
+    threshold_calibration_min_robust_signals: int = 10
     threshold_calibration_min_window_fraction: float = 1.0
     threshold_calibration_quantiles: tuple[float, ...] = (
         0.50,

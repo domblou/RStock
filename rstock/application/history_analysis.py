@@ -42,12 +42,25 @@ THRESHOLD_CALIBRATION_COLUMNS = (
 DEFAULT_THRESHOLD_SENSITIVITY_THRESHOLDS = (
     0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60,
 )
-THRESHOLD_SENSITIVITY_COLUMNS = (
+THRESHOLD_SENSITIVITY_BASE_COLUMNS = (
     "Seuil", "Nombre de signaux", "Précision", "Recall", "F1",
     "Rendement directionnel moyen", "Rendement médian",
     "Fréquence mouvement opposé", "MFE moyen", "MAE moyen",
-    "Seuil calibré actuel", "Meilleure précision (≥ 5 signaux)",
+    "Seuil calibré actuel",
 )
+
+
+def threshold_sensitivity_best_column(minimum_robust_signals: int) -> str:
+    """Return the display-only robust-sample marker column name."""
+
+    return f"Meilleure précision robuste (≥ {minimum_robust_signals} signaux)"
+
+
+def threshold_sensitivity_columns(minimum_robust_signals: int) -> tuple[str, ...]:
+    return (
+        *THRESHOLD_SENSITIVITY_BASE_COLUMNS,
+        threshold_sensitivity_best_column(minimum_robust_signals),
+    )
 
 
 def run_universe_summary(configuration: Mapping[str, Any]) -> dict[str, object]:
@@ -183,7 +196,7 @@ def threshold_sensitivity_table(
     thresholds: Sequence[float] = DEFAULT_THRESHOLD_SENSITIVITY_THRESHOLDS,
     up_target_threshold: float = 0.01,
     down_target_threshold: float = 0.01,
-    minimum_signals_for_best: int = 5,
+    minimum_robust_signals: int,
 ) -> pd.DataFrame:
     """Project existing holdout probabilities across display-only thresholds.
 
@@ -194,14 +207,15 @@ def threshold_sensitivity_table(
     required = {
         "Set", "Direction", "Probability", "Target", "IntradayReturn",
     }
+    columns = threshold_sensitivity_columns(minimum_robust_signals)
     if not required.issubset(holdout_predictions.columns):
-        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_COLUMNS)
+        return pd.DataFrame(columns=columns)
     work = holdout_predictions[
         (holdout_predictions["Set"].astype(str) == str(set_name))
         & (holdout_predictions["Direction"].astype(str) == str(direction))
     ].copy()
     if work.empty:
-        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_COLUMNS)
+        return pd.DataFrame(columns=columns)
     probability = pd.to_numeric(work["Probability"], errors="coerce")
     target = pd.to_numeric(work["Target"], errors="coerce")
     returns = pd.to_numeric(work["IntradayReturn"], errors="coerce")
@@ -211,7 +225,7 @@ def threshold_sensitivity_table(
     target = target.loc[valid].astype(int)
     returns = returns.loc[valid]
     if work.empty:
-        return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_COLUMNS)
+        return pd.DataFrame(columns=columns)
 
     try:
         current = float(calibrated_threshold)
@@ -253,17 +267,18 @@ def threshold_sensitivity_table(
             "MFE moyen": float(mfe.mean()) if not mfe.empty else np.nan,
             "MAE moyen": float(mae.mean()) if not mae.empty else np.nan,
             "Seuil calibré actuel": "✓" if current is not None and np.isclose(threshold, current) else "",
-            "Meilleure précision (≥ 5 signaux)": "",
+            threshold_sensitivity_best_column(minimum_robust_signals): "",
         })
-    result = pd.DataFrame(rows, columns=THRESHOLD_SENSITIVITY_COLUMNS)
-    eligible = result[result["Nombre de signaux"] >= minimum_signals_for_best]
+    result = pd.DataFrame(rows, columns=columns)
+    best_column = threshold_sensitivity_best_column(minimum_robust_signals)
+    eligible = result[result["Nombre de signaux"] >= minimum_robust_signals]
     if not eligible.empty:
         best = eligible.sort_values(
             ["Précision", "Nombre de signaux", "Seuil"],
             ascending=[False, False, True],
             kind="stable",
         ).index[0]
-        result.loc[best, "Meilleure précision (≥ 5 signaux)"] = "✓"
+        result.loc[best, best_column] = "✓"
     return result
 
 
