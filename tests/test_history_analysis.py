@@ -16,8 +16,11 @@ from rstock.application.history_analysis import (
     selected_run_action,
     threshold_calibration_table,
     threshold_sensitivity_best_column,
+    threshold_sensitivity_grid,
     threshold_sensitivity_table,
 )
+from rstock.config import DEFAULT_CONFIG
+from rstock.threshold_calibration import adaptive_threshold_grid, calibrate_thresholds
 
 
 def _qualification():
@@ -358,6 +361,71 @@ def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation
     assert at_high["Précision"] == 0.0
     assert sensitivity[threshold_sensitivity_best_column(5)].eq("✓").sum() == 0
     assert holdout.equals(original)
+
+
+def test_threshold_sensitivity_grid_uses_configured_minimum_maximum_and_step():
+    assert threshold_sensitivity_grid(0.10, 0.20, 0.025) == (
+        0.10, 0.125, 0.15, 0.175, 0.20,
+    )
+
+
+def test_threshold_sensitivity_adds_the_exact_calibrated_threshold_to_custom_grid():
+    holdout = pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.20, "Target": 0, "IntradayReturn": -0.02},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.40, "Target": 1, "IntradayReturn": 0.02},
+    ])
+
+    sensitivity = threshold_sensitivity_table(
+        holdout,
+        set_name="AAA<-BBB",
+        direction="Up",
+        calibrated_threshold=0.137,
+        sensitivity_threshold_min=0.10,
+        sensitivity_threshold_max=0.20,
+        sensitivity_threshold_step=0.025,
+        minimum_robust_signals=1,
+    )
+
+    assert sensitivity["Seuil"].tolist() == [0.10, 0.125, 0.137, 0.15, 0.175, 0.20]
+    assert sensitivity.loc[
+        sensitivity["Seuil"] == 0.137, "Seuil calibré actuel"
+    ].iloc[0] == "✓"
+
+
+def test_sensitivity_settings_do_not_change_calibration_grid_or_selection():
+    rows = []
+    for direction in ("Up", "Down"):
+        for probability, target, intraday_return in (
+            (0.20, 0, -0.02), (0.40, 1, 0.02),
+            (0.60, 1 if direction == "Up" else 0, 0.03),
+        ):
+            rows.append({
+                "Direction": direction, "Window": 1, "Date": "2025-01-01",
+                "Probability": probability, "Target": target,
+                "IntradayReturn": intraday_return, "MFE": 0.03, "MAE": -0.02,
+            })
+    predictions = pd.DataFrame(rows)
+    config = replace(
+        DEFAULT_CONFIG,
+        threshold_calibration_min_signals_per_window=1,
+        threshold_calibration_quantiles=(0.5,),
+    )
+    grid_before = adaptive_threshold_grid(predictions, config)
+    selected_before = calibrate_thresholds(predictions, config).selected_thresholds
+
+    threshold_sensitivity_table(
+        predictions.assign(Set="AAA<-BBB"),
+        set_name="AAA<-BBB",
+        direction="Up",
+        calibrated_threshold=0.137,
+        sensitivity_threshold_min=0.10,
+        sensitivity_threshold_max=0.60,
+        sensitivity_threshold_step=0.025,
+        minimum_robust_signals=1,
+    )
+
+    pd.testing.assert_frame_equal(grid_before, adaptive_threshold_grid(predictions, config))
+    assert calibrate_thresholds(predictions, config).selected_thresholds == selected_before
 
 
 def test_threshold_sensitivity_is_unavailable_without_persisted_probabilities():

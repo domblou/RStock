@@ -169,6 +169,9 @@ UI_SETTINGS_DEFAULTS: dict[str, object] = {
     "lab_combinations_per_target": 3,
     "lab_evaluate_holdout": True,
     "max_concurrent_heavy_jobs": 1,
+    "sensitivity_threshold_min": 0.10,
+    "sensitivity_threshold_max": 0.60,
+    "sensitivity_threshold_step": 0.025,
 }
 
 
@@ -234,6 +237,18 @@ def _coerce_ui_value(name: str, value: object) -> object:
         if isinstance(value, bool):
             return value
         raise ValueError("lab_evaluate_holdout must be a boolean")
+    if name in {
+        "sensitivity_threshold_min",
+        "sensitivity_threshold_max",
+        "sensitivity_threshold_step",
+    }:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numeric = float(value)
+            if name == "sensitivity_threshold_step" and numeric > 0:
+                return numeric
+            if name != "sensitivity_threshold_step" and 0 <= numeric <= 1:
+                return numeric
+        raise ValueError(f"{name} must be a valid sensitivity threshold")
     raise ValueError(f"unknown UI setting: {name}")
 
 

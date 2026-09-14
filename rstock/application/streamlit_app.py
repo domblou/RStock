@@ -718,6 +718,32 @@ def _settings() -> None:
             "Quantiles de la grille",
             value=", ".join(str(value) for value in current.threshold_calibration_quantiles),
         )
+        sensitivity_1, sensitivity_2, sensitivity_3 = st.columns(3)
+        sensitivity_threshold_min = sensitivity_1.number_input(
+            "Seuil min — analyse de sensibilité",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.sensitivity_threshold_min),
+            step=0.025,
+        )
+        sensitivity_threshold_max = sensitivity_2.number_input(
+            "Seuil max — analyse de sensibilité",
+            min_value=float(sensitivity_threshold_min),
+            max_value=1.0,
+            value=max(
+                float(st.session_state.sensitivity_threshold_max),
+                float(sensitivity_threshold_min),
+            ),
+            step=0.025,
+        )
+        sensitivity_threshold_step = sensitivity_3.number_input(
+            "Pas — analyse de sensibilité",
+            min_value=0.0001,
+            max_value=1.0,
+            value=float(st.session_state.sensitivity_threshold_step),
+            step=0.005,
+            format="%.4f",
+        )
 
         if st.button("Enregistrer les paramètres", type="primary"):
             parsed_quantiles = tuple(
@@ -780,12 +806,18 @@ def _settings() -> None:
             st.session_state.lab_combinations_per_target = int(combinations)
             st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
             st.session_state.lab_evaluate_holdout = evaluate_holdout
+            st.session_state.sensitivity_threshold_min = float(sensitivity_threshold_min)
+            st.session_state.sensitivity_threshold_max = float(sensitivity_threshold_max)
+            st.session_state.sensitivity_threshold_step = float(sensitivity_threshold_step)
 
             ui_settings = {
                 "lab_calendar": st.session_state.lab_calendar,
                 "lab_combinations_per_target": st.session_state.lab_combinations_per_target,
                 "lab_evaluate_holdout": st.session_state.lab_evaluate_holdout,
                 "max_concurrent_heavy_jobs": st.session_state.max_concurrent_heavy_jobs,
+                "sensitivity_threshold_min": st.session_state.sensitivity_threshold_min,
+                "sensitivity_threshold_max": st.session_state.sensitivity_threshold_max,
+                "sensitivity_threshold_step": st.session_state.sensitivity_threshold_step,
             }
             try:
                 save_user_settings(
@@ -1104,6 +1136,15 @@ def _render_threshold_sensitivity_analysis(
         up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
         down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
         minimum_robust_signals=minimum_robust_signals,
+        sensitivity_threshold_min=float(
+            st.session_state.sensitivity_threshold_min
+        ),
+        sensitivity_threshold_max=float(
+            st.session_state.sensitivity_threshold_max
+        ),
+        sensitivity_threshold_step=float(
+            st.session_state.sensitivity_threshold_step
+        ),
     )
     if sensitivity.empty:
         st.info("Analyse de sensibilité indisponible pour ce run historique.")

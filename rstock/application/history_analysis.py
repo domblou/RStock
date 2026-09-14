@@ -39,9 +39,9 @@ THRESHOLD_CALIBRATION_COLUMNS = (
     "Fréquence mouvement opposé",
 )
 
-DEFAULT_THRESHOLD_SENSITIVITY_THRESHOLDS = (
-    0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60,
-)
+DEFAULT_SENSITIVITY_THRESHOLD_MIN = 0.10
+DEFAULT_SENSITIVITY_THRESHOLD_MAX = 0.60
+DEFAULT_SENSITIVITY_THRESHOLD_STEP = 0.025
 THRESHOLD_SENSITIVITY_BASE_COLUMNS = (
     "Seuil", "Nombre de signaux", "Précision", "Recall", "F1",
     "Rendement directionnel moyen", "Rendement médian",
@@ -61,6 +61,25 @@ def threshold_sensitivity_columns(minimum_robust_signals: int) -> tuple[str, ...
         *THRESHOLD_SENSITIVITY_BASE_COLUMNS,
         threshold_sensitivity_best_column(minimum_robust_signals),
     )
+
+
+def threshold_sensitivity_grid(
+    minimum: float = DEFAULT_SENSITIVITY_THRESHOLD_MIN,
+    maximum: float = DEFAULT_SENSITIVITY_THRESHOLD_MAX,
+    step: float = DEFAULT_SENSITIVITY_THRESHOLD_STEP,
+) -> tuple[float, ...]:
+    """Build the display-only holdout sensitivity grid, including both bounds."""
+
+    minimum, maximum, step = float(minimum), float(maximum), float(step)
+    if not 0 <= minimum <= maximum <= 1:
+        raise ValueError("Sensitivity thresholds must be between zero and one")
+    if step <= 0:
+        raise ValueError("Sensitivity threshold step must be positive")
+    count = int(np.floor((maximum - minimum) / step))
+    values = [round(minimum + index * step, 10) for index in range(count + 1)]
+    if not np.isclose(values[-1], maximum):
+        values.append(round(maximum, 10))
+    return tuple(values)
 
 
 def run_universe_summary(configuration: Mapping[str, Any]) -> dict[str, object]:
@@ -193,7 +212,10 @@ def threshold_sensitivity_table(
     set_name: str,
     direction: str,
     calibrated_threshold: object,
-    thresholds: Sequence[float] = DEFAULT_THRESHOLD_SENSITIVITY_THRESHOLDS,
+    thresholds: Sequence[float] | None = None,
+    sensitivity_threshold_min: float = DEFAULT_SENSITIVITY_THRESHOLD_MIN,
+    sensitivity_threshold_max: float = DEFAULT_SENSITIVITY_THRESHOLD_MAX,
+    sensitivity_threshold_step: float = DEFAULT_SENSITIVITY_THRESHOLD_STEP,
     up_target_threshold: float = 0.01,
     down_target_threshold: float = 0.01,
     minimum_robust_signals: int,
@@ -231,7 +253,12 @@ def threshold_sensitivity_table(
         current = float(calibrated_threshold)
     except (TypeError, ValueError):
         current = None
-    grid = {round(float(value), 10) for value in thresholds if 0 <= float(value) <= 1}
+    values = thresholds if thresholds is not None else threshold_sensitivity_grid(
+        sensitivity_threshold_min,
+        sensitivity_threshold_max,
+        sensitivity_threshold_step,
+    )
+    grid = {round(float(value), 10) for value in values if 0 <= float(value) <= 1}
     if current is not None and 0 <= current <= 1:
         grid.add(round(current, 10))
     rows: list[dict[str, object]] = []

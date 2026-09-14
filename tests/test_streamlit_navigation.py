@@ -571,6 +571,30 @@ def test_threshold_calibration_selected_row_exposes_read_only_holdout_sensitivit
     assert "selection_reason" in panel
 
 
+def test_sensitivity_threshold_settings_are_rendered_and_used_for_holdout_analysis():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings()", 1)[1].split(
+        "def _history_model_contexts", 1
+    )[0]
+    analysis = source.split("def _render_threshold_sensitivity_analysis", 1)[1].split(
+        "def _render_history_detail", 1
+    )[0]
+
+    for label in (
+        "Seuil min — analyse de sensibilité",
+        "Seuil max — analyse de sensibilité",
+        "Pas — analyse de sensibilité",
+    ):
+        assert label in settings
+    for key in (
+        "sensitivity_threshold_min",
+        "sensitivity_threshold_max",
+        "sensitivity_threshold_step",
+    ):
+        assert key in settings
+        assert key in analysis
+
+
 def test_successful_duplication_returns_to_the_regular_experiments_view():
     source = APP.read_text(encoding="utf-8")
     locked = source.split("def _render_locked_duplication_mode", 1)[1].split(
