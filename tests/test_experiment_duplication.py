@@ -14,6 +14,7 @@ from rstock.application.experiment_duplication import (
     validate_duplication_job,
     walk_forward_duplication_draft,
 )
+from rstock.application.repository import RunRepository
 from rstock.application.universes import (
     CONTEXT_UNIVERSE_TYPE,
     SAMPLE_SOURCE,
@@ -312,7 +313,55 @@ def test_duplicated_spec_preserves_all_frozen_run_inputs(tmp_path):
         draft, current_config=source.config, use_run_config=True
     )
 
-    assert duplicated.to_dict() == source.to_dict()
+    expected = source.to_dict()
+    expected["source_walk_forward_run"] = "run_original"
+    assert duplicated.to_dict() == expected
+
+
+def test_walk_forward_duplication_persists_its_direct_source_run(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    source = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("DIS", "AMZN", "NVDA"),
+        target_symbols=("DIS", "AMZN"),
+        context_symbols=("NVDA",),
+    )
+    run_a = repository.create(source)
+    assert repository.load_spec(run_a).source_walk_forward_run is None
+
+    run_b = repository.create(
+        experiment_spec_from_duplication(
+            walk_forward_duplication_draft(
+                run_a, {"configuration": repository.load_spec(run_a).to_dict()}
+            ),
+            current_config=source.config,
+            use_run_config=True,
+        )
+    )
+    run_c = repository.create(
+        experiment_spec_from_duplication(
+            walk_forward_duplication_draft(
+                run_b, {"configuration": repository.load_spec(run_b).to_dict()}
+            ),
+            current_config=source.config,
+            use_run_config=True,
+        )
+    )
+
+    assert repository.load_spec(run_b).source_walk_forward_run == run_a
+    assert repository.load_spec(run_c).source_walk_forward_run == run_b
+
+
+def test_historical_snapshot_without_walk_forward_provenance_remains_valid(tmp_path):
+    snapshot = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("DIS", "AMZN"),
+    ).to_dict()
+    snapshot.pop("source_walk_forward_run")
+
+    assert ExperimentSpec.from_dict(snapshot).source_walk_forward_run is None
 
 
 def test_current_parameters_replace_only_the_technical_configuration(tmp_path):

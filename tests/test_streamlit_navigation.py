@@ -485,6 +485,15 @@ def test_history_comparison_header_uses_compact_parent_identity_and_run_summarie
     assert "st.title(\"Comparaison de runs" not in comparison
 
 
+def test_history_comparison_uses_an_arrow_safe_display_matrix():
+    source = APP.read_text(encoding="utf-8")
+    comparison = source.split("def _render_run_comparison_view", 1)[1].split(
+        "def _history_runs_panel", 1
+    )[0]
+
+    assert "comparison_display_table(summary)" in comparison
+
+
 def test_generic_history_detail_uses_the_persisted_summary_as_its_title():
     source = APP.read_text(encoding="utf-8")
     detail = source.split("def _render_history_detail", 1)[1].split(
@@ -524,6 +533,18 @@ def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
         'if action == "comparison"', 1
     )[0]
     assert 'width="stretch"' not in actions
+
+
+def test_history_grid_uses_the_run_provenance_display_columns():
+    source = APP.read_text(encoding="utf-8")
+    history_ui = (APP.parent / "history_ui.py").read_text(encoding="utf-8")
+    history = source.split("def _history_runs_panel", 1)[1].split(
+        "def _experiments_page", 1
+    )[0]
+
+    assert '"Run ID": self.run_id' in history_ui
+    assert '"Run source": self.source_walk_forward_run' in history_ui
+    assert "pd.DataFrame([row.display() for row in rows])" in history
 
 
 def test_normal_experiment_submission_persists_context_sampling_metadata():

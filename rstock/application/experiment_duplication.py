@@ -279,14 +279,11 @@ def experiment_spec_from_duplication(
         target_symbols=tuple(str(item) for item in values["target_symbols"]),
         context_symbols=tuple(str(item) for item in values["context_symbols"]),
         predictor_symbols=tuple(str(item) for item in values["predictor_symbols"]),
-        # A calibration created from this locked walk-forward snapshot can be
-        # promoted without guessing or re-resolving its source population.
+        # Every duplicated experiment keeps the directly selected walk-forward
+        # source; calibrations additionally use it to load frozen sets.
         source_walk_forward_run=(
             str(draft["source_run_id"])
-            if selected_job_type in {
-                JobType.XGBOOST_CALIBRATION, JobType.THRESHOLD_CALIBRATION
-            }
-            and draft.get("source_run_id")
+            if draft.get("source_run_id")
             else None
         ),
         run_description=(

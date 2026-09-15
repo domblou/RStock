@@ -85,17 +85,25 @@ def test_today_uses_the_local_calendar_day_for_utc_persisted_runs():
     assert [run["run_id"] for run in filtered] == ["late-local-run"]
 
 
-def test_history_rows_are_human_readable_without_exposing_run_id():
-    row = history_row(
+def test_history_rows_display_run_id_and_direct_walk_forward_source():
+    normal = history_row(
         _run("opaque-guid", "market_update"),
         _detail(summary={"requested_symbols": ["AAA", "BBB", "CCC"], "updated_symbols": ["AAA", "BBB", "CCC"]}),
         {},
     )
+    duplicated_detail = _detail()
+    duplicated_detail["configuration"]["source_walk_forward_run"] = "parent-run"
+    duplicated = history_row(_run("child-run", "walk_forward"), duplicated_detail, {})
 
-    assert row.context == "3 symboles"
-    assert row.summary == "3 symboles mis à jour"
-    assert "opaque-guid" not in row.display().values()
-    assert set(row.display()) == {"Date / heure", "Type", "Contexte", "Statut", "Durée", "Résumé"}
+    assert normal.context == "3 symboles"
+    assert normal.summary == "3 symboles mis à jour"
+    assert normal.display()["Run ID"] == "opaque-guid"
+    assert normal.display()["Run source"] == "—"
+    assert duplicated.display()["Run ID"] == "child-run"
+    assert duplicated.display()["Run source"] == "parent-run"
+    assert set(normal.display()) == {
+        "Run ID", "Run source", "Date / heure", "Type", "Contexte", "Statut", "Durée", "Résumé"
+    }
 
 
 def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallback():

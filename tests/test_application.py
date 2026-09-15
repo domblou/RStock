@@ -649,7 +649,7 @@ def test_restart_creates_new_run_and_keeps_failed_source_intact(tmp_path):
     assert restarted.run_id != source
     assert repository.status(source)["status"] == "failed"
     assert repository.status(restarted.run_id)["restarted_from_run"] == source
-    assert repository.load_spec(restarted.run_id) == repository.load_spec(source)
+    assert repository.load_spec(restarted.run_id).source_walk_forward_run == source
 
 
 def test_restart_reuses_historical_traceability_cutoff(tmp_path):
@@ -672,6 +672,7 @@ def test_restart_reuses_historical_traceability_cutoff(tmp_path):
 
     assert spec.historical_data_cutoff == "2025-01-31T00:00:00"
     assert spec.source_prepared_dataset_sha256 == "source-hash"
+    assert spec.source_walk_forward_run == source
 
 
 def test_per_run_lease_refuses_a_second_live_worker(tmp_path):

@@ -1,12 +1,14 @@
 from dataclasses import replace
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from rstock.application import history_analysis
 from rstock.application.history_analysis import (
     altair_serializable_distribution,
     analyze_run,
+    comparison_display_table,
     combination_table,
     comparison_table,
     comparison_chart_frames,
@@ -128,6 +130,21 @@ def test_comparison_keeps_configuration_and_missing_values_distinct():
     assert matrix.columns.tolist() == ["Indicateur", "Run A", "Run B"]
     assert matrix.loc[matrix["Indicateur"] == "Durée (s)", "Run B"].iloc[0] == 60.0
     assert matrix.loc[matrix["Indicateur"] == "AUC holdout médiane", "Run A"].iloc[0] == 0.74
+
+
+def test_comparison_display_table_normalizes_mixed_values_for_arrow():
+    display = comparison_display_table(
+        pd.DataFrame(
+            {
+                "Indicateur": ["AUC", "Statut", "Valeur absente"],
+                "2026-09-15 17:23": [0.74, "completed", None],
+            }
+        )
+    )
+
+    assert display["2026-09-15 17:23"].tolist() == ["0.74", "completed", "—"]
+    assert str(display["2026-09-15 17:23"].dtype) == "string"
+    pa.Table.from_pandas(display, preserve_index=False)
 
 
 def test_configuration_comparison_exposes_only_differences():

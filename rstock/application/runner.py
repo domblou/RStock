@@ -15,7 +15,7 @@ from typing import Any, Protocol
 
 from rstock.progress import ProgressEvent
 
-from .domain import ExperimentSpec, JobStatus
+from .domain import ExperimentSpec, JobStatus, JobType
 from .repository import RunRepository, utc_now
 from rstock.checkpoints import (
     CHECKPOINT_IMPLEMENTATION_VERSION,
@@ -188,13 +188,15 @@ class RunService:
 
         spec = self.repository.load_spec(run_id)
         traceability = self.repository.summary(run_id).get("traceability", {})
+        replay_values: dict[str, object] = {}
+        if spec.job_type is JobType.WALK_FORWARD:
+            replay_values["source_walk_forward_run"] = run_id
         if (
             spec.historical_data_cutoff is None
             and isinstance(traceability, dict)
             and traceability.get("prepared_market_last_date") is not None
         ):
-            spec = replace(
-                spec,
+            replay_values.update(
                 historical_data_cutoff=str(
                     traceability["prepared_market_last_date"]
                 ),
@@ -204,6 +206,8 @@ class RunService:
                     else str(traceability["prepared_dataset_sha256"])
                 ),
             )
+        if replay_values:
+            spec = replace(spec, **replay_values)
         with self._submission_lock():
             new_run_id = self.repository.create(spec)
             pid = self.backend.launch(

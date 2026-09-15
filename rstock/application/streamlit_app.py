@@ -38,6 +38,7 @@ from rstock.application.history_analysis import (
     RunAnalytics,
     altair_serializable_distribution,
     analyze_run,
+    comparison_display_table,
     comparison_table,
     comparison_chart_frames,
     configuration_differences,
@@ -1754,7 +1755,7 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
         kpis[1].metric("Combinaisons qualifiées max", max(item.qualified_count for item in analytics))
         kpis[2].metric("Run le plus rapide", "—" if fastest is None else history_row(next(detail["status"] for detail in details if detail["status"]["run_id"] == fastest.run_id), next(detail for detail in details if detail["status"]["run_id"] == fastest.run_id), {}).duration)
         kpis[3].metric("Delta dev→holdout le plus stable", _format_metric(None if stable_delta is None else stable_delta.delta_median))
-        st.dataframe(summary, hide_index=True, width="stretch")
+        st.dataframe(comparison_display_table(summary), hide_index=True, width="stretch")
     with tabs[1]:
         quality, durations = comparison_chart_frames(analytics, labels)
         st.subheader("Qualité prédictive")

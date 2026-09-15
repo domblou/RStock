@@ -1066,6 +1066,17 @@ def comparison_table(analyses: Sequence[RunAnalytics], labels: Mapping[str, str]
     }})
 
 
+def comparison_display_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Return an Arrow-safe, human-readable copy of the comparison matrix."""
+
+    def display_value(value: object) -> str:
+        if value is None or pd.isna(value):
+            return "—"
+        return str(value)
+
+    return table.map(display_value).astype("string")
+
+
 def _duration_text(seconds: float | None) -> str:
     if seconds is None or pd.isna(seconds):
         return "—"

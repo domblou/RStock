@@ -17,6 +17,7 @@ from rstock.application.workflows import (
 )
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import intraday_target_column, prepare_dataset
+from rstock.traceability import prepared_dataset_hash
 
 
 def _prices(index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -87,13 +88,80 @@ def test_historical_cutoff_is_applied_before_data_preparation(monkeypatch, tmp_p
     calls = []
     _install_market_loader(monkeypatch, sessions, calls)
     cutoff = pd.Timestamp(sessions[-100])
-    spec = replace(_spec(tmp_path, 0), historical_data_cutoff=cutoff.isoformat())
+    spec = replace(_spec(tmp_path, 63), historical_data_cutoff=cutoff.isoformat())
 
     prepared, _, _ = _prepared_experiment(spec, None, None)
 
     assert calls == [{"history_days": None, "as_of": cutoff.date()}]
     assert prepared.index.max() == cutoff
     assert not (prepared.index > cutoff).any()
+
+
+def test_historical_duplication_keeps_parent_data_and_prefilter_results(
+    monkeypatch, tmp_path
+):
+    sessions = xcals.get_calendar("XNYS").sessions_in_range("2021-01-01", "2026-01-30")
+    calls = []
+    _install_market_loader(monkeypatch, sessions, calls)
+    expected_end = pd.Timestamp(sessions[-64])
+    parent = replace(
+        _spec(tmp_path, 63),
+        config=replace(_spec(tmp_path, 63).config, predictor_prefilter_enabled=True),
+    )
+    duplicate = replace(parent, historical_data_cutoff=expected_end.isoformat())
+    received_hashes = []
+
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_prefilter_walk_forward",
+        lambda prepared, *args, **kwargs: (
+            received_hashes.append(prepared_dataset_hash(prepared))
+            or SimpleNamespace(qualification=pd.DataFrame(), telemetry={})
+        ),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.select_predictors",
+        lambda *args, **kwargs: SimpleNamespace(
+            predictors_by_target={"AAA": ["BBB"], "BBB": ["AAA"]},
+            diagnostics=[{"retained_predictors": ["AAA", "BBB"]}],
+            metrics=pd.DataFrame(),
+        ),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.generate_target_symbol_sets",
+        lambda *args, **kwargs: pd.DataFrame({"V0": ["AAA"], "V1": ["BBB"]}),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_walk_forward",
+        lambda prepared, *args, **kwargs: (
+            received_hashes.append(prepared_dataset_hash(prepared))
+            or SimpleNamespace(
+                aggregate_global=pd.DataFrame([{"Sets": 1}]),
+                qualification=pd.DataFrame({"Eligible": [True]}),
+                run_configuration={},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.write_walk_forward_results",
+        lambda result, output: output.mkdir(parents=True, exist_ok=True),
+    )
+
+    parent_summary = _walk_forward(parent, tmp_path / "parent", None, None)
+    duplicate_summary = _walk_forward(duplicate, tmp_path / "duplicate", None, None)
+
+    assert calls == [
+        {"history_days": None, "as_of": None},
+        {"history_days": 1095, "as_of": expected_end.date()},
+        {"history_days": None, "as_of": expected_end.date()},
+    ]
+    assert parent_summary["effective_end_date"] == duplicate_summary["effective_end_date"]
+    assert parent_summary["traceability"]["prepared_dataset_sha256"] == (
+        duplicate_summary["traceability"]["prepared_dataset_sha256"]
+    )
+    assert len(received_hashes) == 4
+    assert len(set(received_hashes)) == 1
+    assert parent_summary["predictor_prefilter"] == duplicate_summary["predictor_prefilter"]
+    assert parent_summary["total_combinations"] == duplicate_summary["total_combinations"]
 
 
 def test_prefilter_and_walk_forward_receive_the_same_cutoff_data(monkeypatch, tmp_path):

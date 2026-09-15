@@ -34,6 +34,7 @@ PERIOD_DAYS = {"Aujourd’hui": 0, "7 jours": 7, "30 jours": 30}
 @dataclass(frozen=True, slots=True)
 class HistoryRow:
     run_id: str
+    source_walk_forward_run: str
     date_time: str
     job_type: str
     context: str
@@ -43,6 +44,8 @@ class HistoryRow:
 
     def display(self) -> dict[str, str]:
         return {
+            "Run ID": self.run_id,
+            "Run source": self.source_walk_forward_run,
             "Date / heure": self.date_time,
             "Type": JOB_LABELS.get(self.job_type, self.job_type),
             "Contexte": self.context,
@@ -249,6 +252,11 @@ def history_row(
     job_type = str(status["job_type"])
     return HistoryRow(
         run_id=str(status["run_id"]),
+        source_walk_forward_run=(
+            str(configuration["source_walk_forward_run"])
+            if configuration.get("source_walk_forward_run") is not None
+            else "—"
+        ),
         date_time=short_datetime(status.get("created_at")),
         job_type=job_type,
         context=_context_text(job_type, configuration, summary, models),

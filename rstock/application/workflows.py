@@ -114,8 +114,11 @@ def _prepared_inputs(
             "Décalage de fin walk-forward invalide : "
             f"offset demandé={offset!r}; un entier >= 0 est requis."
         )
-    effective_end_date: pd.Timestamp | None = None
-    if offset > 0:
+    # A duplicated run's cutoff is already the source run's final effective
+    # date. Applying the configured session offset again would move its
+    # historical period backwards a second time.
+    effective_end_date: pd.Timestamp | None = historical_cutoff
+    if historical_cutoff is None and offset > 0:
         available_observations = len(downloaded.prices)
         if downloaded.prices.empty:
             raise ValueError(
