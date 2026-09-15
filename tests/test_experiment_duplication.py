@@ -76,6 +76,36 @@ def test_walk_forward_duplication_draft_copies_all_experiment_inputs():
     assert detail["configuration"]["rstock_config"]["xgb_seed"] == 99
 
 
+def test_duplication_carries_the_source_traceability_cutoff(tmp_path):
+    detail = _detail()
+    detail["summary"] = {
+        "traceability": {
+            "prepared_market_last_date": "2025-01-31T00:00:00",
+            "prepared_dataset_sha256": "source-hash",
+        }
+    }
+
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("run_original", detail),
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.historical_data_cutoff == "2025-01-31T00:00:00"
+    assert duplicated.source_prepared_dataset_sha256 == "source-hash"
+
+
+def test_legacy_duplication_without_traceability_keeps_no_data_cutoff(tmp_path):
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("run_original", _detail()),
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.historical_data_cutoff is None
+    assert duplicated.source_prepared_dataset_sha256 is None
+
+
 @pytest.mark.parametrize(
     ("job_type", "expected_label"),
     [

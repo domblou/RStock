@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -187,6 +187,23 @@ class RunService:
         """Create a fresh run from a historical spec without touching the source."""
 
         spec = self.repository.load_spec(run_id)
+        traceability = self.repository.summary(run_id).get("traceability", {})
+        if (
+            spec.historical_data_cutoff is None
+            and isinstance(traceability, dict)
+            and traceability.get("prepared_market_last_date") is not None
+        ):
+            spec = replace(
+                spec,
+                historical_data_cutoff=str(
+                    traceability["prepared_market_last_date"]
+                ),
+                source_prepared_dataset_sha256=(
+                    None
+                    if traceability.get("prepared_dataset_sha256") is None
+                    else str(traceability["prepared_dataset_sha256"])
+                ),
+            )
         with self._submission_lock():
             new_run_id = self.repository.create(spec)
             pid = self.backend.launch(

@@ -119,6 +119,48 @@ def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
     assert "CONTEXT" in set(generated["V1"])
 
 
+def test_walk_forward_persists_prepared_traceability(monkeypatch, tmp_path):
+    prepared = pd.DataFrame(
+        {"AAA.Open": [100.0, 101.0]},
+        index=pd.DatetimeIndex(["2026-01-02", "2026-01-05"]),
+    )
+    prepared.attrs["symbols_used"] = 2
+    generated = pd.DataFrame({"V0": ["AAA"], "V1": ["BBB"]})
+    result = SimpleNamespace(
+        aggregate_global=pd.DataFrame([{"Sets": 1}]),
+        qualification=pd.DataFrame({"Eligible": [True]}),
+        run_configuration={},
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        "rstock.application.workflows._prepared_experiment",
+        lambda *args, **kwargs: (prepared, generated, {}),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_walk_forward",
+        lambda *args, **kwargs: result,
+    )
+
+    def write_result(result, output):
+        output.mkdir(parents=True, exist_ok=True)
+        captured.update(result.run_configuration)
+
+    monkeypatch.setattr(
+        "rstock.application.workflows.write_walk_forward_results", write_result
+    )
+
+    summary = _walk_forward(
+        _spec(tmp_path, permutation_depth=1), tmp_path / "output", None, None
+    )
+
+    assert summary["traceability"] == captured["traceability"]
+    assert captured["traceability"]["git_commit"] is None
+    assert captured["traceability"]["prepared_market_last_date"] == "2026-01-05T00:00:00"
+    assert captured["traceability"]["symbols_used"] == 2
+    assert len(captured["traceability"]["prepared_dataset_sha256"]) == 64
+
+
 def test_disabled_predictor_prefilter_keeps_the_existing_walk_forward_path(
     monkeypatch, tmp_path
 ):
@@ -604,6 +646,28 @@ def test_restart_creates_new_run_and_keeps_failed_source_intact(tmp_path):
     assert repository.status(source)["status"] == "failed"
     assert repository.status(restarted.run_id)["restarted_from_run"] == source
     assert repository.load_spec(restarted.run_id) == repository.load_spec(source)
+
+
+def test_restart_reuses_historical_traceability_cutoff(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    source = repository.create(_spec(tmp_path))
+    repository.write_json(
+        source,
+        "summary.json",
+        {
+            "traceability": {
+                "prepared_market_last_date": "2025-01-31T00:00:00",
+                "prepared_dataset_sha256": "source-hash",
+            }
+        },
+    )
+    repository.transition(source, JobStatus.FAILED, error="original failure")
+
+    restarted = RunService(repository, backend=FakeBackend()).restart(source)
+    spec = repository.load_spec(restarted.run_id)
+
+    assert spec.historical_data_cutoff == "2025-01-31T00:00:00"
+    assert spec.source_prepared_dataset_sha256 == "source-hash"
 
 
 def test_per_run_lease_refuses_a_second_live_worker(tmp_path):

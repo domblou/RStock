@@ -97,6 +97,16 @@ def _source_run_description(
     return None
 
 
+def _source_traceability(detail: Mapping[str, object]) -> Mapping[str, object]:
+    """Return persisted run provenance, or an empty mapping for legacy runs."""
+
+    summary = detail.get("summary")
+    if not isinstance(summary, Mapping):
+        return {}
+    traceability = summary.get("traceability")
+    return traceability if isinstance(traceability, Mapping) else {}
+
+
 def walk_forward_duplication_draft(
     run_id: str, detail: Mapping[str, object]
 ) -> dict[str, object]:
@@ -109,6 +119,7 @@ def walk_forward_duplication_draft(
         raise ValueError("Only walk-forward runs can be duplicated")
 
     symbols = tuple(str(item) for item in configuration.get("symbols", ()) if item)
+    traceability = _source_traceability(detail)
     return {
         "source_run_id": str(run_id),
         "job_type": JobType.WALK_FORWARD.value,
@@ -126,6 +137,10 @@ def walk_forward_duplication_draft(
         "evaluate_final_holdout": bool(configuration.get("evaluate_final_holdout", True)),
         "rstock_config": deepcopy(configuration.get("rstock_config") or {}),
         "run_description": _source_run_description(configuration, detail),
+        "historical_data_cutoff": traceability.get("prepared_market_last_date"),
+        "source_prepared_dataset_sha256": traceability.get(
+            "prepared_dataset_sha256"
+        ),
     }
 
 
@@ -277,5 +292,15 @@ def experiment_spec_from_duplication(
         run_description=(
             None if values.get("run_description") is None
             else str(values["run_description"])
+        ),
+        historical_data_cutoff=(
+            None
+            if values.get("historical_data_cutoff") is None
+            else str(values["historical_data_cutoff"])
+        ),
+        source_prepared_dataset_sha256=(
+            None
+            if values.get("source_prepared_dataset_sha256") is None
+            else str(values["source_prepared_dataset_sha256"])
         ),
     )

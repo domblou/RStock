@@ -1,0 +1,76 @@
+"""Small, deterministic provenance records for prepared RStock datasets."""
+
+from __future__ import annotations
+
+import hashlib
+import subprocess
+from pathlib import Path
+
+import pandas as pd
+
+
+def current_git_commit(project_root: Path) -> str | None:
+    """Return the current commit when Git is available, otherwise ``None``."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    commit = completed.stdout.strip()
+    return commit or None
+
+
+def prepared_dataset_hash(prepared: pd.DataFrame) -> str:
+    """Hash data, index and ordered columns without serializing the dataset."""
+
+    digest = hashlib.sha256()
+    digest.update(b"rstock-prepared-dataset-v1\0")
+    digest.update(f"rows={len(prepared)};columns={len(prepared.columns)}\0".encode())
+    digest.update(
+        pd.util.hash_pandas_object(prepared.index, index=False).values.tobytes()
+    )
+    digest.update(
+        pd.util.hash_pandas_object(prepared.columns, index=False).values.tobytes()
+    )
+    # Some supported pandas releases cannot hash a DataFrame with rows but no
+    # columns. Its data contribution is empty; shape, index and columns are
+    # already represented above.
+    if len(prepared.columns):
+        digest.update(
+            pd.util.hash_pandas_object(prepared, index=False).values.tobytes()
+        )
+    else:
+        digest.update(b"empty-data-columns\0")
+    return digest.hexdigest()
+
+
+def prepared_dataset_traceability(
+    prepared: pd.DataFrame,
+    *,
+    project_root: Path,
+    symbols_used: int,
+    source_prepared_dataset_sha256: str | None = None,
+) -> dict[str, object]:
+    """Build compact provenance metadata for one prepared dataset."""
+
+    last_date = None
+    if len(prepared.index):
+        last_date = pd.Timestamp(prepared.index.max()).isoformat()
+    traceability: dict[str, object] = {
+        "git_commit": current_git_commit(project_root),
+        "prepared_market_last_date": last_date,
+        "symbols_used": int(symbols_used),
+        "prepared_dataset_sha256": prepared_dataset_hash(prepared),
+    }
+    if source_prepared_dataset_sha256 is not None:
+        traceability["source_prepared_dataset_sha256"] = (
+            source_prepared_dataset_sha256
+        )
+    return traceability

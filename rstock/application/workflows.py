@@ -30,6 +30,7 @@ from rstock.threshold_calibration import (
     run_controlled_threshold_calibration,
     write_threshold_calibration_results,
 )
+from rstock.traceability import prepared_dataset_traceability
 from rstock.walk_forward import (
     evaluate_prefilter_walk_forward,
     evaluate_walk_forward,
@@ -91,12 +92,22 @@ def _prepared_inputs(
 ) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
     phase_started_at = perf_counter()
     _phase(progress_callback, "data_preparation", "started")
+    historical_cutoff = (
+        None
+        if spec.historical_data_cutoff is None
+        else pd.Timestamp(spec.historical_data_cutoff).normalize()
+    )
     downloaded, calendars = MarketDataService().load(
         spec,
+        as_of=None if historical_cutoff is None else historical_cutoff.date(),
         progress_callback=_phase_callback(progress_callback, "data_preparation"),
         cancellation_check=cancellation_check,
     )
     check_cancellation(cancellation_check)
+    if historical_cutoff is not None:
+        downloaded.prices = downloaded.prices.loc[
+            downloaded.prices.index <= historical_cutoff
+        ].copy()
     offset = spec.config.walk_forward_end_offset_sessions
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValueError(
@@ -130,6 +141,10 @@ def _prepared_inputs(
             progress_callback=_phase_callback(progress_callback, "data_preparation"),
             cancellation_check=cancellation_check,
         )
+        if historical_cutoff is not None:
+            downloaded.prices = downloaded.prices.loc[
+                downloaded.prices.index <= historical_cutoff
+            ].copy()
         if downloaded.prices.empty:
             raise ValueError(
                 "Décalage de fin walk-forward impossible : "
@@ -155,6 +170,7 @@ def _prepared_inputs(
     if effective_end_date is not None:
         prepared.attrs["effective_end_date"] = effective_end_date.isoformat()
     prepared.attrs["walk_forward_end_offset_sessions"] = offset
+    prepared.attrs["symbols_used"] = len(downloaded.symbols)
     if offset > 0:
         minimum_observations = (
             spec.config.walk_forward_min_train_size
@@ -197,6 +213,21 @@ def _persist_walk_forward_period(
     }
     run_configuration.update(period)
     return period
+
+
+def _persist_prepared_traceability(
+    run_configuration: dict[str, object], prepared: pd.DataFrame, spec: ExperimentSpec
+) -> dict[str, object]:
+    """Persist compact code/data provenance alongside result configuration."""
+
+    traceability = prepared_dataset_traceability(
+        prepared,
+        project_root=spec.config.project_root,
+        symbols_used=int(prepared.attrs.get("symbols_used", len(spec.symbols))),
+        source_prepared_dataset_sha256=spec.source_prepared_dataset_sha256,
+    )
+    run_configuration["traceability"] = traceability
+    return traceability
 
 
 def _prepared_experiment(
@@ -358,6 +389,9 @@ def _walk_forward(
         cancellation_check=cancellation_check,
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
+    traceability = _persist_prepared_traceability(
+        result.run_configuration, prepared, spec
+    )
     if prefilter is not None:
         result.run_configuration["predictor_prefilter"] = {
             "enabled": True,
@@ -397,6 +431,7 @@ def _walk_forward(
         "eligible_combinations": int(result.qualification["Eligible"].sum()),
         "result_files": sorted(path.name for path in output.iterdir()),
         **period,
+        "traceability": traceability,
     }
     if prefilter is not None:
         summary["total_combinations"] = len(generated)
@@ -572,6 +607,7 @@ def _resumable_walk_forward(
         "effective_end_date": prepared.attrs.get("effective_end_date"),
     }
     extras: dict[str, object] = dict(period)
+    traceability = _persist_prepared_traceability(extras, prepared, spec)
     if prefilter is not None:
         extras["predictor_prefilter"] = {
             "enabled": True,
@@ -622,6 +658,7 @@ def _resumable_walk_forward(
         "eligible_combinations": int(result.qualification["Eligible"].sum()),
         "result_files": sorted(path.name for path in output.iterdir()),
         **period,
+        "traceability": traceability,
         "execution_telemetry": _json_value(result.telemetry),
         "checkpoint_manifest": "checkpoints/manifest.json",
         **(
@@ -650,6 +687,9 @@ def _xgboost_calibration(
         cancellation_check=cancellation_check,
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
+    traceability = _persist_prepared_traceability(
+        result.run_configuration, prepared, spec
+    )
     _phase(progress_callback, "result_writing", "started")
     write_calibration_results(result, output)
     _phase(progress_callback, "result_writing", "completed")
@@ -659,6 +699,7 @@ def _xgboost_calibration(
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
         **period,
+        "traceability": traceability,
     }
 
 
@@ -684,6 +725,9 @@ def _threshold_calibration(
         cancellation_check=cancellation_check,
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
+    traceability = _persist_prepared_traceability(
+        result.run_configuration, prepared, spec
+    )
     _phase(progress_callback, "result_writing", "started")
     write_threshold_calibration_results(result, output)
     _phase(progress_callback, "result_writing", "completed")
@@ -710,6 +754,7 @@ def _threshold_calibration(
         "holdout_metrics": _json_value(result.holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
         **period,
+        "traceability": traceability,
         "source_walk_forward_run": spec.source_walk_forward_run,
         "source_qualified_combinations": (
             None if source_generated is None else len(source_generated)

@@ -101,6 +101,8 @@ class ExperimentSpec:
     predictor_symbols: tuple[str, ...] = ()
     source_walk_forward_run: str | None = None
     run_description: str | None = None
+    historical_data_cutoff: str | None = None
+    source_prepared_dataset_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
@@ -148,6 +150,8 @@ class ExperimentSpec:
             "predictor_symbols": list(self.predictor_symbols),
             "source_walk_forward_run": self.source_walk_forward_run,
             "run_description": self.run_description,
+            "historical_data_cutoff": self.historical_data_cutoff,
+            "source_prepared_dataset_sha256": self.source_prepared_dataset_sha256,
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
             "evaluate_final_holdout": self.evaluate_final_holdout,
@@ -205,6 +209,16 @@ class ExperimentSpec:
             run_description=(
                 None if values.get("run_description") is None
                 else str(values["run_description"])
+            ),
+            historical_data_cutoff=(
+                None
+                if values.get("historical_data_cutoff") is None
+                else str(values["historical_data_cutoff"])
+            ),
+            source_prepared_dataset_sha256=(
+                None
+                if values.get("source_prepared_dataset_sha256") is None
+                else str(values["source_prepared_dataset_sha256"])
             ),
         )
 
