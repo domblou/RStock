@@ -197,6 +197,12 @@ class ExperimentService:
     def cancel(self, run_id: str) -> dict[str, object]:
         return self.run_service.cancel(run_id)
 
+    def resume(self, run_id: str) -> SubmissionResult:
+        return self.run_service.resume(run_id)
+
+    def restart(self, run_id: str) -> SubmissionResult:
+        return self.run_service.restart(run_id)
+
     def runs(self) -> list[dict[str, object]]:
         return self.run_service.list()
 

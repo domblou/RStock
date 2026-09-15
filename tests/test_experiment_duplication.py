@@ -119,6 +119,72 @@ def test_legacy_duplication_without_a_description_remains_compatible(tmp_path):
     assert duplicated.run_description is None
 
 
+def test_duplication_preserves_walk_forward_batch_sizes(tmp_path):
+    detail = _detail(snapshot={
+        "predictor_prefilter_batch_size": 7,
+        "walk_forward_batch_size": 11,
+        "final_holdout_batch_size": 3,
+    })
+    draft = walk_forward_duplication_draft("run_original", detail)
+
+    duplicated = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.config.predictor_prefilter_batch_size == 7
+    assert duplicated.config.walk_forward_batch_size == 11
+    assert duplicated.config.final_holdout_batch_size == 3
+
+
+def test_recent_duplication_preserves_explicit_modern_compatibility_fields(tmp_path):
+    detail = _detail(snapshot={
+        "walk_forward_end_offset_sessions": 0,
+        "max_generated_sets": 100_000,
+    })
+
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("run_original", detail),
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.config.walk_forward_end_offset_sessions == 0
+    assert duplicated.config.max_generated_sets == 100_000
+
+
+def test_legacy_duplication_restores_historical_walk_forward_end_offset(tmp_path):
+    detail = _detail(snapshot={"max_generated_sets": 100_000})
+
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("run_original", detail),
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.config.walk_forward_end_offset_sessions == 63
+
+
+def test_legacy_duplication_restores_historical_generated_sets_limit(tmp_path):
+    detail = _detail(snapshot={"walk_forward_end_offset_sessions": 63})
+
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("run_original", detail),
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.config.max_generated_sets == 1_000_000_000
+
+
+def test_new_runs_keep_current_defaults(tmp_path):
+    current = replace(DEFAULT_CONFIG, project_root=tmp_path)
+
+    assert current.walk_forward_end_offset_sessions == 0
+    assert current.max_generated_sets == 100_000
+
+
 def test_historical_walk_forward_string_has_the_safe_ui_label():
     draft = walk_forward_duplication_draft("run_original", _detail())
 

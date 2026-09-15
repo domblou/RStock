@@ -26,15 +26,24 @@ from .features import (
 )
 from .modeling import fit_booster, predict_probabilities
 from .model_selection import model_selection_parameters, score_qualified_models
-from .parallel import process_cancellation_requested, run_combination_tasks
+from .parallel import (
+    iter_combination_batches,
+    iter_indexed_combination_batches,
+    process_cancellation_requested,
+)
 from .progress import (
     CancellationCheck,
     ProgressCallback,
     check_cancellation,
     report_progress,
 )
-from .qualification import qualification_parameters, qualify_combinations
+from .qualification import (
+    qualification_parameters,
+    qualify_combinations,
+    rank_qualified_combinations,
+)
 from .risk import conditional_signal_metrics, intraday_risk_metrics
+from .telemetry import dataframe_bytes, process_rss_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +77,14 @@ class _WalkForwardCombinationResult:
     prediction_records: list[dict[str, object]]
 
 
+@dataclass(slots=True)
+class PrefilterWalkForwardResult:
+    """Only the development qualification consumed by predictor selection."""
+
+    qualification: pd.DataFrame
+    telemetry: dict[str, object]
+
+
 _WALK_FORWARD_TASK_CONTEXT: tuple[
     pd.DataFrame,
     RStockConfig,
@@ -77,6 +94,15 @@ _WALK_FORWARD_TASK_CONTEXT: tuple[
     int,
     int,
 ] | None = None
+
+
+def _validate_prepared_index(prepared: pd.DataFrame) -> None:
+    """Enforce the shared walk-forward date-index contract."""
+
+    if not isinstance(prepared.index, pd.DatetimeIndex):
+        raise TypeError("Prepared data must use a DatetimeIndex")
+    if prepared.index.hasnans or prepared.index.has_duplicates:
+        raise ValueError("Prepared data dates must be complete and unique")
 
 
 def _set_walk_forward_task_context(
@@ -195,6 +221,40 @@ def _walk_forward_process_task(
     if _WALK_FORWARD_TASK_CONTEXT is None:  # pragma: no cover - process invariant
         raise RuntimeError("Walk-forward worker context is unavailable")
     return _walk_forward_combination(
+        row_values,
+        _WALK_FORWARD_TASK_CONTEXT,
+        process_cancellation_requested,
+    )
+
+
+def _prefilter_combination(
+    row_values: dict[str, object],
+    context: tuple[
+        pd.DataFrame,
+        RStockConfig,
+        pd.Timestamp,
+        Mapping[str, str],
+        int,
+        int,
+        int,
+    ],
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, object]:
+    """Return one exact qualification row and discard prediction-level detail."""
+
+    result = _walk_forward_combination(row_values, context, cancellation_check)
+    qualification = qualify_combinations(
+        pd.DataFrame(result.window_records),
+        pd.DataFrame(result.prediction_records),
+        context[1],
+    )
+    return qualification.drop(columns="EligibleRank").iloc[0].to_dict()
+
+
+def _prefilter_process_task(row_values: dict[str, object]) -> dict[str, object]:
+    if _WALK_FORWARD_TASK_CONTEXT is None:  # pragma: no cover - process invariant
+        raise RuntimeError("Walk-forward worker context is unavailable")
+    return _prefilter_combination(
         row_values,
         _WALK_FORWARD_TASK_CONTEXT,
         process_cancellation_requested,
@@ -663,6 +723,164 @@ def _combine_selection_results(
     return combined
 
 
+def evaluate_prefilter_walk_forward(
+    prepared: pd.DataFrame,
+    generated_sets: pd.DataFrame,
+    config: RStockConfig,
+    *,
+    market_calendars: Mapping[str, str] | None = None,
+    min_train_size: int | None = None,
+    test_size: int | None = None,
+    step_size: int | None = None,
+    final_holdout_size: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
+    checkpoint_manager: object | None = None,
+) -> PrefilterWalkForwardResult:
+    """Qualify univariate development models without building unused results.
+
+    The scientific path is the same as :func:`evaluate_walk_forward`: each set
+    is fitted on the same expanding windows and qualification is calculated from
+    the same prediction rows.  Prediction-level records are released inside the
+    worker after the one-row qualification record has been produced.
+    """
+
+    _validate_prepared_index(prepared)
+    ordered = prepared.sort_index()
+    min_train = (
+        config.walk_forward_min_train_size
+        if min_train_size is None
+        else min_train_size
+    )
+    test_window = config.walk_forward_test_size if test_size is None else test_size
+    step = config.walk_forward_step_size if step_size is None else step_size
+    holdout_size = (
+        config.final_holdout_size
+        if final_holdout_size is None
+        else final_holdout_size
+    )
+    if holdout_size < 1 or holdout_size >= len(ordered):
+        raise ValueError("final_holdout_size must leave non-empty development history")
+    holdout_start = ordered.index[-holdout_size]
+    task_context = (
+        ordered,
+        config,
+        holdout_start,
+        market_calendars or {},
+        min_train,
+        test_window,
+        step,
+    )
+    task_rows = [row.to_dict() for _, row in generated_sets.iterrows()]
+    started_at = perf_counter()
+    rss_before = process_rss_bytes()
+    report_progress(
+        progress_callback,
+        "predictor_prefilter_walk_forward",
+        substage="started",
+        details={
+            "phase_event": "started",
+            "combinations": len(task_rows),
+            "prepared_bytes": dataframe_bytes(ordered),
+            "parent_rss_bytes": rss_before,
+            "combination_workers": config.combination_workers,
+            "xgb_threads_per_worker": config.xgb_nthread,
+            "maximum_xgb_threads": config.combination_workers * config.xgb_nthread,
+        },
+    )
+    batch_size = config.predictor_prefilter_batch_size
+    total_batches = (len(task_rows) + batch_size - 1) // batch_size
+    if checkpoint_manager is None:
+        batches = iter_combination_batches(
+            task_rows,
+            batch_size=batch_size,
+            combination_workers=config.combination_workers,
+            worker_context=task_context,
+            context_initializer=_set_walk_forward_task_context,
+            process_task=_prefilter_process_task,
+            serial_task=_prefilter_combination,
+            item_label=lambda values: symbol_set_id(pd.Series(values)),
+            stage="predictor_prefilter_walk_forward",
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+            details={"combination_workers": config.combination_workers},
+        )
+        records = [record for batch in batches for record in batch]
+    else:
+        manager = checkpoint_manager
+        manager.set_total_batches("predictor_prefilter_walk_forward", total_batches)
+        completed_ids = manager.completed_batch_ids("predictor_prefilter_walk_forward")
+        for batch in iter_indexed_combination_batches(
+            task_rows,
+            batch_size=batch_size,
+            combination_workers=config.combination_workers,
+            worker_context=task_context,
+            context_initializer=_set_walk_forward_task_context,
+            process_task=_prefilter_process_task,
+            serial_task=_prefilter_combination,
+            item_label=lambda values: symbol_set_id(pd.Series(values)),
+            stage="predictor_prefilter_walk_forward",
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+            details={"combination_workers": config.combination_workers},
+            completed_batch_ids=completed_ids,
+        ):
+            checkpoint_started_at = perf_counter()
+            payload = {"qualification": pd.DataFrame(batch.results)}
+            manager.commit_batch(
+                "predictor_prefilter_walk_forward",
+                batch.batch_id,
+                payload,
+                first_index=batch.first_index,
+                last_index=batch.last_index,
+                combination_count=len(batch.results),
+                row_counts={"qualification": len(payload["qualification"])},
+            )
+            report_progress(
+                progress_callback,
+                "predictor_prefilter_walk_forward",
+                substage=f"batch {batch.batch_id + 1}/{total_batches}",
+                completed_units=batch.last_index + 1,
+                total_units=len(task_rows),
+                details={
+                    "batch_id": batch.batch_id,
+                    "batch_number": batch.batch_id + 1,
+                    "total_batches": total_batches,
+                    "combinations": len(batch.results),
+                    "rows": len(payload["qualification"]),
+                    "elapsed_seconds": (
+                        batch.elapsed_seconds + perf_counter() - checkpoint_started_at
+                    ),
+                    "calculation_seconds": batch.elapsed_seconds,
+                    "parent_rss_bytes": process_rss_bytes(),
+                    "checkpoint_written": True,
+                },
+            )
+        records = []
+        for batch_id in range(total_batches):
+            payload = manager.load_batch("predictor_prefilter_walk_forward", batch_id)
+            records.extend(payload["qualification"].to_dict("records"))
+    qualification = rank_qualified_combinations(pd.DataFrame(records))
+    elapsed = perf_counter() - started_at
+    telemetry = {
+        "elapsed_seconds": elapsed,
+        "combinations": len(task_rows),
+        "qualification_rows": len(qualification),
+        "prepared_bytes": dataframe_bytes(ordered),
+        "parent_rss_before_bytes": rss_before,
+        "parent_rss_after_bytes": process_rss_bytes(),
+        "combination_workers": config.combination_workers,
+        "xgb_threads_per_worker": config.xgb_nthread,
+    }
+    report_progress(
+        progress_callback,
+        "predictor_prefilter_walk_forward",
+        substage="completed",
+        details={"phase_event": "completed", **telemetry},
+    )
+    return PrefilterWalkForwardResult(qualification, telemetry)
+
+
 def evaluate_walk_forward(
     prepared: pd.DataFrame,
     generated_sets: pd.DataFrame,
@@ -679,10 +897,7 @@ def evaluate_walk_forward(
 ) -> WalkForwardResult:
     """Qualify on development windows, then confirm on an untouched final holdout."""
 
-    if not isinstance(prepared.index, pd.DatetimeIndex):
-        raise TypeError("Prepared data must use a DatetimeIndex")
-    if prepared.index.hasnans or prepared.index.has_duplicates:
-        raise ValueError("Prepared data dates must be complete and unique")
+    _validate_prepared_index(prepared)
     ordered = prepared.sort_index()
     min_train = (
         config.walk_forward_min_train_size
@@ -713,8 +928,9 @@ def evaluate_walk_forward(
     report_progress(
         progress_callback, "walk_forward", substage="started", details={"phase_event": "started", "combinations": len(task_rows)}
     )
-    combination_results = run_combination_tasks(
+    combination_batches = iter_combination_batches(
         task_rows,
+        batch_size=config.walk_forward_batch_size,
         combination_workers=config.combination_workers,
         worker_context=task_context,
         context_initializer=_set_walk_forward_task_context,
@@ -726,12 +942,12 @@ def evaluate_walk_forward(
         cancellation_check=cancellation_check,
         details={"combination_workers": config.combination_workers},
     )
-    window_records = [
-        record for result in combination_results for record in result.window_records
-    ]
-    prediction_records = [
-        record for result in combination_results for record in result.prediction_records
-    ]
+    window_records: list[dict[str, object]] = []
+    prediction_records: list[dict[str, object]] = []
+    for batch in combination_batches:
+        for result in batch:
+            window_records.extend(result.window_records)
+            prediction_records.extend(result.prediction_records)
     report_progress(progress_callback, "walk_forward", substage="completed", details={"phase_event": "completed", "combinations": len(task_rows), "windows": len(window_records)})
 
     report_progress(progress_callback, "aggregation", substage="started", details={"phase_event": "started"})
@@ -747,6 +963,8 @@ def evaluate_walk_forward(
     aggregate_by_set, aggregate_global = _aggregate_predictions(
         predictions_frame, windows_frame
     )
+
+
     aggregation_timings["aggregate_predictions"] = (
         perf_counter() - aggregate_predictions_started_at
     )

@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from rstock.config import RStockConfig
+from rstock.config import HISTORICAL_MISSING_CONFIG_DEFAULTS, RStockConfig
 
 from .universes import UniverseSelection
 
@@ -48,10 +48,16 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
     @property
     def terminal(self) -> bool:
-        return self in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        return self in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }
 
 
 def _config_to_dict(config: RStockConfig) -> dict[str, Any]:
@@ -65,7 +71,7 @@ def _config_from_dict(values: dict[str, Any]) -> RStockConfig:
     unknown = set(values) - allowed
     if unknown:
         raise ValueError(f"Unknown RStock configuration fields: {sorted(unknown)}")
-    restored = dict(values)
+    restored = {**HISTORICAL_MISSING_CONFIG_DEFAULTS, **values}
     restored["project_root"] = Path(restored["project_root"])
     for field_name in ("selected_symbols", "threshold_calibration_quantiles"):
         if restored.get(field_name) is not None:

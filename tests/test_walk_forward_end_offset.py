@@ -143,13 +143,13 @@ def test_offset_too_large_has_a_clear_user_error(monkeypatch, tmp_path):
     assert "calendrier XNYS" in message
 
 
-def test_legacy_snapshot_defaults_offset_to_zero(tmp_path):
+def test_legacy_snapshot_restores_historical_offset(tmp_path):
     source = _spec(tmp_path, 0).to_dict()
     source["rstock_config"].pop("walk_forward_end_offset_sessions")
 
     restored = ExperimentSpec.from_dict(source)
 
-    assert restored.config.walk_forward_end_offset_sessions == 0
+    assert restored.config.walk_forward_end_offset_sessions == 63
 
 
 def test_duplication_preserves_walk_forward_end_offset(tmp_path):

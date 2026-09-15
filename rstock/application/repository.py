@@ -17,10 +17,16 @@ from .domain import ExperimentSpec, JobStatus
 
 STATUS_TRANSITIONS = {
     JobStatus.PENDING: {JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED},
-    JobStatus.RUNNING: {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED},
+    JobStatus.RUNNING: {
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.INTERRUPTED,
+    },
     JobStatus.COMPLETED: set(),
-    JobStatus.FAILED: set(),
-    JobStatus.CANCELLED: set(),
+    JobStatus.FAILED: {JobStatus.PENDING},
+    JobStatus.CANCELLED: {JobStatus.PENDING},
+    JobStatus.INTERRUPTED: {JobStatus.PENDING},
 }
 
 JSON_WRITE_ATTEMPTS = 5
@@ -246,6 +252,14 @@ class RunRepository:
         if target == JobStatus.RUNNING:
             status["started_at"] = now
             status["pid"] = pid
+            status["finished_at"] = None
+            status["error"] = None
+            status["cancellation_requested"] = False
+        if target == JobStatus.PENDING:
+            status["pid"] = None
+            status["finished_at"] = None
+            status["error"] = None
+            status["cancellation_requested"] = False
         if target.terminal:
             status["finished_at"] = now
             status["error"] = error
@@ -257,6 +271,19 @@ class RunRepository:
         status["status"] = target.value
         self.write_json(run_id, "status.json", status)
         return status
+
+    def prepare_resume(self, run_id: str) -> dict[str, Any]:
+        status = self.status(run_id)
+        current = JobStatus(status["status"])
+        if current not in {
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }:
+            raise ValueError(f"Run {run_id} is not resumable from status {current.value}")
+        cancellation = self.run_directory(run_id) / "cancel.requested"
+        cancellation.unlink(missing_ok=True)
+        return self.transition(run_id, JobStatus.PENDING)
 
     def request_cancellation(self, run_id: str) -> dict[str, Any]:
         status = self.status(run_id)

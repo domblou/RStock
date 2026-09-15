@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,7 @@ import pandas as pd
 
 from rstock.calibration import run_controlled_calibration, write_calibration_results
 from rstock.calendars import offset_market_session
+from rstock.checkpoints import CheckpointManager
 from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
@@ -28,7 +30,12 @@ from rstock.threshold_calibration import (
     run_controlled_threshold_calibration,
     write_threshold_calibration_results,
 )
-from rstock.walk_forward import evaluate_walk_forward, write_walk_forward_results
+from rstock.walk_forward import (
+    evaluate_prefilter_walk_forward,
+    evaluate_walk_forward,
+    write_walk_forward_results,
+)
+from rstock.streaming_walk_forward import run_streamed_walk_forward
 
 from .domain import ExperimentSpec, JobType
 from .production_repository import ProductionRepository
@@ -82,6 +89,7 @@ def _prepared_inputs(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
+    phase_started_at = perf_counter()
     _phase(progress_callback, "data_preparation", "started")
     downloaded, calendars = MarketDataService().load(
         spec,
@@ -162,7 +170,14 @@ def _prepared_inputs(
                 f"au moins {minimum_observations} observations sont requises pour "
                 "le train minimal et le holdout final."
             )
-    _phase(progress_callback, "data_preparation", "completed", symbols=len(downloaded.symbols))
+    _phase(
+        progress_callback,
+        "data_preparation",
+        "completed",
+        symbols=len(downloaded.symbols),
+        rows=len(prepared),
+        elapsed_seconds=perf_counter() - phase_started_at,
+    )
     available = set(downloaded.symbols)
     predictor_symbols = [
         symbol for symbol in spec.predictor_symbols if symbol in available
@@ -258,12 +273,17 @@ def _walk_forward(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
+    if output.name == "_working":
+        return _resumable_walk_forward(
+            spec, output, progress_callback, cancellation_check
+        )
     prefilter = None
+    prefilter_walk_forward_telemetry: dict[str, object] | None = None
     if spec.config.predictor_prefilter_enabled:
         prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
             spec, progress_callback, cancellation_check
         )
-        _phase(progress_callback, "combination_generation", "started")
+        _phase(progress_callback, "predictor_prefilter_generation", "started")
         univariate_sets = generate_symbol_sets(
             predictor_symbols,
             1,
@@ -281,15 +301,23 @@ def _walk_forward(
             ),
             qualification_max_auc_std=spec.config.predictor_prefilter_max_auc_std,
         )
-        univariate = evaluate_walk_forward(
+        _phase(
+            progress_callback,
+            "predictor_prefilter_generation",
+            "completed",
+            combinations=len(univariate_sets),
+        )
+        univariate = evaluate_prefilter_walk_forward(
             prepared,
             univariate_sets,
             prefilter_config,
             market_calendars=calendars,
-            evaluate_holdout=False,
             cancellation_check=cancellation_check,
+            progress_callback=progress_callback,
         )
+        prefilter_walk_forward_telemetry = univariate.telemetry
         development = prepared.iloc[:-spec.config.final_holdout_size]
+        _phase(progress_callback, "predictor_prefilter_selection", "started")
         prefilter = select_predictors(
             univariate.qualification,
             development,
@@ -297,6 +325,13 @@ def _walk_forward(
             candidate_symbols=predictor_symbols,
             config=spec.config,
         )
+        _phase(
+            progress_callback,
+            "predictor_prefilter_selection",
+            "completed",
+            retained=sum(len(values) for values in prefilter.predictors_by_target.values()),
+        )
+        _phase(progress_callback, "combination_generation", "started")
         generated = generate_target_symbol_sets(
             prefilter.predictors_by_target,
             spec.config.permutation_depth,
@@ -338,6 +373,7 @@ def _walk_forward(
                 spec.config.predictor_prefilter_correlation_threshold
             ),
             "targets": prefilter.diagnostics,
+            "telemetry": prefilter_walk_forward_telemetry,
         }
     _phase(progress_callback, "result_writing", "started")
     write_walk_forward_results(result, output)
@@ -366,6 +402,234 @@ def _walk_forward(
         summary["total_combinations"] = len(generated)
         summary["predictor_prefilter"] = _json_value(prefilter.diagnostics)
     return summary
+
+
+def _resumable_walk_forward(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    """Production walk-forward path backed by versioned run checkpoints."""
+
+    run_directory = output.parent
+    checkpoint = CheckpointManager(
+        run_directory,
+        run_id=run_directory.name,
+        job_type=spec.job_type.value,
+        configuration_fingerprint=spec.fingerprint,
+        batch_sizes={
+            "predictor_prefilter_walk_forward": (
+                spec.config.predictor_prefilter_batch_size
+            ),
+            "walk_forward": spec.config.walk_forward_batch_size,
+            "final_holdout": spec.config.final_holdout_batch_size,
+        },
+    )
+
+    if checkpoint.artifact_exists("prepared_snapshot"):
+        prepared, preparation = checkpoint.load_snapshot()
+        predictor_symbols = list(preparation["predictor_symbols"])
+        target_symbols = list(preparation["target_symbols"])
+        calendars = dict(preparation["calendars"])
+    else:
+        checkpoint.phase_started("data_preparation")
+        prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
+            spec, progress_callback, cancellation_check
+        )
+        checkpoint.commit_snapshot(
+            prepared,
+            {
+                "predictor_symbols": predictor_symbols,
+                "target_symbols": target_symbols,
+                "calendars": calendars,
+                "effective_end_date": prepared.attrs.get("effective_end_date"),
+            },
+        )
+        checkpoint.phase_completed("data_preparation")
+
+    prefilter = None
+    prefilter_telemetry: dict[str, object] | None = None
+    if spec.config.predictor_prefilter_enabled:
+        if checkpoint.artifact_exists("prefilter_univariate_sets"):
+            univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
+        else:
+            checkpoint.phase_started("predictor_prefilter_generation")
+            _phase(progress_callback, "predictor_prefilter_generation", "started")
+            phase_started_at = perf_counter()
+            univariate_sets = generate_symbol_sets(
+                predictor_symbols,
+                1,
+                target_symbols=target_symbols,
+                max_sets=spec.config.max_generated_sets,
+            )
+            checkpoint.commit_artifact("prefilter_univariate_sets", univariate_sets)
+            checkpoint.phase_completed("predictor_prefilter_generation")
+            _phase(
+                progress_callback,
+                "predictor_prefilter_generation",
+                "completed",
+                combinations=len(univariate_sets),
+                elapsed_seconds=perf_counter() - phase_started_at,
+            )
+        prefilter_config = replace(
+            spec.config,
+            qualification_min_median_auc=spec.config.predictor_prefilter_min_median_auc,
+            qualification_min_pct_windows_above_random=(
+                spec.config.predictor_prefilter_min_pct_above_random
+            ),
+            qualification_min_worst_window_auc=(
+                spec.config.predictor_prefilter_min_worst_auc
+            ),
+            qualification_max_auc_std=spec.config.predictor_prefilter_max_auc_std,
+        )
+        univariate = evaluate_prefilter_walk_forward(
+            prepared,
+            univariate_sets,
+            prefilter_config,
+            market_calendars=calendars,
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+            checkpoint_manager=checkpoint,
+        )
+        checkpoint.commit_artifact("prefilter_qualification", univariate.qualification)
+        checkpoint.phase_completed("predictor_prefilter_walk_forward")
+        prefilter_telemetry = univariate.telemetry
+        if checkpoint.artifact_exists("prefilter_selection"):
+            prefilter = checkpoint.load_artifact("prefilter_selection")
+        else:
+            checkpoint.phase_started("predictor_prefilter_selection")
+            _phase(progress_callback, "predictor_prefilter_selection", "started")
+            phase_started_at = perf_counter()
+            development = prepared.iloc[:-spec.config.final_holdout_size]
+            prefilter = select_predictors(
+                univariate.qualification,
+                development,
+                targets=target_symbols,
+                candidate_symbols=predictor_symbols,
+                config=spec.config,
+            )
+            checkpoint.commit_artifact("prefilter_selection", prefilter)
+            checkpoint.phase_completed("predictor_prefilter_selection")
+            _phase(
+                progress_callback,
+                "predictor_prefilter_selection",
+                "completed",
+                retained=sum(
+                    len(values) for values in prefilter.predictors_by_target.values()
+                ),
+                elapsed_seconds=perf_counter() - phase_started_at,
+            )
+        if checkpoint.artifact_exists("generated_sets"):
+            generated = checkpoint.load_artifact("generated_sets")
+        else:
+            checkpoint.phase_started("combination_generation")
+            _phase(progress_callback, "combination_generation", "started")
+            phase_started_at = perf_counter()
+            generated = generate_target_symbol_sets(
+                prefilter.predictors_by_target,
+                spec.config.permutation_depth,
+                max_sets=spec.config.max_generated_sets,
+            )
+            if generated.empty:
+                raise ValueError("Predictor prefilter retained no testable combinations")
+            checkpoint.commit_artifact("generated_sets", generated)
+            checkpoint.phase_completed("combination_generation")
+            _phase(
+                progress_callback,
+                "combination_generation",
+                "completed",
+                combinations=len(generated),
+                elapsed_seconds=perf_counter() - phase_started_at,
+            )
+    else:
+        if checkpoint.artifact_exists("generated_sets"):
+            generated = checkpoint.load_artifact("generated_sets")
+        else:
+            checkpoint.phase_started("combination_generation")
+            _phase(progress_callback, "combination_generation", "started")
+            phase_started_at = perf_counter()
+            generated = generate_symbol_sets(
+                predictor_symbols,
+                spec.config.permutation_depth,
+                target_symbols=target_symbols,
+                max_sets=spec.config.max_generated_sets,
+            )
+            checkpoint.commit_artifact("generated_sets", generated)
+            checkpoint.phase_completed("combination_generation")
+            _phase(
+                progress_callback,
+                "combination_generation",
+                "completed",
+                combinations=len(generated),
+                elapsed_seconds=perf_counter() - phase_started_at,
+            )
+
+    period = {
+        "walk_forward_end_offset_sessions": int(
+            spec.config.walk_forward_end_offset_sessions
+        ),
+        "effective_end_date": prepared.attrs.get("effective_end_date"),
+    }
+    extras: dict[str, object] = dict(period)
+    if prefilter is not None:
+        extras["predictor_prefilter"] = {
+            "enabled": True,
+            "score_formula": PREFILTER_SCORE_FORMULA,
+            "top_n": spec.config.predictor_prefilter_top_n,
+            "min_median_auc": spec.config.predictor_prefilter_min_median_auc,
+            "min_pct_above_random": (
+                spec.config.predictor_prefilter_min_pct_above_random
+            ),
+            "min_worst_auc": spec.config.predictor_prefilter_min_worst_auc,
+            "max_auc_std": spec.config.predictor_prefilter_max_auc_std,
+            "correlation_threshold": (
+                spec.config.predictor_prefilter_correlation_threshold
+            ),
+            "targets": prefilter.diagnostics,
+            "telemetry": prefilter_telemetry,
+        }
+    result = run_streamed_walk_forward(
+        prepared,
+        generated,
+        spec.config,
+        checkpoint,
+        output,
+        market_calendars=calendars,
+        evaluate_holdout=spec.evaluate_final_holdout,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        run_configuration_extras=extras,
+    )
+    if prefilter is not None:
+        prefilter.metrics.to_csv(output / "predictor_prefilter.csv", index=False)
+        (output / "predictor_prefilter.json").write_text(
+            json.dumps(
+                {
+                    "score_formula": PREFILTER_SCORE_FORMULA,
+                    "targets": prefilter.diagnostics,
+                    "telemetry": prefilter_telemetry,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return {
+        "job_type": spec.job_type.value,
+        "metrics": _json_value(result.aggregate_global.iloc[0].to_dict()),
+        "eligible_combinations": int(result.qualification["Eligible"].sum()),
+        "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
+        "execution_telemetry": _json_value(result.telemetry),
+        "checkpoint_manifest": "checkpoints/manifest.json",
+        **(
+            {"total_combinations": len(generated), "predictor_prefilter": _json_value(prefilter.diagnostics)}
+            if prefilter is not None
+            else {}
+        ),
+    }
 
 
 def _xgboost_calibration(

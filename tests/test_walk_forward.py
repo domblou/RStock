@@ -5,9 +5,12 @@ import pandas as pd
 import pytest
 
 from rstock.combinations import generate_symbol_sets
+from rstock.checkpoints import CheckpointManager
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import prepare_dataset
+from rstock.streaming_walk_forward import run_streamed_walk_forward
 from rstock.walk_forward import (
+    evaluate_prefilter_walk_forward,
     evaluate_walk_forward,
     expanding_windows,
     write_walk_forward_results,
@@ -164,6 +167,19 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
     )
     pd.testing.assert_frame_equal(result.qualification, altered_result.qualification)
 
+    prefilter_result = evaluate_prefilter_walk_forward(
+        prepared,
+        generated,
+        config,
+        market_calendars={"AAA": "XNYS", "BBB": "XNYS"},
+        min_train_size=10,
+        test_size=5,
+        step_size=5,
+        final_holdout_size=5,
+    )
+    pd.testing.assert_frame_equal(result.qualification, prefilter_result.qualification)
+    assert prefilter_result.telemetry["qualification_rows"] == len(result.qualification)
+
 
 def test_combination_process_workers_preserve_walk_forward_results_and_seed(tmp_path):
     index = pd.bdate_range("2024-01-01", periods=30)
@@ -192,10 +208,141 @@ def test_combination_process_workers_preserve_walk_forward_results_and_seed(tmp_
     generated = generate_symbol_sets(["AAA", "BBB", "CCC"], 1)
     arguments = dict(min_train_size=10, test_size=5, step_size=5, final_holdout_size=5)
     serial = evaluate_walk_forward(
-        prepared, generated, replace(base, combination_workers=1), **arguments
+        prepared,
+        generated,
+        replace(base, combination_workers=1, walk_forward_batch_size=1),
+        **arguments,
     )
     parallel = evaluate_walk_forward(
-        prepared, generated, replace(base, combination_workers=2), **arguments
+        prepared,
+        generated,
+        replace(base, combination_workers=2, walk_forward_batch_size=2),
+        **arguments,
+    )
+    large_batch = evaluate_walk_forward(
+        prepared,
+        generated,
+        replace(base, combination_workers=1, walk_forward_batch_size=100),
+        **arguments,
     )
     for name in ("windows", "predictions", "qualification", "final_holdout"):
         pd.testing.assert_frame_equal(getattr(serial, name), getattr(parallel, name))
+        pd.testing.assert_frame_equal(getattr(serial, name), getattr(large_batch, name))
+
+
+def test_streamed_walk_forward_matches_reference_artifacts(tmp_path):
+    index = pd.bdate_range("2024-01-01", periods=30)
+    signal = np.arange(len(index)) % 2
+    stock = pd.DataFrame(index=index)
+    for offset, symbol in enumerate(("AAA", "BBB")):
+        shifted = np.roll(signal, offset)
+        stock[f"{symbol}.Open"] = 100.0
+        stock[f"{symbol}.Close"] = np.where(shifted, 102.0, 100.0)
+        stock[f"{symbol}.High"] = np.maximum(stock[f"{symbol}.Close"], 100.0) + 1.0
+        stock[f"{symbol}.Low"] = np.minimum(stock[f"{symbol}.Close"], 100.0) - 1.0
+    config = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        permutation_depth=1,
+        combination_workers=1,
+        walk_forward_batch_size=1,
+        final_holdout_batch_size=1,
+        xgb_rounds=1,
+        xgb_nthread=1,
+        walk_forward_min_train_size=10,
+        walk_forward_test_size=5,
+        walk_forward_step_size=5,
+        final_holdout_size=5,
+        qualification_min_windows=3,
+        qualification_min_median_auc=0.0,
+        qualification_min_pct_windows_above_random=0.0,
+        qualification_min_worst_window_auc=0.0,
+        qualification_min_positive_observations=1,
+        qualification_max_auc_std=1.0,
+    )
+    prepared = prepare_dataset(stock, ["AAA", "BBB"])
+    generated = generate_symbol_sets(["AAA", "BBB"], 1)
+    reference = evaluate_walk_forward(prepared, generated, config)
+    reference_path = tmp_path / "reference"
+    write_walk_forward_results(reference, reference_path)
+    run_path = tmp_path / "run"
+    checkpoint = CheckpointManager(
+        run_path,
+        run_id="run",
+        job_type="walk_forward",
+        configuration_fingerprint="fixture",
+        batch_sizes={
+            "predictor_prefilter_walk_forward": config.predictor_prefilter_batch_size,
+            "walk_forward": config.walk_forward_batch_size,
+            "final_holdout": config.final_holdout_batch_size,
+        },
+    )
+    streamed_path = run_path / "_working"
+
+    run_streamed_walk_forward(
+        prepared,
+        generated,
+        config,
+        checkpoint,
+        streamed_path,
+    )
+
+    for name in (
+        "windows.csv",
+        "predictions.csv",
+        "aggregate_by_window.csv",
+        "aggregate_by_set.csv",
+        "aggregate_global.csv",
+        "qualification.csv",
+        "final_holdout.csv",
+        "final_holdout_predictions.csv",
+        "selection_results.csv",
+        "risk_by_window.csv",
+        "risk_by_set.csv",
+        "risk_global.csv",
+        "final_holdout_risk.csv",
+    ):
+        expected = pd.read_csv(reference_path / name)
+        actual = pd.read_csv(streamed_path / name)
+        pd.testing.assert_frame_equal(actual, expected, check_dtype=False, atol=1e-12)
+
+    large_config = replace(
+        config,
+        combination_workers=2,
+        walk_forward_batch_size=100,
+        final_holdout_batch_size=100,
+    )
+    large_run = tmp_path / "large-run"
+    large_checkpoint = CheckpointManager(
+        large_run,
+        run_id="large-run",
+        job_type="walk_forward",
+        configuration_fingerprint="large-fixture",
+        batch_sizes={
+            "predictor_prefilter_walk_forward": large_config.predictor_prefilter_batch_size,
+            "walk_forward": large_config.walk_forward_batch_size,
+            "final_holdout": large_config.final_holdout_batch_size,
+        },
+    )
+    large_path = large_run / "_working"
+    run_streamed_walk_forward(
+        prepared, generated, large_config, large_checkpoint, large_path
+    )
+    for name in (
+        "windows.csv",
+        "predictions.csv",
+        "aggregate_by_window.csv",
+        "aggregate_by_set.csv",
+        "aggregate_global.csv",
+        "qualification.csv",
+        "final_holdout.csv",
+        "final_holdout_predictions.csv",
+        "selection_results.csv",
+        "risk_by_window.csv",
+        "risk_by_set.csv",
+        "risk_global.csv",
+        "final_holdout_risk.csv",
+    ):
+        small = pd.read_csv(streamed_path / name)
+        large = pd.read_csv(large_path / name)
+        pd.testing.assert_frame_equal(small, large, check_dtype=False, atol=1e-12)

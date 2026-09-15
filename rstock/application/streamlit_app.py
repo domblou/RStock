@@ -110,6 +110,20 @@ DUPLICATION_CONFIG_CHOICE_KEY = "experiment-duplication-config-choice"
 DUPLICATION_JOB_TYPE_KEY = "experiment-duplication-job-type"
 EXPERIMENT_NAVIGATION_KEY = "requested-primary-page"
 _PRIMARY_PAGES: list[st.Page] | None = None
+WORKFLOW_PHASE_LABELS = {
+    "data_preparation": "Préparation des données",
+    "predictor_prefilter_generation": "Predictor prefilter",
+    "predictor_prefilter_walk_forward": "Walk-forward du prefilter",
+    "predictor_prefilter_selection": "Sélection des prédicteurs",
+    "combination_generation": "Génération des combinaisons",
+    "walk_forward": "Walk-forward",
+    "aggregation": "Agrégation",
+    "qualification": "Qualification",
+    "final_holdout": "Holdout final",
+    "metrics": "Métriques",
+    "result_writing": "Écriture",
+    "publishing": "Publication",
+}
 
 
 def _page_header(title: str) -> None:
@@ -326,7 +340,8 @@ def _job_panel(service: ExperimentService, *, active_only: bool = True) -> None:
             columns[2].metric("Statut", status["status"])
             columns[3].metric("Durée", _duration(running_duration(status)))
             st.caption(
-                f"Étape: {progress.get('stage', '—')} · "
+                "Étape: "
+                f"{WORKFLOW_PHASE_LABELS.get(str(progress.get('stage')), progress.get('stage', '—'))} · "
                 f"Sous-étape: {progress.get('substage') or '—'}"
             )
             workflow_percent = progress.get("workflow_percent")
@@ -617,6 +632,25 @@ def _settings() -> None:
                 "0 = données les plus récentes."
             ),
         )
+        b1, b2, b3 = st.columns(3)
+        prefilter_batch_size = b1.number_input(
+            "Batch préfiltre",
+            min_value=1,
+            value=current.predictor_prefilter_batch_size,
+            help="Nombre de combinaisons univariées calculées avant chaque checkpoint.",
+        )
+        walk_forward_batch_size = b2.number_input(
+            "Batch walk-forward",
+            min_value=1,
+            value=current.walk_forward_batch_size,
+            help="Nombre de combinaisons détaillées conservées simultanément en mémoire.",
+        )
+        final_holdout_batch_size = b3.number_input(
+            "Batch holdout final",
+            min_value=1,
+            value=current.final_holdout_batch_size,
+            help="Nombre de modèles admissibles évalués entre deux checkpoints holdout.",
+        )
 
         st.subheader("Pré-filtrage des prédicteurs")
         prefilter_enabled = st.checkbox(
@@ -806,6 +840,9 @@ def _settings() -> None:
                 walk_forward_step_size=int(step),
                 final_holdout_size=int(holdout),
                 walk_forward_end_offset_sessions=int(end_offset),
+                predictor_prefilter_batch_size=int(prefilter_batch_size),
+                walk_forward_batch_size=int(walk_forward_batch_size),
+                final_holdout_batch_size=int(final_holdout_batch_size),
                 predictor_prefilter_enabled=bool(prefilter_enabled),
                 predictor_prefilter_top_n=int(prefilter_top_n),
                 predictor_prefilter_min_median_auc=float(prefilter_median_auc),
@@ -1314,6 +1351,65 @@ def _render_threshold_sensitivity_analysis(
     )
 
 
+def _render_resume_controls(
+    run_id: str,
+    status: dict[str, object],
+    detail: dict[str, object],
+) -> None:
+    if status.get("job_type") != JobType.WALK_FORWARD.value or status.get(
+        "status"
+    ) not in {"failed", "cancelled", "interrupted"}:
+        return
+    manifest = detail.get("checkpoint")
+    error = detail.get("checkpoint_error")
+    if isinstance(manifest, dict):
+        completed_phases = list(manifest.get("phases_completed", []))
+        current_phase = str(manifest.get("current_phase") or "—")
+        batches = manifest.get("batches", {})
+        batch_info = batches.get(current_phase, {}) if isinstance(batches, dict) else {}
+        if not batch_info and isinstance(batches, dict):
+            batch_info = batches.get("walk_forward", {})
+        completed_batches = len(batch_info.get("completed", [])) if isinstance(batch_info, dict) else 0
+        total_batches = batch_info.get("total") if isinstance(batch_info, dict) else None
+        last = manifest.get("last_checkpoint", {})
+        last_time = last.get("at", "—") if isinstance(last, dict) else "—"
+        st.caption(
+            "Checkpoint · dernière phase complétée : "
+            f"{WORKFLOW_PHASE_LABELS.get(completed_phases[-1], completed_phases[-1]) if completed_phases else 'aucune'} · "
+            f"arrêt : {WORKFLOW_PHASE_LABELS.get(current_phase, current_phase)} · "
+            f"batchs : {completed_batches}/{total_batches if total_batches is not None else '—'} · "
+            f"dernier checkpoint : {last_time}"
+        )
+    if error:
+        st.warning(str(error))
+    actions = st.columns(2)
+    if actions[0].button(
+        "Reprendre le run",
+        key=f"resume-run-{run_id}",
+        disabled=bool(error),
+        width="stretch",
+    ):
+        try:
+            _service().resume(run_id)
+        except (OSError, ValueError, RuntimeError) as resume_error:
+            st.error(f"Reprise impossible : {resume_error}")
+        else:
+            st.success("Reprise soumise au worker.")
+            st.rerun()
+    if actions[1].button(
+        "Relancer depuis le début",
+        key=f"restart-run-{run_id}",
+        width="stretch",
+    ):
+        try:
+            restarted = _service().restart(run_id)
+        except (OSError, ValueError, RuntimeError) as restart_error:
+            st.error(f"Relance impossible : {restart_error}")
+        else:
+            st.success(f"Nouveau run créé : {restarted.run_id}")
+            st.rerun()
+
+
 def _render_history_detail(
     run_id: str,
     *,
@@ -1331,6 +1427,7 @@ def _render_history_detail(
     columns[3].metric("Durée", history_row(status, detail, {}).duration)
     columns[4].metric("Contexte", context)
     st.caption(f"ID technique : {run_id}")
+    _render_resume_controls(run_id, status, detail)
     if (
         status["job_type"] == JobType.WALK_FORWARD.value
         and status["status"] == "completed"
@@ -1487,6 +1584,19 @@ def _render_run_detail_view(
             run_id, status=status, detail=detail,
             context=history_row(status, detail, {}).context,
             summary_text=history_row(status, detail, {}).summary,
+        )
+        return
+    if status["status"] != "completed":
+        st.caption("Historique > Détail du run")
+        if st.button("← Retour à Historique", key="history-back-incomplete"):
+            _clear_history_navigation()
+        row = history_row(status, detail, {})
+        _render_history_detail(
+            run_id,
+            status=status,
+            detail=detail,
+            context=row.context,
+            summary_text=row.summary,
         )
         return
     analytics = _load_run_analytics(run_id, status, detail)

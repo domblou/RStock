@@ -31,6 +31,9 @@ class RStockConfig:
     selected_symbols: tuple[str, ...] | None = None
     market_cache_workers: int = 8
     combination_workers: int = 3
+    predictor_prefilter_batch_size: int = 25
+    walk_forward_batch_size: int = 25
+    final_holdout_batch_size: int = 25
     model_history_days: int = 730
     prediction_history_days: int = 10
 
@@ -165,6 +168,13 @@ class RStockConfig:
 
 DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])
 
+# Fields absent from old immutable run snapshots must retain the behavior those
+# runs were created with, rather than inheriting today's defaults.
+HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    "walk_forward_end_offset_sessions": 63,
+    "max_generated_sets": 1_000_000_000,
+}
+
 USER_SETTINGS_SCHEMA_VERSION = 1
 USER_SETTINGS_RELATIVE_PATH = Path("data") / "config" / "user_settings.json"
 UI_SETTINGS_DEFAULTS: dict[str, object] = {
@@ -208,6 +218,8 @@ def _coerce_config_value(name: str, value: object, default_value: object) -> obj
         if isinstance(value, int) and not isinstance(value, bool):
             if name == "walk_forward_end_offset_sessions" and value < 0:
                 raise ValueError(f"{name} must be an integer >= 0")
+            if name.endswith("_batch_size") and value < 1:
+                raise ValueError(f"{name} must be an integer >= 1")
             return value
         raise ValueError(f"{name} must be an integer")
 

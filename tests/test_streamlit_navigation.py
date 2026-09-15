@@ -307,6 +307,27 @@ def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary
     assert 'st.subheader("Pré-filtrage des prédicteurs")' in detail
 
 
+def test_settings_and_history_expose_resumable_walk_forward_controls():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split("def _models", 1)[0]
+    detail = source.split("def _render_resume_controls", 1)[1].split(
+        "def _render_history_detail", 1
+    )[0]
+
+    for label in ("Batch préfiltre", "Batch walk-forward", "Batch holdout final"):
+        assert label in settings
+    for field in (
+        "predictor_prefilter_batch_size",
+        "walk_forward_batch_size",
+        "final_holdout_batch_size",
+    ):
+        assert field in settings
+    assert "Reprendre le run" in detail
+    assert "Relancer depuis le début" in detail
+    assert "checkpoint_error" in detail
+    assert "completed_phases" in detail
+
+
 def test_settings_and_combination_detail_expose_model_selection_scores():
     source = APP.read_text(encoding="utf-8")
     settings = source.split("def _settings", 1)[1].split(

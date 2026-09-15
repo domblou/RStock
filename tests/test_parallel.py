@@ -2,7 +2,11 @@ import time
 
 import pytest
 
-from rstock.parallel import process_cancellation_requested, run_combination_tasks
+from rstock.parallel import (
+    iter_combination_batches,
+    process_cancellation_requested,
+    run_combination_tasks,
+)
 from rstock.progress import CancellationRequested
 
 
@@ -60,3 +64,19 @@ def test_parallel_combination_cancellation_stops_without_partial_result():
             stage="test",
             cancellation_check=lambda: True,
         )
+
+
+def test_combination_batches_preserve_input_order_and_batch_boundaries():
+    batches = list(iter_combination_batches(
+        [0, 1, 2, 3, 4],
+        batch_size=2,
+        combination_workers=2,
+        worker_context={item: 0.01 for item in range(5)},
+        context_initializer=_set_test_context,
+        process_task=_process_task,
+        serial_task=_serial_task,
+        item_label=str,
+        stage="test",
+    ))
+
+    assert batches == [[0, 10], [20, 30], [40]]

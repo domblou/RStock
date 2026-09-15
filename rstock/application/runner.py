@@ -17,6 +17,10 @@ from rstock.progress import ProgressEvent
 
 from .domain import ExperimentSpec, JobStatus
 from .repository import RunRepository, utc_now
+from rstock.checkpoints import (
+    CHECKPOINT_IMPLEMENTATION_VERSION,
+    CHECKPOINT_SCHEMA_VERSION,
+)
 
 
 ACTIVE_STATUSES = {JobStatus.PENDING.value, JobStatus.RUNNING.value}
@@ -57,6 +61,21 @@ class LocalProcessBackend:
             close_fds=True,
         )
         return process.pid
+
+
+def _pid_alive(pid: object) -> bool:
+    try:
+        numeric = int(pid)
+        if numeric <= 0:
+            return False
+        os.kill(numeric, 0)
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class RunService:
@@ -123,7 +142,102 @@ class RunService:
             return self.repository.transition(run_id, JobStatus.CANCELLED)
         return self.repository.status(run_id)
 
+    def resume(self, run_id: str) -> SubmissionResult:
+        """Resume the same run id through the normal detached worker backend."""
+
+        from rstock.checkpoints import CheckpointManager
+
+        with self._submission_lock():
+            self._refresh_interrupted(run_id)
+            status = self.repository.status(run_id)
+            if status["status"] in ACTIVE_STATUSES:
+                raise ValueError("Ce run est déjà en cours ou en attente.")
+            spec = self.repository.load_spec(run_id)
+            if spec.job_type.value != "walk_forward":
+                raise ValueError("Seuls les walk-forward avec checkpoint sont reprenables.")
+            if not (
+                self.repository.run_directory(run_id) / "checkpoints" / "manifest.json"
+            ).exists():
+                raise ValueError(
+                    "Aucun checkpoint de reprise n’est disponible pour ce run. "
+                    "Relancez depuis le début."
+                )
+            CheckpointManager(
+                self.repository.run_directory(run_id),
+                run_id=run_id,
+                job_type=spec.job_type.value,
+                configuration_fingerprint=spec.fingerprint,
+                batch_sizes={
+                    "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+                    "walk_forward": spec.config.walk_forward_batch_size,
+                    "final_holdout": spec.config.final_holdout_batch_size,
+                },
+            )
+            self.repository.prepare_resume(run_id)
+            pid = self.backend.launch(
+                self.repository.root, run_id, self.max_concurrent_heavy_jobs
+            )
+            resumed = self.repository.status(run_id)
+            resumed["launcher_pid"] = pid
+            resumed["resume_requested"] = True
+            self.repository.write_json(run_id, "status.json", resumed)
+            return SubmissionResult(run_id, False)
+
+    def restart(self, run_id: str) -> SubmissionResult:
+        """Create a fresh run from a historical spec without touching the source."""
+
+        spec = self.repository.load_spec(run_id)
+        with self._submission_lock():
+            new_run_id = self.repository.create(spec)
+            pid = self.backend.launch(
+                self.repository.root, new_run_id, self.max_concurrent_heavy_jobs
+            )
+            status = self.repository.status(new_run_id)
+            status["launcher_pid"] = pid
+            status["restarted_from_run"] = run_id
+            self.repository.write_json(new_run_id, "status.json", status)
+            return SubmissionResult(new_run_id, True)
+
+    def _refresh_interrupted(self, run_id: str) -> dict[str, object]:
+        status = self.repository.status(run_id)
+        if status.get("status") == JobStatus.RUNNING.value and not _pid_alive(
+            status.get("pid")
+        ):
+            status = self.repository.transition(
+                run_id,
+                JobStatus.INTERRUPTED,
+                error="Le processus worker n’est plus actif.",
+            )
+        return status
+
     def get(self, run_id: str) -> dict[str, object]:
+        self._refresh_interrupted(run_id)
+        checkpoint_path = (
+            self.repository.run_directory(run_id) / "checkpoints" / "manifest.json"
+        )
+        checkpoint = None
+        checkpoint_error = None
+        if checkpoint_path.exists():
+            try:
+                import json
+
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                status = self.repository.status(run_id)
+                if (
+                    checkpoint.get("checkpoint_schema_version")
+                    != CHECKPOINT_SCHEMA_VERSION
+                    or checkpoint.get("implementation_version")
+                    != CHECKPOINT_IMPLEMENTATION_VERSION
+                ):
+                    checkpoint_error = "Version de checkpoint incompatible."
+                elif checkpoint.get("configuration_fingerprint") != status.get(
+                    "configuration_fingerprint"
+                ):
+                    checkpoint_error = "Configuration différente du checkpoint."
+            except (OSError, ValueError):
+                checkpoint_error = "Manifest de checkpoint illisible ou corrompu."
+        else:
+            checkpoint_error = "Aucun checkpoint de reprise disponible pour cet ancien run."
         return {
             "configuration": self.repository.load_spec(run_id).to_dict(),
             "status": self.repository.status(run_id),
@@ -131,10 +245,12 @@ class RunService:
             "summary": self.repository.summary(run_id),
             "files": self.repository.result_files(run_id),
             "log_tail": self.repository.log_tail(run_id),
+            "checkpoint": checkpoint,
+            "checkpoint_error": checkpoint_error,
         }
 
     def list(self) -> list[dict[str, object]]:
-        return self.repository.list_runs()
+        return [self._refresh_interrupted(run_id) for run_id in self.repository.list_run_ids()]
 
 
 class ProgressReporter:

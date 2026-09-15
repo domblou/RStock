@@ -9,7 +9,11 @@ from math import comb
 from pathlib import Path
 from typing import Any, Mapping
 
-from rstock.config import DEFAULT_CONFIG, RStockConfig
+from rstock.config import (
+    DEFAULT_CONFIG,
+    HISTORICAL_MISSING_CONFIG_DEFAULTS,
+    RStockConfig,
+)
 
 from .domain import ExperimentSpec, JobType
 from .universes import UniverseSelection
@@ -133,6 +137,7 @@ def config_from_historical_snapshot(
     source = snapshot or {}
     allowed = {field.name for field in fields(RStockConfig)} - {"project_root"}
     values: dict[str, Any] = asdict(DEFAULT_CONFIG)
+    values.update(HISTORICAL_MISSING_CONFIG_DEFAULTS)
     values.update({name: deepcopy(value) for name, value in source.items() if name in allowed})
     values["project_root"] = Path(current_project_root)
     for name in ("selected_symbols", "threshold_calibration_quantiles"):

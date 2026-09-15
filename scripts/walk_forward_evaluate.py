@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
+from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 
 from rstock.calendars import validate_calendar_name
+from rstock.checkpoints import CheckpointManager
 from rstock.combinations import generate_symbol_sets
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
+from rstock.streaming_walk_forward import run_streamed_walk_forward
 from rstock.symbols import read_symbol_universe
-from rstock.walk_forward import evaluate_walk_forward, write_walk_forward_results
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -54,6 +58,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--combination-workers", type=int, default=DEFAULT_CONFIG.combination_workers
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=DEFAULT_CONFIG.walk_forward_batch_size
     )
     parser.add_argument(
         "--min-windows", type=int, default=DEFAULT_CONFIG.qualification_min_windows
@@ -105,6 +112,12 @@ def main() -> None:
         qualification_min_positive_observations=args.min_positive_observations,
         qualification_max_auc_std=args.max_auc_std,
         combination_workers=args.combination_workers,
+        walk_forward_batch_size=args.batch_size,
+        final_holdout_batch_size=args.batch_size,
+        walk_forward_min_train_size=args.min_train_size,
+        walk_forward_test_size=args.test_size,
+        walk_forward_step_size=args.step_size,
+        final_holdout_size=args.final_holdout_size,
     )
 
     if args.symbols:
@@ -128,40 +141,69 @@ def main() -> None:
         symbols = universe["Symbol"].tolist()
         market_calendars = universe.set_index("Symbol")["Calendar"].to_dict()
 
-    downloaded = market_data_service(config).get_market_data(
-        universe,
-        args.history_days,
-        force_refresh=args.force_refresh,
-        force_symbols=set(args.force_symbol),
+    fingerprint_values = asdict(config)
+    fingerprint_values["project_root"] = str(config.project_root)
+    fingerprint_values.update({
+        "symbols": symbols,
+        "universe": universe.to_dict("records"),
+        "market_calendars": market_calendars,
+        "history_days": args.history_days,
+        "force_refresh": bool(args.force_refresh),
+        "force_symbols": sorted(args.force_symbol),
+    })
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_values, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    checkpoint = CheckpointManager(
+        config.walk_forward_path / ".checkpoint_runs" / fingerprint,
+        run_id=fingerprint,
+        job_type="walk_forward",
+        configuration_fingerprint=fingerprint,
+        batch_sizes={
+            "predictor_prefilter_walk_forward": config.predictor_prefilter_batch_size,
+            "walk_forward": config.walk_forward_batch_size,
+            "final_holdout": config.final_holdout_batch_size,
+        },
     )
-    if len(downloaded.symbols) < 2:
-        raise RuntimeError("At least two symbols must be downloaded")
-    if downloaded.failed_symbols:
-        print(f"Cache/download issues for: {', '.join(downloaded.failed_symbols)}")
-
-    prepared = prepare_dataset(
-        downloaded.prices,
-        downloaded.symbols,
-        config.intraday_target_threshold,
-        config.lag_depth,
-        config.intraday_down_threshold,
-    )
-    generated = generate_symbol_sets(
-        downloaded.symbols,
-        args.permutation_depth,
-        max_sets=config.max_generated_sets,
-    )
-    result = evaluate_walk_forward(
+    if checkpoint.artifact_exists("prepared_snapshot"):
+        prepared, snapshot = checkpoint.load_snapshot()
+        generated = snapshot["generated_sets"]
+        market_calendars = snapshot["market_calendars"]
+    else:
+        downloaded = market_data_service(config).get_market_data(
+            universe,
+            args.history_days,
+            force_refresh=args.force_refresh,
+            force_symbols=set(args.force_symbol),
+        )
+        if len(downloaded.symbols) < 2:
+            raise RuntimeError("At least two symbols must be downloaded")
+        if downloaded.failed_symbols:
+            print(f"Cache/download issues for: {', '.join(downloaded.failed_symbols)}")
+        prepared = prepare_dataset(
+            downloaded.prices,
+            downloaded.symbols,
+            config.intraday_target_threshold,
+            config.lag_depth,
+            config.intraday_down_threshold,
+        )
+        generated = generate_symbol_sets(
+            downloaded.symbols,
+            args.permutation_depth,
+            max_sets=config.max_generated_sets,
+        )
+        checkpoint.commit_snapshot(prepared, {
+            "generated_sets": generated,
+            "market_calendars": market_calendars,
+        })
+    result = run_streamed_walk_forward(
         prepared,
         generated,
         config,
+        checkpoint,
+        config.walk_forward_path,
         market_calendars=market_calendars,
-        min_train_size=args.min_train_size,
-        test_size=args.test_size,
-        step_size=args.step_size,
-        final_holdout_size=args.final_holdout_size,
     )
-    write_walk_forward_results(result, config.walk_forward_path)
     print(result.aggregate_global.to_string(index=False))
     print(
         f"Eligible combinations: {int(result.qualification['Eligible'].sum())}/"

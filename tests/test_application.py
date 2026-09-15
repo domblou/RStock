@@ -14,8 +14,13 @@ from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 import rstock.application.repository as repository_module
 from rstock.application.repository import RunRepository
 from rstock.application.runner import ProgressReporter, RunService
-from rstock.application.worker import SlotLease, execute_run
-from rstock.application.workflows import WorkflowRegistry, _prepared_experiment, _walk_forward
+from rstock.application.worker import RunLease, SlotLease, execute_run
+from rstock.application.workflows import (
+    WorkflowRegistry,
+    _prepared_experiment,
+    _resumable_walk_forward,
+    _walk_forward,
+)
 from rstock.config import DEFAULT_CONFIG
 from rstock.progress import ProgressEvent, check_cancellation
 
@@ -59,6 +64,22 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     restored = RunRepository(tmp_path / "runs").load_spec(run_id)
     assert restored == spec
     assert restored.config.xgb_seed == 987
+
+
+def test_legacy_experiment_config_defaults_missing_batch_sizes(tmp_path):
+    values = _spec(tmp_path).to_dict()
+    for name in (
+        "predictor_prefilter_batch_size",
+        "walk_forward_batch_size",
+        "final_holdout_batch_size",
+    ):
+        values["rstock_config"].pop(name)
+
+    restored = ExperimentSpec.from_dict(values)
+
+    assert restored.config.predictor_prefilter_batch_size == 25
+    assert restored.config.walk_forward_batch_size == 25
+    assert restored.config.final_holdout_batch_size == 25
 
 
 def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
@@ -178,9 +199,12 @@ def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
         evaluated_configs.append(config)
         evaluated_options.append(kwargs)
         if len(evaluated_sets) == 1:
-            return SimpleNamespace(qualification=qualification)
+            return SimpleNamespace(qualification=qualification, telemetry={})
         return final_result
 
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_prefilter_walk_forward", fake_evaluate
+    )
     monkeypatch.setattr(
         "rstock.application.workflows.evaluate_walk_forward", fake_evaluate
     )
@@ -211,7 +235,7 @@ def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
     assert evaluated_configs[0].qualification_min_median_auc == (
         spec.config.predictor_prefilter_min_median_auc
     )
-    assert evaluated_options[0]["evaluate_holdout"] is False
+    assert "evaluate_holdout" not in evaluated_options[0]
     assert "evaluate_holdout" not in evaluated_options[1]
     assert summary["total_combinations"] == 1
     assert summary["predictor_prefilter"][0]["retained_predictors"] == ["A"]
@@ -540,6 +564,162 @@ def test_slot_lease_enforces_concurrency_limit(tmp_path):
     assert acquired.wait(timeout=1)
     second.release()
     thread.join(timeout=1)
+
+
+def test_failed_walk_forward_can_resume_same_run_only_once(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+
+    def fail(spec, output, progress, cancellation):
+        raise RuntimeError("boom")
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.WALK_FORWARD: fail}),
+    )
+    backend = FakeBackend()
+    service = RunService(repository, backend=backend)
+
+    resumed = service.resume(run_id)
+
+    assert resumed.run_id == run_id
+    assert resumed.created is False
+    assert repository.status(run_id)["status"] == "pending"
+    assert backend.launches[0][1] == run_id
+    with pytest.raises(ValueError, match="déjà"):
+        service.resume(run_id)
+
+
+def test_restart_creates_new_run_and_keeps_failed_source_intact(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    source = repository.create(_spec(tmp_path))
+    repository.transition(source, JobStatus.FAILED, error="original failure")
+    backend = FakeBackend()
+
+    restarted = RunService(repository, backend=backend).restart(source)
+
+    assert restarted.run_id != source
+    assert repository.status(source)["status"] == "failed"
+    assert repository.status(restarted.run_id)["restarted_from_run"] == source
+    assert repository.load_spec(restarted.run_id) == repository.load_spec(source)
+
+
+def test_per_run_lease_refuses_a_second_live_worker(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    first = RunLease(repository, run_id)
+    second = RunLease(repository, run_id)
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="verrou"):
+            second.acquire()
+    finally:
+        first.release()
+
+
+def test_resume_refuses_legacy_run_without_checkpoint(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.FAILED, error="legacy")
+
+    with pytest.raises(ValueError, match="Aucun checkpoint"):
+        RunService(repository, backend=FakeBackend()).resume(run_id)
+
+
+def test_dead_running_worker_is_exposed_as_interrupted(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.RUNNING, pid=999_999_999)
+
+    detail = RunService(repository, backend=FakeBackend()).get(run_id)
+
+    assert detail["status"]["status"] == "interrupted"
+
+
+def test_attempt_history_survives_failed_then_successful_resume(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+
+    def fail(spec, output, progress, cancellation):
+        raise RuntimeError("first attempt")
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.WALK_FORWARD: fail}),
+    )
+    RunService(repository, backend=FakeBackend()).resume(run_id)
+
+    def succeed(spec, output, progress, cancellation):
+        (output / "result.txt").write_text("ok", encoding="utf-8")
+        return {"job_type": spec.job_type.value}
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.WALK_FORWARD: succeed}),
+    )
+    manifest = repository.read_json(run_id, "checkpoints/manifest.json")
+
+    assert repository.status(run_id)["status"] == "completed"
+    assert manifest["attempt_count"] == 2
+    assert manifest["resume_count"] == 1
+    assert [attempt["status"] for attempt in manifest["attempts"]] == [
+        "failed",
+        "completed",
+    ]
+
+
+def test_resumable_workflow_reuses_prepared_and_generated_snapshots(monkeypatch, tmp_path):
+    run = tmp_path / "runs" / "run-fixture"
+    output = run / "_working"
+    prepared = pd.DataFrame(index=pd.bdate_range("2026-01-01", periods=12))
+    loads = 0
+
+    def prepare(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return prepared, ["AAA", "BBB"], ["AAA"], {"AAA": "XNYS"}
+
+    monkeypatch.setattr("rstock.application.workflows._prepared_inputs", prepare)
+    monkeypatch.setattr(
+        "rstock.application.workflows.run_streamed_walk_forward",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("walk crash")),
+    )
+    with pytest.raises(RuntimeError, match="walk crash"):
+        _resumable_walk_forward(_spec(tmp_path, permutation_depth=1), output, None, None)
+
+    monkeypatch.setattr(
+        "rstock.application.workflows._prepared_inputs",
+        lambda *args, **kwargs: pytest.fail("prepared snapshot was not reused"),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.generate_symbol_sets",
+        lambda *args, **kwargs: pytest.fail("generated-set checkpoint was not reused"),
+    )
+
+    def resumed(*args, **kwargs):
+        output.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            aggregate_global=pd.DataFrame([{"Sets": 1}]),
+            qualification=pd.DataFrame([{"Eligible": True}]),
+            run_configuration={},
+            telemetry={},
+        )
+
+    monkeypatch.setattr(
+        "rstock.application.workflows.run_streamed_walk_forward", resumed
+    )
+    summary = _resumable_walk_forward(
+        _spec(tmp_path, permutation_depth=1), output, None, None
+    )
+
+    assert loads == 1
+    assert summary["eligible_combinations"] == 1
 
 
 def test_services_import_without_streamlit(monkeypatch):

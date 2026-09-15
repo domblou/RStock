@@ -11,6 +11,7 @@ import traceback
 from pathlib import Path
 
 from rstock.progress import CancellationRequested, check_cancellation
+from rstock.checkpoints import CheckpointManager
 
 from .domain import JobStatus, JobType
 from .repository import RunRepository
@@ -20,9 +21,12 @@ from .workflows import WorkflowRegistry
 
 WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
     JobType.WALK_FORWARD: [
-        ("data_preparation", 10), ("combination_generation", 5),
-        ("walk_forward", 65), ("aggregation", 7), ("qualification", 5),
-        ("final_holdout", 4), ("metrics", 2), ("result_writing", 1), ("publishing", 1),
+        ("data_preparation", 8), ("predictor_prefilter_generation", 2),
+        ("predictor_prefilter_walk_forward", 18),
+        ("predictor_prefilter_selection", 2), ("combination_generation", 4),
+        ("walk_forward", 47), ("aggregation", 7), ("qualification", 5),
+        ("final_holdout", 3), ("metrics", 2), ("result_writing", 1),
+        ("publishing", 1),
     ],
     JobType.XGBOOST_CALIBRATION: [
         ("data_preparation", 12), ("combination_generation", 6),
@@ -128,6 +132,54 @@ class SlotLease:
             self.path = None
 
 
+class RunLease:
+    """Exclusive per-run lease preventing concurrent resume workers."""
+
+    def __init__(self, repository: RunRepository, run_id: str) -> None:
+        self.repository = repository
+        self.run_id = run_id
+        self.path = repository.run_directory(run_id) / ".worker.lock"
+        self.acquired = False
+
+    def _clear_stale(self) -> None:
+        owner_path = self.path / "owner.json"
+        try:
+            owner = json.loads(owner_path.read_text(encoding="utf-8"))
+            alive = _process_alive(int(owner["pid"]))
+        except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
+            alive = False
+        if not alive:
+            owner_path.unlink(missing_ok=True)
+            try:
+                self.path.rmdir()
+            except OSError:
+                pass
+
+    def acquire(self) -> None:
+        for _ in range(2):
+            try:
+                self.path.mkdir()
+            except FileExistsError:
+                self._clear_stale()
+                continue
+            (self.path / "owner.json").write_text(
+                json.dumps({"pid": os.getpid(), "run_id": self.run_id}),
+                encoding="utf-8",
+            )
+            self.acquired = True
+            return
+        raise RuntimeError("Une autre exécution détient déjà le verrou de ce run.")
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        (self.path / "owner.json").unlink(missing_ok=True)
+        try:
+            self.path.rmdir()
+        finally:
+            self.acquired = False
+
+
 def execute_run(
     repository: RunRepository,
     run_id: str,
@@ -141,6 +193,8 @@ def execute_run(
     if JobStatus(status["status"]).terminal:
         return
     lease = SlotLease(repository, run_id, max_concurrent_jobs)
+    run_lease = RunLease(repository, run_id)
+    checkpoint: CheckpointManager | None = None
     log_handler = logging.FileHandler(
         repository.run_directory(run_id) / "run.log", encoding="utf-8"
     )
@@ -149,15 +203,42 @@ def execute_run(
     root_logger.addHandler(log_handler)
     root_logger.setLevel(logging.INFO)
     try:
+        run_lease.acquire()
         lease.acquire()
         check_cancellation(lambda: repository.cancellation_requested(run_id))
         repository.transition(run_id, JobStatus.RUNNING, pid=os.getpid())
         repository.append_log(run_id, "Worker started")
         reporter = ProgressReporter(repository, run_id)
         spec = repository.load_spec(run_id)
+        if spec.job_type is JobType.WALK_FORWARD:
+            checkpoint = CheckpointManager(
+                repository.run_directory(run_id),
+                run_id=run_id,
+                job_type=spec.job_type.value,
+                configuration_fingerprint=spec.fingerprint,
+                batch_sizes={
+                    "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+                    "walk_forward": spec.config.walk_forward_batch_size,
+                    "final_holdout": spec.config.final_holdout_batch_size,
+                },
+            )
+            checkpoint.start_attempt(
+                resumed=bool(status.get("resume_requested"))
+                or int(checkpoint.manifest.get("attempt_count", 0)) > 0
+            )
         reporter.configure_phases(WORKFLOW_PHASES[spec.job_type])
         working = repository.run_directory(run_id) / "_working"
-        working.mkdir(exist_ok=False)
+        results = repository.run_directory(run_id) / "results"
+        if results.exists() and repository.summary(run_id):
+            reporter.phase_started("publishing")
+            reporter.phase_completed("publishing")
+            reporter.complete_workflow()
+            repository.transition(run_id, JobStatus.COMPLETED)
+            if checkpoint is not None:
+                checkpoint.finish_attempt("completed")
+            repository.append_log(run_id, "Worker completed after publication recovery")
+            return
+        working.mkdir(exist_ok=bool(status.get("resume_requested")))
         active_registry = registry or WorkflowRegistry.production()
         summary = active_registry.execute(
             spec,
@@ -168,26 +249,34 @@ def execute_run(
         if spec.run_description:
             summary = {**summary, "run_description": spec.run_description}
         check_cancellation(lambda: repository.cancellation_requested(run_id))
-        results = repository.run_directory(run_id) / "results"
         reporter.phase_started("publishing")
-        working.rename(results)
         repository.write_json(run_id, "summary.json", summary)
+        working.rename(results)
         reporter.phase_completed("publishing")
         reporter.complete_workflow()
         repository.transition(run_id, JobStatus.COMPLETED)
+        if checkpoint is not None:
+            checkpoint.finish_attempt("completed")
         repository.append_log(run_id, "Worker completed")
     except CancellationRequested:
         current = JobStatus(repository.status(run_id)["status"])
         if not current.terminal:
             repository.transition(run_id, JobStatus.CANCELLED)
+        if checkpoint is not None:
+            checkpoint.finish_attempt("cancelled")
         repository.append_log(run_id, "Worker cancelled at a safe boundary")
     except Exception as error:
         repository.append_log(run_id, traceback.format_exc())
+        if not run_lease.acquired:
+            return
         current = JobStatus(repository.status(run_id)["status"])
         if not current.terminal:
             repository.transition(run_id, JobStatus.FAILED, error=str(error))
+        if checkpoint is not None:
+            checkpoint.finish_attempt("failed", str(error))
     finally:
         lease.release()
+        run_lease.release()
         root_logger.removeHandler(log_handler)
         log_handler.close()
 

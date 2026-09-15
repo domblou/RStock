@@ -392,7 +392,7 @@ Sélecteur de titres pour créer des univers
 ✅ Historique réel des signaux
 ✅ Suivi descriptif rendement / risque des signaux
 Test sur les prefiltres qui aapliquée un prédcateur à la fois peut éliminer des combinaisons intéressantes. Voir fichier dans les notes.
-⬜ Traiment des combinaison de walk-forward en batch
+✅ Traiment des combinaisons de walk-forward en batch
 ⬜ Promotion et disqualification automatique de modèle
 ⬜ Calculer les profits non réalisés sur signaux positifs
 ⬜ Positions / portefeuille éventuel

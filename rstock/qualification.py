@@ -123,7 +123,13 @@ def qualify_combinations(
             }
         )
 
-    qualified = pd.DataFrame(records)
+    return rank_qualified_combinations(pd.DataFrame(records))
+
+
+def rank_qualified_combinations(qualified: pd.DataFrame) -> pd.DataFrame:
+    """Apply the historical deterministic rank to precomputed qualification rows."""
+
+    qualified = qualified.copy()
     qualified["EligibleRank"] = pd.Series(pd.NA, index=qualified.index, dtype="Int64")
     eligible = qualified[qualified["Eligible"]].sort_values(
         [
