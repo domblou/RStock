@@ -288,6 +288,62 @@ def _compact_xgboost_parameters(parameters: Mapping[str, Any]) -> str:
     return f"d{depth} / η{eta} / {rounds}"
 
 
+def threshold_parameter_calibration_table(
+    metrics: pd.DataFrame, tested: pd.DataFrame
+) -> pd.DataFrame:
+    """Build the dedicated, presentation-ready parameter calibration grid."""
+
+    if metrics.empty:
+        return pd.DataFrame()
+    merged = metrics.copy()
+    parameter_columns = [
+        "Configuration",
+        "threshold_calibration_min_signals_per_window",
+        "threshold_calibration_min_robust_signals",
+        "threshold_calibration_min_window_fraction",
+        "threshold_calibration_precision_tolerance",
+        "threshold_calibration_quantiles",
+    ]
+    if not tested.empty and "Configuration" in tested:
+        available = [name for name in parameter_columns if name in tested]
+        merged = merged.merge(tested[available], on="Configuration", how="left")
+
+    def compact(row: pd.Series) -> str:
+        minimum = row.get("threshold_calibration_min_signals_per_window", "—")
+        robust = row.get("threshold_calibration_min_robust_signals", "—")
+        fraction = row.get("threshold_calibration_min_window_fraction", "—")
+        tolerance = row.get("threshold_calibration_precision_tolerance", "—")
+        return f"fenêtre {minimum} / robuste {robust} / fraction {fraction} / tol. {tolerance}"
+
+    merged["Paramètres clés"] = merged.apply(compact, axis=1)
+    merged["Raison sélection/rejet"] = merged["SelectionReason"].fillna(
+        merged["RejectionReason"]
+    )
+    return merged.rename(columns={
+        "Configuration": "Configuration",
+        "Selected": "Sélectionnée",
+        "Rank": "Rang",
+        "EligibleModelPct": "% modèles admissibles (critère principal)",
+        "ModelsEvaluated": "Modèles évalués",
+        "ModelsEligible": "Modèles admissibles",
+        "TotalSignals": "Signaux",
+        "PrecisionMedian": "Précision médiane",
+        "F1Median": "F1 médian",
+        "WindowCoverageMedian": "Fraction fenêtres admissibles",
+        "PrecisionStdMedian": "Stabilité précision",
+        "DirectionalReturnMeanMedian": "Rendement directionnel moyen",
+        "DirectionalReturnStdMedian": "Stabilité rendement",
+        "OppositeMoveFrequencyMedian": "Mouvement opposé",
+    })[[
+        "Configuration", "Sélectionnée",
+        "% modèles admissibles (critère principal)", "Rang",
+        "Paramètres clés", "Modèles évalués", "Modèles admissibles", "Signaux",
+        "Précision médiane", "F1 médian", "Fraction fenêtres admissibles",
+        "Stabilité précision", "Rendement directionnel moyen",
+        "Stabilité rendement", "Mouvement opposé", "Raison sélection/rejet",
+    ]]
+
+
 def xgboost_calibration_selection_table(
     selected_configurations: Mapping[str, Any],
     development_metrics: pd.DataFrame,

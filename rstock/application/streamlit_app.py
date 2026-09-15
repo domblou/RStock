@@ -15,6 +15,7 @@ import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.experiment_duplication import (
+    DUPLICATION_JOB_TYPES,
     JOB_TYPE_BY_LABEL,
     JOB_TYPE_LABELS,
     duplication_combination_count,
@@ -55,6 +56,7 @@ from rstock.application.history_analysis import (
     threshold_calibration_table,
     threshold_calibration_choice_diagnostic_table,
     threshold_calibration_selection_summary,
+    threshold_parameter_calibration_table,
     threshold_promotion_guidance,
     threshold_sensitivity_summary,
     threshold_sensitivity_table,
@@ -186,7 +188,13 @@ def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> N
         run_id, detail, project_root=st.session_state.lab_config.project_root
     )
     st.session_state[DUPLICATION_CONFIG_CHOICE_KEY] = "Paramètres du run"
-    st.session_state[DUPLICATION_JOB_TYPE_KEY] = JOB_TYPE_LABELS[JobType.WALK_FORWARD]
+    configuration = detail.get("configuration", {})
+    source_job_type = normalize_duplication_job_type(
+        configuration.get("job_type") if isinstance(configuration, dict) else None
+    )
+    st.session_state[DUPLICATION_JOB_TYPE_KEY] = JOB_TYPE_LABELS[
+        source_job_type or JobType.WALK_FORWARD
+    ]
     st.session_state[EXPERIMENT_NAVIGATION_KEY] = "Expériences"
     st.rerun()
 
@@ -201,11 +209,6 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
     choice = st.session_state.get(
         DUPLICATION_CONFIG_CHOICE_KEY, "Paramètres du run"
     )
-    selected_config = duplication_submission_values(
-        draft,
-        current_config=st.session_state.lab_config,
-        use_run_config=choice == "Paramètres du run",
-    )["config"]
     context_ids = ", ".join(str(item) for item in draft["context_universe_ids"])
     primary_mode = selection.source
     if selection.sample_size is not None:
@@ -233,6 +236,15 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
     if st.session_state.get(DUPLICATION_JOB_TYPE_KEY) != selected_label:
         st.session_state[DUPLICATION_JOB_TYPE_KEY] = selected_label
     selected_job_type = JOB_TYPE_BY_LABEL[selected_label]
+    selected_config = duplication_submission_values(
+        draft,
+        current_config=st.session_state.lab_config,
+        use_run_config=choice == "Paramètres du run",
+        job_type=selected_job_type,
+        current_combinations_per_target=(
+            st.session_state.lab_combinations_per_target
+        ),
+    )["config"]
     try:
         validate_duplication_job(draft, selected_job_type)
         duplication_error = None
@@ -274,17 +286,46 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             st.warning(job_type_fallback_message)
         if duplication_error:
             st.error(f"Duplication impossible : {duplication_error}")
+        parameter_label = {
+            JobType.WALK_FORWARD: "Paramètres du walk-forward",
+            JobType.XGBOOST_CALIBRATION: "Paramètres de calibration XGBoost",
+            JobType.THRESHOLD_PARAMETER_CALIBRATION: (
+                "Paramètres du processus de calibration des seuils"
+            ),
+            JobType.THRESHOLD_CALIBRATION: "Paramètres de calibration des seuils",
+        }[selected_job_type]
         choice = st.radio(
-            "Paramètres à utiliser",
+            parameter_label,
             ["Paramètres du run", "Paramètres actuels"],
             horizontal=True,
             key=DUPLICATION_CONFIG_CHOICE_KEY,
         )
         xgboost_source = draft.get("source_xgboost_calibration_run")
-        if xgboost_source:
+        if selected_job_type is JobType.XGBOOST_CALIBRATION:
+            st.caption(
+                "Les paramètres XGBoost du walk-forward source restent la baseline. "
+                "Ce choix modifie uniquement les paramètres propres au processus "
+                "de calibration XGBoost."
+            )
+        elif selected_job_type in {
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            JobType.THRESHOLD_CALIBRATION,
+        }:
+            if xgboost_source or draft.get("frozen_xgboost_parameters"):
+                st.caption(
+                    "Les configurations XGBoost Up/Down sélectionnées par la "
+                    "calibration source seront conservées. Ce choix modifie "
+                    "uniquement les paramètres de calibration des seuils."
+                )
+            else:
+                st.caption(
+                    "Les paramètres XGBoost du walk-forward source seront conservés. "
+                    "Ce choix modifie uniquement les paramètres de calibration des seuils."
+                )
+        elif xgboost_source:
             st.caption(
                 f"Calibration XGBoost {xgboost_source} : "
-                + ("conservée" if choice == "Paramètres du run" else "ignorée/détachée")
+                + ("conservée" if choice == "Paramètres du run" else "détachée")
             )
         actions = st.columns([2, 1, 5])
         if actions[0].button(
@@ -298,6 +339,9 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
                 current_config=st.session_state.lab_config,
                 use_run_config=choice == "Paramètres du run",
                 job_type=selected_job_type,
+                current_combinations_per_target=(
+                    st.session_state.lab_combinations_per_target
+                ),
             )
             submitted = service.submit(spec)
             if submitted.created:
@@ -567,6 +611,9 @@ def _experiments(service: ExperimentService) -> None:
     labels = {
         "Walk-forward": JobType.WALK_FORWARD,
         "Calibration XGBoost": JobType.XGBOOST_CALIBRATION,
+        "Calibration des paramètres de seuils": (
+            JobType.THRESHOLD_PARAMETER_CALIBRATION
+        ),
         "Calibration des seuils": JobType.THRESHOLD_CALIBRATION,
     }
     choice = st.selectbox("Type de job", list(labels))
@@ -1366,13 +1413,18 @@ def _render_resume_controls(
     status: dict[str, object],
     detail: dict[str, object],
 ) -> None:
-    if status.get("job_type") != JobType.WALK_FORWARD.value or status.get(
-        "status"
-    ) not in {"failed", "cancelled", "interrupted"}:
+    resumable_types = {
+        JobType.WALK_FORWARD.value,
+        JobType.THRESHOLD_PARAMETER_CALIBRATION.value,
+    }
+    if status.get("job_type") not in resumable_types or status.get("status") not in {
+        "failed", "cancelled", "interrupted"
+    }:
         return
     manifest = detail.get("checkpoint")
     error = detail.get("checkpoint_error")
-    if isinstance(manifest, dict):
+    checkpointed_resume = status.get("job_type") == JobType.WALK_FORWARD.value
+    if checkpointed_resume and isinstance(manifest, dict):
         completed_phases = list(manifest.get("phases_completed", []))
         current_phase = str(manifest.get("current_phase") or "—")
         batches = manifest.get("batches", {})
@@ -1390,13 +1442,13 @@ def _render_resume_controls(
             f"batchs : {completed_batches}/{total_batches if total_batches is not None else '—'} · "
             f"dernier checkpoint : {last_time}"
         )
-    if error:
+    if checkpointed_resume and error:
         st.warning(str(error))
     actions = st.columns(2)
     if actions[0].button(
         "Reprendre le run",
         key=f"resume-run-{run_id}",
-        disabled=bool(error),
+        disabled=checkpointed_resume and bool(error),
         width="stretch",
     ):
         try:
@@ -1458,6 +1510,8 @@ def _render_history_detail(
     with tabs[0]:
         if status["job_type"] == JobType.XGBOOST_CALIBRATION.value:
             _render_xgboost_calibration_selection(run_id)
+        elif status["job_type"] == JobType.THRESHOLD_PARAMETER_CALIBRATION.value:
+            _render_threshold_parameter_calibration_selection(run_id)
         st.json(detail["summary"])
     tabs[1].json(detail["configuration"])
     tabs[2].write(detail["files"] or "Aucun résultat publié")
@@ -1513,6 +1567,57 @@ def _render_xgboost_calibration_selection(run_id: str) -> None:
             for direction, payload in selected.items()
             if isinstance(payload, dict)
         })
+
+
+def _render_threshold_parameter_calibration_selection(run_id: str) -> None:
+    results = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    selected_path = results / "selected_threshold_calibration_configuration.json"
+    metrics_path = results / "development_metrics_by_configuration.csv"
+    tested_path = results / "tested_threshold_parameter_configurations.csv"
+    if not selected_path.exists() or not metrics_path.exists():
+        st.caption(
+            "Les artefacts de calibration des paramètres de seuils ne sont pas "
+            "disponibles pour ce run historique."
+        )
+        return
+    selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    metrics = pd.read_csv(metrics_path)
+    tested = pd.read_csv(tested_path) if tested_path.exists() else pd.DataFrame()
+    table = threshold_parameter_calibration_table(metrics, tested)
+    st.subheader("Calibration des paramètres de seuils")
+    columns = st.columns(4)
+    columns[0].metric("Configuration gagnante", selected.get("configuration", "—"))
+    columns[1].metric("Candidats testés", selected.get("candidates_tested", "—"))
+    columns[2].metric("Candidats admissibles", selected.get("eligible_candidates", "—"))
+    columns[3].metric(
+        "Écart avec #2",
+        _format_metric(selected.get("runner_up_primary_criterion_gap"), percent=True),
+    )
+    st.caption(
+        f"Parent direct : {selected.get('parent_run') or '—'} · "
+        "Source XGBoost : "
+        f"{selected.get('source_xgboost_calibration_run') or selected.get('xgboost_parameter_source') or '—'} · "
+        f"Digest : {selected.get('configuration_sha256', '—')}"
+    )
+    st.dataframe(
+        table,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "% modèles admissibles (critère principal)": (
+                st.column_config.NumberColumn(format="percent")
+            ),
+            "Précision médiane": st.column_config.NumberColumn(format="%.4f"),
+            "F1 médian": st.column_config.NumberColumn(format="%.4f"),
+            "Fraction fenêtres admissibles": st.column_config.NumberColumn(format="percent"),
+            "Stabilité précision": st.column_config.NumberColumn(format="%.4f"),
+            "Rendement directionnel moyen": st.column_config.NumberColumn(format="percent"),
+            "Stabilité rendement": st.column_config.NumberColumn(format="%.4f"),
+            "Mouvement opposé": st.column_config.NumberColumn(format="percent"),
+        },
+    )
+    with st.expander("Paramètres gagnants complets"):
+        st.json(selected.get("parameters", {}))
 
 
 def _promote_combination_action(run_id: str, combination: pd.Series) -> None:
@@ -1914,8 +2019,7 @@ def _history_runs_panel(
         ):
             _history_navigation("detail", selected)
         if str(selected_run["job_type"]) in {
-            JobType.WALK_FORWARD.value,
-            JobType.XGBOOST_CALIBRATION.value,
+            job_type.value for job_type in DUPLICATION_JOB_TYPES
         } and actions[1].button(
             "Dupliquer l’expérience",
             type="primary",

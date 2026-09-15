@@ -153,26 +153,34 @@ class RunService:
             if status["status"] in ACTIVE_STATUSES:
                 raise ValueError("Ce run est déjà en cours ou en attente.")
             spec = self.repository.load_spec(run_id)
-            if spec.job_type.value != "walk_forward":
-                raise ValueError("Seuls les walk-forward avec checkpoint sont reprenables.")
-            if not (
+            resumable_types = {
+                JobType.WALK_FORWARD,
+                JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            }
+            if spec.job_type not in resumable_types:
+                raise ValueError(
+                    "Seuls les walk-forward avec checkpoint et les calibrations "
+                    "de paramètres de seuils sont reprenables."
+                )
+            if spec.job_type is JobType.WALK_FORWARD and not (
                 self.repository.run_directory(run_id) / "checkpoints" / "manifest.json"
             ).exists():
                 raise ValueError(
                     "Aucun checkpoint de reprise n’est disponible pour ce run. "
                     "Relancez depuis le début."
                 )
-            CheckpointManager(
-                self.repository.run_directory(run_id),
-                run_id=run_id,
-                job_type=spec.job_type.value,
-                configuration_fingerprint=spec.fingerprint,
-                batch_sizes={
-                    "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
-                    "walk_forward": spec.config.walk_forward_batch_size,
-                    "final_holdout": spec.config.final_holdout_batch_size,
-                },
-            )
+            if spec.job_type is JobType.WALK_FORWARD:
+                CheckpointManager(
+                    self.repository.run_directory(run_id),
+                    run_id=run_id,
+                    job_type=spec.job_type.value,
+                    configuration_fingerprint=spec.fingerprint,
+                    batch_sizes={
+                        "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+                        "walk_forward": spec.config.walk_forward_batch_size,
+                        "final_holdout": spec.config.final_holdout_batch_size,
+                    },
+                )
             self.repository.prepare_resume(run_id)
             pid = self.backend.launch(
                 self.repository.root, run_id, self.max_concurrent_heavy_jobs

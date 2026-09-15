@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import json
 from copy import deepcopy
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from math import comb
 from pathlib import Path
 from typing import Any, Mapping
@@ -25,12 +25,25 @@ LOGGER = logging.getLogger(__name__)
 DUPLICATION_JOB_TYPES = (
     JobType.WALK_FORWARD,
     JobType.XGBOOST_CALIBRATION,
+    JobType.THRESHOLD_PARAMETER_CALIBRATION,
     JobType.THRESHOLD_CALIBRATION,
+)
+
+THRESHOLD_CALIBRATION_CONFIG_FIELDS = (
+    "threshold_calibration_min_signals_per_window",
+    "threshold_calibration_min_robust_signals",
+    "threshold_calibration_min_window_fraction",
+    "threshold_calibration_precision_tolerance",
+    "threshold_calibration_quantiles",
+    "threshold_calibration_grid_decimals",
 )
 
 JOB_TYPE_LABELS = {
     JobType.WALK_FORWARD: "Walk-forward",
     JobType.XGBOOST_CALIBRATION: "Calibration XGBoost",
+    JobType.THRESHOLD_PARAMETER_CALIBRATION: (
+        "Calibration des paramètres de seuils"
+    ),
     JobType.THRESHOLD_CALIBRATION: "Calibration des seuils",
 }
 JOB_TYPE_BY_LABEL = {label: job_type for job_type, label in JOB_TYPE_LABELS.items()}
@@ -117,11 +130,20 @@ def walk_forward_duplication_draft(
     if not isinstance(configuration, Mapping):
         raise ValueError("Run configuration is unavailable")
     source_job_type = normalize_duplication_job_type(configuration.get("job_type"))
-    if source_job_type not in {JobType.WALK_FORWARD, JobType.XGBOOST_CALIBRATION}:
-        raise ValueError("Only walk-forward and XGBoost calibration runs can be duplicated")
+    if source_job_type not in DUPLICATION_JOB_TYPES:
+        raise ValueError(
+            "Only walk-forward, XGBoost calibration, threshold parameter "
+            "calibration, and threshold calibration runs can be duplicated"
+        )
 
     source_xgboost_run = configuration.get("source_xgboost_calibration_run")
     frozen_xgboost = deepcopy(configuration.get("frozen_xgboost_parameters"))
+    source_threshold_parameter_run = configuration.get(
+        "source_threshold_parameter_calibration_run"
+    )
+    frozen_threshold_parameters = deepcopy(
+        configuration.get("frozen_threshold_calibration_parameters")
+    )
     if source_job_type is JobType.XGBOOST_CALIBRATION:
         source_xgboost_run = str(run_id)
         root = project_root
@@ -143,6 +165,29 @@ def walk_forward_duplication_draft(
             }
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise ValueError("XGBoost calibration selections are invalid") from error
+    elif source_job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:
+        source_threshold_parameter_run = str(run_id)
+        root = project_root
+        if root is None:
+            rstock_config = configuration.get("rstock_config", {})
+            if isinstance(rstock_config, Mapping) and rstock_config.get("project_root"):
+                root = Path(str(rstock_config["project_root"]))
+        selected_path = (
+            None
+            if root is None
+            else Path(root)
+            / "runs"
+            / str(run_id)
+            / "results"
+            / "selected_threshold_calibration_configuration.json"
+        )
+        if selected_path is None or not selected_path.exists():
+            raise ValueError("Threshold parameter calibration selection is unavailable")
+        try:
+            selected = json.loads(selected_path.read_text(encoding="utf-8"))
+            frozen_threshold_parameters = dict(selected["parameters"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError("Threshold parameter calibration selection is invalid") from error
 
     symbols = tuple(str(item) for item in configuration.get("symbols", ()) if item)
     traceability = _source_traceability(detail)
@@ -174,6 +219,8 @@ def walk_forward_duplication_draft(
         ),
         "source_xgboost_calibration_run": source_xgboost_run,
         "frozen_xgboost_parameters": frozen_xgboost,
+        "source_threshold_parameter_calibration_run": source_threshold_parameter_run,
+        "frozen_threshold_calibration_parameters": frozen_threshold_parameters,
         "xgboost_resolution_version": int(
             configuration.get("xgboost_resolution_version", 0)
         ),
@@ -213,23 +260,77 @@ def duplication_combination_count(
     )
 
 
-def duplication_submission_values(
-    draft: Mapping[str, object], *, current_config: RStockConfig, use_run_config: bool
-) -> dict[str, object]:
-    """Choose config source while preserving the duplicated universe inputs."""
+def resolve_stage_configuration(
+    draft: Mapping[str, object],
+    *,
+    current_config: RStockConfig,
+    use_run_config: bool,
+    target_job_type: JobType,
+) -> RStockConfig:
+    """Resolve only the settings owned by the stage about to be executed."""
 
+    historical = config_from_historical_snapshot(
+        draft.get("rstock_config")
+        if isinstance(draft.get("rstock_config"), Mapping)
+        else None,
+        current_project_root=current_config.project_root,
+    )
     if use_run_config:
-        config = config_from_historical_snapshot(
-            draft.get("rstock_config")
-            if isinstance(draft.get("rstock_config"), Mapping)
-            else None,
-            current_project_root=current_config.project_root,
+        return historical
+    if target_job_type is JobType.WALK_FORWARD:
+        return current_config
+    if target_job_type is JobType.XGBOOST_CALIBRATION:
+        # The calibration grid and selection protocol are fixed in calibration.py.
+        # No RStockConfig field currently belongs exclusively to this stage.
+        return historical
+    if (
+        target_job_type is JobType.THRESHOLD_CALIBRATION
+        and (
+            draft.get("source_threshold_parameter_calibration_run")
+            or draft.get("frozen_threshold_calibration_parameters")
         )
-    else:
-        # Deliberately use the session configuration passed at submission time;
-        # it must not be taken from the historical draft.
-        config = current_config
-    return {**deepcopy(dict(draft)), "config": config}
+    ):
+        return historical
+    return replace(
+        historical,
+        **{
+            name: getattr(current_config, name)
+            for name in THRESHOLD_CALIBRATION_CONFIG_FIELDS
+        },
+    )
+
+
+def duplication_submission_values(
+    draft: Mapping[str, object],
+    *,
+    current_config: RStockConfig,
+    use_run_config: bool,
+    job_type: JobType | str | None = None,
+    current_combinations_per_target: int | None = None,
+) -> dict[str, object]:
+    """Resolve stage-owned settings while preserving immutable upstream inputs."""
+
+    selected_job_type = _selected_duplication_job_type(job_type, draft)
+    config = resolve_stage_configuration(
+        draft,
+        current_config=current_config,
+        use_run_config=use_run_config,
+        target_job_type=selected_job_type,
+    )
+    values = {**deepcopy(dict(draft)), "config": config}
+    if (
+        not use_run_config
+        and selected_job_type in {
+            JobType.XGBOOST_CALIBRATION,
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            JobType.THRESHOLD_CALIBRATION,
+        }
+        and current_combinations_per_target is not None
+    ):
+        if current_combinations_per_target < 1:
+            raise ValueError("current_combinations_per_target must be positive")
+        values["combinations_per_target"] = int(current_combinations_per_target)
+    return values
 
 
 def _selected_duplication_job_type(job_type: JobType | str | None, draft: Mapping[str, object]) -> JobType:
@@ -278,13 +379,26 @@ def experiment_spec_from_duplication(
     current_config: RStockConfig,
     use_run_config: bool,
     job_type: JobType | str | None = None,
+    current_combinations_per_target: int | None = None,
 ) -> ExperimentSpec:
     """Build a new immutable spec from the frozen run inputs only."""
 
     selected_job_type = validate_duplication_job(draft, job_type)
     values = duplication_submission_values(
-        draft, current_config=current_config, use_run_config=use_run_config
+        draft,
+        current_config=current_config,
+        use_run_config=use_run_config,
+        job_type=selected_job_type,
+        current_combinations_per_target=current_combinations_per_target,
     )
+    source_job_type = normalize_duplication_job_type(draft.get("job_type"))
+    preserve_xgboost = (
+        use_run_config or selected_job_type is not JobType.WALK_FORWARD
+    )
+    preserve_threshold_parameters = selected_job_type in {
+        JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        JobType.THRESHOLD_CALIBRATION,
+    }
     return ExperimentSpec(
         job_type=selected_job_type,
         config=values["config"],
@@ -315,6 +429,7 @@ def experiment_spec_from_duplication(
         target_symbols=tuple(str(item) for item in values["target_symbols"]),
         context_symbols=tuple(str(item) for item in values["context_symbols"]),
         predictor_symbols=tuple(str(item) for item in values["predictor_symbols"]),
+        source_experiment_run=str(values["source_run_id"]),
         source_walk_forward_run=(
             str(values["source_walk_forward_run"])
             if values.get("source_walk_forward_run")
@@ -322,17 +437,40 @@ def experiment_spec_from_duplication(
         ),
         source_xgboost_calibration_run=(
             str(values["source_xgboost_calibration_run"])
-            if use_run_config and values.get("source_xgboost_calibration_run")
+            if preserve_xgboost and values.get("source_xgboost_calibration_run")
             else None
         ),
         frozen_xgboost_parameters=(
             deepcopy(values.get("frozen_xgboost_parameters"))
-            if use_run_config and isinstance(values.get("frozen_xgboost_parameters"), Mapping)
+            if preserve_xgboost
+            and isinstance(values.get("frozen_xgboost_parameters"), Mapping)
+            else None
+        ),
+        source_threshold_parameter_calibration_run=(
+            str(values["source_threshold_parameter_calibration_run"])
+            if preserve_threshold_parameters
+            and values.get("source_threshold_parameter_calibration_run")
+            else None
+        ),
+        frozen_threshold_calibration_parameters=(
+            deepcopy(values.get("frozen_threshold_calibration_parameters"))
+            if preserve_threshold_parameters
+            and isinstance(
+                values.get("frozen_threshold_calibration_parameters"), Mapping
+            )
             else None
         ),
         xgboost_resolution_version=(
             int(values.get("xgboost_resolution_version", 0))
-            if use_run_config
+            if source_job_type is selected_job_type
+            and (
+                use_run_config
+                or selected_job_type
+                in {
+                    JobType.THRESHOLD_PARAMETER_CALIBRATION,
+                    JobType.THRESHOLD_CALIBRATION,
+                }
+            )
             else 1
         ),
         run_description=(

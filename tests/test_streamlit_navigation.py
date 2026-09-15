@@ -514,7 +514,7 @@ def test_history_can_duplicate_one_walk_forward_run_into_experiments():
     assert "Dupliquer l’expérience" in history
     assert "JobType.WALK_FORWARD.value" in history
     assert "_start_walk_forward_duplication" in history
-    assert "Paramètres à utiliser" in experiments
+    assert "_render_locked_duplication_mode(service)" in experiments
     assert 'button("Annuler"' in source
     assert "duplication_submission_values" in experiments
     assert "st.switch_page(target_page)" in source
@@ -584,7 +584,11 @@ def test_duplication_mode_bypasses_editable_universe_form():
     experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
 
     assert "_experiment_universe_selector()" not in locked
-    assert "Paramètres à utiliser" in locked
+    assert "Paramètres de calibration XGBoost" in locked
+    assert "Paramètres de calibration des seuils" in locked
+    assert "paramètres XGBoost du walk-forward source seront conservés" in locked
+    assert "configurations XGBoost Up/Down sélectionnées" in locked
+    assert "current_combinations_per_target" in locked
     assert "Soumettre la duplication" in locked
     assert 'button("Annuler"' in locked
     assert "experiment_spec_from_duplication" in locked
@@ -592,6 +596,26 @@ def test_duplication_mode_bypasses_editable_universe_form():
     assert "DUPLICATION_JOB_TYPE_KEY" in locked
     assert "JOB_TYPE_BY_LABEL" in locked
     assert "if _render_locked_duplication_mode(service):" in experiments
+
+
+def test_threshold_parameter_calibration_has_experiment_option_and_detail_grid():
+    source = APP.read_text(encoding="utf-8")
+    experiments = source.split("def _experiments(", 1)[1].split("def _settings", 1)[0]
+    detail = source.split(
+        "def _render_threshold_parameter_calibration_selection", 1
+    )[1].split("def _promote_combination_action", 1)[0]
+
+    assert "Calibration des paramètres de seuils" in experiments
+    assert "JobType.THRESHOLD_PARAMETER_CALIBRATION" in experiments
+    assert "Paramètres du processus de calibration des seuils" in source
+    assert "Configuration gagnante" in detail
+    assert "Candidats testés" in detail
+    assert "Candidats admissibles" in detail
+    assert "Écart avec #2" in detail
+    assert "Parent direct" in detail
+    assert "Source XGBoost" in detail
+    assert "threshold_parameter_calibration_table" in detail
+    assert "Paramètres gagnants complets" in detail
 
 
 def test_duplication_summary_uses_arrow_safe_display_values_and_safe_job_fallback():

@@ -33,7 +33,14 @@ from rstock.predictor_prefilter import PREFILTER_SCORE_FORMULA, select_predictor
 from rstock.threshold_calibration import (
     EXPERIMENTAL_XGBOOST_PARAMETERS,
     run_controlled_threshold_calibration,
+    validate_threshold_calibration_config,
     write_threshold_calibration_results,
+)
+from rstock.threshold_parameter_calibration import (
+    ThresholdCalibrationParameters,
+    frozen_threshold_parameter_candidates,
+    run_threshold_parameter_calibration,
+    write_threshold_parameter_calibration_results,
 )
 from rstock.traceability import prepared_dataset_traceability
 from rstock.walk_forward import (
@@ -724,10 +731,13 @@ def _threshold_calibration(
     source_generated = _qualified_sets_from_walk_forward_source(spec)
     if source_generated is not None:
         generated = source_generated
+    effective_threshold_config, threshold_parameter_source = (
+        _resolve_threshold_calibration_config(spec)
+    )
     result = run_controlled_threshold_calibration(
         prepared,
         generated,
-        spec.config,
+        effective_threshold_config,
         combinations_per_target=spec.combinations_per_target,
         evaluate_final_holdout=spec.evaluate_final_holdout,
         xgboost_parameters_by_direction={
@@ -739,6 +749,13 @@ def _threshold_calibration(
         frozen_xgboost_parameters_sha256=spec.frozen_xgboost_parameters_sha256,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
+    )
+    result.run_configuration["threshold_parameter_source"] = threshold_parameter_source
+    result.run_configuration["source_threshold_parameter_calibration_run"] = (
+        spec.source_threshold_parameter_calibration_run
+    )
+    result.run_configuration["frozen_threshold_calibration_parameters_sha256"] = (
+        spec.frozen_threshold_calibration_parameters_sha256
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     traceability = _persist_prepared_traceability(
@@ -772,10 +789,117 @@ def _threshold_calibration(
         **period,
         "traceability": traceability,
         "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_threshold_parameter_calibration_run": (
+            spec.source_threshold_parameter_calibration_run
+        ),
         "source_qualified_combinations": (
             None if source_generated is None else len(source_generated)
         ),
     }
+
+
+def _threshold_parameter_parent(spec: ExperimentSpec) -> str | None:
+    return (
+        spec.source_experiment_run
+        or spec.source_threshold_parameter_calibration_run
+        or spec.source_xgboost_calibration_run
+        or spec.source_walk_forward_run
+    )
+
+
+def _threshold_parameter_calibration(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    prepared, generated, _ = _prepared_experiment(
+        spec, progress_callback, cancellation_check
+    )
+    effective_xgboost = _resolve_threshold_xgboost_parameters(spec)
+    source_generated = _qualified_sets_from_walk_forward_source(spec)
+    if source_generated is not None:
+        generated = source_generated
+    result = run_threshold_parameter_calibration(
+        prepared,
+        generated,
+        spec.config,
+        xgboost_parameters_by_direction={
+            "Up": effective_xgboost.up,
+            "Down": effective_xgboost.down,
+        },
+        xgboost_parameter_source=effective_xgboost.source,
+        combinations_per_target=spec.combinations_per_target,
+        candidates=frozen_threshold_parameter_candidates(output, spec.config),
+        source_parent_run=_threshold_parameter_parent(spec),
+        source_walk_forward_run=spec.source_walk_forward_run,
+        source_xgboost_calibration_run=spec.source_xgboost_calibration_run,
+        frozen_xgboost_parameters_sha256=spec.frozen_xgboost_parameters_sha256,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+    )
+    period = _persist_walk_forward_period(
+        result.run_configuration, prepared, spec.config
+    )
+    traceability = _persist_prepared_traceability(
+        result.run_configuration, prepared, spec
+    )
+    _phase(progress_callback, "result_writing", "started")
+    write_threshold_parameter_calibration_results(result, output)
+    _phase(progress_callback, "result_writing", "completed")
+    return {
+        "job_type": spec.job_type.value,
+        "selected_configuration": _json_value(result.selected_configuration),
+        "candidate_count": len(result.development_by_configuration),
+        "eligible_candidate_count": int(
+            result.development_by_configuration["EligibleConfiguration"].sum()
+        ),
+        "source_parent_run": _threshold_parameter_parent(spec),
+        "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_xgboost_calibration_run": spec.source_xgboost_calibration_run,
+        "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
+        "traceability": traceability,
+    }
+
+
+def _resolve_threshold_calibration_config(
+    spec: ExperimentSpec,
+) -> tuple[Any, str]:
+    frozen = spec.frozen_threshold_calibration_parameters
+    source = "frozen_snapshot"
+    if frozen is None and spec.source_threshold_parameter_calibration_run:
+        runs = RunRepository(spec.config.project_root / "runs")
+        source_run = spec.source_threshold_parameter_calibration_run
+        status = runs.status(source_run)
+        if status.get("job_type") != JobType.THRESHOLD_PARAMETER_CALIBRATION.value:
+            raise ValueError(
+                "Threshold parameter source must be a parameter calibration run"
+            )
+        if status.get("status") != "completed":
+            raise ValueError("Threshold parameter calibration source is not completed")
+        path = (
+            runs.run_directory(source_run)
+            / "results"
+            / "selected_threshold_calibration_configuration.json"
+        )
+        try:
+            selected = json.loads(path.read_text(encoding="utf-8"))
+            frozen = dict(selected["parameters"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "Threshold parameter calibration selection is unavailable"
+            ) from error
+        source = "referenced_calibration"
+    if frozen is None:
+        return spec.config, "run_snapshot"
+    try:
+        parameters = ThresholdCalibrationParameters.from_dict(frozen)
+        effective = parameters.apply(spec.config)
+        validate_threshold_calibration_config(effective)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Frozen threshold calibration parameters are invalid") from error
+    return effective, source
 
 
 def _resolve_threshold_xgboost_parameters(
@@ -1078,6 +1202,9 @@ class WorkflowRegistry:
             {
                 JobType.WALK_FORWARD: _walk_forward,
                 JobType.XGBOOST_CALIBRATION: _xgboost_calibration,
+                JobType.THRESHOLD_PARAMETER_CALIBRATION: (
+                    _threshold_parameter_calibration
+                ),
                 JobType.THRESHOLD_CALIBRATION: _threshold_calibration,
                 JobType.PRODUCTION_TRAINING: _production_training,
                 JobType.MARKET_UPDATE: _market_update,

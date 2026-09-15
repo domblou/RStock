@@ -18,7 +18,39 @@ L’objectif n’est pas de produire une prédiction unique, mais de construire 
 
 Le processus général est :
 
-**Univers → Walk-forward → Calibration XGBoost → Calibration des seuils → Holdout → Promotion → Signaux → Simulation**
+**Univers → Walk-forward → [Calibration XGBoost] → [Calibration des paramètres de seuils] → Calibration des seuils → Holdout → Promotion → Signaux → Simulation**
+
+Les crochets indiquent les étapes optionnelles.
+
+---
+
+## 1.1 Propriété des paramètres par étape
+
+Chaque étape possède uniquement les paramètres qu’elle est chargée de choisir.
+Lorsqu’un run est dérivé, les décisions scientifiques déjà établies en amont
+restent gelées. Le choix **Paramètres actuels** ne remplace que les paramètres
+propres à la nouvelle étape :
+
+- **Walk-forward → Calibration XGBoost** : univers, données, période, protocole
+  walk-forward et baseline XGBoost viennent du walk-forward. Les paramètres
+  actuels peuvent modifier le nombre de combinaisons échantillonnées par la
+  calibration; la grille et la sélection sont actuellement fixes dans le
+  protocole de calibration.
+- **Calibration XGBoost → Calibration des seuils** : les configurations
+  gagnantes Up/Down, leur provenance et leur digest restent gelés. Seuls les
+  paramètres `threshold_calibration_*` et le nombre de combinaisons de la
+  calibration des seuils peuvent venir des paramètres actuels.
+- **Walk-forward → Calibration des seuils** : en l’absence de calibration
+  XGBoost intermédiaire, la calibration des seuils conserve les paramètres
+  XGBoost du walk-forward. Les paramètres XGBoost actuellement affichés dans
+  l’application ne les remplacent pas.
+- **Calibration des paramètres de seuils → Calibration des seuils** : la
+  politique gagnante du calibrateur est gelée. Le descendant ne peut pas la
+  remplacer par les paramètres actuels; pour effectuer un choix manuel, il faut
+  repartir du walk-forward ou de la calibration XGBoost précédente.
+
+Pour changer les hyperparamètres XGBoost d’un modèle après un walk-forward, il
+faut produire un nouveau walk-forward, puis reprendre les étapes aval.
 
 ---
 
@@ -313,7 +345,65 @@ et le digest du snapshot gelé lorsqu’ils existent.
 
 ---
 
-# 8. Calibration des seuils
+# 8. Calibration des paramètres de seuils
+
+## 8.1 Rôle
+
+Cette étape optionnelle recherche une configuration générale du **processus de
+calibration des seuils**. Elle ne choisit pas encore les seuils finaux et ne
+modifie ni les modèles XGBoost, ni les fenêtres walk-forward, ni les données.
+
+Elle compare une petite liste déterministe de politiques faisant varier :
+
+- le minimum de signaux par fenêtre;
+- le minimum total de signaux robustes;
+- la fraction minimale de fenêtres admissibles;
+- la tolérance de précision;
+- la grille de quantiles.
+
+La baseline correspond toujours aux paramètres hérités du parent. Les autres
+candidats font varier une dimension à la fois afin d’éviter une explosion
+combinatoire.
+
+## 8.2 Développement uniquement
+
+Les probabilités de développement sont générées une seule fois avec les
+paramètres XGBoost effectifs hérités, puis réutilisées pour tous les candidats.
+La sélection ne consulte jamais le holdout final. Le holdout reste réservé à la
+vraie **Calibration des seuils**, exécutée après le gel de la politique.
+
+Le classement privilégie explicitement, dans l’ordre : proportion de modèles
+admissibles, précision, F1, couverture des fenêtres, stabilité, rendement
+directionnel, faible fréquence de mouvement opposé, volume de signaux, puis un
+identifiant stable pour départager les égalités. Aucun score composite opaque
+n’est utilisé.
+
+Le run publie la liste testée, les métriques par configuration et par fenêtre,
+la configuration gagnante et son digest dans des artefacts CSV/JSON dédiés. Le
+fichier `run_configuration.json` conserve également le parent direct, les
+sources Walk-forward/XGBoost, les paramètres XGBoost effectifs et la traçabilité
+du code et du dataset.
+
+## 8.3 Chemin automatique et chemin manuel
+
+Chemin automatique :
+
+**Walk-forward → [Calibration XGBoost] → Calibration des paramètres de seuils → Calibration des seuils**
+
+La configuration gagnante, son digest et sa provenance sont gelés dans la
+calibration des seuils descendante.
+
+Chemin manuel :
+
+**Walk-forward → [Calibration XGBoost] → Calibration des seuils avec paramètres actuels**
+
+Pour ignorer une calibration automatique qui ne convient pas, il faut repartir
+du parent précédent et lancer directement une calibration des seuils. Cela
+préserve une lignée explicite et évite un remplacement silencieux.
+
+---
+
+# 9. Calibration des seuils
 
 ## 8.1 Pourquoi calibrer un seuil?
 
@@ -398,7 +488,7 @@ La précision demeure donc le filtre principal, mais une différence minuscule n
 
 ---
 
-## 9. Diagnostic du choix du seuil
+## 9.7 Diagnostic du choix du seuil
 
 RStock permet d’afficher les seuils candidats évalués pendant la calibration.
 
@@ -635,16 +725,35 @@ Cette approche est préférable à la reconstruction manuelle d’une expérienc
 
 ## Duplication et paramètres XGBoost
 
-Lors de la duplication, le choix des paramètres est explicite :
+Lors de la duplication, le choix est nommé selon l’étape cible : **Paramètres du
+walk-forward**, **Paramètres de calibration XGBoost** ou **Paramètres de
+calibration des paramètres de seuils**, ou **Paramètres de calibration des
+seuils**.
 
-- **Paramètres du run** conserve le snapshot `RStockConfig` du run, ainsi que
-  toute provenance de calibration XGBoost et ses paramètres directionnels gelés.
-- **Paramètres actuels** remplace le `RStockConfig` par la configuration actuelle
-  de l’application et détache explicitement toute calibration XGBoost antérieure.
-  Le nouveau run ne conserve alors ni `run_id` de calibration source ni snapshot
-  directionnel ; il ne peut donc pas l’utiliser implicitement.
+- **Paramètres du run** conserve les paramètres historiques de l’étape cible et
+  toutes les décisions amont.
+- **Paramètres actuels** applique seulement les champs appartenant à l’étape
+  cible. Pour une calibration des seuils, il s’agit des champs
+  `threshold_calibration_*`; pour une calibration XGBoost, le nombre de
+  combinaisons par cible peut être actualisé. Une provenance XGBoost amont et
+  son snapshot Up/Down ne sont jamais détachés par ce choix.
+- Une calibration des seuils issue d’une calibration automatique conserve
+  toujours la politique gagnante gelée, même si « Paramètres actuels » est
+  sélectionné. L’override manuel se fait depuis le parent précédent.
+- Pour un nouveau walk-forward, les paramètres actuels constituent bien la
+  configuration scientifique complète de cette nouvelle étape. Une provenance
+  de calibration aval éventuellement présente sur le run copié est alors
+  détachée.
 
 Un restart/replay conserve le snapshot et la provenance du run relancé.
+Une reprise de calibration des paramètres de seuils réutilise la liste de
+candidats gelée lors de la première tentative; elle ne reconstruit pas une
+recherche différente avec de nouveaux paramètres ou une nouvelle version du
+code.
+
+Dans l’historique, **Calibration des paramètres de seuils** apparaît comme un
+type distinct. La grille indique son parent direct et sa configuration gagnante;
+le détail présente les candidats, leur rang et les métriques de développement.
 
 ---
 
@@ -812,6 +921,13 @@ Une tolérance trop grande peut toutefois diminuer l’importance de la précisi
 
 Il faut donc la modifier avec prudence.
 
+## Calibration automatique des paramètres
+
+La nouvelle étape peut comparer ces réglages de manière contrôlée. Elle doit
+rester limitée à une petite liste de candidats et à une règle globale. Ajouter
+continuellement des candidats après observation du holdout transformerait la
+méthode elle-même en source de surajustement.
+
 ---
 
 ## 21. Comment évaluer une modification de paramètres
@@ -854,6 +970,8 @@ Pour limiter ce risque :
 - conserver des règles générales;
 - éviter d’ajuster manuellement chaque modèle;
 - privilégier les résultats reproduits sur plusieurs périodes.
+- sélectionner les paramètres du calibrateur uniquement sur le développement;
+- ne jamais ajouter ou choisir un candidat après avoir observé son holdout.
 
 ---
 
@@ -864,13 +982,15 @@ Un modèle candidat devrait idéalement avoir :
 1. passé les critères walk-forward;
 2. montré une stabilité raisonnable entre fenêtres;
 3. utilisé des paramètres XGBoost validés sans sur-optimisation;
-4. obtenu un seuil calibré uniquement sur les données de développement;
-5. produit suffisamment de signaux sur le holdout;
-6. obtenu une AUC et une précision raisonnables;
-7. produit un rendement directionnel positif;
-8. évité une fréquence excessive de mouvements opposés;
-9. montré une sensibilité raisonnable autour de son seuil;
-10. idéalement reproduit son comportement sur plusieurs périodes historiques.
+4. éventuellement utilisé une politique de calibration des seuils sélectionnée
+   uniquement sur le développement;
+5. obtenu un seuil calibré uniquement sur les données de développement;
+6. produit suffisamment de signaux sur le holdout;
+7. obtenu une AUC et une précision raisonnables;
+8. produit un rendement directionnel positif;
+9. évité une fréquence excessive de mouvements opposés;
+10. montré une sensibilité raisonnable autour de son seuil;
+11. idéalement reproduit son comportement sur plusieurs périodes historiques.
 
 La promotion demeure une décision contrôlée, et non une conséquence automatique d’une métrique unique.
 

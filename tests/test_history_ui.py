@@ -106,6 +106,23 @@ def test_history_rows_display_run_id_and_direct_walk_forward_source():
     }
 
 
+def test_threshold_parameter_calibration_appears_with_direct_parent_and_winner():
+    detail = _detail(summary={
+        "selected_configuration": {"configuration": "candidate_03"}
+    })
+    detail["configuration"]["source_walk_forward_run"] = "wf-parent"
+    detail["configuration"]["source_xgboost_calibration_run"] = "xgb-parent"
+
+    row = history_row(
+        _run("parameter-run", "threshold_parameter_calibration"), detail, {}
+    )
+
+    assert "threshold_parameter_calibration" in EXPERIMENT_JOB_TYPES
+    assert row.display()["Type"] == "Calibration des paramètres de seuils"
+    assert row.display()["Run source"] == "xgb-parent"
+    assert row.summary == "Configuration gagnante : candidate_03"
+
+
 def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallback():
     described = _detail(summary={"outcome": "completed"})
     described["configuration"]["run_description"] = "profondeur 2"

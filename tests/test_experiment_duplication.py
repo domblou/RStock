@@ -193,6 +193,10 @@ def test_duplication_config_choice_preserves_or_detaches_xgboost_provenance(tmp_
     [
         (JobType.WALK_FORWARD, "Walk-forward — profondeur 2"),
         (JobType.XGBOOST_CALIBRATION, "Calibration XGBoost — profondeur 2"),
+        (
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            "Calibration des paramètres de seuils — profondeur 2",
+        ),
         (JobType.THRESHOLD_CALIBRATION, "Calibration des seuils — profondeur 2"),
     ],
 )
@@ -310,6 +314,10 @@ def test_historical_walk_forward_string_has_the_safe_ui_label():
     [
         (JobType.WALK_FORWARD, "Walk-forward"),
         (JobType.XGBOOST_CALIBRATION, "Calibration XGBoost"),
+        (
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            "Calibration des paramètres de seuils",
+        ),
         (JobType.THRESHOLD_CALIBRATION, "Calibration des seuils"),
     ],
 )
@@ -395,6 +403,7 @@ def test_duplicated_spec_preserves_all_frozen_run_inputs(tmp_path):
     )
 
     expected = source.to_dict()
+    expected["source_experiment_run"] = "run_original"
     expected["source_walk_forward_run"] = "run_original"
     assert duplicated.to_dict() == expected
 
@@ -498,7 +507,11 @@ def test_current_parameters_are_read_at_submission_after_the_draft_was_created(
 
 @pytest.mark.parametrize(
     "job_type",
-    [JobType.THRESHOLD_CALIBRATION, JobType.XGBOOST_CALIBRATION],
+    [
+        JobType.THRESHOLD_CALIBRATION,
+        JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        JobType.XGBOOST_CALIBRATION,
+    ],
 )
 def test_duplication_can_change_walk_forward_to_a_compatible_experimental_job(
     tmp_path, job_type
@@ -523,13 +536,291 @@ def test_duplication_can_change_walk_forward_to_a_compatible_experimental_job(
     assert from_run.job_type is job_type
     assert from_current.job_type is job_type
     assert from_run.config.xgb_seed == 99
-    assert from_current.config is current
+    assert from_current.config.xgb_seed == 99
     assert from_run.source_walk_forward_run == "run_original"
     assert from_current.source_walk_forward_run == "run_original"
     for field in ("target_symbols", "context_symbols", "predictor_symbols"):
         assert getattr(from_run, field) == tuple(draft[field])
         assert getattr(from_current, field) == tuple(draft[field])
     assert detail == _detail(snapshot={"xgb_seed": 99})
+
+
+def test_walk_forward_to_xgboost_current_parameters_keep_upstream_baseline(tmp_path):
+    from rstock.calibration import default_parameter_candidates
+
+    source_config = {
+        "xgb_max_depth": 2,
+        "xgb_eta": 0.05,
+        "xgb_rounds": 80,
+        "walk_forward_min_train_size": 300,
+        "threshold_calibration_min_signals_per_window": 11,
+    }
+    draft = walk_forward_duplication_draft(
+        "wf-parent", _detail(snapshot=source_config)
+    )
+    current = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        xgb_max_depth=7,
+        xgb_eta=0.3,
+        xgb_rounds=12,
+        walk_forward_min_train_size=120,
+    )
+
+    derived = experiment_spec_from_duplication(
+        draft,
+        current_config=current,
+        use_run_config=False,
+        job_type=JobType.XGBOOST_CALIBRATION,
+        current_combinations_per_target=13,
+    )
+
+    assert derived.config.xgb_max_depth == 2
+    assert derived.config.xgb_eta == 0.05
+    assert derived.config.xgb_rounds == 80
+    assert derived.config.walk_forward_min_train_size == 300
+    assert derived.combinations_per_target == 13
+    assert derived.source_walk_forward_run == "wf-parent"
+    assert default_parameter_candidates(derived.config)[0].max_depth == 2
+    assert default_parameter_candidates(derived.config)[0].eta == 0.05
+    assert default_parameter_candidates(derived.config)[0].num_boost_round == 80
+
+
+@pytest.mark.parametrize(
+    "target_job_type",
+    [
+        JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        JobType.THRESHOLD_CALIBRATION,
+    ],
+)
+def test_xgboost_to_threshold_current_parameters_keep_directional_winners(
+    tmp_path, target_job_type
+):
+    from rstock.application.workflows import _resolve_threshold_xgboost_parameters
+
+    run_id = "xgb-parent"
+    selected = {
+        "Up": {"parameters": {"max_depth": 2, "eta": 0.05, "num_boost_round": 120}},
+        "Down": {"parameters": {"max_depth": 4, "eta": 0.1, "num_boost_round": 80}},
+    }
+    results = tmp_path / "runs" / run_id / "results"
+    results.mkdir(parents=True)
+    (results / "selected_configurations.json").write_text(
+        json.dumps(selected), encoding="utf-8"
+    )
+    detail = _detail(
+        job_type="xgboost_calibration",
+        snapshot={
+            "xgb_max_depth": 3,
+            "threshold_calibration_min_signals_per_window": 40,
+            "threshold_calibration_precision_tolerance": 0.02,
+        },
+    )
+    detail["configuration"]["source_walk_forward_run"] = "wf-parent"
+    current = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        xgb_max_depth=9,
+        threshold_calibration_min_signals_per_window=7,
+        threshold_calibration_precision_tolerance=0.005,
+    )
+
+    derived = experiment_spec_from_duplication(
+        walk_forward_duplication_draft(run_id, detail, project_root=tmp_path),
+        current_config=current,
+        use_run_config=False,
+        job_type=target_job_type,
+        current_combinations_per_target=5,
+    )
+
+    assert derived.source_xgboost_calibration_run == run_id
+    assert derived.frozen_xgboost_parameters == {
+        direction: values["parameters"] for direction, values in selected.items()
+    }
+    assert derived.config.xgb_max_depth == 3
+    assert derived.config.threshold_calibration_min_signals_per_window == 7
+    assert derived.config.threshold_calibration_precision_tolerance == 0.005
+    assert derived.combinations_per_target == 5
+    resolved = _resolve_threshold_xgboost_parameters(derived)
+    assert resolved.source == "frozen_snapshot"
+    assert resolved.up.max_depth == 2
+    assert resolved.down.max_depth == 4
+
+
+def test_walk_forward_to_threshold_current_parameters_keep_walk_forward_xgboost(tmp_path):
+    from rstock.application.workflows import _resolve_threshold_xgboost_parameters
+
+    draft = walk_forward_duplication_draft(
+        "wf-parent",
+        _detail(snapshot={
+            "xgb_max_depth": 2,
+            "xgb_eta": 0.04,
+            "xgb_rounds": 90,
+            "walk_forward_test_size": 42,
+            "threshold_calibration_min_robust_signals": 30,
+        }),
+    )
+    current = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        xgb_max_depth=8,
+        xgb_eta=0.4,
+        xgb_rounds=10,
+        walk_forward_test_size=10,
+        threshold_calibration_min_robust_signals=6,
+    )
+
+    derived = experiment_spec_from_duplication(
+        draft,
+        current_config=current,
+        use_run_config=False,
+        job_type=JobType.THRESHOLD_CALIBRATION,
+    )
+
+    assert derived.config.xgb_max_depth == 2
+    assert derived.config.xgb_eta == 0.04
+    assert derived.config.xgb_rounds == 90
+    assert derived.config.walk_forward_test_size == 42
+    assert derived.config.threshold_calibration_min_robust_signals == 6
+    assert derived.source_xgboost_calibration_run is None
+    assert derived.xgboost_resolution_version == 1
+    resolved = _resolve_threshold_xgboost_parameters(derived)
+    assert resolved.source == "rstock_config"
+    assert resolved.up.max_depth == 2
+    assert resolved.down.max_depth == 2
+
+
+def test_threshold_duplication_with_run_parameters_preserves_both_stages(tmp_path):
+    from rstock.application.workflows import _resolve_threshold_xgboost_parameters
+
+    detail = _detail(
+        job_type="threshold_calibration",
+        snapshot={
+            "xgb_max_depth": 3,
+            "threshold_calibration_min_signals_per_window": 25,
+        },
+    )
+    detail["configuration"].update({
+        "source_walk_forward_run": "wf-parent",
+        "source_xgboost_calibration_run": "xgb-parent",
+        "frozen_xgboost_parameters": {
+            "Up": {"max_depth": 2, "eta": 0.05, "num_boost_round": 120},
+            "Down": {"max_depth": 4, "eta": 0.1, "num_boost_round": 80},
+        },
+        "xgboost_resolution_version": 1,
+    })
+
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("threshold-parent", detail),
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.job_type is JobType.THRESHOLD_CALIBRATION
+    assert duplicated.source_walk_forward_run == "wf-parent"
+    assert duplicated.source_xgboost_calibration_run == "xgb-parent"
+    assert duplicated.frozen_xgboost_parameters["Down"]["max_depth"] == 4
+    assert duplicated.config.xgb_max_depth == 3
+    assert duplicated.config.threshold_calibration_min_signals_per_window == 25
+    assert _resolve_threshold_xgboost_parameters(duplicated).source == "frozen_snapshot"
+
+
+def test_walk_forward_to_threshold_parameter_calibration_owns_only_threshold_fields(
+    tmp_path,
+):
+    detail = _detail(snapshot={
+            "xgb_max_depth": 2,
+            "walk_forward_test_size": 42,
+            "threshold_calibration_min_signals_per_window": 30,
+        })
+    detail["configuration"].update({
+        "source_xgboost_calibration_run": "older-xgb-ancestor",
+        "frozen_xgboost_parameters": {
+            "Up": {"max_depth": 2, "eta": 0.05, "num_boost_round": 80},
+            "Down": {"max_depth": 3, "eta": 0.1, "num_boost_round": 60},
+        },
+    })
+    draft = walk_forward_duplication_draft("wf-parent", detail)
+    current = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        xgb_max_depth=9,
+        walk_forward_test_size=10,
+        threshold_calibration_min_signals_per_window=6,
+    )
+
+    derived = experiment_spec_from_duplication(
+        draft,
+        current_config=current,
+        use_run_config=False,
+        job_type=JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        current_combinations_per_target=4,
+    )
+
+    assert derived.config.xgb_max_depth == 2
+    assert derived.config.walk_forward_test_size == 42
+    assert derived.config.threshold_calibration_min_signals_per_window == 6
+    assert derived.combinations_per_target == 4
+    assert derived.source_walk_forward_run == "wf-parent"
+    assert derived.source_experiment_run == "wf-parent"
+    from rstock.application.workflows import _threshold_parameter_parent
+    assert _threshold_parameter_parent(derived) == "wf-parent"
+
+
+def test_threshold_parameter_result_is_frozen_for_threshold_descendant(tmp_path):
+    from rstock.application.workflows import _resolve_threshold_calibration_config
+
+    run_id = "threshold-parameter-parent"
+    parameters = {
+        "threshold_calibration_min_signals_per_window": 7,
+        "threshold_calibration_min_robust_signals": 12,
+        "threshold_calibration_min_window_fraction": 0.75,
+        "threshold_calibration_precision_tolerance": 0.02,
+        "threshold_calibration_quantiles": [0.5, 0.75, 0.9],
+        "threshold_calibration_grid_decimals": 6,
+    }
+    results = tmp_path / "runs" / run_id / "results"
+    results.mkdir(parents=True)
+    (results / "selected_threshold_calibration_configuration.json").write_text(
+        json.dumps({"parameters": parameters}), encoding="utf-8"
+    )
+    detail = _detail(
+        job_type="threshold_parameter_calibration",
+        snapshot={
+            "xgb_max_depth": 3,
+            "threshold_calibration_min_signals_per_window": 40,
+        },
+    )
+    detail["configuration"].update({
+        "source_walk_forward_run": "wf-parent",
+        "source_xgboost_calibration_run": "xgb-parent",
+        "frozen_xgboost_parameters": {
+            "Up": {"max_depth": 2, "eta": 0.05, "num_boost_round": 120},
+            "Down": {"max_depth": 4, "eta": 0.1, "num_boost_round": 80},
+        },
+    })
+
+    derived = experiment_spec_from_duplication(
+        walk_forward_duplication_draft(run_id, detail, project_root=tmp_path),
+        current_config=replace(
+            DEFAULT_CONFIG,
+            project_root=tmp_path,
+            xgb_max_depth=9,
+            threshold_calibration_min_signals_per_window=2,
+        ),
+        use_run_config=False,
+        job_type=JobType.THRESHOLD_CALIBRATION,
+    )
+
+    assert derived.source_threshold_parameter_calibration_run == run_id
+    assert derived.frozen_threshold_calibration_parameters == parameters
+    assert derived.config.threshold_calibration_min_signals_per_window == 40
+    assert derived.config.xgb_max_depth == 3
+    assert derived.source_xgboost_calibration_run == "xgb-parent"
+    assert derived.frozen_xgboost_parameters["Down"]["max_depth"] == 4
+    effective, source = _resolve_threshold_calibration_config(derived)
+    assert source == "frozen_snapshot"
+    assert effective.threshold_calibration_min_signals_per_window == 7
 
 
 def test_duplication_defaults_to_the_source_job_type():

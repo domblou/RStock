@@ -21,6 +21,7 @@ from rstock.application.history_analysis import (
     threshold_calibration_table,
     threshold_calibration_choice_diagnostic_table,
     threshold_calibration_selection_summary,
+    threshold_parameter_calibration_table,
     threshold_promotion_guidance,
     threshold_sensitivity_best_column,
     threshold_sensitivity_grid,
@@ -74,6 +75,42 @@ def test_combination_table_calculates_delta_and_preserves_existing_metrics():
     assert row["Dispersion"] == 0.09
     assert bool(row["Holdout confirmé"]) is True
     assert row["Statut"] == "Holdout confirmé"
+
+
+def test_threshold_parameter_calibration_grid_contains_winner_and_parameters():
+    metrics = pd.DataFrame([{
+        "Configuration": "candidate_01",
+        "Selected": True,
+        "Rank": 1,
+        "EligibleModelPct": 0.75,
+        "ModelsEvaluated": 8,
+        "ModelsEligible": 6,
+        "TotalSignals": 120,
+        "PrecisionMedian": 0.62,
+        "F1Median": 0.58,
+        "WindowCoverageMedian": 0.8,
+        "PrecisionStdMedian": 0.04,
+        "DirectionalReturnMeanMedian": 0.01,
+        "DirectionalReturnStdMedian": 0.02,
+        "OppositeMoveFrequencyMedian": 0.2,
+        "SelectionReason": "development_order",
+        "RejectionReason": None,
+    }])
+    tested = pd.DataFrame([{
+        "Configuration": "candidate_01",
+        "threshold_calibration_min_signals_per_window": 10,
+        "threshold_calibration_min_robust_signals": 20,
+        "threshold_calibration_min_window_fraction": 0.75,
+        "threshold_calibration_precision_tolerance": 0.01,
+    }])
+
+    table = threshold_parameter_calibration_table(metrics, tested)
+
+    assert table.loc[0, "Configuration"] == "candidate_01"
+    assert bool(table.loc[0, "Sélectionnée"])
+    assert table.loc[0, "% modèles admissibles (critère principal)"] == 0.75
+    assert "fenêtre 10" in table.loc[0, "Paramètres clés"]
+    assert table.loc[0, "Raison sélection/rejet"] == "development_order"
 
 
 def test_combination_filters_keep_qualification_separate_from_confirmation():

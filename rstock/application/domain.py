@@ -17,6 +17,7 @@ from .universes import UniverseSelection
 class JobType(str, Enum):
     WALK_FORWARD = "walk_forward"
     XGBOOST_CALIBRATION = "xgboost_calibration"
+    THRESHOLD_PARAMETER_CALIBRATION = "threshold_parameter_calibration"
     THRESHOLD_CALIBRATION = "threshold_calibration"
     FULL_TRAINING = "full_training"
     DAILY_PREDICTION = "daily_prediction"
@@ -32,6 +33,7 @@ class JobType(str, Enum):
         return self in {
             JobType.WALK_FORWARD,
             JobType.XGBOOST_CALIBRATION,
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
             JobType.THRESHOLD_CALIBRATION,
             JobType.PRODUCTION_TRAINING,
             JobType.MARKET_UPDATE,
@@ -99,11 +101,15 @@ class ExperimentSpec:
     target_symbols: tuple[str, ...] = ()
     context_symbols: tuple[str, ...] = ()
     predictor_symbols: tuple[str, ...] = ()
+    source_experiment_run: str | None = None
     source_walk_forward_run: str | None = None
     source_xgboost_calibration_run: str | None = None
     frozen_xgboost_parameters: dict[str, dict[str, int | float]] | None = None
     frozen_xgboost_parameters_sha256: str | None = None
     xgboost_resolution_version: int = 1
+    source_threshold_parameter_calibration_run: str | None = None
+    frozen_threshold_calibration_parameters: dict[str, object] | None = None
+    frozen_threshold_calibration_parameters_sha256: str | None = None
     run_description: str | None = None
     historical_data_cutoff: str | None = None
     source_prepared_dataset_sha256: str | None = None
@@ -147,6 +153,26 @@ class ExperimentSpec:
             object.__setattr__(self, "frozen_xgboost_parameters_sha256", digest)
         else:
             object.__setattr__(self, "frozen_xgboost_parameters_sha256", None)
+        frozen_threshold = self.frozen_threshold_calibration_parameters
+        if frozen_threshold is not None:
+            normalized_threshold = {
+                str(name): list(value) if isinstance(value, tuple) else value
+                for name, value in frozen_threshold.items()
+            }
+            canonical_threshold = json.dumps(
+                normalized_threshold, sort_keys=True, separators=(",", ":")
+            )
+            threshold_digest = hashlib.sha256(canonical_threshold.encode()).hexdigest()
+            object.__setattr__(
+                self, "frozen_threshold_calibration_parameters", normalized_threshold
+            )
+            object.__setattr__(
+                self, "frozen_threshold_calibration_parameters_sha256", threshold_digest
+            )
+        else:
+            object.__setattr__(
+                self, "frozen_threshold_calibration_parameters_sha256", None
+            )
         if len(self.symbols) < 2:
             raise ValueError("At least two symbols are required")
         if self.combinations_per_target < 1:
@@ -167,11 +193,21 @@ class ExperimentSpec:
             "target_symbols": list(self.target_symbols),
             "context_symbols": list(self.context_symbols),
             "predictor_symbols": list(self.predictor_symbols),
+            "source_experiment_run": self.source_experiment_run,
             "source_walk_forward_run": self.source_walk_forward_run,
             "source_xgboost_calibration_run": self.source_xgboost_calibration_run,
             "frozen_xgboost_parameters": self.frozen_xgboost_parameters,
             "frozen_xgboost_parameters_sha256": self.frozen_xgboost_parameters_sha256,
             "xgboost_resolution_version": self.xgboost_resolution_version,
+            "source_threshold_parameter_calibration_run": (
+                self.source_threshold_parameter_calibration_run
+            ),
+            "frozen_threshold_calibration_parameters": (
+                self.frozen_threshold_calibration_parameters
+            ),
+            "frozen_threshold_calibration_parameters_sha256": (
+                self.frozen_threshold_calibration_parameters_sha256
+            ),
             "run_description": self.run_description,
             "historical_data_cutoff": self.historical_data_cutoff,
             "source_prepared_dataset_sha256": self.source_prepared_dataset_sha256,
@@ -224,6 +260,11 @@ class ExperimentSpec:
             predictor_symbols=tuple(
                 str(item) for item in values.get("predictor_symbols", ())
             ),
+            source_experiment_run=(
+                None
+                if values.get("source_experiment_run") is None
+                else str(values["source_experiment_run"])
+            ),
             source_walk_forward_run=(
                 None
                 if values.get("source_walk_forward_run") is None
@@ -245,6 +286,23 @@ class ExperimentSpec:
                 else str(values["frozen_xgboost_parameters_sha256"])
             ),
             xgboost_resolution_version=int(values.get("xgboost_resolution_version", 0)),
+            source_threshold_parameter_calibration_run=(
+                None
+                if values.get("source_threshold_parameter_calibration_run") is None
+                else str(values["source_threshold_parameter_calibration_run"])
+            ),
+            frozen_threshold_calibration_parameters=(
+                None
+                if not isinstance(
+                    values.get("frozen_threshold_calibration_parameters"), dict
+                )
+                else values["frozen_threshold_calibration_parameters"]
+            ),
+            frozen_threshold_calibration_parameters_sha256=(
+                None
+                if values.get("frozen_threshold_calibration_parameters_sha256") is None
+                else str(values["frozen_threshold_calibration_parameters_sha256"])
+            ),
             run_description=(
                 None if values.get("run_description") is None
                 else str(values["run_description"])

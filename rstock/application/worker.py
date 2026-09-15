@@ -33,6 +33,11 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("walk_forward", 65), ("final_holdout", 8), ("metrics", 4),
         ("result_writing", 3), ("publishing", 2),
     ],
+    JobType.THRESHOLD_PARAMETER_CALIBRATION: [
+        ("data_preparation", 12), ("combination_generation", 6),
+        ("walk_forward", 57), ("metrics", 20),
+        ("result_writing", 3), ("publishing", 2),
+    ],
     JobType.THRESHOLD_CALIBRATION: [
         ("data_preparation", 12), ("combination_generation", 6),
         ("walk_forward", 65), ("final_holdout", 8), ("metrics", 4),

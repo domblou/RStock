@@ -11,7 +11,8 @@ import pandas as pd
 
 
 EXPERIMENT_JOB_TYPES = frozenset({
-    "walk_forward", "xgboost_calibration", "threshold_calibration",
+    "walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
+    "threshold_calibration",
 })
 PRODUCTION_JOB_TYPES = frozenset({
     "production_training", "market_update", "daily_prediction",
@@ -20,6 +21,7 @@ PRODUCTION_JOB_TYPES = frozenset({
 JOB_LABELS = {
     "walk_forward": "Walk-forward",
     "xgboost_calibration": "Calibration XGBoost",
+    "threshold_parameter_calibration": "Calibration des paramètres de seuils",
     "threshold_calibration": "Calibration des seuils",
     "production_training": "Entraînement production",
     "market_update": "Mise à jour marché",
@@ -173,6 +175,11 @@ def _summary_text(
     summary: Mapping[str, object],
     configuration: Mapping[str, object],
 ) -> str:
+    if job_type == "threshold_parameter_calibration":
+        selected = summary.get("selected_configuration")
+        if isinstance(selected, Mapping):
+            return f"Configuration gagnante : {selected.get('configuration', '—')}"
+        return "Calibration des paramètres terminée"
     description = configuration.get("run_description")
     if isinstance(description, str) and description.strip():
         return f"{JOB_LABELS.get(job_type, job_type)} — {description.strip()}"
@@ -250,11 +257,28 @@ def history_row(
     configuration = detail.get("configuration", {})
     summary = detail.get("summary", {})
     job_type = str(status["job_type"])
+    source_run = (
+        configuration.get("source_experiment_run")
+        or configuration.get("source_walk_forward_run")
+    )
+    if job_type == "threshold_parameter_calibration":
+        source_run = (
+            configuration.get("source_experiment_run")
+            or configuration.get("source_threshold_parameter_calibration_run")
+            or configuration.get("source_xgboost_calibration_run")
+            or source_run
+        )
+    elif job_type == "threshold_calibration":
+        source_run = (
+            configuration.get("source_experiment_run")
+            or configuration.get("source_threshold_parameter_calibration_run")
+            or source_run
+        )
     return HistoryRow(
         run_id=str(status["run_id"]),
         source_walk_forward_run=(
-            str(configuration["source_walk_forward_run"])
-            if configuration.get("source_walk_forward_run") is not None
+            str(source_run)
+            if source_run is not None
             else "—"
         ),
         date_time=short_datetime(status.get("created_at")),
