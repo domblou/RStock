@@ -134,6 +134,10 @@ def test_walk_forward_persists_prepared_traceability(monkeypatch, tmp_path):
     captured = {}
 
     monkeypatch.setattr(
+        "rstock.traceability.current_git_commit", lambda project_root: "deadbeef"
+    )
+
+    monkeypatch.setattr(
         "rstock.application.workflows._prepared_experiment",
         lambda *args, **kwargs: (prepared, generated, {}),
     )
@@ -155,7 +159,7 @@ def test_walk_forward_persists_prepared_traceability(monkeypatch, tmp_path):
     )
 
     assert summary["traceability"] == captured["traceability"]
-    assert captured["traceability"]["git_commit"] is None
+    assert captured["traceability"]["git_commit"] == "deadbeef"
     assert captured["traceability"]["prepared_market_last_date"] == "2026-01-05T00:00:00"
     assert captured["traceability"]["symbols_used"] == 2
     assert len(captured["traceability"]["prepared_dataset_sha256"]) == 64
