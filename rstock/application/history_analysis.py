@@ -76,6 +76,14 @@ CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS = (
     "Stabilité rendement", "Fréquence mouvement opposé", "F1",
     "Dans tolérance précision", "Raison de rejet / sélection",
 )
+XGBOOST_CALIBRATION_SELECTION_COLUMNS = (
+    "Direction", "Configuration sélectionnée", "Selection score",
+    "Écart avec le 2e meilleur candidat", "ROC-AUC développement",
+    "PR-AUC développement", "Stabilité développement", "ROC-AUC holdout",
+    "PR-AUC holdout", "Précision holdout", "Rappel holdout", "F1 holdout",
+    "Taux de prédictions positives", "Prévalence", "TP", "FP", "Sets",
+    "Observations", "Paramètres clés",
+)
 
 
 def altair_serializable_distribution(distribution: pd.Series) -> pd.Series:
@@ -233,6 +241,147 @@ def load_threshold_calibration_artifacts(
     except (OSError, json.JSONDecodeError):
         selected = {}
     return metrics, holdout, selected if isinstance(selected, dict) else {}
+
+
+def load_xgboost_calibration_artifacts(
+    project_root: Path, run_id: str
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Load existing XGBoost-calibration artifacts without recomputation."""
+
+    results = Path(project_root) / "runs" / run_id / "results"
+    development_path = results / "development_metrics_by_configuration.csv"
+    holdout_path = results / "holdout_metrics.csv"
+    selected_path = results / "selected_configurations.json"
+    development = (
+        pd.read_csv(development_path) if development_path.exists() else pd.DataFrame()
+    )
+    holdout = pd.read_csv(holdout_path) if holdout_path.exists() else pd.DataFrame()
+    try:
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        selected = {}
+    return development, holdout, selected if isinstance(selected, dict) else {}
+
+
+def _calibration_row(
+    frame: pd.DataFrame, direction: str, configuration: object
+) -> pd.Series | None:
+    if frame.empty or "Direction" not in frame:
+        return None
+    matches = frame[frame["Direction"].astype(str) == direction]
+    if "Configuration" in frame and configuration is not None:
+        matches = matches[matches["Configuration"].astype(str) == str(configuration)]
+    return None if matches.empty else matches.iloc[0]
+
+
+def _calibration_value(row: pd.Series | None, name: str) -> object:
+    return pd.NA if row is None or name not in row else row[name]
+
+
+def _compact_xgboost_parameters(parameters: Mapping[str, Any]) -> str:
+    try:
+        depth = int(parameters["max_depth"])
+        eta = f"{float(parameters['eta']):.4g}"
+        rounds = int(parameters["num_boost_round"])
+    except (KeyError, TypeError, ValueError):
+        return "—"
+    return f"d{depth} / η{eta} / {rounds}"
+
+
+def xgboost_calibration_selection_table(
+    selected_configurations: Mapping[str, Any],
+    development_metrics: pd.DataFrame,
+    holdout_metrics: pd.DataFrame,
+) -> pd.DataFrame:
+    """Project persisted XGBoost calibration artifacts into one row per direction."""
+
+    rows: list[dict[str, object]] = []
+    for direction in ("Up", "Down"):
+        selected = selected_configurations.get(direction, {})
+        selected = selected if isinstance(selected, Mapping) else {}
+        configuration = selected.get("configuration")
+        parameters = selected.get("parameters", {})
+        parameters = parameters if isinstance(parameters, Mapping) else {}
+        development = _calibration_row(development_metrics, direction, configuration)
+        holdout = _calibration_row(holdout_metrics, direction, configuration)
+
+        gap: object = pd.NA
+        if not development_metrics.empty and "Direction" in development_metrics:
+            candidates = development_metrics[
+                development_metrics["Direction"].astype(str) == direction
+            ].copy()
+            scores = _number(candidates, "SelectionScore")
+            if configuration is not None and "Configuration" in candidates:
+                selected_scores = scores[
+                    candidates["Configuration"].astype(str) == str(configuration)
+                ].dropna()
+                other_scores = scores[
+                    candidates["Configuration"].astype(str) != str(configuration)
+                ].dropna()
+                if not selected_scores.empty and not other_scores.empty:
+                    gap = float(selected_scores.iloc[0] - other_scores.max())
+
+        rows.append({
+            "Direction": direction,
+            "Configuration sélectionnée": configuration if configuration is not None else pd.NA,
+            "Selection score": selected.get("selection_score", _calibration_value(development, "SelectionScore")),
+            "Écart avec le 2e meilleur candidat": gap,
+            "ROC-AUC développement": _calibration_value(development, "ROCAUCMedian"),
+            "PR-AUC développement": _calibration_value(development, "PRAUCMedian"),
+            "Stabilité développement": _calibration_value(development, "ROCAUCStd"),
+            "ROC-AUC holdout": _calibration_value(holdout, "ROCAUC"),
+            "PR-AUC holdout": _calibration_value(holdout, "PRAUC"),
+            "Précision holdout": _calibration_value(holdout, "Precision"),
+            "Rappel holdout": _calibration_value(holdout, "Recall"),
+            "F1 holdout": _calibration_value(holdout, "F1"),
+            "Taux de prédictions positives": _calibration_value(holdout, "PositivePredictionRate"),
+            "Prévalence": _calibration_value(holdout, "Prevalence"),
+            "TP": _calibration_value(holdout, "TP"),
+            "FP": _calibration_value(holdout, "FP"),
+            "Sets": _calibration_value(holdout, "Sets"),
+            "Observations": _calibration_value(holdout, "Observations"),
+            "Paramètres clés": _compact_xgboost_parameters(parameters),
+        })
+    return pd.DataFrame(rows, columns=XGBOOST_CALIBRATION_SELECTION_COLUMNS)
+
+
+def xgboost_calibration_selection_display_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Format the selection projection for a consistent, Arrow-safe UI grid."""
+
+    display = table.copy()
+    decimal_columns = {
+        "Selection score", "Écart avec le 2e meilleur candidat",
+    }
+    metric_columns = {
+        "ROC-AUC développement", "PR-AUC développement", "Stabilité développement",
+        "ROC-AUC holdout", "PR-AUC holdout", "Précision holdout",
+        "Rappel holdout", "F1 holdout",
+    }
+    percent_columns = {"Taux de prédictions positives", "Prévalence"}
+    integer_columns = {"TP", "FP", "Sets", "Observations"}
+    for column in display.columns:
+        if column in decimal_columns:
+            display[column] = _number(display, column).map(
+                lambda value: "—" if pd.isna(value) else f"{value:.4f}"
+            )
+        elif column in metric_columns:
+            display[column] = _number(display, column).map(
+                lambda value: "—" if pd.isna(value) else f"{value:.3f}"
+            )
+        elif column in percent_columns:
+            display[column] = _number(display, column).map(
+                lambda value: "—" if pd.isna(value) else f"{value:.1%}"
+            )
+        elif column in integer_columns:
+            display[column] = _number(display, column).map(
+                lambda value: "—" if pd.isna(value) else str(int(value))
+            )
+        else:
+            display[column] = display[column].map(
+                lambda value: "—" if value is None or pd.isna(value) else str(value)
+            )
+        display[column] = display[column].astype("string")
+    return display
 
 
 def load_threshold_holdout_predictions(project_root: Path, run_id: str) -> pd.DataFrame:

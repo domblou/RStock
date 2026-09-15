@@ -48,6 +48,7 @@ from rstock.application.history_analysis import (
     load_threshold_calibration_artifacts,
     load_threshold_holdout_predictions,
     load_walk_forward_artifacts,
+    load_xgboost_calibration_artifacts,
     predictor_prefilter_summary,
     run_universe_summary,
     selected_run_action,
@@ -57,6 +58,8 @@ from rstock.application.history_analysis import (
     threshold_promotion_guidance,
     threshold_sensitivity_summary,
     threshold_sensitivity_table,
+    xgboost_calibration_selection_display_table,
+    xgboost_calibration_selection_table,
 )
 from rstock.application.runner import running_duration
 from rstock.application.surveillance import (
@@ -1446,7 +1449,10 @@ def _render_history_detail(
             configuration=detail["configuration"],
         )
     tabs = st.tabs(["Résultats", "Configuration", "Fichiers", "Logs"])
-    tabs[0].json(detail["summary"])
+    with tabs[0]:
+        if status["job_type"] == JobType.XGBOOST_CALIBRATION.value:
+            _render_xgboost_calibration_selection(run_id)
+        st.json(detail["summary"])
     tabs[1].json(detail["configuration"])
     tabs[2].write(detail["files"] or "Aucun résultat publié")
     tabs[3].code("\n".join(detail["log_tail"]) or "Aucun message")
@@ -1478,6 +1484,29 @@ def _format_metric(value: object, *, percent: bool = False) -> str:
     if value is None or pd.isna(value):
         return "—"
     return f"{float(value):.2%}" if percent else f"{float(value):.2f}"
+
+
+def _render_xgboost_calibration_selection(run_id: str) -> None:
+    development, holdout, selected = load_xgboost_calibration_artifacts(
+        st.session_state.lab_config.project_root, run_id
+    )
+    table = xgboost_calibration_selection_table(selected, development, holdout)
+    if not selected:
+        st.caption("Les artefacts de sélection XGBoost ne sont pas disponibles pour ce run historique.")
+        return
+    st.subheader("Sélection et validation XGBoost")
+    st.caption("Stabilité développement = écart-type ROC-AUC entre les fenêtres.")
+    st.dataframe(
+        xgboost_calibration_selection_display_table(table),
+        hide_index=True,
+        width="stretch",
+    )
+    with st.expander("Paramètres XGBoost complets"):
+        st.json({
+            direction: payload.get("parameters", {})
+            for direction, payload in selected.items()
+            if isinstance(payload, dict)
+        })
 
 
 def _promote_combination_action(run_id: str, combination: pd.Series) -> None:

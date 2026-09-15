@@ -26,6 +26,8 @@ from rstock.application.history_analysis import (
     threshold_sensitivity_grid,
     threshold_sensitivity_summary,
     threshold_sensitivity_table,
+    xgboost_calibration_selection_display_table,
+    xgboost_calibration_selection_table,
 )
 from rstock.config import DEFAULT_CONFIG
 from rstock.threshold_calibration import adaptive_threshold_grid, calibrate_thresholds
@@ -264,6 +266,66 @@ def test_predictor_prefilter_summary_exposes_threshold_rejection_counts():
     assert table.iloc[0]["Rejet fenêtres > 0,50"] == 1
     assert table.iloc[0]["Rejet Worst AUC"] == 3
     assert table.iloc[0]["Rejet dispersion"] == 1
+
+
+def test_xgboost_calibration_selection_table_projects_selected_configs_and_holdout():
+    selected = {
+        "Up": {
+            "configuration": "candidate_up",
+            "selection_score": 0.61234,
+            "parameters": {"max_depth": 2, "eta": 0.05, "num_boost_round": 120},
+        },
+        "Down": {
+            "configuration": "candidate_down",
+            "selection_score": 0.52345,
+            "parameters": {"max_depth": 3, "eta": 0.1, "num_boost_round": 80},
+        },
+    }
+    development = pd.DataFrame([
+        {"Direction": "Up", "Configuration": "candidate_up", "SelectionScore": 0.61234, "ROCAUCMedian": 0.63, "PRAUCMedian": 0.41, "ROCAUCStd": 0.03},
+        {"Direction": "Up", "Configuration": "runner_up", "SelectionScore": 0.59},
+        {"Direction": "Down", "Configuration": "candidate_down", "SelectionScore": 0.52345, "ROCAUCMedian": 0.58, "PRAUCMedian": 0.36, "ROCAUCStd": 0.04},
+        {"Direction": "Down", "Configuration": "runner_up", "SelectionScore": 0.50},
+    ])
+    holdout = pd.DataFrame([
+        {"Direction": "Up", "Configuration": "candidate_up", "ROCAUC": 0.55, "PRAUC": 0.31, "Precision": 0.0, "Recall": 0.0, "F1": 0.0, "PositivePredictionRate": 0.02, "Prevalence": 0.30, "TP": 0, "FP": 3, "Sets": 4, "Observations": 120},
+        {"Direction": "Up", "Configuration": "wrong_configuration", "ROCAUC": 0.99},
+        {"Direction": "Down", "Configuration": "candidate_down", "ROCAUC": 0.57, "PRAUC": 0.35, "Precision": 0.4, "Recall": 0.2, "F1": 0.27, "PositivePredictionRate": 0.1, "Prevalence": 0.2, "TP": 2, "FP": 3, "Sets": 4, "Observations": 120},
+    ])
+
+    table = xgboost_calibration_selection_table(selected, development, holdout)
+    up = table[table["Direction"] == "Up"].iloc[0]
+    down = table[table["Direction"] == "Down"].iloc[0]
+
+    assert up["Configuration sélectionnée"] == "candidate_up"
+    assert up["Écart avec le 2e meilleur candidat"] == pytest.approx(0.02234)
+    assert down["Écart avec le 2e meilleur candidat"] == pytest.approx(0.02345)
+    assert up["ROC-AUC holdout"] == 0.55
+    assert up["TP"] == 0
+    assert up["Rappel holdout"] == 0.0
+    assert up["Paramètres clés"] == "d2 / η0.05 / 120"
+    assert down["Paramètres clés"] == "d3 / η0.1 / 80"
+
+    display = xgboost_calibration_selection_display_table(table)
+    up_display = display[display["Direction"] == "Up"].iloc[0]
+    assert up_display["ROC-AUC holdout"] == "0.550"
+    assert up_display["TP"] == "0"
+    assert up_display["Rappel holdout"] == "0.000"
+
+
+def test_xgboost_calibration_selection_table_displays_missing_development_metrics():
+    selected = {
+        "Up": {"configuration": "baseline", "parameters": {}},
+        "Down": {"configuration": "baseline", "parameters": {}},
+    }
+
+    table = xgboost_calibration_selection_display_table(
+        xgboost_calibration_selection_table(selected, pd.DataFrame(), pd.DataFrame())
+    )
+
+    assert table["ROC-AUC développement"].tolist() == ["—", "—"]
+    assert table["Écart avec le 2e meilleur candidat"].tolist() == ["—", "—"]
+    assert table["Paramètres clés"].tolist() == ["—", "—"]
 
 
 def test_threshold_calibration_table_uses_per_set_thresholds_and_holdout_metrics():

@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from rstock.atomic_io import (
+    ATOMIC_WRITE_ATTEMPTS,
+    ATOMIC_WRITE_BACKOFF_SECONDS,
+    is_temporary_file_lock,
+)
 from .domain import ExperimentSpec, JobStatus
 
 
@@ -29,8 +34,8 @@ STATUS_TRANSITIONS = {
     JobStatus.INTERRUPTED: {JobStatus.PENDING},
 }
 
-JSON_WRITE_ATTEMPTS = 5
-JSON_WRITE_BACKOFF_SECONDS = 0.02
+JSON_WRITE_ATTEMPTS = ATOMIC_WRITE_ATTEMPTS
+JSON_WRITE_BACKOFF_SECONDS = ATOMIC_WRITE_BACKOFF_SECONDS
 JSON_READ_ATTEMPTS = 4
 JSON_READ_BACKOFF_SECONDS = 0.01
 
@@ -147,12 +152,7 @@ class RunRepository:
     @staticmethod
     def _temporary_lock(error: OSError) -> bool:
         """Recognise the common Windows sharing/access-denied lock errors."""
-
-        return isinstance(error, PermissionError) or getattr(error, "winerror", None) in {
-            5,  # ERROR_ACCESS_DENIED
-            32,  # ERROR_SHARING_VIOLATION
-            33,  # ERROR_LOCK_VIOLATION
-        }
+        return is_temporary_file_lock(error)
 
     def _atomic_json_write(self, destination: Path, payload: str) -> None:
         """Write and close a sibling temporary file before atomically replacing."""

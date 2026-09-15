@@ -7,10 +7,17 @@ import json
 import os
 import pickle
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .atomic_io import (
+    ATOMIC_WRITE_ATTEMPTS,
+    ATOMIC_WRITE_BACKOFF_SECONDS,
+    is_temporary_file_lock,
+)
 
 
 CHECKPOINT_SCHEMA_VERSION = 1
@@ -48,9 +55,23 @@ def _atomic_bytes(destination: Path, payload: bytes) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, destination)
+        for attempt in range(ATOMIC_WRITE_ATTEMPTS):
+            try:
+                os.replace(temporary, destination)
+                return
+            except OSError as error:
+                # Keep checkpoint publication consistent with the repository's
+                # bounded retry policy for transient Windows file locks.
+                if not is_temporary_file_lock(error) or attempt == ATOMIC_WRITE_ATTEMPTS - 1:
+                    raise
+                time.sleep(ATOMIC_WRITE_BACKOFF_SECONDS * (2**attempt))
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # Cleanup is best effort when another process still holds the temp
+            # file. The original publication error remains authoritative.
+            pass
 
 
 def _atomic_json(destination: Path, values: dict[str, Any]) -> None:

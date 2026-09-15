@@ -3,10 +3,12 @@ import json
 import pandas as pd
 import pytest
 
+import rstock.checkpoints as checkpoints_module
 from rstock.checkpoints import (
     CheckpointCorruptError,
     CheckpointIncompatibleError,
     CheckpointManager,
+    _atomic_bytes,
 )
 
 
@@ -157,3 +159,72 @@ def test_snapshot_preserves_datetime_index_dtypes_and_attrs(tmp_path):
     pd.testing.assert_frame_equal(restored, prepared)
     assert restored.attrs == prepared.attrs
     assert metadata == {"calendar": "XNYS"}
+
+
+def test_atomic_bytes_retries_transient_permission_error(tmp_path, monkeypatch):
+    destination = tmp_path / "manifest.json"
+    original_replace = checkpoints_module.os.replace
+    calls = {"count": 0}
+
+    def flaky_replace(source, target):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise PermissionError(5, "access denied")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(checkpoints_module.os, "replace", flaky_replace)
+    monkeypatch.setattr(checkpoints_module.time, "sleep", lambda _: None)
+
+    _atomic_bytes(destination, b'{"ok": true}\n')
+
+    assert destination.read_bytes() == b'{"ok": true}\n'
+    assert calls["count"] == 2
+    assert list(tmp_path.glob(".manifest.json.*.tmp")) == []
+
+
+def test_atomic_bytes_propagates_persistent_permission_error_and_preserves_manifest(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "manifest.json"
+    destination.write_bytes(b'{"old": true}\n')
+    monkeypatch.setattr(
+        checkpoints_module.os,
+        "replace",
+        lambda *_: (_ for _ in ()).throw(PermissionError(5, "access denied")),
+    )
+    monkeypatch.setattr(checkpoints_module.time, "sleep", lambda _: None)
+
+    with pytest.raises(PermissionError):
+        _atomic_bytes(destination, b'{"new": true}\n')
+
+    assert destination.read_bytes() == b'{"old": true}\n'
+    assert list(tmp_path.glob(".manifest.json.*.tmp")) == []
+
+
+def test_failed_manifest_publication_is_reconciled_for_resume(tmp_path, monkeypatch):
+    manager = _manager(tmp_path)
+    original_replace = checkpoints_module.os.replace
+
+    def fail_manifest_replace(source, target):
+        if target.name == "manifest.json":
+            raise PermissionError(5, "access denied")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(checkpoints_module.os, "replace", fail_manifest_replace)
+    monkeypatch.setattr(checkpoints_module.time, "sleep", lambda _: None)
+
+    with pytest.raises(PermissionError):
+        manager.commit_batch(
+            "walk_forward",
+            0,
+            {"value": 1},
+            first_index=0,
+            last_index=0,
+            combination_count=1,
+            row_counts={},
+        )
+
+    monkeypatch.setattr(checkpoints_module.os, "replace", original_replace)
+    resumed = _manager(tmp_path)
+    assert resumed.completed_batch_ids("walk_forward") == (0,)
+    assert resumed.load_batch("walk_forward", 0) == {"value": 1}
