@@ -243,7 +243,7 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
         "Mettre à jour le marché",
         "Prédictions quotidiennes",
         "Détecter les signaux",
-        "Résultats réalisés",
+        "Évaluer les prédictions",
         "Exécution complète",
     ):
         assert label in source
@@ -319,16 +319,16 @@ def test_surveillance_uses_one_conditional_page_level_polling_fragment():
     assert "_polling_surveillance_page = st.fragment(run_every=2)" in source
     assert "surveillance_refresh_decision(runs, polling=False)" in source
     assert "st.rerun(scope=\"app\")" in source
-    assert "_realized_results_panel = st.fragment" not in source
+    assert "_evaluated_predictions_panel = st.fragment" not in source
 
 
 def test_surveillance_uses_internal_tabs_and_on_demand_technical_details():
     source = APP.read_text(encoding="utf-8")
 
-    assert 'st.tabs(["Prédictions", "Signaux", "Résultats réalisés"])' in source
+    assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' in source
     assert "_render_predictions_tab(predictions)" in source
     assert "_render_signals_tab(signals, predictions, models)" in source
-    assert "_realized_results_panel(predictions, signals)" in source
+    assert "_evaluated_predictions_panel(predictions, signals)" in source
     assert "Voir les prédictions sans signal" in source
     assert "Détails techniques" in source
     assert "Pourquoi ce signal ?" in source
@@ -363,21 +363,21 @@ def test_surveillance_kpis_keep_last_update_wide_and_prediction_secondary():
     assert 'timestamp.strftime("%Y-%m-%d %H:%M")' in source
 
 
-def test_realized_results_grid_is_always_rendered_with_readable_audit_details():
+def test_evaluated_predictions_grid_is_always_rendered_with_readable_audit_details():
     source = APP.read_text(encoding="utf-8")
-    panel = source.split("def _realized_results_panel", 1)[1].split(
+    panel = source.split("def _evaluated_predictions_panel", 1)[1].split(
         "def _render_surveillance_page", 1
     )[0]
 
-    assert "main_table = realized_main_table(view.table)" in panel
+    assert "main_table = evaluated_predictions_main_table(displayed_view.table)" in panel
     assert "if view.table.empty:" not in panel
-    assert 'key="surveillance-realized"' in panel
+    assert 'key="surveillance-evaluated-predictions"' in panel
     assert "_render_prediction_audit_details(record)" in panel
     assert "pending_columns = st.columns(2)" not in panel
     assert 'st.caption(' in panel
     assert "Prochaine validation" in panel
     assert "Données jusqu’au" in panel
-    assert "Aucun résultat réalisé disponible pour l’instant." not in panel
+    assert "evaluation_feedback(new_results, view)" in panel
     assert "if new_results:" in panel
 
 
@@ -390,9 +390,9 @@ def test_prediction_audit_ui_is_shared_by_predictions_signals_and_results():
         "def _render_signals_tab", 1
     )[0]
     signals = source.split("def _render_signals_tab", 1)[1].split(
-        "def _realized_results_panel", 1
+        "def _evaluated_predictions_panel", 1
     )[0]
-    realized = source.split("def _realized_results_panel", 1)[1].split(
+    realized = source.split("def _evaluated_predictions_panel", 1)[1].split(
         "def _render_surveillance_page", 1
     )[0]
 

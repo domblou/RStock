@@ -22,7 +22,7 @@ from rstock.application.production_services import (
     RealizedResultService,
 )
 from rstock.application.repository import RunRepository, utc_now
-from rstock.application.surveillance import build_realized_results_view
+from rstock.application.surveillance import build_evaluated_predictions_view
 from rstock.application.worker import execute_run
 from rstock.application.workflows import WorkflowRegistry, _market_update, _operational_run
 from rstock.config import DEFAULT_CONFIG
@@ -497,7 +497,7 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
     assert not repository.read_table("realized_results").empty
     assert len(repository.read_table("realized_results")) == 1
     assert repository.read_table("predictions").columns.tolist() != repository.read_table("realized_results").columns.tolist()
-    displayed = build_realized_results_view(
+    displayed = build_evaluated_predictions_view(
         repository.read_table("predictions"),
         repository.read_table("signals"),
         repository.read_table("realized_results"),

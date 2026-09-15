@@ -36,6 +36,7 @@ from rstock.application.history_ui import (
 )
 from rstock.application.history_analysis import (
     RunAnalytics,
+    altair_serializable_distribution,
     analyze_run,
     comparison_table,
     comparison_chart_frames,
@@ -60,12 +61,13 @@ from rstock.application.runner import running_duration
 from rstock.application.surveillance import (
     OperationalTableView,
     build_predictions_view,
-    build_realized_results_view,
+    build_evaluated_predictions_view,
     build_signals_view,
+    evaluated_predictions_main_table,
+    evaluation_feedback,
+    filter_evaluated_predictions_view,
     prediction_feature_tables,
-    realized_main_table,
     source_observation_tables,
-    validation_feedback,
 )
 from rstock.application.surveillance_refresh import (
     OPERATIONAL_JOB_TYPES,
@@ -2064,7 +2066,7 @@ def _invalidate_surveillance_selection_state() -> None:
         "surveillance-predictions",
         "surveillance-signals",
         "surveillance-no-signals",
-        "surveillance-realized",
+        "surveillance-evaluated-predictions",
     ):
         st.session_state.pop(key, None)
 
@@ -2164,11 +2166,11 @@ def _render_signals_tab(
         )
 
 
-def _realized_results_panel(
+def _evaluated_predictions_panel(
     predictions: pd.DataFrame,
     signals: pd.DataFrame,
 ) -> None:
-    """Render realized results, pending predictions and validation feedback."""
+    """Render evaluated predictions, pending predictions and evaluation feedback."""
 
     project_root = st.session_state.lab_config.project_root
     signal_service = SignalService(project_root)
@@ -2186,7 +2188,7 @@ def _realized_results_panel(
         freshness_symbols,
         st.session_state.lab_config,
     )
-    view = build_realized_results_view(predictions, signals, realized, freshness)
+    view = build_evaluated_predictions_view(predictions, signals, realized, freshness)
 
     prediction_word = "prédiction" if view.pending_count == 1 else "prédictions"
     st.caption(
@@ -2211,17 +2213,23 @@ def _realized_results_panel(
             summary = _service().run(str(latest["run_id"]))["summary"]
             new_results = int(summary.get("realized_results", 0))
             if new_results:
-                level, message = validation_feedback(new_results, view)
+                level, message = evaluation_feedback(new_results, view)
                 getattr(st, level)(message)
 
-    main_table = realized_main_table(view.table)
+    status_filter = st.selectbox(
+        "Afficher",
+        ["Toutes", "Signaux seulement", "Sans signal"],
+        key="surveillance-evaluated-predictions-filter",
+    )
+    displayed_view = filter_evaluated_predictions_view(view, status_filter)
+    main_table = evaluated_predictions_main_table(displayed_view.table)
     event = st.dataframe(
         main_table, hide_index=True, width="stretch",
-        on_select="rerun", selection_mode="single-row", key="surveillance-realized",
+        on_select="rerun", selection_mode="single-row", key="surveillance-evaluated-predictions",
     )
     selected = _selected_rows(event)
-    if selected and selected[0] < len(view.technical):
-        record = json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso"))
+    if selected and selected[0] < len(displayed_view.technical):
+        record = json.loads(displayed_view.technical.iloc[selected[0]].to_json(date_format="iso"))
         _render_prediction_audit_details(record)
     if not view.pending.empty:
         with st.expander("Voir les prédictions en attente"):
@@ -2283,7 +2291,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
         ("Mettre à jour le marché", JobType.MARKET_UPDATE),
         ("Prédictions quotidiennes", JobType.DAILY_PREDICTION),
         ("Détecter les signaux", JobType.DAILY_SCREENING),
-        ("Résultats réalisés", JobType.REALIZED_VALIDATION),
+        ("Évaluer les prédictions", JobType.REALIZED_VALIDATION),
         ("Exécution complète", JobType.OPERATIONAL_RUN),
     ]
     for column, (label, job_type) in zip(action_columns, actions, strict=True):
@@ -2293,13 +2301,13 @@ def _render_surveillance_page(*, polling: bool) -> None:
             # reruns are driven by that fragment only while work is active.
             st.rerun()
     st.divider()
-    content_tabs = st.tabs(["Prédictions", "Signaux", "Résultats réalisés"])
+    content_tabs = st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])
     with content_tabs[0]:
         _render_predictions_tab(predictions)
     with content_tabs[1]:
         _render_signals_tab(signals, predictions, models)
     with content_tabs[2]:
-        _realized_results_panel(predictions, signals)
+        _evaluated_predictions_panel(predictions, signals)
     if errors:
         with st.expander("Erreurs opérationnelles récentes"):
             st.json(errors[:10])
@@ -2479,7 +2487,11 @@ def _history_page() -> None:
             distribution = pd.cut(
                 results["intraday_return"], bins=10, duplicates="drop"
             ).value_counts(sort=False)
-            st.bar_chart(distribution.rename("Nombre de prédictions"))
+            st.bar_chart(
+                altair_serializable_distribution(distribution).rename(
+                    "Nombre de prédictions"
+                )
+            )
             st.dataframe(results.tail(100), hide_index=True, width="stretch")
         with st.expander("Historique des prédictions de production"):
             st.dataframe(predictions.tail(200), hide_index=True, width="stretch")

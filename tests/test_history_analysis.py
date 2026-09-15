@@ -3,7 +3,9 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
+from rstock.application import history_analysis
 from rstock.application.history_analysis import (
+    altair_serializable_distribution,
     analyze_run,
     combination_table,
     comparison_table,
@@ -360,7 +362,7 @@ def test_threshold_promotion_guidance_blocks_ineligible_holdout_rows_without_mut
 def test_threshold_promotion_score_is_normalized_and_maps_statuses_and_filters():
     rows = [
         ("STRONG<-BBB", 0.70, 0.75, 0.015, 0.15, 60, "near_optimal"),
-        ("REVIEW<-BBB", 0.68, 0.72, 0.015, 0.15, 60, "lower_threshold_better"),
+        ("REVIEW<-BBB", 0.65, 0.60, 0.010, 0.15, 50, "lower_threshold_better"),
         ("LOW<-BBB", 0.56, 0.51, 0.001, 0.29, 21, "unstable"),
     ]
     results = pd.DataFrame([{
@@ -386,11 +388,40 @@ def test_threshold_promotion_score_is_normalized_and_maps_statuses_and_filters()
         "REVIEW<-BBB": "À examiner",
         "LOW<-BBB": "Non candidat",
     }
-    assert scores["STRONG<-BBB"] == pytest.approx(76.7)
+    assert scores["STRONG<-BBB"] == pytest.approx(96.2)
+    assert scores["REVIEW<-BBB"] == pytest.approx(73.8)
     assert all(0 <= score <= 100 for score in scores.values())
     assert filter_threshold_calibration_results(
         guided, direction="Toutes", min_signals=0, promotion_status="Candidat fort"
     )["Combinaison"].tolist() == ["STRONG<-BBB"]
+
+
+def test_threshold_promotion_uses_the_revised_normalization_bounds():
+    assert history_analysis._promotion_scale(0.55, 0.55, 0.70) == 0.0
+    assert history_analysis._promotion_scale(0.70, 0.55, 0.70) == 1.0
+    assert history_analysis._promotion_scale(0.40, 0.40, 0.65) == 0.0
+    assert history_analysis._promotion_scale(0.65, 0.40, 0.65) == 1.0
+    assert history_analysis._promotion_scale(0.00, 0.00, 0.015) == 0.0
+    assert history_analysis._promotion_scale(0.015, 0.00, 0.015) == 1.0
+    assert history_analysis._promotion_signal_scale(20) == 0.5
+    assert history_analysis._promotion_signal_scale(50) == 1.0
+    assert history_analysis._promotion_signal_scale(80) == 1.0
+
+    results = pd.DataFrame([{
+        "Combinaison": "AAA<-BBB", "Cible": "AAA", "Predictors": "BBB",
+        "Direction": "Up", "Seuil calibré": 0.60, "AUC holdout": 0.716,
+        "Précision holdout": 0.55, "Rendement directionnel moyen": 0.0077,
+        "Fréquence mouvement opposé": 0.10, "Signaux holdout": 20,
+    }])
+    sensitivity = pd.DataFrame([{
+        "Combinaison": "AAA<-BBB", "Direction": "Up", "Diagnostic": "near_optimal",
+    }])
+    selected = {"AAA<-BBB": {"Up": {"status": "selected", "threshold": 0.60}}}
+
+    guided = threshold_promotion_guidance(results, sensitivity, selected)
+
+    assert guided.iloc[0]["Score promotion"] == pytest.approx(77.3)
+    assert guided.iloc[0]["Statut promotion"] == "Candidat fort"
 
 
 def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation():
@@ -549,6 +580,34 @@ def test_threshold_sensitivity_summary_uses_visible_rows_and_computes_deltas():
     assert filtered_summary["Combinaison"].tolist() == ["CCC<-DDD"]
 
 
+def test_threshold_sensitivity_summary_does_not_build_detailed_tables(monkeypatch):
+    visible = pd.DataFrame([{
+        "Cible": "AAA", "Combinaison": "AAA<-BBB", "Direction": "Up",
+        "Seuil calibré": 0.30,
+    }])
+    holdout = pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.20, "Target": 0, "IntradayReturn": -0.01},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.30, "Target": 1, "IntradayReturn": 0.02},
+        {"Set": "AAA<-BBB", "Direction": "Up", "Probability": 0.40, "Target": 1, "IntradayReturn": 0.03},
+    ])
+
+    def detailed_table_must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("The aggregate view must not build detailed tables")
+
+    monkeypatch.setattr(
+        history_analysis, "threshold_sensitivity_table", detailed_table_must_not_be_called
+    )
+
+    summary = threshold_sensitivity_summary(
+        visible, holdout, minimum_robust_signals=1,
+        sensitivity_threshold_min=0.10,
+        sensitivity_threshold_max=0.50,
+        sensitivity_threshold_step=0.10,
+    )
+
+    assert summary.iloc[0]["Diagnostic"] == "near_optimal"
+
+
 def test_calibration_choice_diagnostics_use_persisted_candidates_for_visible_rows():
     metrics = pd.DataFrame([
         {
@@ -632,3 +691,18 @@ def test_threshold_sensitivity_uses_the_configured_robust_signal_minimum():
     assert threshold_sensitivity_best_column(1) in relaxed.columns
     assert relaxed[threshold_sensitivity_best_column(1)].tolist() == ["✓"]
     assert strict[threshold_sensitivity_best_column(2)].tolist() == [""]
+
+
+def test_altair_serializable_distribution_converts_interval_categories_only():
+    distribution = pd.Series(
+        [3, 5],
+        index=pd.IntervalIndex.from_breaks([0.014, 0.0141, 0.0142]),
+        name="Nombre de prédictions",
+    )
+
+    serializable = altair_serializable_distribution(distribution)
+
+    assert serializable.tolist() == [3, 5]
+    assert serializable.index.tolist() == ["(0.014, 0.0141]", "(0.0141, 0.0142]"]
+    assert all(isinstance(category, str) for category in serializable.index)
+    assert isinstance(distribution.index[0], pd.Interval)

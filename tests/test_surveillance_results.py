@@ -4,18 +4,19 @@ import pandas as pd
 
 from rstock.application.surveillance import (
     PREDICTION_MAIN_COLUMNS,
-    REALIZED_DISPLAY_COLUMNS,
-    REALIZED_MAIN_COLUMNS,
+    EVALUATED_PREDICTIONS_DISPLAY_COLUMNS,
+    EVALUATED_PREDICTIONS_MAIN_COLUMNS,
     SIGNAL_MAIN_COLUMNS,
     build_predictions_view,
-    build_realized_results_view,
+    build_evaluated_predictions_view,
     build_signals_view,
+    filter_evaluated_predictions_view,
     prediction_feature_tables,
     prediction_features_table,
-    realized_main_table,
+    evaluated_predictions_main_table,
     source_observation_tables,
     source_observations_table,
-    validation_feedback,
+    evaluation_feedback,
 )
 
 
@@ -67,18 +68,18 @@ def _realized(identifier="prediction-1", date="2026-09-14", intraday=0.02):
 
 
 def test_zero_results_and_zero_pending_predictions():
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
     )
 
     assert view.table.empty
-    assert tuple(view.table.columns) == REALIZED_DISPLAY_COLUMNS
-    empty_main = realized_main_table(view.table)
+    assert tuple(view.table.columns) == EVALUATED_PREDICTIONS_DISPLAY_COLUMNS
+    empty_main = evaluated_predictions_main_table(view.table)
     assert empty_main.empty
-    assert tuple(empty_main.columns) == REALIZED_MAIN_COLUMNS
+    assert tuple(empty_main.columns) == EVALUATED_PREDICTIONS_MAIN_COLUMNS
     assert view.pending_count == 0
     assert view.next_validation_date is None
-    assert validation_feedback(0, view) == (
+    assert evaluation_feedback(0, view) == (
         "info", "Aucune prédiction en attente de validation."
     )
 
@@ -93,13 +94,13 @@ def test_zero_results_with_multiple_pending_predictions_and_market_date():
         {**_signal("prediction-2"), "category": "no_signal"},
     ])
 
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         predictions,
         signals,
         pd.DataFrame(),
         {"AAA": "2026-09-11T00:00:00"},
     )
-    level, message = validation_feedback(0, view)
+    level, message = evaluation_feedback(0, view)
 
     assert view.pending_count == 2
     assert view.next_validation_date == "2026-09-14"
@@ -116,7 +117,7 @@ def test_future_no_signal_prediction_is_pending_without_realized_result():
     )
     prediction["as_of_date"] = "2026-09-11"
 
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         pd.DataFrame([prediction]),
         pd.DataFrame(),
         pd.DataFrame(),
@@ -125,7 +126,7 @@ def test_future_no_signal_prediction_is_pending_without_realized_result():
 
     assert view.pending_count == 1
     assert view.next_validation_date == "2026-09-14"
-    assert "1 prédiction est encore en attente" in validation_feedback(0, view)[1]
+    assert "1 prédiction est encore en attente" in evaluation_feedback(0, view)[1]
 
 
 def test_bullish_and_no_signal_predictions_are_both_pending():
@@ -138,7 +139,7 @@ def test_bullish_and_no_signal_predictions_are_both_pending():
         {**_signal("no-signal"), "category": "no_signal"},
     ])
 
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         predictions, signals, pd.DataFrame()
     )
 
@@ -155,7 +156,7 @@ def test_next_validation_date_is_the_closest_unrealized_prediction():
     ])
     realized = pd.DataFrame([_realized("realized", "2026-09-13")])
 
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         predictions, pd.DataFrame(), realized
     )
 
@@ -164,7 +165,7 @@ def test_next_validation_date_is_the_closest_unrealized_prediction():
 
 
 def test_realized_table_joins_history_and_formats_returns_targets_and_dates():
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         pd.DataFrame([_prediction()]),
         pd.DataFrame([_signal()]),
         pd.DataFrame([_realized()]),
@@ -188,6 +189,31 @@ def test_realized_table_joins_history_and_formats_returns_targets_and_dates():
     assert row["up_probability"] == "72.00%"
     assert row["down_probability"] == "18.00%"
     assert view.pending_count == 0
+
+
+def test_evaluated_predictions_include_no_signal_rows_and_filter_display_only():
+    predictions = pd.DataFrame([
+        _prediction("bullish", signal_status="bullish_signal"),
+        _prediction("no-signal", signal_status="no_signal"),
+    ])
+    realized = pd.DataFrame([
+        _realized("bullish"),
+        _realized("no-signal"),
+    ])
+    original_predictions = predictions.copy(deep=True)
+    original_realized = realized.copy(deep=True)
+
+    view = build_evaluated_predictions_view(predictions, pd.DataFrame(), realized)
+    signals_only = filter_evaluated_predictions_view(view, "Signaux seulement")
+    without_signal = filter_evaluated_predictions_view(view, "Sans signal")
+    main = evaluated_predictions_main_table(view.table)
+
+    assert set(view.table["category"]) == {"bullish_signal", "no_signal"}
+    assert signals_only.technical["prediction_id"].tolist() == ["bullish"]
+    assert without_signal.technical["prediction_id"].tolist() == ["no-signal"]
+    assert main["Statut initial"].tolist() == ["Signal haussier", "Sans signal"]
+    pd.testing.assert_frame_equal(predictions, original_predictions)
+    pd.testing.assert_frame_equal(realized, original_realized)
 
 
 def test_prediction_view_is_concise_formatted_and_keeps_technical_details():
@@ -381,16 +407,16 @@ def test_missing_snapshot_returns_empty_audit_tables():
     assert other_observations.empty
 
 
-def test_realized_main_table_hides_technical_columns_and_preserves_formatting():
-    view = build_realized_results_view(
+def test_evaluated_predictions_main_table_hides_technical_columns_and_preserves_formatting():
+    view = build_evaluated_predictions_view(
         pd.DataFrame([_prediction()]),
         pd.DataFrame([_signal()]),
         pd.DataFrame([_realized()]),
     )
 
-    main = realized_main_table(view.table)
+    main = evaluated_predictions_main_table(view.table)
 
-    assert tuple(main.columns) == REALIZED_MAIN_COLUMNS
+    assert tuple(main.columns) == EVALUATED_PREDICTIONS_MAIN_COLUMNS
     assert main.iloc[0]["Rendement"] == "2.00%"
     assert main.iloc[0]["Predictors"] == "BBB"
     assert main.iloc[0]["P(Up)"] == "72.00%"
@@ -417,7 +443,7 @@ def test_realized_audit_tables_show_snapshot_and_keep_legacy_predictions_readabl
             }]
         }),
     })
-    view = build_realized_results_view(
+    view = build_evaluated_predictions_view(
         pd.DataFrame([prediction]), pd.DataFrame([_signal()]), pd.DataFrame([_realized()])
     )
     record = view.technical.iloc[0].to_dict()
@@ -431,7 +457,7 @@ def test_realized_audit_tables_show_snapshot_and_keep_legacy_predictions_readabl
         "Rendement intraday": "3,00 %",
     }
 
-    legacy_view = build_realized_results_view(
+    legacy_view = build_evaluated_predictions_view(
         pd.DataFrame([_prediction("legacy")]),
         pd.DataFrame([_signal("legacy")]),
         pd.DataFrame([_realized("legacy")]),
@@ -451,12 +477,12 @@ def test_new_and_multiple_realized_results_feedback():
         _realized("prediction-1", "2026-09-14"),
         _realized("prediction-2", "2026-09-15", -0.01),
     ])
-    view = build_realized_results_view(predictions, signals, realized)
+    view = build_evaluated_predictions_view(predictions, signals, realized)
 
     assert len(view.table) == 2
-    assert validation_feedback(1, view) == (
-        "success", "1 nouveau résultat réalisé ajouté."
+    assert evaluation_feedback(1, view) == (
+        "success", "1 nouvelle prédiction évaluée."
     )
-    assert validation_feedback(2, view) == (
-        "success", "2 nouveaux résultats réalisés ajoutés."
+    assert evaluation_feedback(2, view) == (
+        "success", "2 nouvelles prédictions évaluées."
     )

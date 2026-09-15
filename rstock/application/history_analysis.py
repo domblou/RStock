@@ -78,6 +78,14 @@ CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS = (
 )
 
 
+def altair_serializable_distribution(distribution: pd.Series) -> pd.Series:
+    """Return a display-only copy whose categories are accepted by Altair."""
+
+    serializable = distribution.copy()
+    serializable.index = serializable.index.astype(str)
+    return serializable
+
+
 def threshold_sensitivity_best_column(minimum_robust_signals: int) -> str:
     """Return the display-only robust-sample marker column name."""
 
@@ -337,6 +345,151 @@ def threshold_sensitivity_table(
     return result
 
 
+def _threshold_sensitivity_summary_values(
+    holdout_predictions: pd.DataFrame,
+    *,
+    set_name: str,
+    direction: str,
+    calibrated_threshold: object,
+    up_target_threshold: float,
+    down_target_threshold: float,
+    minimum_robust_signals: int,
+    sensitivity_threshold_min: float,
+    sensitivity_threshold_max: float,
+    sensitivity_threshold_step: float,
+) -> dict[str, object]:
+    """Compute only the sensitivity values used by the aggregate view.
+
+    The detailed table still uses :func:`threshold_sensitivity_table`.  This
+    compact projection avoids constructing a full DataFrame and classification
+    metric object for every threshold of every visible combination.
+    """
+
+    missing = {
+        "Seuil calibré": np.nan,
+        "Meilleur seuil robuste": np.nan,
+        "Delta seuil": np.nan,
+        "Signaux au seuil calibré": np.nan,
+        "Signaux au meilleur seuil robuste": np.nan,
+        "Précision au seuil calibré": np.nan,
+        "Précision au meilleur seuil robuste": np.nan,
+        "Delta précision": np.nan,
+        "Rendement directionnel moyen au seuil calibré": np.nan,
+        "Rendement directionnel moyen au meilleur seuil robuste": np.nan,
+        "Delta rendement": np.nan,
+        "Fréquence mouvement opposé au seuil calibré": np.nan,
+        "Fréquence mouvement opposé au meilleur seuil robuste": np.nan,
+        "Diagnostic": "unstable",
+    }
+    required = {"Set", "Direction", "Probability", "Target", "IntradayReturn"}
+    if not required.issubset(holdout_predictions.columns):
+        return missing
+    work = holdout_predictions[
+        (holdout_predictions["Set"].astype(str) == set_name)
+        & (holdout_predictions["Direction"].astype(str) == direction)
+    ]
+    probability = pd.to_numeric(work["Probability"], errors="coerce")
+    target = pd.to_numeric(work["Target"], errors="coerce")
+    returns = pd.to_numeric(work["IntradayReturn"], errors="coerce")
+    valid = probability.notna() & target.isin([0, 1])
+    if not valid.any():
+        return missing
+    probability_values = probability.loc[valid].to_numpy(dtype=float)
+    target_values = target.loc[valid].to_numpy(dtype=int)
+    return_values = returns.loc[valid].to_numpy(dtype=float)
+    try:
+        current = float(calibrated_threshold)
+    except (TypeError, ValueError):
+        current = None
+    grid = {
+        round(float(value), 10)
+        for value in threshold_sensitivity_grid(
+            sensitivity_threshold_min,
+            sensitivity_threshold_max,
+            sensitivity_threshold_step,
+        )
+        if 0 <= float(value) <= 1
+    }
+    if current is not None and 0 <= current <= 1:
+        grid.add(round(current, 10))
+    thresholds = np.asarray(sorted(grid), dtype=float)
+    selected = probability_values[None, :] >= thresholds[:, None]
+    signal_counts = selected.sum(axis=1)
+    true_positives = (selected & (target_values[None, :] == 1)).sum(axis=1)
+    precision = np.divide(
+        true_positives,
+        signal_counts,
+        out=np.zeros(len(thresholds), dtype=float),
+        where=signal_counts != 0,
+    )
+    valid_returns = ~np.isnan(return_values)
+    selected_returns = selected & valid_returns[None, :]
+    return_counts = selected_returns.sum(axis=1)
+    directional_values = return_values if direction == "Up" else -return_values
+    directional_mean = np.divide(
+        np.where(selected_returns, directional_values[None, :], 0.0).sum(axis=1),
+        return_counts,
+        out=np.full(len(thresholds), np.nan),
+        where=return_counts != 0,
+    )
+    if direction == "Up":
+        opposite_values = return_values <= -down_target_threshold
+    else:
+        opposite_values = return_values >= up_target_threshold
+    opposite_frequency = np.divide(
+        (selected_returns & opposite_values[None, :]).sum(axis=1),
+        return_counts,
+        out=np.full(len(thresholds), np.nan),
+        where=return_counts != 0,
+    )
+    calibrated_indices = (
+        np.flatnonzero(np.isclose(thresholds, current)) if current is not None else []
+    )
+    calibrated_index = int(calibrated_indices[0]) if len(calibrated_indices) else None
+    eligible = np.flatnonzero(signal_counts >= minimum_robust_signals)
+    robust_index = (
+        min(eligible, key=lambda index: (-precision[index], -signal_counts[index], thresholds[index]))
+        if len(eligible) else None
+    )
+    if calibrated_index is None and robust_index is None:
+        return missing
+
+    def indexed(values: np.ndarray, index: int | None) -> float:
+        return float(values[index]) if index is not None else np.nan
+
+    calibrated_threshold_value = indexed(thresholds, calibrated_index)
+    robust_threshold_value = indexed(thresholds, robust_index)
+    delta_threshold = robust_threshold_value - calibrated_threshold_value
+    if robust_index is None or signal_counts[robust_index] < minimum_robust_signals:
+        diagnostic = "unstable"
+    elif abs(delta_threshold) <= sensitivity_threshold_step / 2:
+        diagnostic = "near_optimal"
+    elif delta_threshold > 0:
+        diagnostic = "higher_threshold_better"
+    else:
+        diagnostic = "lower_threshold_better"
+    calibrated_precision = indexed(precision, calibrated_index)
+    robust_precision = indexed(precision, robust_index)
+    calibrated_return = indexed(directional_mean, calibrated_index)
+    robust_return = indexed(directional_mean, robust_index)
+    return {
+        "Seuil calibré": calibrated_threshold_value,
+        "Meilleur seuil robuste": robust_threshold_value,
+        "Delta seuil": delta_threshold,
+        "Signaux au seuil calibré": indexed(signal_counts, calibrated_index),
+        "Signaux au meilleur seuil robuste": indexed(signal_counts, robust_index),
+        "Précision au seuil calibré": calibrated_precision,
+        "Précision au meilleur seuil robuste": robust_precision,
+        "Delta précision": robust_precision - calibrated_precision,
+        "Rendement directionnel moyen au seuil calibré": calibrated_return,
+        "Rendement directionnel moyen au meilleur seuil robuste": robust_return,
+        "Delta rendement": robust_return - calibrated_return,
+        "Fréquence mouvement opposé au seuil calibré": indexed(opposite_frequency, calibrated_index),
+        "Fréquence mouvement opposé au meilleur seuil robuste": indexed(opposite_frequency, robust_index),
+        "Diagnostic": diagnostic,
+    }
+
+
 def threshold_sensitivity_summary(
     visible_results: pd.DataFrame,
     holdout_predictions: pd.DataFrame,
@@ -355,12 +508,24 @@ def threshold_sensitivity_summary(
         return pd.DataFrame(columns=THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS)
     rows: list[dict[str, object]] = []
     visible = visible_results.drop_duplicates(["Combinaison", "Direction"])
-    best_column = threshold_sensitivity_best_column(minimum_robust_signals)
+    prediction_groups: dict[tuple[str, str], pd.DataFrame] = {}
+    if {"Set", "Direction"}.issubset(holdout_predictions.columns):
+        grouped = holdout_predictions.assign(
+            _sensitivity_set=holdout_predictions["Set"].astype(str),
+            _sensitivity_direction=holdout_predictions["Direction"].astype(str),
+        ).groupby(["_sensitivity_set", "_sensitivity_direction"], sort=False)
+        prediction_groups = {
+            (set_name, direction): group
+            for (set_name, direction), group in grouped
+        }
+    empty_predictions = holdout_predictions.iloc[0:0]
     for _, visible_row in visible.iterrows():
-        sensitivity = threshold_sensitivity_table(
-            holdout_predictions,
-            set_name=str(visible_row["Combinaison"]),
-            direction=str(visible_row["Direction"]),
+        set_name = str(visible_row["Combinaison"])
+        direction = str(visible_row["Direction"])
+        values = _threshold_sensitivity_summary_values(
+            prediction_groups.get((set_name, direction), empty_predictions),
+            set_name=set_name,
+            direction=direction,
             calibrated_threshold=visible_row["Seuil calibré"],
             up_target_threshold=up_target_threshold,
             down_target_threshold=down_target_threshold,
@@ -369,59 +534,11 @@ def threshold_sensitivity_summary(
             sensitivity_threshold_max=sensitivity_threshold_max,
             sensitivity_threshold_step=sensitivity_threshold_step,
         )
-        calibrated = sensitivity[
-            sensitivity["Seuil calibré actuel"] == "✓"
-        ] if not sensitivity.empty else pd.DataFrame()
-        robust = sensitivity[
-            sensitivity[best_column] == "✓"
-        ] if not sensitivity.empty else pd.DataFrame()
-        calibrated_row = calibrated.iloc[0] if not calibrated.empty else None
-        robust_row = robust.iloc[0] if not robust.empty else None
-        calibrated_threshold = (
-            float(calibrated_row["Seuil"]) if calibrated_row is not None else np.nan
-        )
-        robust_threshold = (
-            float(robust_row["Seuil"]) if robust_row is not None else np.nan
-        )
-        delta_threshold = robust_threshold - calibrated_threshold
-        if robust_row is None or robust_row["Nombre de signaux"] < minimum_robust_signals:
-            diagnostic = "unstable"
-        elif abs(delta_threshold) <= sensitivity_threshold_step / 2:
-            diagnostic = "near_optimal"
-        elif delta_threshold > 0:
-            diagnostic = "higher_threshold_better"
-        else:
-            diagnostic = "lower_threshold_better"
-
-        def value(row: pd.Series | None, column: str) -> object:
-            return np.nan if row is None else row[column]
-
-        calibrated_precision = value(calibrated_row, "Précision")
-        robust_precision = value(robust_row, "Précision")
-        calibrated_return = value(calibrated_row, "Rendement directionnel moyen")
-        robust_return = value(robust_row, "Rendement directionnel moyen")
         rows.append({
             "Cible": visible_row["Cible"],
             "Combinaison": visible_row["Combinaison"],
             "Direction": visible_row["Direction"],
-            "Seuil calibré": calibrated_threshold,
-            "Meilleur seuil robuste": robust_threshold,
-            "Delta seuil": delta_threshold,
-            "Signaux au seuil calibré": value(calibrated_row, "Nombre de signaux"),
-            "Signaux au meilleur seuil robuste": value(robust_row, "Nombre de signaux"),
-            "Précision au seuil calibré": calibrated_precision,
-            "Précision au meilleur seuil robuste": robust_precision,
-            "Delta précision": robust_precision - calibrated_precision,
-            "Rendement directionnel moyen au seuil calibré": calibrated_return,
-            "Rendement directionnel moyen au meilleur seuil robuste": robust_return,
-            "Delta rendement": robust_return - calibrated_return,
-            "Fréquence mouvement opposé au seuil calibré": value(
-                calibrated_row, "Fréquence mouvement opposé"
-            ),
-            "Fréquence mouvement opposé au meilleur seuil robuste": value(
-                robust_row, "Fréquence mouvement opposé"
-            ),
-            "Diagnostic": diagnostic,
+            **values,
         })
     return pd.DataFrame(rows, columns=THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS)
 
@@ -518,6 +635,15 @@ def _promotion_opposite_scale(value: object) -> float:
     return float(np.clip((0.30 - float(numeric)) / 0.20, 0.0, 1.0))
 
 
+def _promotion_signal_scale(value: object) -> float:
+    """Map 20 holdout signals to 0.5 and 50 signals to 1.0."""
+
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return 0.0
+    return float(np.clip(0.5 + (float(numeric) - 20.0) / 60.0, 0.0, 1.0))
+
+
 def _promotion_sensitivity_scale(diagnostic: object) -> float:
     return {
         "near_optimal": 1.0,
@@ -591,13 +717,13 @@ def threshold_promotion_guidance(
             scores.append(None)
             reasons.append(" · ".join(blockers[:2]))
             continue
-        auc = _promotion_scale(row.get("AUC holdout"), 0.55, 0.75)
-        precision = _promotion_scale(row.get("Précision holdout"), 0.50, 0.80)
+        auc = _promotion_scale(row.get("AUC holdout"), 0.55, 0.70)
+        precision = _promotion_scale(row.get("Précision holdout"), 0.40, 0.65)
         directional_return = _promotion_scale(
-            row.get("Rendement directionnel moyen"), 0.0, 0.02
+            row.get("Rendement directionnel moyen"), 0.0, 0.015
         )
         opposite = _promotion_opposite_scale(row.get("Fréquence mouvement opposé"))
-        signals = _promotion_scale(row.get("Signaux holdout"), 20.0, 100.0)
+        signals = _promotion_signal_scale(row.get("Signaux holdout"))
         sensitivity_score = _promotion_sensitivity_scale(row.get("Diagnostic"))
         score = round(100 * (
             0.25 * auc + 0.20 * precision + 0.20 * directional_return

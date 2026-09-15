@@ -10,7 +10,7 @@ from typing import Mapping
 import pandas as pd
 
 
-REALIZED_DISPLAY_COLUMNS = (
+EVALUATED_PREDICTIONS_DISPLAY_COLUMNS = (
     "prediction_date",
     "target",
     "model_id",
@@ -42,8 +42,8 @@ PREDICTION_MAIN_COLUMNS = (
 SIGNAL_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "Catégorie", "P(Up)", "P(Down)",
 )
-REALIZED_MAIN_COLUMNS = (
-    "Date", "Cible", "Predictors", "P(Up)", "P(Down)", "Open", "Close",
+EVALUATED_PREDICTIONS_MAIN_COLUMNS = (
+    "Date", "Cible", "Predictors", "Statut initial", "P(Up)", "P(Down)", "Open", "Close",
     "Rendement", "MFE", "MAE", "UpTarget", "DownTarget",
 )
 
@@ -67,7 +67,7 @@ class SignalResultsView:
 
 
 @dataclass(frozen=True, slots=True)
-class RealizedResultsView:
+class EvaluatedPredictionsView:
     table: pd.DataFrame
     pending: pd.DataFrame
     next_validation_date: str | None
@@ -209,8 +209,8 @@ def build_signals_view(
     )
 
 
-def realized_main_table(table: pd.DataFrame) -> pd.DataFrame:
-    """Project the formatted realized history onto its user-facing columns."""
+def evaluated_predictions_main_table(table: pd.DataFrame) -> pd.DataFrame:
+    """Project evaluated predictions onto their user-facing columns."""
 
     aliases = {
         "prediction_date": "Date", "target": "Cible", "predictors": "Predictors",
@@ -218,13 +218,17 @@ def realized_main_table(table: pd.DataFrame) -> pd.DataFrame:
         "up_probability": "P(Up)", "down_probability": "P(Down)",
         "intraday_return": "Rendement", "up_target_hit": "UpTarget",
         "down_target_hit": "DownTarget",
+        "category": "Statut initial",
     }
     projected = table.rename(columns=aliases)
-    for name in REALIZED_MAIN_COLUMNS:
+    for name in EVALUATED_PREDICTIONS_MAIN_COLUMNS:
         if name not in projected:
             projected[name] = pd.NA
     projected["Predictors"] = projected["Predictors"].map(_predictors)
-    return projected.loc[:, REALIZED_MAIN_COLUMNS].reset_index(drop=True)
+    projected["Statut initial"] = projected["Statut initial"].map(
+        lambda value: "—" if pd.isna(value) else SIGNAL_LABELS.get(str(value), str(value))
+    )
+    return projected.loc[:, EVALUATED_PREDICTIONS_MAIN_COLUMNS].reset_index(drop=True)
 
 
 def _json_mapping(value: object) -> dict[str, object]:
@@ -416,13 +420,13 @@ def _pending_predictions(
     return pending.sort_values(["prediction_date", "target"], kind="stable")
 
 
-def build_realized_results_view(
+def build_evaluated_predictions_view(
     predictions: pd.DataFrame,
     signals: pd.DataFrame,
     realized: pd.DataFrame,
     freshness: Mapping[str, str | None] | None = None,
-) -> RealizedResultsView:
-    """Join existing histories and format them without duplicating persistence."""
+) -> EvaluatedPredictionsView:
+    """Join existing histories for the evaluated-predictions display only."""
 
     joined = realized.copy()
     joined = _merge_missing(
@@ -430,10 +434,16 @@ def build_realized_results_view(
         predictions,
         (
             "model_version", "predictors", "up_probability", "down_probability",
-            "feature_names", "features", "source_observations",
+            "signal_status", "feature_names", "features", "source_observations",
         ),
     )
     joined = _merge_missing(joined, signals, ("signal_id", "category"))
+    if "category" not in joined:
+        joined["category"] = _column(joined, "signal_status")
+    elif "signal_status" in joined:
+        joined["category"] = joined["category"].where(
+            joined["category"].notna(), joined["signal_status"]
+        )
     aliases = {
         "mfe": "MFE",
         "mae": "MAE",
@@ -444,7 +454,7 @@ def build_realized_results_view(
     joined = joined.rename(
         columns={old: new for old, new in aliases.items() if new not in joined}
     )
-    for name in REALIZED_DISPLAY_COLUMNS:
+    for name in EVALUATED_PREDICTIONS_DISPLAY_COLUMNS:
         if name not in joined:
             joined[name] = pd.NA
     technical = joined.sort_values(
@@ -460,7 +470,7 @@ def build_realized_results_view(
         for name in ("open", "high", "low", "close"):
             joined[name] = pd.to_numeric(joined[name], errors="coerce").round(4)
         joined = joined.sort_values("prediction_date", ascending=False, kind="stable")
-    table = joined.loc[:, REALIZED_DISPLAY_COLUMNS].reset_index(drop=True)
+    table = joined.loc[:, EVALUATED_PREDICTIONS_DISPLAY_COLUMNS].reset_index(drop=True)
 
     pending = _pending_predictions(predictions, realized)
     next_date = None if pending.empty else str(pending["prediction_date"].min())
@@ -470,23 +480,45 @@ def build_realized_results_view(
         if value is not None and _short_date(value) != "—"
     ]
     latest_market = max(available_dates) if available_dates else None
-    return RealizedResultsView(table, pending, next_date, latest_market, technical)
+    return EvaluatedPredictionsView(table, pending, next_date, latest_market, technical)
 
 
-def validation_feedback(
+def filter_evaluated_predictions_view(
+    view: EvaluatedPredictionsView, status_filter: str = "Toutes"
+) -> EvaluatedPredictionsView:
+    """Apply the evaluated-predictions status filter without changing history."""
+
+    categories = {
+        "Signaux seulement": "bullish_signal",
+        "Sans signal": "no_signal",
+    }
+    category = categories.get(status_filter)
+    if category is None or view.technical.empty or "category" not in view.technical:
+        return view
+    keep = view.technical["category"].astype(str).eq(category).to_numpy()
+    return EvaluatedPredictionsView(
+        view.table.iloc[keep].reset_index(drop=True),
+        view.pending,
+        view.next_validation_date,
+        view.latest_market_date,
+        view.technical.iloc[keep].reset_index(drop=True),
+    )
+
+
+def evaluation_feedback(
     new_results: int,
-    view: RealizedResultsView,
+    view: EvaluatedPredictionsView,
 ) -> tuple[str, str]:
     """Return a Streamlit message level and explicit validation outcome."""
 
     if new_results > 0:
         if new_results == 1:
-            return "success", "1 nouveau résultat réalisé ajouté."
-        return "success", f"{new_results} nouveaux résultats réalisés ajoutés."
+            return "success", "1 nouvelle prédiction évaluée."
+        return "success", f"{new_results} nouvelles prédictions évaluées."
     if view.pending_count:
         prediction_word = "prédiction est" if view.pending_count == 1 else "prédictions sont"
         message = (
-            "Aucun nouveau résultat disponible.\n\n"
+            "Aucune nouvelle prédiction évaluée.\n\n"
             f"{view.pending_count} {prediction_word} encore en attente"
         )
         if view.next_validation_date:

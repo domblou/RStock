@@ -25,7 +25,7 @@ JOB_LABELS = {
     "market_update": "Mise à jour marché",
     "daily_prediction": "Prédictions quotidiennes",
     "daily_screening": "Screening",
-    "realized_validation": "Résultats réalisés",
+    "realized_validation": "Évaluer les prédictions",
     "operational_run": "Exécution complète",
 }
 PERIOD_DAYS = {"Aujourd’hui": 0, "7 jours": 7, "30 jours": 30}
@@ -184,7 +184,7 @@ def _summary_text(
             signals = int(categories.get("bullish_signal", 0))
             return f"{signals} signaux · {no_signal} sans signal"
     if job_type == "realized_validation":
-        return f"{int(summary.get('realized_results', 0))} résultats réalisés"
+        return f"{int(summary.get('realized_results', 0))} prédictions évaluées"
     if job_type == "production_training":
         return "1 modèle entraîné" if summary.get("model_id") else "Entraînement terminé"
     if job_type == "operational_run":
