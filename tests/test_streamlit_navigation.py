@@ -65,7 +65,7 @@ def test_surveillance_is_the_default_page_without_dashboard_navigation():
     assert "_dashboard_page" not in source
 
 
-def test_simulation_page_offers_both_modes_with_realized_results_as_default():
+def test_simulation_page_offers_both_modes_with_evaluated_predictions_as_default():
     source = APP.read_text(encoding="utf-8")
     page = source.split("def _simulation_page", 1)[1].split(
         "def _primary_pages", 1
@@ -74,9 +74,10 @@ def test_simulation_page_offers_both_modes_with_realized_results_as_default():
     assert '_page_header("Simulation")' in page
     assert 'SignalService(project_root).active_history()' in page
     assert "SimulationService.local(" in page
-    assert '"simulation-mode": "Résultats réalisés"' in page
+    assert '"simulation-mode": "Prédictions évaluées"' in page
+    assert 'st.session_state.get("simulation-mode") == "Résultats réalisés"' in page
     assert '"Mode de simulation"' in page
-    assert '["Historique", "Résultats réalisés"]' in page
+    assert '["Historique", "Prédictions évaluées"]' in page
     assert "service.run_historical(" in page
     assert "service.run(start_date, end_date" in page
     assert '"Lancer la simulation"' in page
@@ -166,6 +167,18 @@ def test_experiments_only_selects_saved_universes_without_manual_entry():
     assert "Prédicteurs disponibles" not in selector
 
 
+def test_experiment_sampling_defaults_to_reproducible_for_both_universes():
+    source = APP.read_text(encoding="utf-8")
+    selector = source.split("def _experiment_universe_selector", 1)[1].split(
+        "def _experiments", 1
+    )[0]
+
+    assert "index=0 if current.selection_method == TOP_N else 1" in selector
+    assert "st.session_state.lab_context_selection_method == TOP_N" in selector
+    assert 'key="experiment-sample-method"' in selector
+    assert 'key="experiment-context-sample-method"' in selector
+
+
 def test_experiment_summary_is_compact_and_submission_help_is_secondary():
     source = APP.read_text(encoding="utf-8")
     selector = source.split("def _experiment_universe_selector", 1)[1].split(
@@ -175,7 +188,12 @@ def test_experiment_summary_is_compact_and_submission_help_is_secondary():
         "def _settings", 1
     )[0]
 
-    assert selector.count("st.caption(") == 2  # empty-context feedback + summary
+    assert "primary_column, context_column = st.columns(2)" in selector
+    assert selector.count("st.container(border=True)") == 2
+    assert selector.count("st.caption(") == 4  # block summaries, empty context, global summary
+    assert selector.index('"Sélection de l’univers principal"') < selector.index(
+        'key="experiment-universe-mode"'
+    )
     assert "La création et la modification des listes" not in selector
     assert "La liste résolue et la configuration seront figées" not in experiments
     assert "Les listes se gèrent dans Univers; la sélection résolue" in experiments

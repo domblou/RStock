@@ -14,14 +14,21 @@ from rstock.config import DEFAULT_CONFIG
 
 
 class FakeRepository:
-    def __init__(self, signals, predictions=None, active_ids=()):
+    def __init__(self, signals, predictions=None, active_ids=(), evaluated_predictions=None):
         self.signals = signals
         self.predictions = predictions if predictions is not None else pd.DataFrame()
+        self.evaluated_predictions = (
+            evaluated_predictions
+            if evaluated_predictions is not None
+            else pd.DataFrame()
+        )
         self._active_ids = frozenset(active_ids)
 
     def read_active_model_table(self, name):
-        assert name == "signals"
-        return self.signals.copy()
+        if name == "signals":
+            return self.signals.copy()
+        assert name == "realized_results"
+        return self.evaluated_predictions.copy()
 
     def read_table(self, name):
         assert name == "predictions"
@@ -50,6 +57,18 @@ def _signal(identifier, date, symbol, model="model_one"):
 
 def _prices(date, opened, closed):
     return pd.DataFrame({"Open": [opened], "Close": [closed]}, index=[pd.Timestamp(date)])
+
+
+def _evaluated(identifier, date, symbol, opened, closed, model="model_one"):
+    return {
+        "result_id": identifier,
+        "prediction_id": identifier,
+        "prediction_date": date,
+        "model_id": model,
+        "target": symbol,
+        "open": opened,
+        "close": closed,
+    }
 
 
 def _model(model_id="model_active", status=ProductionModelStatus.ACTIVE):
@@ -110,7 +129,13 @@ def test_simulation_calculates_winning_losing_kpis_and_cumulative_result():
         "BBB": _prices("2026-01-06", 100.0, 95.0),
     }
 
-    result = SimulationService(FakeRepository(signals), prices.get).run(
+    evaluated = pd.DataFrame([
+        _evaluated("win", "2026-01-05", "AAA", 100.0, 110.0),
+        _evaluated("loss", "2026-01-06", "BBB", 100.0, 95.0),
+    ])
+    result = SimulationService(
+        FakeRepository(signals, evaluated_predictions=evaluated), prices.get
+    ).run(
         "2026-01-01", "2026-01-31", 1_000.0
     )
 
@@ -136,7 +161,13 @@ def test_multiple_signals_and_models_on_one_day_are_independent_trades():
         "BBB": _prices("2026-02-02", 200.0, 204.0),
     }
 
-    result = SimulationService(FakeRepository(signals), prices.get).run(
+    evaluated = pd.DataFrame([
+        _evaluated("one", "2026-02-02", "AAA", 100.0, 102.0, "model_one"),
+        _evaluated("two", "2026-02-02", "BBB", 200.0, 204.0, "model_two"),
+    ])
+    result = SimulationService(
+        FakeRepository(signals, evaluated_predictions=evaluated), prices.get
+    ).run(
         "2026-02-02", "2026-02-02", 10_000.0
     )
 
@@ -145,6 +176,29 @@ def test_multiple_signals_and_models_on_one_day_are_independent_trades():
     assert result.trades["Montant investi"].tolist() == [10_000.0, 10_000.0]
     assert result.metrics.total_profit_loss == pytest.approx(400.0)
     assert result.cumulative_results["Résultat cumulé"].tolist() == pytest.approx([400.0])
+
+
+def test_evaluated_no_signal_prediction_does_not_create_a_financial_trade():
+    signals = pd.DataFrame([
+        _signal("bullish", "2026-02-03", "AAA"),
+        {**_signal("no-signal", "2026-02-03", "BBB"), "category": "no_signal"},
+    ])
+    evaluated = pd.DataFrame([
+        _evaluated("bullish", "2026-02-03", "AAA", 100.0, 110.0),
+        _evaluated("no-signal", "2026-02-03", "BBB", 100.0, 50.0),
+    ])
+
+    result = SimulationService(
+        FakeRepository(signals, evaluated_predictions=evaluated),
+        lambda _symbol: pytest.fail("Evaluated prices must be used directly"),
+    ).run("2026-02-03", "2026-02-03", 1_000.0)
+
+    assert result.trades["Symbole"].tolist() == ["AAA"]
+    assert result.metrics.signals_found == 1
+    assert result.metrics.calculated_trades == 1
+    assert result.metrics.total_profit_loss == pytest.approx(100.0)
+    assert result.metrics.winning_trade_rate == 1.0
+    assert result.metrics.average_return == pytest.approx(0.10)
 
 
 def test_missing_open_or_close_excludes_trade_without_estimation():
@@ -159,7 +213,14 @@ def test_missing_open_or_close_excludes_trade_without_estimation():
         "CCC": pd.DataFrame(columns=["Open", "Close"]),
     }
 
-    result = SimulationService(FakeRepository(signals), prices.get).run(
+    evaluated = pd.DataFrame([
+        _evaluated("open-missing", "2026-03-02", "AAA", None, 102.0),
+        _evaluated("close-missing", "2026-03-02", "BBB", 100.0, None),
+        _evaluated("no-market-row", "2026-03-02", "CCC", None, None),
+    ])
+    result = SimulationService(
+        FakeRepository(signals, evaluated_predictions=evaluated), prices.get
+    ).run(
         "2026-03-01", "2026-03-31"
     )
 
@@ -256,7 +317,14 @@ def test_historical_and_persisted_modes_share_identical_trade_financials(monkeyp
         "up_threshold": 0.65, "down_threshold": 0.40,
     }])
     signal = pd.DataFrame([_signal("same", "2026-02-02", "AAA")])
-    repository = FakeRepository(signal, prediction, active_ids=("model_one",))
+    repository = FakeRepository(
+        signal,
+        prediction,
+        active_ids=("model_one",),
+        evaluated_predictions=pd.DataFrame([
+            _evaluated("same", "2026-02-02", "AAA", 100.0, 105.0),
+        ]),
+    )
     service = SimulationService(
         repository, lambda _: _prices("2026-02-02", 100.0, 105.0)
     )

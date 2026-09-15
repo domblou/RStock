@@ -368,7 +368,6 @@ def _experiment_universe_selector() -> bool:
 
     service = _universe_service()
     current = st.session_state.lab_universe_selection
-    st.subheader("Univers de l’expérience")
     labels = {
         "Univers complet": SAVED_SOURCE,
         "Échantillon d’un univers": SAMPLE_SOURCE,
@@ -377,116 +376,129 @@ def _experiment_universe_selector() -> bool:
         (label for label, source in labels.items() if source == current.source),
         "Univers complet",
     )
-    selected_label = st.radio(
-        "Mode d’utilisation",
-        list(labels),
-        index=list(labels).index(current_label),
-        horizontal=True,
-        key="experiment-universe-mode",
-    )
-    source = labels[selected_label]
-    universe_id = None
-    size = None
-    method = None
-    seed = None
-    names = service.standard_universe_names()
-    universe_id = st.selectbox(
-        "Univers principal",
-        names,
-        index=names.index(current.universe) if current.universe in names else 0,
-        format_func=lambda item: universe_display_name(item, service),
-        key="experiment-saved-universe",
-    )
-    if source == SAMPLE_SOURCE:
-        available = len(service.universe_symbols(universe_id))
-        size = int(st.number_input(
-            "Nombre de symboles",
-            min_value=1,
-            max_value=available,
-            value=min(available, current.sample_size or available),
-            key="experiment-sample-size",
-        ))
-        method_label = st.selectbox(
-            "Méthode",
-            ["Top N", "Échantillon reproductible"],
-            index=0 if current.selection_method != SEEDED_SAMPLE else 1,
-            key="experiment-sample-method",
-        )
-        method = TOP_N if method_label == "Top N" else SEEDED_SAMPLE
-        if method == SEEDED_SAMPLE:
-            seed = int(st.number_input(
-                "Seed", min_value=0, value=current.seed or 1234,
-                key="experiment-sample-seed",
-            ))
-    selection = UniverseSelection(
-        source=source,
-        universe=universe_id,
-        sample_size=size,
-        selection_method=method,
-        seed=seed,
-    )
-    try:
-        preview = universe_ui_preview(selection, service)
-    except ValueError as error:
-        st.error(f"Univers invalide : {error}")
-        return False
+    primary_column, context_column = st.columns(2)
+    with primary_column:
+        with st.container(border=True):
+            st.subheader("Univers principal")
+            names = service.standard_universe_names()
+            universe_id = st.selectbox(
+                "Sélection de l’univers principal",
+                names,
+                index=names.index(current.universe) if current.universe in names else 0,
+                format_func=lambda item: universe_display_name(item, service),
+                key="experiment-saved-universe",
+            )
+            selected_label = st.radio(
+                "Mode d’utilisation",
+                list(labels),
+                index=list(labels).index(current_label),
+                horizontal=True,
+                key="experiment-universe-mode",
+            )
+            source = labels[selected_label]
+            size = None
+            method = None
+            seed = None
+            if source == SAMPLE_SOURCE:
+                available = len(service.universe_symbols(universe_id))
+                size = int(st.number_input(
+                    "Nombre de symboles",
+                    min_value=1,
+                    max_value=available,
+                    value=min(available, current.sample_size or available),
+                    key="experiment-sample-size",
+                ))
+                method_label = st.selectbox(
+                    "Méthode",
+                    ["Top N", "Échantillon reproductible"],
+                    index=0 if current.selection_method == TOP_N else 1,
+                    key="experiment-sample-method",
+                )
+                method = TOP_N if method_label == "Top N" else SEEDED_SAMPLE
+                if method == SEEDED_SAMPLE:
+                    seed = int(st.number_input(
+                        "Seed", min_value=0, value=current.seed or 1234,
+                        key="experiment-sample-seed",
+                    ))
+            selection = UniverseSelection(
+                source=source,
+                universe=universe_id,
+                sample_size=size,
+                selection_method=method,
+                seed=seed,
+            )
+            try:
+                preview = universe_ui_preview(selection, service)
+            except ValueError as error:
+                st.error(f"Univers invalide : {error}")
+                return False
+            st.caption(f"{len(preview.resolved_symbols)} cibles sélectionnées")
     context_names = tuple(
         record.universe_id
         for record in service.records()
         if record.type == CONTEXT_UNIVERSE_TYPE
     )
-    selected_contexts = st.multiselect(
-        "Univers de contexte",
-        context_names,
-        default=[
-            item
-            for item in st.session_state.lab_context_universe_ids
-            if item in context_names
-        ],
-        format_func=lambda item: universe_display_name(item, service),
-        key="experiment-context-universes",
-    )
-    full_context = service.resolve_experiment(preview.selection, selected_contexts)
     context_labels = {
         "Univers complet": SAVED_SOURCE,
         "Échantillon d’un univers": SAMPLE_SOURCE,
     }
-    context_mode = st.radio(
-        "Mode d’utilisation du contexte",
-        list(context_labels),
-        horizontal=True,
-        key="experiment-context-mode",
-    )
     context_sample_size = None
     context_method = None
     context_seed = None
-    if context_labels[context_mode] == SAMPLE_SOURCE and full_context.context_symbols:
-        context_sample_size_key = "experiment-context-sample-size"
-        saved_context_size = st.session_state.get(
-            context_sample_size_key, len(full_context.context_symbols)
-        )
-        if not 1 <= int(saved_context_size) <= len(full_context.context_symbols):
-            st.session_state[context_sample_size_key] = len(full_context.context_symbols)
-        context_sample_size = int(st.number_input(
-            "Nombre de symboles de contexte",
-            min_value=1,
-            max_value=len(full_context.context_symbols),
-            value=len(full_context.context_symbols),
-            key=context_sample_size_key,
-        ))
-        context_method_label = st.selectbox(
-            "Méthode de sélection du contexte",
-            ["Top N", "Échantillon reproductible"],
-            key="experiment-context-sample-method",
-        )
-        context_method = TOP_N if context_method_label == "Top N" else SEEDED_SAMPLE
-        if context_method == SEEDED_SAMPLE:
-            context_seed = int(st.number_input(
-                "Seed du contexte", min_value=0, value=1234,
-                key="experiment-context-sample-seed",
-            ))
-    elif context_labels[context_mode] == SAMPLE_SOURCE:
-        st.caption("Aucun symbole de contexte disponible.")
+    with context_column:
+        with st.container(border=True):
+            st.subheader("Univers de contexte")
+            selected_contexts = st.multiselect(
+                "Sélection de l’univers de contexte",
+                context_names,
+                default=[
+                    item
+                    for item in st.session_state.lab_context_universe_ids
+                    if item in context_names
+                ],
+                format_func=lambda item: universe_display_name(item, service),
+                key="experiment-context-universes",
+            )
+            full_context = service.resolve_experiment(preview.selection, selected_contexts)
+            context_mode = st.radio(
+                "Mode d’utilisation du contexte",
+                list(context_labels),
+                horizontal=True,
+                key="experiment-context-mode",
+            )
+            if context_labels[context_mode] == SAMPLE_SOURCE and full_context.context_symbols:
+                context_sample_size_key = "experiment-context-sample-size"
+                saved_context_size = st.session_state.get(
+                    context_sample_size_key, len(full_context.context_symbols)
+                )
+                if not 1 <= int(saved_context_size) <= len(full_context.context_symbols):
+                    st.session_state[context_sample_size_key] = len(full_context.context_symbols)
+                context_sample_size = int(st.number_input(
+                    "Nombre de symboles de contexte",
+                    min_value=1,
+                    max_value=len(full_context.context_symbols),
+                    value=len(full_context.context_symbols),
+                    key=context_sample_size_key,
+                ))
+                context_method_label = st.selectbox(
+                    "Méthode de sélection du contexte",
+                    ["Top N", "Échantillon reproductible"],
+                    index=(
+                        0
+                        if st.session_state.lab_context_selection_method == TOP_N
+                        else 1
+                    ),
+                    key="experiment-context-sample-method",
+                )
+                context_method = TOP_N if context_method_label == "Top N" else SEEDED_SAMPLE
+                if context_method == SEEDED_SAMPLE:
+                    context_seed = int(st.number_input(
+                        "Seed du contexte", min_value=0, value=1234,
+                        key="experiment-context-sample-seed",
+                    ))
+            elif context_labels[context_mode] == SAMPLE_SOURCE:
+                st.caption("Aucun symbole de contexte disponible.")
+            st.caption(f"{len(full_context.context_symbols)} symboles de contexte disponibles")
     resolved = service.resolve_experiment(
         preview.selection,
         selected_contexts,
@@ -2608,12 +2620,14 @@ def _simulation_page() -> None:
         available_dates.max().date() if not available_dates.empty else pd.Timestamp.today().date()
     )
     default_start = default_end - timedelta(days=365)
+    if st.session_state.get("simulation-mode") == "Résultats réalisés":
+        st.session_state["simulation-mode"] = "Prédictions évaluées"
     defaults = {
         "simulation-start-date": default_start,
         "simulation-end-date": default_end,
         "simulation-amount": 10_000.0,
         "simulation-exit-mode": "Clôture du jour",
-        "simulation-mode": "Résultats réalisés",
+        "simulation-mode": "Prédictions évaluées",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -2632,7 +2646,7 @@ def _simulation_page() -> None:
         )
         simulation_mode = controls[4].selectbox(
             "Mode de simulation",
-            ["Historique", "Résultats réalisés"],
+            ["Historique", "Prédictions évaluées"],
             key="simulation-mode",
         )
         # Reserve the label's height so the action lines up with the inputs.

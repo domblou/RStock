@@ -100,9 +100,42 @@ class SimulationService:
         end = _date(end_date, "Date de fin")
         self._validate_parameters(start, end, amount_per_signal)
         signals = self.repository.read_active_model_table("signals")
+        evaluated_predictions = self.repository.read_active_model_table(
+            "realized_results"
+        )
         predictions = self.repository.read_table("predictions")
+        evaluated_signals = self._evaluated_signal_rows(
+            evaluated_predictions, signals
+        )
         return self._simulate_signals(
-            signals, predictions, start, end, amount_per_signal
+            evaluated_signals, predictions, start, end, amount_per_signal
+        )
+
+    @staticmethod
+    def _evaluated_signal_rows(
+        evaluated_predictions: pd.DataFrame, signals: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Keep evaluated predictions that have a persisted signal record.
+
+        The financial mode must not turn an evaluated ``no_signal`` prediction
+        into a trade.  The inner join also means a prediction is tradable only
+        after both evaluation and signal detection have been persisted.
+        """
+
+        if (
+            evaluated_predictions.empty
+            or signals.empty
+            or "prediction_id" not in evaluated_predictions
+            or "prediction_id" not in signals
+        ):
+            return pd.DataFrame()
+        signal_rows = signals.drop_duplicates("prediction_id", keep="last")
+        return evaluated_predictions.merge(
+            signal_rows,
+            on="prediction_id",
+            how="inner",
+            suffixes=("_evaluated", ""),
+            validate="many_to_one",
         )
 
     def run_historical(
@@ -181,19 +214,22 @@ class SimulationService:
             signal_date = signal.get("created_at")
             if prediction is not None:
                 signal_date = prediction.get("as_of_date", signal_date)
-            if symbol not in price_cache:
-                price_cache[symbol] = self.price_loader(symbol)
-            prices = price_cache[symbol]
-            opened = closed = None
-            if prices is not None and not prices.empty:
-                normalized = prices.copy()
-                normalized.index = pd.to_datetime(normalized.index).normalize()
-                if trade_date in normalized.index:
-                    price_row = normalized.loc[trade_date]
-                    if isinstance(price_row, pd.DataFrame):
-                        price_row = price_row.iloc[-1]
-                    opened = _number(price_row.get("Open"))
-                    closed = _number(price_row.get("Close"))
+            has_evaluated_prices = "open" in signal or "close" in signal
+            opened = _number(signal.get("open")) if has_evaluated_prices else None
+            closed = _number(signal.get("close")) if has_evaluated_prices else None
+            if not has_evaluated_prices:
+                if symbol not in price_cache:
+                    price_cache[symbol] = self.price_loader(symbol)
+                prices = price_cache[symbol]
+                if prices is not None and not prices.empty:
+                    normalized = prices.copy()
+                    normalized.index = pd.to_datetime(normalized.index).normalize()
+                    if trade_date in normalized.index:
+                        price_row = normalized.loc[trade_date]
+                        if isinstance(price_row, pd.DataFrame):
+                            price_row = price_row.iloc[-1]
+                        opened = _number(price_row.get("Open"))
+                        closed = _number(price_row.get("Close"))
             if opened is None and closed is None:
                 status = "Données de marché incomplètes"
             elif opened is None:
