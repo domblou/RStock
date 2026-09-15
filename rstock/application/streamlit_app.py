@@ -183,7 +183,7 @@ def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> N
     """Store a fresh editable draft, leaving the persisted run untouched."""
 
     st.session_state[DUPLICATION_DRAFT_KEY] = walk_forward_duplication_draft(
-        run_id, detail
+        run_id, detail, project_root=st.session_state.lab_config.project_root
     )
     st.session_state[DUPLICATION_CONFIG_CHOICE_KEY] = "Paramètres du run"
     st.session_state[DUPLICATION_JOB_TYPE_KEY] = JOB_TYPE_LABELS[JobType.WALK_FORWARD]
@@ -280,6 +280,12 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             horizontal=True,
             key=DUPLICATION_CONFIG_CHOICE_KEY,
         )
+        xgboost_source = draft.get("source_xgboost_calibration_run")
+        if xgboost_source:
+            st.caption(
+                f"Calibration XGBoost {xgboost_source} : "
+                + ("conservée" if choice == "Paramètres du run" else "ignorée/détachée")
+            )
         actions = st.columns([2, 1, 5])
         if actions[0].button(
             "Soumettre la duplication",
@@ -1907,7 +1913,10 @@ def _history_runs_panel(
             key=f"open-history-{key_prefix}",
         ):
             _history_navigation("detail", selected)
-        if str(selected_run["job_type"]) == JobType.WALK_FORWARD.value and actions[1].button(
+        if str(selected_run["job_type"]) in {
+            JobType.WALK_FORWARD.value,
+            JobType.XGBOOST_CALIBRATION.value,
+        } and actions[1].button(
             "Dupliquer l’expérience",
             type="primary",
             key=f"duplicate-history-{key_prefix}",

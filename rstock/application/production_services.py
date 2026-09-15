@@ -24,7 +24,12 @@ from rstock.features import (
     prepare_dataset,
     prepare_prediction_row,
 )
-from rstock.modeling import XGBoostParameters, fit_booster, predict_probabilities
+from rstock.modeling import (
+    XGBoostParameters,
+    fit_booster,
+    predict_probabilities,
+    resolve_directional_xgboost_parameters,
+)
 from rstock.persistence import load_booster, model_store_transaction
 from rstock.progress import CancellationCheck, check_cancellation
 from rstock.qualification import qualification_parameters
@@ -112,27 +117,7 @@ class PromotionService:
         xgboost_threads = spec.config.xgb_nthread
         calibration_sources: dict[str, Any] = {}
         down_xgb_parameters: dict[str, int | float] | None = None
-        if xgboost_calibration_run:
-            self._require_completed_run(
-                xgboost_calibration_run, JobType.XGBOOST_CALIBRATION
-            )
-            xgb_spec = self.runs.load_spec(xgboost_calibration_run)
-            self._assert_methodology_compatible(spec, xgb_spec, "XGBoost calibration")
-            xgboost_seed = xgb_spec.config.xgb_seed
-            xgboost_threads = xgb_spec.config.xgb_nthread
-            calibration_sources["xgboost"] = xgb_spec.to_dict()
-            path = self.runs.run_directory(xgboost_calibration_run) / "results" / "selected_configurations.json"
-            calibrated = json.loads(path.read_text(encoding="utf-8"))
-            # Direction-specific parameters are preserved; production V1 uses
-            # the Up selection as the common architecture when they differ.
-            xgb_parameters = dict(calibrated["Up"]["parameters"])
-            down_xgb_parameters = dict(calibrated["Down"]["parameters"])
-        up_threshold = spec.config.prediction_threshold
-        down_threshold = spec.config.prediction_threshold
-        calibrated_signal_threshold = None
-        calibration_metrics: dict[str, Any] = {}
-        calibration_sample_size = None
-        holdout_signal_metrics: dict[str, Any] = {}
+        threshold_spec: ExperimentSpec | None = None
         if threshold_calibration_run:
             self._require_completed_run(
                 threshold_calibration_run, JobType.THRESHOLD_CALIBRATION
@@ -141,6 +126,50 @@ class PromotionService:
             self._assert_methodology_compatible(
                 spec, threshold_spec, "threshold calibration"
             )
+        provenance_spec = (
+            threshold_spec
+            if threshold_spec is not None
+            and (
+                threshold_spec.source_xgboost_calibration_run is not None
+                or threshold_spec.frozen_xgboost_parameters is not None
+            )
+            else spec
+        )
+        inherited_xgboost_run = provenance_spec.source_xgboost_calibration_run
+        frozen_xgboost = provenance_spec.frozen_xgboost_parameters
+        resolved_xgboost_run = xgboost_calibration_run or inherited_xgboost_run
+        if resolved_xgboost_run:
+            self._require_completed_run(
+                resolved_xgboost_run, JobType.XGBOOST_CALIBRATION
+            )
+            xgb_spec = self.runs.load_spec(resolved_xgboost_run)
+            self._assert_methodology_compatible(spec, xgb_spec, "XGBoost calibration")
+            xgboost_seed = xgb_spec.config.xgb_seed
+            xgboost_threads = xgb_spec.config.xgb_nthread
+            calibration_sources["xgboost"] = xgb_spec.to_dict()
+            referenced_xgboost = None
+            if xgboost_calibration_run or frozen_xgboost is None:
+                path = self.runs.run_directory(resolved_xgboost_run) / "results" / "selected_configurations.json"
+                referenced_xgboost = json.loads(path.read_text(encoding="utf-8"))
+            directional_xgboost = resolve_directional_xgboost_parameters(
+                xgb_spec.config,
+                frozen=(
+                    frozen_xgboost
+                    if not xgboost_calibration_run
+                    else None
+                ),
+                referenced=referenced_xgboost,
+            )
+            xgb_parameters = directional_xgboost.up.as_dict()
+            down_xgb_parameters = directional_xgboost.down.as_dict()
+        up_threshold = spec.config.prediction_threshold
+        down_threshold = spec.config.prediction_threshold
+        calibrated_signal_threshold = None
+        calibration_metrics: dict[str, Any] = {}
+        calibration_sample_size = None
+        holdout_signal_metrics: dict[str, Any] = {}
+        if threshold_calibration_run:
+            assert threshold_spec is not None
             calibration_sources["thresholds"] = threshold_spec.to_dict()
             calibration_results = self.runs.run_directory(threshold_calibration_run) / "results"
             path = calibration_results / "selected_thresholds_by_set.json"
@@ -193,7 +222,7 @@ class PromotionService:
             "target": target,
             "predictors": predictors,
             "walk_forward": walk_forward_run,
-            "xgboost": xgboost_calibration_run,
+            "xgboost": resolved_xgboost_run,
             "thresholds": threshold_calibration_run,
         }
         fingerprint = hashlib.sha256(
@@ -218,7 +247,7 @@ class PromotionService:
             down_threshold=down_threshold,
             qualification_rules=qualification_parameters(spec.config),
             source_walk_forward_run=walk_forward_run,
-            source_xgboost_calibration_run=xgboost_calibration_run,
+            source_xgboost_calibration_run=resolved_xgboost_run,
             source_threshold_calibration_run=threshold_calibration_run,
             development_metrics=development_metrics,
             holdout_metrics=holdout_metrics,

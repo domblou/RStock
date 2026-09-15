@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -55,6 +55,58 @@ class XGBoostParameters:
             "nthread": config.xgb_nthread,
             "seed": config.xgb_seed,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class DirectionalXGBoostParameters:
+    up: XGBoostParameters
+    down: XGBoostParameters
+    source: str
+
+    def as_dict(self) -> dict[str, dict[str, int | float]]:
+        return {"Up": self.up.as_dict(), "Down": self.down.as_dict()}
+
+
+def selected_xgboost_parameters(
+    selected: Mapping[str, Any],
+) -> dict[str, dict[str, int | float]]:
+    """Extract and validate Up/Down parameters from a calibration artifact."""
+
+    return {
+        direction: XGBoostParameters(
+            **dict(selected[direction]["parameters"])
+        ).as_dict()
+        for direction in ("Up", "Down")
+    }
+
+
+def resolve_directional_xgboost_parameters(
+    config: RStockConfig,
+    *,
+    frozen: Mapping[str, Mapping[str, int | float]] | None = None,
+    referenced: Mapping[str, Any] | None = None,
+    legacy_fallback: XGBoostParameters | None = None,
+) -> DirectionalXGBoostParameters:
+    """Resolve effective parameters with one explicit, shared priority rule."""
+
+    if frozen is not None:
+        values = {direction: dict(frozen[direction]) for direction in ("Up", "Down")}
+        source = "frozen_snapshot"
+    elif referenced is not None:
+        values = selected_xgboost_parameters(referenced)
+        source = "referenced_calibration"
+    elif legacy_fallback is not None:
+        values = {direction: legacy_fallback.as_dict() for direction in ("Up", "Down")}
+        source = "legacy_fallback"
+    else:
+        baseline = historical_xgboost_parameters(config).as_dict()
+        values = {direction: baseline for direction in ("Up", "Down")}
+        source = "rstock_config"
+    return DirectionalXGBoostParameters(
+        up=XGBoostParameters(**values["Up"]),
+        down=XGBoostParameters(**values["Down"]),
+        source=source,
+    )
 
 
 def historical_xgboost_parameters(config: RStockConfig) -> XGBoostParameters:

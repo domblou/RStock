@@ -77,7 +77,7 @@ CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS = (
     "Dans tolérance précision", "Raison de rejet / sélection",
 )
 XGBOOST_CALIBRATION_SELECTION_COLUMNS = (
-    "Direction", "Configuration sélectionnée", "Selection score",
+    "Direction", "Config gagnante", "Selection score",
     "Écart avec le 2e meilleur candidat", "ROC-AUC développement",
     "PR-AUC développement", "Stabilité développement", "ROC-AUC holdout",
     "PR-AUC holdout", "Précision holdout", "Rappel holdout", "F1 holdout",
@@ -323,7 +323,7 @@ def xgboost_calibration_selection_table(
 
         rows.append({
             "Direction": direction,
-            "Configuration sélectionnée": configuration if configuration is not None else pd.NA,
+            "Config gagnante": configuration if configuration is not None else pd.NA,
             "Selection score": selected.get("selection_score", _calibration_value(development, "SelectionScore")),
             "Écart avec le 2e meilleur candidat": gap,
             "ROC-AUC développement": _calibration_value(development, "ROCAUCMedian"),

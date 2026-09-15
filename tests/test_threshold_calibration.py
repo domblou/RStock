@@ -19,6 +19,7 @@ from rstock.threshold_calibration import (
     calibrate_thresholds_by_set,
     evaluate_threshold_grid,
     generate_development_probabilities,
+    generate_holdout_probabilities,
     probability_distribution,
     run_controlled_threshold_calibration,
     summarize_and_select_thresholds,
@@ -112,6 +113,48 @@ def test_experimental_xgboost_parameters_are_frozen_as_requested():
         "reg_alpha": 0.0,
         "reg_lambda": 1.0,
     }
+
+
+def test_development_and_holdout_use_directional_xgboost_parameters(monkeypatch):
+    index = pd.bdate_range("2025-01-01", periods=24)
+    stock = pd.DataFrame(index=index)
+    for offset, symbol in enumerate(("AAA", "BBB")):
+        intraday = np.where((np.arange(len(index)) + offset) % 2 == 0, 0.02, -0.02)
+        stock[f"{symbol}.Open"] = 100.0
+        stock[f"{symbol}.Close"] = 100.0 * (1.0 + intraday)
+        stock[f"{symbol}.High"] = np.maximum(stock[f"{symbol}.Close"], 100.0) + 0.5
+        stock[f"{symbol}.Low"] = np.minimum(stock[f"{symbol}.Close"], 100.0) - 0.5
+    prepared = prepare_dataset(stock, ["AAA", "BBB"])
+    sampled = generate_symbol_sets(["AAA", "BBB"], 1).iloc[:1]
+    directional = {
+        "Up": XGBoostParameters(2, 0.05, 10),
+        "Down": XGBoostParameters(4, 0.1, 20),
+    }
+    calls = []
+
+    def fake_fit(frame, names, outcome, config, *, parameters):
+        calls.append((outcome, parameters))
+        return object()
+
+    monkeypatch.setattr("rstock.threshold_calibration.fit_booster", fake_fit)
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.predict_probabilities",
+        lambda booster, frame, names: np.full(len(frame), 0.5),
+    )
+    config = replace(_config(), combination_workers=1)
+    generate_development_probabilities(
+        prepared.iloc[:18], sampled, config,
+        min_train_size=8, test_size=4, step_size=4,
+        parameters_by_direction=directional,
+    )
+    generate_holdout_probabilities(
+        prepared.iloc[:18], prepared.iloc[18:], sampled, config,
+        parameters_by_direction=directional,
+    )
+
+    assert calls
+    assert all(parameters is directional["Up"] for _, parameters in calls[::2])
+    assert all(parameters is directional["Down"] for _, parameters in calls[1::2])
 
 
 def test_probability_distribution_and_grid_are_directional_and_adaptive():
@@ -437,6 +480,44 @@ def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch
     assert events == ["development", "selection_frozen", "holdout"]
     assert result.run_configuration["holdout_used_for_selection"] is False
     assert result.run_configuration["holdout_evaluated"] is True
+
+
+def test_controlled_runner_persists_effective_xgboost_provenance(monkeypatch):
+    directional = {
+        "Up": XGBoostParameters(2, 0.04, 60),
+        "Down": XGBoostParameters(5, 0.09, 100),
+    }
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: _economically_viable_predictions(),
+    )
+    prepared = pd.DataFrame(
+        {"placeholder": np.arange(12)},
+        index=pd.bdate_range("2025-01-01", periods=12),
+    )
+    result = run_controlled_threshold_calibration(
+        prepared,
+        generate_symbol_sets(["AAA", "BBB"], 1),
+        _config(),
+        combinations_per_target=1,
+        min_train_size=2,
+        test_size=2,
+        step_size=2,
+        final_holdout_size=3,
+        xgboost_parameters_by_direction=directional,
+        xgboost_parameter_source="frozen_snapshot",
+        source_xgboost_calibration_run="xgb-parent",
+        frozen_xgboost_parameters_sha256="abc123",
+    )
+
+    configuration = result.run_configuration
+    assert configuration["xgboost_parameter_source"] == "frozen_snapshot"
+    assert configuration["xgboost_parameters_by_direction"] == {
+        direction: parameters.as_dict()
+        for direction, parameters in directional.items()
+    }
+    assert configuration["source_xgboost_calibration_run"] == "xgb-parent"
+    assert configuration["frozen_xgboost_parameters_sha256"] == "abc123"
 
 
 def _controlled_result_with_predictions(monkeypatch, predictions, config):
@@ -821,6 +902,103 @@ def test_threshold_calibration_reuses_qualified_sets_from_its_walk_forward_sourc
     generated = workflows._qualified_sets_from_walk_forward_source(calibration_spec)
 
     assert generated.to_dict("records") == [{"V0": "AAA", "V1": "BBB"}]
+
+
+def test_threshold_xgboost_resolution_uses_frozen_snapshot_before_reference(tmp_path):
+    from rstock.application import workflows
+
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path)
+    spec = ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        config,
+        symbols=("AAA", "BBB"),
+        source_xgboost_calibration_run="missing-source-is-not-read",
+        frozen_xgboost_parameters={
+            "Up": XGBoostParameters(2, 0.03, 70).as_dict(),
+            "Down": XGBoostParameters(4, 0.08, 90).as_dict(),
+        },
+    )
+
+    resolved = workflows._resolve_threshold_xgboost_parameters(spec)
+
+    assert resolved.source == "frozen_snapshot"
+    assert resolved.up.max_depth == 2
+    assert resolved.down.max_depth == 4
+
+
+def test_threshold_xgboost_resolution_loads_referenced_calibration(tmp_path):
+    import json
+    from rstock.application import workflows
+    from rstock.application.repository import RunRepository
+
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path)
+    runs = RunRepository(tmp_path / "runs")
+    source = runs.create(ExperimentSpec(
+        JobType.XGBOOST_CALIBRATION, config, symbols=("AAA", "BBB")
+    ))
+    results = runs.run_directory(source) / "results"
+    results.mkdir()
+    (results / "selected_configurations.json").write_text(json.dumps({
+        "Up": {"parameters": XGBoostParameters(3, 0.04, 60).as_dict()},
+        "Down": {"parameters": XGBoostParameters(5, 0.09, 100).as_dict()},
+    }), encoding="utf-8")
+    runs.transition(source, JobStatus.RUNNING)
+    runs.transition(source, JobStatus.COMPLETED)
+    spec = ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        config,
+        symbols=("AAA", "BBB"),
+        source_xgboost_calibration_run=source,
+    )
+
+    resolved = workflows._resolve_threshold_xgboost_parameters(spec)
+
+    assert resolved.source == "referenced_calibration"
+    assert resolved.up.max_depth == 3
+    assert resolved.down.max_depth == 5
+
+
+def test_threshold_xgboost_resolution_uses_current_config_for_new_run(tmp_path):
+    from rstock.application import workflows
+
+    config = replace(
+        DEFAULT_CONFIG, project_root=tmp_path,
+        xgb_max_depth=6, xgb_eta=0.07, xgb_rounds=77,
+    )
+    resolved = workflows._resolve_threshold_xgboost_parameters(ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION, config, symbols=("AAA", "BBB")
+    ))
+
+    assert resolved.source == "rstock_config"
+    assert resolved.up.as_dict() == resolved.down.as_dict()
+    assert resolved.up.max_depth == 6
+    assert resolved.up.eta == 0.07
+    assert resolved.up.num_boost_round == 77
+
+
+def test_historical_threshold_spec_uses_documented_legacy_fallback(tmp_path):
+    from rstock.application import workflows
+
+    snapshot = ExperimentSpec(
+        JobType.THRESHOLD_CALIBRATION,
+        replace(DEFAULT_CONFIG, project_root=tmp_path, xgb_max_depth=7),
+        symbols=("AAA", "BBB"),
+    ).to_dict()
+    for name in (
+        "source_xgboost_calibration_run",
+        "frozen_xgboost_parameters",
+        "frozen_xgboost_parameters_sha256",
+        "xgboost_resolution_version",
+    ):
+        snapshot.pop(name)
+
+    resolved = workflows._resolve_threshold_xgboost_parameters(
+        ExperimentSpec.from_dict(snapshot)
+    )
+
+    assert resolved.source == "legacy_fallback"
+    assert resolved.up == EXPERIMENTAL_XGBOOST_PARAMETERS
+    assert resolved.down == EXPERIMENTAL_XGBOOST_PARAMETERS
 
 
 @pytest.mark.parametrize(

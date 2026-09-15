@@ -276,6 +276,43 @@ Sinon le holdout cesse d’être une validation indépendante.
 
 ---
 
+## 7.3 Provenance des configurations sélectionnées
+
+Une calibration XGBoost choisit une configuration gagnante séparément pour les
+directions **Up** et **Down**. Les deux configurations, y compris tous leurs
+hyperparamètres, sont publiées dans `selected_configurations.json`.
+
+Lorsqu’un run est créé à partir de cette calibration, RStock enregistre dans sa
+configuration :
+
+- le `run_id` de la calibration source ;
+- un snapshot gelé des paramètres Up et Down ;
+- un digest SHA-256 de ce snapshot.
+
+Ce snapshot permet d’expliquer quelle calibration est à l’origine du run, même
+si les paramètres de l’application changent plus tard. Les anciens runs, créés
+avant cette traçabilité, restent valides mais n’ont pas de provenance XGBoost.
+
+La calibration des seuils consomme ces paramètres directionnels. La priorité est
+explicite : snapshot gelé du run, puis artefact de la calibration XGBoost
+référencée, puis paramètres du `RStockConfig`. Les paramètres Up servent au
+modèle Up et les paramètres Down au modèle Down, aussi bien pendant le
+développement que pendant le holdout final. Le seed et le nombre de threads
+restent ceux du `RStockConfig` du run.
+
+Pour reproduire le comportement des runs historiques créés avant cette règle,
+un snapshot qui ne contient ni version de résolution ni provenance XGBoost
+utilise le jeu de paramètres fixe historique de la calibration des seuils. Ce
+fallback est enregistré comme `legacy_fallback`; aucune provenance n’est
+inventée. Les nouveaux runs sans calibration source utilisent les paramètres
+XGBoost courants de leur `RStockConfig`.
+
+Le fichier `run_configuration.json` de la calibration des seuils indique la
+source effective, les paramètres complets Up/Down, le run de calibration source
+et le digest du snapshot gelé lorsqu’ils existent.
+
+---
+
 # 8. Calibration des seuils
 
 ## 8.1 Pourquoi calibrer un seuil?
@@ -517,6 +554,15 @@ Une métrique unique ne devrait pas décider à elle seule de la promotion.
 
 ---
 
+## Paramètres XGBoost lors de la promotion
+
+Lorsqu’un run promu référence une calibration XGBoost gelée, la promotion
+conserve cette provenance et les paramètres distincts Up/Down dans le modèle de
+production. Une calibration XGBoost explicitement indiquée lors de la promotion
+reste prioritaire sur une provenance héritée.
+
+---
+
 # 14. Signaux
 
 Les modèles promus peuvent produire des signaux Up ou Down selon leur configuration.
@@ -584,6 +630,21 @@ Chaque run conserve notamment :
 Les expériences peuvent être dupliquées afin de comparer différentes méthodologies tout en conservant la même population de symboles.
 
 Cette approche est préférable à la reconstruction manuelle d’une expérience.
+
+---
+
+## Duplication et paramètres XGBoost
+
+Lors de la duplication, le choix des paramètres est explicite :
+
+- **Paramètres du run** conserve le snapshot `RStockConfig` du run, ainsi que
+  toute provenance de calibration XGBoost et ses paramètres directionnels gelés.
+- **Paramètres actuels** remplace le `RStockConfig` par la configuration actuelle
+  de l’application et détache explicitement toute calibration XGBoost antérieure.
+  Le nouveau run ne conserve alors ni `run_id` de calibration source ni snapshot
+  directionnel ; il ne peut donc pas l’utiliser implicitement.
+
+Un restart/replay conserve le snapshot et la provenance du run relancé.
 
 ---
 

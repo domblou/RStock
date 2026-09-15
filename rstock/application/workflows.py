@@ -18,6 +18,10 @@ from rstock.checkpoints import CheckpointManager
 from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
+from rstock.modeling import (
+    DirectionalXGBoostParameters,
+    resolve_directional_xgboost_parameters,
+)
 from rstock.progress import (
     CancellationCheck,
     ProgressCallback,
@@ -27,6 +31,7 @@ from rstock.progress import (
 )
 from rstock.predictor_prefilter import PREFILTER_SCORE_FORMULA, select_predictors
 from rstock.threshold_calibration import (
+    EXPERIMENTAL_XGBOOST_PARAMETERS,
     run_controlled_threshold_calibration,
     write_threshold_calibration_results,
 )
@@ -715,6 +720,7 @@ def _threshold_calibration(
     prepared, generated, _ = _prepared_experiment(
         spec, progress_callback, cancellation_check
     )
+    effective_xgboost = _resolve_threshold_xgboost_parameters(spec)
     source_generated = _qualified_sets_from_walk_forward_source(spec)
     if source_generated is not None:
         generated = source_generated
@@ -724,6 +730,13 @@ def _threshold_calibration(
         spec.config,
         combinations_per_target=spec.combinations_per_target,
         evaluate_final_holdout=spec.evaluate_final_holdout,
+        xgboost_parameters_by_direction={
+            "Up": effective_xgboost.up,
+            "Down": effective_xgboost.down,
+        },
+        xgboost_parameter_source=effective_xgboost.source,
+        source_xgboost_calibration_run=spec.source_xgboost_calibration_run,
+        frozen_xgboost_parameters_sha256=spec.frozen_xgboost_parameters_sha256,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
@@ -763,6 +776,43 @@ def _threshold_calibration(
             None if source_generated is None else len(source_generated)
         ),
     }
+
+
+def _resolve_threshold_xgboost_parameters(
+    spec: ExperimentSpec,
+) -> DirectionalXGBoostParameters:
+    """Resolve threshold-model parameters from the immutable experiment spec."""
+
+    referenced: dict[str, Any] | None = None
+    if (
+        spec.frozen_xgboost_parameters is None
+        and spec.source_xgboost_calibration_run is not None
+    ):
+        runs = RunRepository(spec.config.project_root / "runs")
+        source_run = spec.source_xgboost_calibration_run
+        status = runs.status(source_run)
+        if status.get("job_type") != JobType.XGBOOST_CALIBRATION.value:
+            raise ValueError("XGBoost parameter source must be a calibration run")
+        if status.get("status") != "completed":
+            raise ValueError("XGBoost parameter source is not completed")
+        path = runs.run_directory(source_run) / "results" / "selected_configurations.json"
+        try:
+            referenced = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("XGBoost calibration selections are unavailable") from error
+    legacy = (
+        EXPERIMENTAL_XGBOOST_PARAMETERS
+        if spec.xgboost_resolution_version < 1
+        and spec.frozen_xgboost_parameters is None
+        and spec.source_xgboost_calibration_run is None
+        else None
+    )
+    return resolve_directional_xgboost_parameters(
+        spec.config,
+        frozen=spec.frozen_xgboost_parameters,
+        referenced=referenced,
+        legacy_fallback=legacy,
+    )
 
 
 def _operational_prepared(

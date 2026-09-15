@@ -100,6 +100,10 @@ class ExperimentSpec:
     context_symbols: tuple[str, ...] = ()
     predictor_symbols: tuple[str, ...] = ()
     source_walk_forward_run: str | None = None
+    source_xgboost_calibration_run: str | None = None
+    frozen_xgboost_parameters: dict[str, dict[str, int | float]] | None = None
+    frozen_xgboost_parameters_sha256: str | None = None
+    xgboost_resolution_version: int = 1
     run_description: str | None = None
     historical_data_cutoff: str | None = None
     source_prepared_dataset_sha256: str | None = None
@@ -128,6 +132,21 @@ class ExperimentSpec:
         object.__setattr__(self, "run_description", description or None)
         # ``symbols`` remains the backward-compatible market-data universe.
         object.__setattr__(self, "symbols", predictors)
+        frozen = self.frozen_xgboost_parameters
+        if frozen is not None:
+            normalized = {
+                direction: {
+                    str(name): value
+                    for name, value in dict(frozen.get(direction, {})).items()
+                }
+                for direction in ("Up", "Down")
+            }
+            canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+            digest = hashlib.sha256(canonical.encode()).hexdigest()
+            object.__setattr__(self, "frozen_xgboost_parameters", normalized)
+            object.__setattr__(self, "frozen_xgboost_parameters_sha256", digest)
+        else:
+            object.__setattr__(self, "frozen_xgboost_parameters_sha256", None)
         if len(self.symbols) < 2:
             raise ValueError("At least two symbols are required")
         if self.combinations_per_target < 1:
@@ -149,6 +168,10 @@ class ExperimentSpec:
             "context_symbols": list(self.context_symbols),
             "predictor_symbols": list(self.predictor_symbols),
             "source_walk_forward_run": self.source_walk_forward_run,
+            "source_xgboost_calibration_run": self.source_xgboost_calibration_run,
+            "frozen_xgboost_parameters": self.frozen_xgboost_parameters,
+            "frozen_xgboost_parameters_sha256": self.frozen_xgboost_parameters_sha256,
+            "xgboost_resolution_version": self.xgboost_resolution_version,
             "run_description": self.run_description,
             "historical_data_cutoff": self.historical_data_cutoff,
             "source_prepared_dataset_sha256": self.source_prepared_dataset_sha256,
@@ -206,6 +229,22 @@ class ExperimentSpec:
                 if values.get("source_walk_forward_run") is None
                 else str(values["source_walk_forward_run"])
             ),
+            source_xgboost_calibration_run=(
+                None
+                if values.get("source_xgboost_calibration_run") is None
+                else str(values["source_xgboost_calibration_run"])
+            ),
+            frozen_xgboost_parameters=(
+                None
+                if not isinstance(values.get("frozen_xgboost_parameters"), dict)
+                else values["frozen_xgboost_parameters"]
+            ),
+            frozen_xgboost_parameters_sha256=(
+                None
+                if values.get("frozen_xgboost_parameters_sha256") is None
+                else str(values["frozen_xgboost_parameters_sha256"])
+            ),
+            xgboost_resolution_version=int(values.get("xgboost_resolution_version", 0)),
             run_description=(
                 None if values.get("run_description") is None
                 else str(values["run_description"])

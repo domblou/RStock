@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from copy import deepcopy
 from dataclasses import asdict, fields
 from math import comb
@@ -108,21 +109,46 @@ def _source_traceability(detail: Mapping[str, object]) -> Mapping[str, object]:
 
 
 def walk_forward_duplication_draft(
-    run_id: str, detail: Mapping[str, object]
+    run_id: str, detail: Mapping[str, object], *, project_root: Path | None = None
 ) -> dict[str, object]:
-    """Extract the editable inputs of one historical walk-forward run."""
+    """Extract frozen inputs from a walk-forward or XGBoost calibration run."""
 
     configuration = detail.get("configuration", {})
     if not isinstance(configuration, Mapping):
         raise ValueError("Run configuration is unavailable")
-    if normalize_duplication_job_type(configuration.get("job_type")) != JobType.WALK_FORWARD:
-        raise ValueError("Only walk-forward runs can be duplicated")
+    source_job_type = normalize_duplication_job_type(configuration.get("job_type"))
+    if source_job_type not in {JobType.WALK_FORWARD, JobType.XGBOOST_CALIBRATION}:
+        raise ValueError("Only walk-forward and XGBoost calibration runs can be duplicated")
+
+    source_xgboost_run = configuration.get("source_xgboost_calibration_run")
+    frozen_xgboost = deepcopy(configuration.get("frozen_xgboost_parameters"))
+    if source_job_type is JobType.XGBOOST_CALIBRATION:
+        source_xgboost_run = str(run_id)
+        root = project_root
+        if root is None:
+            rstock_config = configuration.get("rstock_config", {})
+            if isinstance(rstock_config, Mapping) and rstock_config.get("project_root"):
+                root = Path(str(rstock_config["project_root"]))
+        selected_path = (
+            None if root is None else Path(root) / "runs" / str(run_id) / "results"
+            / "selected_configurations.json"
+        )
+        if selected_path is None or not selected_path.exists():
+            raise ValueError("XGBoost calibration selections are unavailable")
+        try:
+            selected = json.loads(selected_path.read_text(encoding="utf-8"))
+            frozen_xgboost = {
+                direction: dict(selected[direction]["parameters"])
+                for direction in ("Up", "Down")
+            }
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError("XGBoost calibration selections are invalid") from error
 
     symbols = tuple(str(item) for item in configuration.get("symbols", ()) if item)
     traceability = _source_traceability(detail)
     return {
         "source_run_id": str(run_id),
-        "job_type": JobType.WALK_FORWARD.value,
+        "job_type": source_job_type.value,
         "primary_universe_id": configuration.get("primary_universe_id"),
         "context_universe_ids": list(configuration.get("context_universe_ids", ())),
         "context_sample_size": configuration.get("context_sample_size"),
@@ -140,6 +166,16 @@ def walk_forward_duplication_draft(
         "historical_data_cutoff": traceability.get("prepared_market_last_date"),
         "source_prepared_dataset_sha256": traceability.get(
             "prepared_dataset_sha256"
+        ),
+        "source_walk_forward_run": (
+            str(run_id)
+            if source_job_type is JobType.WALK_FORWARD
+            else configuration.get("source_walk_forward_run")
+        ),
+        "source_xgboost_calibration_run": source_xgboost_run,
+        "frozen_xgboost_parameters": frozen_xgboost,
+        "xgboost_resolution_version": int(
+            configuration.get("xgboost_resolution_version", 0)
         ),
     }
 
@@ -279,12 +315,25 @@ def experiment_spec_from_duplication(
         target_symbols=tuple(str(item) for item in values["target_symbols"]),
         context_symbols=tuple(str(item) for item in values["context_symbols"]),
         predictor_symbols=tuple(str(item) for item in values["predictor_symbols"]),
-        # Every duplicated experiment keeps the directly selected walk-forward
-        # source; calibrations additionally use it to load frozen sets.
         source_walk_forward_run=(
-            str(draft["source_run_id"])
-            if draft.get("source_run_id")
+            str(values["source_walk_forward_run"])
+            if values.get("source_walk_forward_run")
             else None
+        ),
+        source_xgboost_calibration_run=(
+            str(values["source_xgboost_calibration_run"])
+            if use_run_config and values.get("source_xgboost_calibration_run")
+            else None
+        ),
+        frozen_xgboost_parameters=(
+            deepcopy(values.get("frozen_xgboost_parameters"))
+            if use_run_config and isinstance(values.get("frozen_xgboost_parameters"), Mapping)
+            else None
+        ),
+        xgboost_resolution_version=(
+            int(values.get("xgboost_resolution_version", 0))
+            if use_run_config
+            else 1
         ),
         run_description=(
             None if values.get("run_description") is None

@@ -178,6 +178,53 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
     assert first.holdout_metrics["FinalUpROCAUC"] == 0.57
 
 
+def test_promotion_inherits_frozen_xgboost_provenance_from_derived_run(tmp_path):
+    runs, walk_forward_run = _promotion_run(tmp_path)
+    calibration_spec = ExperimentSpec(
+        JobType.XGBOOST_CALIBRATION,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"),
+    )
+    xgb_run = runs.create(calibration_spec)
+    runs.transition(xgb_run, JobStatus.RUNNING)
+    runs.transition(xgb_run, JobStatus.COMPLETED)
+    up_parameters = dict(_model().xgboost_parameters)
+    down_parameters = {**up_parameters, "max_depth": 2}
+    threshold_spec = replace(
+        calibration_spec,
+        job_type=JobType.THRESHOLD_CALIBRATION,
+        source_xgboost_calibration_run=xgb_run,
+        frozen_xgboost_parameters={"Up": up_parameters, "Down": down_parameters},
+    )
+    threshold_run = runs.create(threshold_spec)
+    threshold_results = runs.run_directory(threshold_run) / "results"
+    threshold_results.mkdir()
+    (threshold_results / "selected_thresholds_by_set.json").write_text(
+        json.dumps({
+            "AAA<-BBB": {
+                "Up": {"status": "selected", "threshold": 0.63},
+                "Down": {"status": "selected", "threshold": 0.37},
+            }
+        }),
+        encoding="utf-8",
+    )
+    runs.transition(threshold_run, JobStatus.RUNNING)
+    runs.transition(threshold_run, JobStatus.COMPLETED)
+
+    model, created = PromotionService(
+        runs, ProductionRepository(tmp_path)
+    ).promote(
+        walk_forward_run,
+        "AAA<-BBB",
+        threshold_calibration_run=threshold_run,
+    )
+
+    assert created is True
+    assert model.source_xgboost_calibration_run == xgb_run
+    assert model.xgboost_parameters == up_parameters
+    assert model.down_xgboost_parameters == down_parameters
+
+
 def test_model_signal_threshold_falls_back_to_its_global_prediction_threshold():
     model = replace(
         _model(),

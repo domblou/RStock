@@ -104,12 +104,14 @@ class ControlledThresholdCalibrationResult:
 
 
 _THRESHOLD_DEVELOPMENT_CONTEXT: tuple[
-    pd.DataFrame, RStockConfig, int, int, int, XGBoostParameters
+    pd.DataFrame, RStockConfig, int, int, int, Mapping[str, XGBoostParameters]
 ] | None = None
 
 
 def _set_threshold_development_context(
-    context: tuple[pd.DataFrame, RStockConfig, int, int, int, XGBoostParameters]
+    context: tuple[
+        pd.DataFrame, RStockConfig, int, int, int, Mapping[str, XGBoostParameters]
+    ]
 ) -> None:
     global _THRESHOLD_DEVELOPMENT_CONTEXT
     _THRESHOLD_DEVELOPMENT_CONTEXT = context
@@ -117,7 +119,9 @@ def _set_threshold_development_context(
 
 def _threshold_development_combination(
     row_values: dict[str, object],
-    context: tuple[pd.DataFrame, RStockConfig, int, int, int, XGBoostParameters],
+    context: tuple[
+        pd.DataFrame, RStockConfig, int, int, int, Mapping[str, XGBoostParameters]
+    ],
     cancellation_check: CancellationCheck | None,
 ) -> list[dict[str, object]]:
     """Evaluate one combination while retaining sequential windows and directions."""
@@ -145,7 +149,9 @@ def _threshold_development_combination(
         if train.index.max() >= test.index.min():
             raise AssertionError("Threshold calibration leaked future test data")
         for direction, outcome in outcomes.items():
-            booster = fit_booster(train, names, outcome, config, parameters=parameters)
+            booster = fit_booster(
+                train, names, outcome, config, parameters=parameters[direction]
+            )
             probabilities = predict_probabilities(booster, test, names)
             records.extend(
                 {
@@ -739,13 +745,16 @@ def generate_development_probabilities(
     min_train_size: int,
     test_size: int,
     step_size: int,
-    parameters: XGBoostParameters = EXPERIMENTAL_XGBOOST_PARAMETERS,
+    parameters: XGBoostParameters | None = None,
+    parameters_by_direction: Mapping[str, XGBoostParameters] | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
 ) -> pd.DataFrame:
     """Generate out-of-sample development probabilities with expanding windows."""
 
-    context = (development, config, min_train_size, test_size, step_size, parameters)
+    shared = parameters or EXPERIMENTAL_XGBOOST_PARAMETERS
+    directional = parameters_by_direction or {"Up": shared, "Down": shared}
+    context = (development, config, min_train_size, test_size, step_size, directional)
     results = run_combination_tasks(
         [row.to_dict() for _, row in sampled_sets.iterrows()],
         combination_workers=config.combination_workers,
@@ -768,12 +777,15 @@ def generate_holdout_probabilities(
     sampled_sets: pd.DataFrame,
     config: RStockConfig,
     *,
-    parameters: XGBoostParameters = EXPERIMENTAL_XGBOOST_PARAMETERS,
+    parameters: XGBoostParameters | None = None,
+    parameters_by_direction: Mapping[str, XGBoostParameters] | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
 ) -> pd.DataFrame:
     """Fit on development and produce untouched-holdout probabilities once."""
 
+    shared = parameters or EXPERIMENTAL_XGBOOST_PARAMETERS
+    directional = parameters_by_direction or {"Up": shared, "Down": shared}
     records: list[dict[str, object]] = []
     for completed, (_, row) in enumerate(sampled_sets.iterrows(), start=1):
         check_cancellation(cancellation_check)
@@ -797,7 +809,9 @@ def generate_holdout_probabilities(
         if train.index.max() >= test.index.min():
             raise AssertionError("Final holdout leaked into threshold training data")
         for direction, outcome in outcomes.items():
-            booster = fit_booster(train, names, outcome, config, parameters=parameters)
+            booster = fit_booster(
+                train, names, outcome, config, parameters=directional[direction]
+            )
             probabilities = predict_probabilities(booster, test, names)
             records.extend(
                 {
@@ -964,6 +978,10 @@ def run_controlled_threshold_calibration(
     step_size: int | None = None,
     final_holdout_size: int | None = None,
     evaluate_final_holdout: bool = False,
+    xgboost_parameters_by_direction: Mapping[str, XGBoostParameters] | None = None,
+    xgboost_parameter_source: str = "legacy_fallback",
+    source_xgboost_calibration_run: str | None = None,
+    frozen_xgboost_parameters_sha256: str | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
 ) -> ControlledThresholdCalibrationResult:
@@ -974,6 +992,10 @@ def run_controlled_threshold_calibration(
     test_window = test_size or config.walk_forward_test_size
     step = step_size or config.walk_forward_step_size
     holdout_size = final_holdout_size or config.final_holdout_size
+    directional_xgboost = xgboost_parameters_by_direction or {
+        "Up": EXPERIMENTAL_XGBOOST_PARAMETERS,
+        "Down": EXPERIMENTAL_XGBOOST_PARAMETERS,
+    }
     sampled = deterministic_combination_sample(
         generated_sets,
         per_target=combinations_per_target,
@@ -990,6 +1012,7 @@ def run_controlled_threshold_calibration(
         min_train_size=min_train,
         test_size=test_window,
         step_size=step,
+        parameters_by_direction=directional_xgboost,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
@@ -1043,6 +1066,7 @@ def run_controlled_threshold_calibration(
             holdout,
             sampled,
             config,
+            parameters_by_direction=directional_xgboost,
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
         )
@@ -1097,7 +1121,16 @@ def run_controlled_threshold_calibration(
         "missing_threshold_count_up": missing_by_direction["Up"],
         "missing_threshold_count_down": missing_by_direction["Down"],
         "frozen_threshold_digest": frozen_digest,
-        "xgboost_parameters": EXPERIMENTAL_XGBOOST_PARAMETERS.as_dict(),
+        # The singular key is retained for historical readers; new consumers
+        # should use the explicit directional snapshot below.
+        "xgboost_parameters": directional_xgboost["Up"].as_dict(),
+        "xgboost_parameter_source": xgboost_parameter_source,
+        "xgboost_parameters_by_direction": {
+            direction: directional_xgboost[direction].as_dict()
+            for direction in ("Up", "Down")
+        },
+        "source_xgboost_calibration_run": source_xgboost_calibration_run,
+        "frozen_xgboost_parameters_sha256": frozen_xgboost_parameters_sha256,
         "selection_order": threshold_selection_order(
             config.threshold_calibration_min_robust_signals,
             config.threshold_calibration_precision_tolerance,

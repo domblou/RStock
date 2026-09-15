@@ -297,7 +297,7 @@ def test_xgboost_calibration_selection_table_projects_selected_configs_and_holdo
     up = table[table["Direction"] == "Up"].iloc[0]
     down = table[table["Direction"] == "Down"].iloc[0]
 
-    assert up["Configuration sélectionnée"] == "candidate_up"
+    assert up["Config gagnante"] == "candidate_up"
     assert up["Écart avec le 2e meilleur candidat"] == pytest.approx(0.02234)
     assert down["Écart avec le 2e meilleur candidat"] == pytest.approx(0.02345)
     assert up["ROC-AUC holdout"] == 0.55

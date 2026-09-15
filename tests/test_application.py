@@ -652,6 +652,29 @@ def test_restart_creates_new_run_and_keeps_failed_source_intact(tmp_path):
     assert repository.load_spec(restarted.run_id).source_walk_forward_run == source
 
 
+def test_restart_preserves_frozen_xgboost_calibration_provenance(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    source_spec = replace(
+        _spec(tmp_path),
+        source_xgboost_calibration_run="xgb-parent",
+        frozen_xgboost_parameters={
+            "Up": {"max_depth": 2, "eta": 0.05, "num_boost_round": 120},
+            "Down": {"max_depth": 3, "eta": 0.1, "num_boost_round": 80},
+        },
+    )
+    source = repository.create(source_spec)
+    repository.transition(source, JobStatus.FAILED, error="original failure")
+
+    restarted = RunService(repository, backend=FakeBackend()).restart(source)
+    replayed = repository.load_spec(restarted.run_id)
+
+    assert replayed.source_xgboost_calibration_run == "xgb-parent"
+    assert replayed.frozen_xgboost_parameters == source_spec.frozen_xgboost_parameters
+    assert replayed.frozen_xgboost_parameters_sha256 == (
+        source_spec.frozen_xgboost_parameters_sha256
+    )
+
+
 def test_restart_reuses_historical_traceability_cutoff(tmp_path):
     repository = RunRepository(tmp_path / "runs")
     source = repository.create(_spec(tmp_path))

@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -105,6 +106,86 @@ def test_legacy_duplication_without_traceability_keeps_no_data_cutoff(tmp_path):
 
     assert duplicated.historical_data_cutoff is None
     assert duplicated.source_prepared_dataset_sha256 is None
+
+
+def test_new_and_legacy_specs_have_no_xgboost_calibration_provenance(tmp_path):
+    spec = ExperimentSpec(
+        JobType.WALK_FORWARD,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("DIS", "AMZN"),
+    )
+    historical = spec.to_dict()
+    historical.pop("source_xgboost_calibration_run")
+    historical.pop("frozen_xgboost_parameters")
+    historical.pop("frozen_xgboost_parameters_sha256")
+    historical.pop("xgboost_resolution_version")
+
+    assert spec.source_xgboost_calibration_run is None
+    assert spec.frozen_xgboost_parameters is None
+    assert ExperimentSpec.from_dict(historical).source_xgboost_calibration_run is None
+    assert ExperimentSpec.from_dict(historical).xgboost_resolution_version == 0
+
+
+def test_duplication_from_xgboost_calibration_freezes_directional_parameters(tmp_path):
+    run_id = "xgb-parent"
+    results = tmp_path / "runs" / run_id / "results"
+    results.mkdir(parents=True)
+    selected = {
+        "Up": {"parameters": {"max_depth": 2, "eta": 0.05, "num_boost_round": 120}},
+        "Down": {"parameters": {"max_depth": 3, "eta": 0.1, "num_boost_round": 80}},
+    }
+    (results / "selected_configurations.json").write_text(
+        json.dumps(selected), encoding="utf-8"
+    )
+
+    draft = walk_forward_duplication_draft(
+        run_id, _detail(job_type="xgboost_calibration"), project_root=tmp_path
+    )
+    derived = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+        job_type=JobType.WALK_FORWARD,
+    )
+    repository = RunRepository(tmp_path / "persisted-runs")
+    reloaded = repository.load_spec(repository.create(derived))
+
+    assert reloaded.source_xgboost_calibration_run == run_id
+    assert reloaded.frozen_xgboost_parameters == {
+        "Up": selected["Up"]["parameters"],
+        "Down": selected["Down"]["parameters"],
+    }
+    assert len(reloaded.frozen_xgboost_parameters_sha256) == 64
+
+
+def test_duplication_config_choice_preserves_or_detaches_xgboost_provenance(tmp_path):
+    from rstock.application.workflows import _resolve_threshold_xgboost_parameters
+
+    detail = _detail()
+    detail["configuration"].update({
+        "source_xgboost_calibration_run": "xgb-parent",
+        "frozen_xgboost_parameters": {
+            "Up": {"max_depth": 2, "eta": 0.05, "num_boost_round": 60},
+            "Down": {"max_depth": 3, "eta": 0.1, "num_boost_round": 90},
+        },
+    })
+    draft = walk_forward_duplication_draft("wf-parent", detail)
+    current = replace(DEFAULT_CONFIG, project_root=tmp_path)
+
+    preserved = experiment_spec_from_duplication(
+        draft, current_config=current, use_run_config=True
+    )
+    detached = experiment_spec_from_duplication(
+        draft, current_config=current, use_run_config=False
+    )
+
+    assert preserved.source_xgboost_calibration_run == "xgb-parent"
+    assert preserved.frozen_xgboost_parameters["Down"]["max_depth"] == 3
+    assert detached.source_xgboost_calibration_run is None
+    assert detached.frozen_xgboost_parameters is None
+    assert detached.frozen_xgboost_parameters_sha256 is None
+    assert _resolve_threshold_xgboost_parameters(preserved).source == "frozen_snapshot"
+    assert _resolve_threshold_xgboost_parameters(detached).source == "rstock_config"
 
 
 @pytest.mark.parametrize(
