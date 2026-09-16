@@ -55,6 +55,7 @@ class SimulationResult:
     metrics: SimulationMetrics
     cumulative_results: pd.DataFrame
     result_distribution: pd.DataFrame
+    model_snapshots: tuple[dict[str, object], ...] = ()
 
 
 def _date(value: date | str | pd.Timestamp, label: str) -> pd.Timestamp:
@@ -99,10 +100,10 @@ class SimulationService:
         start = _date(start_date, "Date de début")
         end = _date(end_date, "Date de fin")
         self._validate_parameters(start, end, amount_per_signal)
-        signals = self.repository.read_active_model_table("signals")
-        evaluated_predictions = self.repository.read_active_model_table(
-            "realized_results"
-        )
+        # Evaluated predictions are realized production history. Persisted facts
+        # remain valid after their originating model becomes inactive or retired.
+        signals = self.repository.read_table("signals")
+        evaluated_predictions = self.repository.read_table("realized_results")
         predictions = self.repository.read_table("predictions")
         evaluated_signals = self._evaluated_signal_rows(
             evaluated_predictions, signals
@@ -150,17 +151,26 @@ class SimulationService:
         start = _date(start_date, "Date de début")
         end = _date(end_date, "Date de fin")
         self._validate_parameters(start, end, amount_per_signal)
+        # Historical mode replays one frozen population: the models active when
+        # this simulation starts, over the whole requested period.
+        active_models = tuple(self.repository.active_models())
         predictions = DailyPredictionService(self.repository).replay(
             self.price_loader,
             config,
             start_date=start,
             end_date=end,
+            models=active_models,
         )
         signals = ProductionSignalService(self.repository).screen(
-            predictions, persist=False
+            predictions, persist=False, restrict_to_active_models=False
         )
         return self._simulate_signals(
-            signals, predictions, start, end, amount_per_signal
+            signals,
+            predictions,
+            start,
+            end,
+            amount_per_signal,
+            model_snapshots=tuple(model.to_dict() for model in active_models),
         )
 
     @staticmethod
@@ -179,11 +189,16 @@ class SimulationService:
         start: pd.Timestamp,
         end: pd.Timestamp,
         amount_per_signal: float,
+        *,
+        model_snapshots: tuple[dict[str, object], ...] = (),
     ) -> SimulationResult:
         """Convert persisted or replayed signals through one financial engine."""
 
         if signals.empty or "prediction_date" not in signals:
-            return self._result(pd.DataFrame(columns=TRADE_COLUMNS))
+            return self._result(
+                pd.DataFrame(columns=TRADE_COLUMNS),
+                model_snapshots=model_snapshots,
+            )
         work = signals.copy()
         trade_dates = pd.to_datetime(work["prediction_date"], errors="coerce").dt.normalize()
         work = work[
@@ -264,10 +279,17 @@ class SimulationService:
                 ),
                 "Statut": status,
             })
-        return self._result(pd.DataFrame(rows, columns=TRADE_COLUMNS))
+        return self._result(
+            pd.DataFrame(rows, columns=TRADE_COLUMNS),
+            model_snapshots=model_snapshots,
+        )
 
     @staticmethod
-    def _result(trades: pd.DataFrame) -> SimulationResult:
+    def _result(
+        trades: pd.DataFrame,
+        *,
+        model_snapshots: tuple[dict[str, object], ...] = (),
+    ) -> SimulationResult:
         returns = pd.to_numeric(trades.get("Rendement"), errors="coerce")
         valid = trades[returns.notna()].copy() if not trades.empty else trades.copy()
         valid_returns = pd.to_numeric(valid.get("Rendement"), errors="coerce")
@@ -308,4 +330,10 @@ class SimulationService:
             "Résultat": ["Trades gagnants", "Trades perdants"],
             "Trades": [len(wins), len(losses)],
         })
-        return SimulationResult(trades, metrics, cumulative, distribution)
+        return SimulationResult(
+            trades,
+            metrics,
+            cumulative,
+            distribution,
+            model_snapshots,
+        )

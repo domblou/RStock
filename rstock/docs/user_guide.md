@@ -845,7 +845,9 @@ La page Simulation permet d’évaluer les conséquences économiques des signau
 
 ## Historique
 
-Le mode Historique rejoue les modèles sur des données passées.
+Le mode Historique utilise les modèles actifs au moment où la simulation est
+lancée et les rejoue rétrospectivement sur toute la période demandée. Le statut
+que le modèle avait à chaque date passée n'est pas utilisé.
 
 Il permet d’obtenir une vue plus longue de leur comportement.
 
@@ -853,11 +855,18 @@ Il s’agit toutefois d’une simulation rétrospective.
 
 Elle peut contenir certains biais de sélection puisque les modèles analysés aujourd’hui ont eux-mêmes été sélectionnés à partir de données historiques.
 
-## Résultats réalisés
+## Prédictions évaluées
 
-Le mode Résultats réalisés utilise les signaux réellement produits et persistés par l’application.
+Le mode Prédictions évaluées utilise les signaux et les résultats réellement
+produits et persistés par l’application. Un modèle devenu inactif ou retiré
+conserve ses résultats passés; son changement de statut empêche seulement la
+production de nouveaux signaux.
 
 Cette partie devient progressivement la source la plus importante pour mesurer la performance opérationnelle réelle.
+
+`Prédictions évaluées` répond à « Qu’est-ce qui s’est réellement produit? »,
+tandis que `Historique` répond à « Qu’auraient fait mes modèles actifs actuels
+sur cette période passée? ».
 
 ## Simulation combinée
 
@@ -879,6 +888,9 @@ La liste « Simulations précédentes » permet de rouvrir une simulation et
 d’afficher ses résultats historiques sans les recalculer. La simulation conserve
 les paramètres effectifs ainsi que les modèles et leur provenance au moment du
 calcul.
+
+Une simulation Historique sauvegardée conserve son snapshot de modèles et ses
+résultats, même si ces modèles changent ensuite de statut.
 
 Une simulation peut être supprimée depuis cette liste. Cette suppression ne
 modifie ni les modèles, ni les prédictions, ni les signaux.

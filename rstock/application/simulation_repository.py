@@ -109,6 +109,7 @@ class SimulationRepository:
             metrics=metrics,
             cumulative_results=pd.read_csv(directory / "cumulative_results.csv"),
             result_distribution=pd.read_csv(directory / "result_distribution.csv"),
+            model_snapshots=tuple(metadata.get("models", ())),
         )
         return metadata, result
 

@@ -2903,13 +2903,19 @@ def _render_simulation_results(result: SimulationResult) -> None:
             st.warning("Couverture partielle : certains trades ont été exclus.")
 
 
-def _simulation_model_snapshots(project_root: Path, result: SimulationResult) -> list[dict[str, object]]:
+def _simulation_model_snapshots(
+    project_root: Path,
+    result: SimulationResult,
+    simulation_mode: str,
+) -> list[dict[str, object]]:
+    if simulation_mode == "Historique":
+        return [dict(model) for model in result.model_snapshots]
     try:
-        models = ProductionRepository(project_root).active_models()
+        models = ProductionRepository(project_root).models()
     except (OSError, ValueError, json.JSONDecodeError):
         models = []
     used_ids = set(result.trades.get("Modèle source", pd.Series(dtype=object)).dropna().astype(str))
-    selected = [model for model in models if not used_ids or model.model_id in used_ids]
+    selected = [model for model in models if model.model_id in used_ids]
     return [model.to_dict() for model in selected]
 
 
@@ -3153,7 +3159,9 @@ def _render_simulation_main(project_root: Path) -> None:
                     parameters=_simulation_parameters(
                         start_date, end_date, amount, st.session_state["simulation-exit-mode"], simulation_mode
                     ),
-                    models=_simulation_model_snapshots(project_root, result),
+                    models=_simulation_model_snapshots(
+                        project_root, result, simulation_mode
+                    ),
                 )
                 st.session_state["simulation-record"] = metadata
                 st.rerun()

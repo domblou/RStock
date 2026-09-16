@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -524,6 +524,7 @@ class DailyPredictionService:
         *,
         start_date: Any,
         end_date: Any,
+        models: Sequence[ProductionModel] | None = None,
     ) -> pd.DataFrame:
         """Replay active models using only information preceding each target session.
 
@@ -538,7 +539,8 @@ class DailyPredictionService:
         end = pd.Timestamp(end_date).normalize()
         rows: list[dict[str, Any]] = []
         training_config_by_model: dict[str, RStockConfig] = {}
-        for model in self.repository.active_models():
+        replay_models = self.repository.active_models() if models is None else models
+        for model in replay_models:
             try:
                 market_frames: list[pd.DataFrame] = []
                 for symbol in model.symbols:
@@ -751,14 +753,15 @@ class ProductionSignalService:
         *,
         cancellation_check: CancellationCheck | None = None,
         persist: bool = True,
+        restrict_to_active_models: bool = True,
     ) -> pd.DataFrame:
         frame = (
             self.repository.read_active_model_table("predictions")
             if predictions is None
             else predictions.copy()
         )
-        active_ids = self.repository.active_model_ids()
-        if not frame.empty:
+        if restrict_to_active_models and not frame.empty:
+            active_ids = self.repository.active_model_ids()
             if "model_id" not in frame:
                 frame = frame.iloc[0:0].copy()
             else:

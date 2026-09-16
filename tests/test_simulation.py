@@ -10,11 +10,19 @@ from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_services import DailyPredictionService
 from rstock.application.repository import utc_now
 from rstock.application.simulation import SimulationService
+from rstock.application.simulation_repository import SimulationRepository
 from rstock.config import DEFAULT_CONFIG
 
 
 class FakeRepository:
-    def __init__(self, signals, predictions=None, active_ids=(), evaluated_predictions=None):
+    def __init__(
+        self,
+        signals,
+        predictions=None,
+        active_ids=(),
+        evaluated_predictions=None,
+        models=(),
+    ):
         self.signals = signals
         self.predictions = predictions if predictions is not None else pd.DataFrame()
         self.evaluated_predictions = (
@@ -23,6 +31,7 @@ class FakeRepository:
             else pd.DataFrame()
         )
         self._active_ids = frozenset(active_ids)
+        self._models = list(models)
 
     def read_active_model_table(self, name):
         if name == "signals":
@@ -31,11 +40,15 @@ class FakeRepository:
         return self.evaluated_predictions.copy()
 
     def read_table(self, name):
-        assert name == "predictions"
-        return self.predictions.copy()
+        tables = {
+            "signals": self.signals,
+            "predictions": self.predictions,
+            "realized_results": self.evaluated_predictions,
+        }
+        return tables[name].copy()
 
     def active_models(self):
-        return []
+        return [model for model in self._models if model.is_active]
 
     def active_model_ids(self):
         return self._active_ids
@@ -201,6 +214,81 @@ def test_evaluated_no_signal_prediction_does_not_create_a_financial_trade():
     assert result.metrics.average_return == pytest.approx(0.10)
 
 
+@pytest.mark.parametrize(
+    "current_status",
+    (
+        ProductionModelStatus.ACTIVE,
+        ProductionModelStatus.INACTIVE,
+        ProductionModelStatus.RETIRED,
+    ),
+)
+def test_evaluated_production_trade_survives_current_model_status_and_up_target(
+    tmp_path, current_status
+):
+    model_id = f"model_{current_status.value}"
+    repository = ProductionRepository(tmp_path)
+    repository.add(_model(model_id, current_status))
+    repository.write_table(
+        "signals",
+        pd.DataFrame([_signal("real-trade", "2026-09-15", "AAA", model_id)]),
+    )
+    repository.write_table(
+        "predictions",
+        pd.DataFrame([{
+            "prediction_id": "real-trade",
+            "prediction_date": "2026-09-15",
+            "as_of_date": "2026-09-14",
+            "model_id": model_id,
+            "target": "AAA",
+            "status": "predicted",
+        }]),
+    )
+    repository.write_table(
+        "realized_results",
+        pd.DataFrame([{
+            **_evaluated(
+                "real-trade", "2026-09-15", "AAA", 53.79, 54.20, model_id
+            ),
+            "up_target": 0,
+            "down_target": 0,
+        }]),
+    )
+
+    result = SimulationService(
+        repository,
+        lambda _symbol: pytest.fail("Persisted evaluated prices must be used"),
+    ).run("2026-09-15", "2026-09-15", 10_000.0)
+
+    expected_return = 54.20 / 53.79 - 1.0
+    assert result.metrics.signals_found == 1
+    assert result.metrics.calculated_trades == 1
+    assert result.metrics.winning_trade_rate == 1.0
+    assert result.metrics.total_profit_loss == pytest.approx(10_000.0 * expected_return)
+    assert result.metrics.average_return == pytest.approx(expected_return)
+    assert result.trades["Rendement"].tolist() == pytest.approx([expected_return])
+    assert result.cumulative_results.iloc[:, 1].tolist() == pytest.approx(
+        [10_000.0 * expected_return]
+    )
+
+
+def test_evaluated_trade_requires_both_persisted_signal_and_realized_result():
+    signals = pd.DataFrame([
+        _signal("signal-only", "2026-04-01", "AAA"),
+    ])
+    evaluated = pd.DataFrame([
+        _evaluated("result-only", "2026-04-01", "BBB", 100.0, 105.0),
+    ])
+
+    result = SimulationService(
+        FakeRepository(signals, evaluated_predictions=evaluated),
+        lambda _symbol: pytest.fail("Unmatched facts must not load market prices"),
+    ).run("2026-04-01", "2026-04-01")
+
+    assert result.trades.empty
+    assert result.metrics.signals_found == 0
+    assert result.metrics.calculated_trades == 0
+
+
 def test_missing_open_or_close_excludes_trade_without_estimation():
     signals = pd.DataFrame([
         _signal("open-missing", "2026-03-02", "AAA"),
@@ -354,3 +442,86 @@ def test_historical_mode_without_active_models_returns_empty_result(tmp_path):
 
     assert result.trades.empty
     assert result.metrics.signals_found == 0
+
+
+def test_historical_mode_freezes_current_active_models_and_persisted_result(
+    monkeypatch, tmp_path
+):
+    active = _model("model_active", ProductionModelStatus.ACTIVE)
+    inactive = _model("model_inactive", ProductionModelStatus.INACTIVE)
+    repository = FakeRepository(
+        pd.DataFrame(),
+        models=(active, inactive),
+        active_ids=(active.model_id,),
+    )
+    replay_calls = []
+
+    def fake_replay(
+        _service, _price_loader, _config, *, start_date, end_date, models
+    ):
+        replay_calls.append({
+            "model_ids": tuple(model.model_id for model in models),
+            "start": pd.Timestamp(start_date),
+            "end": pd.Timestamp(end_date),
+        })
+        if not models:
+            return pd.DataFrame()
+        return pd.DataFrame([{
+            "prediction_id": "historical-active",
+            "prediction_date": "2025-09-01",
+            "as_of_date": "2025-08-29",
+            "model_id": models[0].model_id,
+            "model_version": models[0].artifact_version,
+            "target": models[0].target,
+            "predictors": json.dumps(models[0].predictors),
+            "status": "predicted",
+            "up_probability": 0.72,
+            "down_probability": 0.20,
+            "up_threshold": 0.65,
+            "down_threshold": 0.40,
+        }])
+
+    monkeypatch.setattr(DailyPredictionService, "replay", fake_replay)
+    service = SimulationService(
+        repository, lambda _: _prices("2025-09-01", 100.0, 105.0)
+    )
+
+    original = service.run_historical(
+        "2025-09-01", "2026-09-01", DEFAULT_CONFIG, 1_000.0
+    )
+
+    assert replay_calls[0] == {
+        "model_ids": (active.model_id,),
+        "start": pd.Timestamp("2025-09-01"),
+        "end": pd.Timestamp("2026-09-01"),
+    }
+    assert [model["model_id"] for model in original.model_snapshots] == [
+        active.model_id
+    ]
+    assert original.trades.iloc[:, 3].tolist() == [active.model_id]
+
+    persisted = SimulationRepository(tmp_path).save(
+        original,
+        parameters={"simulation_mode": "Historique"},
+        models=list(original.model_snapshots),
+    )
+    repository._models = [
+        replace(active, status=ProductionModelStatus.INACTIVE),
+        inactive,
+    ]
+
+    _, reopened = SimulationRepository(tmp_path).load(persisted["simulation_id"])
+    assert [model["model_id"] for model in reopened.model_snapshots] == [
+        active.model_id
+    ]
+    assert reopened.metrics == original.metrics
+    assert reopened.trades["Profit / perte"].tolist() == pytest.approx(
+        original.trades["Profit / perte"].tolist()
+    )
+
+    new_result = service.run_historical(
+        "2025-09-01", "2026-09-01", DEFAULT_CONFIG, 1_000.0
+    )
+    assert replay_calls[1]["model_ids"] == ()
+    assert new_result.trades.empty
+    assert new_result.model_snapshots == ()

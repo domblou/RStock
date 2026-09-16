@@ -40,6 +40,9 @@ def test_simulation_repository_round_trips_and_isolates_records(tmp_path):
     assert [item["simulation_id"] for item in listed] == [metadata["simulation_id"]]
     loaded_metadata, loaded = repository.load(metadata["simulation_id"])
     assert loaded_metadata["models"][0]["model_id"] == "model-1"
+    assert loaded.model_snapshots == (
+        {"model_id": "model-1", "status": "active"},
+    )
     assert loaded.metrics == _result().metrics
     pd.testing.assert_frame_equal(loaded.trades, _result().trades)
 
