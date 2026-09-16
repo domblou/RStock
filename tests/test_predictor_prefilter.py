@@ -85,6 +85,11 @@ def test_prefilter_applies_threshold_top_n_and_actual_feature_redundancy():
     assert diagnostic == {
         "target": "T",
         "initial_candidates": 5,
+        "pairs_attempted": 5,
+        "pairs_admissible": 5,
+        "pairs_skipped": 0,
+        "target_excluded": False,
+        "exclusion_reason": None,
         "rejected_median_auc": 1,
         "rejected_pct_above_random": 1,
         "rejected_worst_auc": 1,
@@ -125,6 +130,40 @@ def test_prefilter_is_reproducible_and_generated_sets_use_only_retained_candidat
     assert len(parsed) == 3
     assert {predictor for _, predictors in parsed for predictor in predictors} == {"A", "C"}
     assert max(len(predictors) for _, predictors in parsed) == 2
+
+
+def test_prefilter_selection_preserves_skip_reason_and_excludes_empty_target():
+    qualification = _qualification()
+    skipped = qualification["Predictors"] == '["WEAK"]'
+    qualification.loc[skipped, "PrefilterSkipReason"] = (
+        "insufficient_walk_forward_observations"
+    )
+    config = replace(
+        DEFAULT_CONFIG,
+        predictor_prefilter_enabled=True,
+        predictor_prefilter_top_n=3,
+        predictor_prefilter_correlation_threshold=0.90,
+        permutation_depth=2,
+    )
+
+    result = select_predictors(
+        qualification,
+        _prepared(),
+        targets=["T", "EA"],
+        candidate_symbols=["T", "A", "B", "C", "D", "WEAK", "EA"],
+        config=config,
+        excluded_targets={"EA": "insufficient_walk_forward_observations"},
+    )
+
+    assert "EA" not in result.predictors_by_target
+    assert (
+        result.metrics.set_index("Predictor").at["WEAK", "PrefilterStatus"]
+        == "skipped_insufficient_observations"
+    )
+    excluded = next(item for item in result.diagnostics if item["target"] == "EA")
+    assert excluded["target_excluded"]
+    assert excluded["exclusion_reason"] == "insufficient_walk_forward_observations"
+    assert excluded["pairs_admissible"] == 0
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import comb
 
@@ -105,6 +106,7 @@ def select_predictors(
     targets: list[str],
     candidate_symbols: list[str],
     config: RStockConfig,
+    excluded_targets: Mapping[str, str] | None = None,
 ) -> PredictorPrefilterResult:
     """Rank qualified univariate predictors, cap them, then remove redundancy."""
 
@@ -114,10 +116,15 @@ def select_predictors(
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("predictor_prefilter_correlation_threshold must be between zero and one")
 
+    excluded = dict(excluded_targets or {})
     metrics = qualification.copy()
     metrics["Predictor"] = metrics["Predictors"].map(_predictor)
     metrics["PrefilterScore"] = metrics.apply(_score, axis=1)
     metrics["PrefilterStatus"] = "rejected_threshold"
+    skip_reason = metrics.get(
+        "PrefilterSkipReason", pd.Series(pd.NA, index=metrics.index, dtype="string")
+    ).fillna("")
+    metrics.loc[skip_reason != "", "PrefilterStatus"] = "skipped_insufficient_observations"
     metrics["RedundantWith"] = pd.NA
     metrics["RedundancyCorrelation"] = np.nan
     retained_by_target: dict[str, tuple[str, ...]] = {}
@@ -129,7 +136,37 @@ def select_predictors(
             (metrics["Observation"] == target)
             & metrics["Predictor"].isin(initial)
         ]
-        qualified = target_rows[target_rows["Eligible"]].sort_values(
+        target_skip_reason = target_rows.get(
+            "PrefilterSkipReason",
+            pd.Series(pd.NA, index=target_rows.index, dtype="string"),
+        ).fillna("")
+        evaluable = target_rows[target_skip_reason == ""]
+        skipped_count = int((target_skip_reason != "").sum())
+        if target in excluded:
+            diagnostics.append({
+                "target": target,
+                "initial_candidates": len(initial),
+                "pairs_attempted": len(target_rows),
+                "pairs_admissible": len(evaluable),
+                "pairs_skipped": skipped_count,
+                "target_excluded": True,
+                "exclusion_reason": excluded[target],
+                "rejected_median_auc": 0,
+                "rejected_pct_above_random": 0,
+                "rejected_worst_auc": 0,
+                "rejected_auc_std": 0,
+                "after_qualification": 0,
+                "after_top_n": 0,
+                "removed_for_redundancy": 0,
+                "after_redundancy": 0,
+                "retained_predictors": [],
+                "combinations_before_filtering": _combination_count(
+                    len(initial), config.permutation_depth
+                ),
+                "combinations_tested": 0,
+            })
+            continue
+        qualified = evaluable[evaluable["Eligible"]].sort_values(
             [
                 "PrefilterScore", "PctWindowsAboveRandom", "ROCAUCMedian",
                 "ROCAUCWorst", "ROCAUCStd", "Predictor",
@@ -163,7 +200,12 @@ def select_predictors(
         diagnostics.append({
             "target": target,
             "initial_candidates": len(initial),
-            **_threshold_rejection_counts(target_rows, config),
+            "pairs_attempted": len(target_rows),
+            "pairs_admissible": len(evaluable),
+            "pairs_skipped": skipped_count,
+            "target_excluded": False,
+            "exclusion_reason": None,
+            **_threshold_rejection_counts(evaluable, config),
             "after_qualification": len(qualified),
             "after_top_n": len(top),
             "removed_for_redundancy": len(top) - len(retained),

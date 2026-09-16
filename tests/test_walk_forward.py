@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 
 import numpy as np
@@ -9,6 +10,7 @@ from rstock.checkpoints import CheckpointManager
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import prepare_dataset
 from rstock.streaming_walk_forward import run_streamed_walk_forward
+import rstock.walk_forward as walk_forward
 from rstock.walk_forward import (
     evaluate_prefilter_walk_forward,
     evaluate_walk_forward,
@@ -30,6 +32,132 @@ def test_expanding_windows_are_chronological_and_include_final_partial_window():
 def test_walk_forward_rejects_insufficient_history():
     with pytest.raises(ValueError, match="Not enough observations"):
         expanding_windows(10, min_train_size=10, test_size=2, step_size=2)
+
+
+def test_prefilter_skips_insufficient_pair_and_keeps_valid_pair(caplog, tmp_path):
+    index = pd.bdate_range("2025-01-01", periods=40)
+    signal = np.arange(len(index)) % 2
+    stock = pd.DataFrame(index=index)
+    for offset, symbol in enumerate(("AAA", "BBB")):
+        shifted = np.roll(signal, offset)
+        stock[f"{symbol}.Open"] = 100.0
+        stock[f"{symbol}.Close"] = np.where(shifted, 102.0, 100.0)
+        stock[f"{symbol}.High"] = np.maximum(stock[f"{symbol}.Close"], 100.0) + 1.0
+        stock[f"{symbol}.Low"] = np.minimum(stock[f"{symbol}.Close"], 100.0) - 1.0
+    prepared = prepare_dataset(stock, ["AAA", "BBB"])
+    for lag in range(1, 4):
+        prepared[f"EA_intraday_J-{lag}"] = np.nan
+    generated = pd.DataFrame([
+        {"V0": "AAA", "V1": "BBB"},
+        {"V0": "AAA", "V1": "EA"},
+    ])
+    config = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        combination_workers=1,
+        predictor_prefilter_batch_size=2,
+        xgb_rounds=1,
+        xgb_nthread=1,
+        qualification_min_windows=1,
+        qualification_min_median_auc=0.0,
+        qualification_min_pct_windows_above_random=0.0,
+        qualification_min_worst_window_auc=0.0,
+        qualification_min_positive_observations=0,
+        qualification_max_auc_std=1.0,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="rstock.walk_forward"):
+        result = evaluate_prefilter_walk_forward(
+            prepared,
+            generated,
+            config,
+            min_train_size=10,
+            test_size=5,
+            step_size=5,
+            final_holdout_size=5,
+        )
+
+    skipped = result.qualification.set_index("Set").loc['["AAA","EA"]']
+    assert len(result.qualification) == 2
+    assert not skipped["Eligible"]
+    assert skipped["IneligibilityReasons"] == (
+        '["insufficient_walk_forward_observations"]'
+    )
+    assert skipped["RawObservations"] == 40
+    assert skipped["ModelObservations"] == skipped["DevelopmentObservations"] == 0
+    assert skipped["MinimumRequiredObservations"] == 11
+    assert result.telemetry["pairs_attempted"] == 2
+    assert result.telemetry["pairs_admissible"] == 1
+    assert result.telemetry["pairs_skipped"] == 1
+    assert result.exploitable_targets == ("AAA",)
+    assert result.excluded_targets == {}
+    assert "target=AAA" in caplog.text
+    assert "development=0" in caplog.text
+
+
+def test_prefilter_does_not_hide_unrelated_value_errors(monkeypatch, tmp_path):
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path)
+    prepared = pd.DataFrame(index=pd.bdate_range("2025-01-01", periods=2))
+    context = (prepared, config, prepared.index[-1], {}, 1, 1, 1)
+
+    def fail(*args, **kwargs):
+        raise ValueError("structural failure")
+
+    monkeypatch.setattr(walk_forward, "_walk_forward_combination", fail)
+    with pytest.raises(ValueError, match="structural failure"):
+        walk_forward._prefilter_combination({"V0": "AAA", "V1": "BBB"}, context, None)
+
+
+def test_prefilter_continues_150_target_population_with_missing_ea(monkeypatch, tmp_path):
+    symbols = [f"S{index:03d}" for index in range(149)] + ["EA"]
+    generated = generate_symbol_sets(symbols, 1)
+    prepared = pd.DataFrame(index=pd.bdate_range("2025-01-01", periods=2))
+    config = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        combination_workers=1,
+        predictor_prefilter_batch_size=1_000,
+        final_holdout_size=1,
+    )
+
+    def fake_prefilter(values, *args):
+        target, predictor = values["V0"], values["V1"]
+        skipped = "EA" in (target, predictor)
+        return {
+            "Set": f"{target}<-{predictor}",
+            "Observation": target,
+            "Predictors": f'["{predictor}"]',
+            "Eligible": False,
+            "PctWindowsAboveRandom": np.nan,
+            "ROCAUCMedian": np.nan,
+            "ROCAUCWorst": np.nan,
+            "ROCAUCStd": np.nan,
+            "PRAUCMedian": np.nan,
+            "PrefilterSkipReason": (
+                "insufficient_walk_forward_observations" if skipped else None
+            ),
+        }
+
+    monkeypatch.setattr(walk_forward, "_prefilter_combination", fake_prefilter)
+    result = evaluate_prefilter_walk_forward(
+        prepared,
+        generated,
+        config,
+        min_train_size=1,
+        test_size=1,
+        step_size=1,
+        final_holdout_size=1,
+    )
+
+    assert len(result.qualification) == 22_350
+    assert result.telemetry["pairs_attempted"] == 22_350
+    assert result.telemetry["pairs_admissible"] == 22_052
+    assert result.telemetry["pairs_skipped"] == 298
+    assert result.telemetry["pair_coverage_percent"] == pytest.approx(98.6666666667)
+    assert result.telemetry["targets_requested"] == 150
+    assert result.telemetry["targets_exploitable"] == 149
+    assert result.excluded_targets == {"EA": "insufficient_walk_forward_observations"}
+    assert "EA" not in result.exploitable_targets
 
 
 def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_path):

@@ -282,6 +282,20 @@ def _prepared_experiment(
     return prepared, generated, calendars
 
 
+def _require_exploitable_prefilter(univariate: object) -> None:
+    """Fail only when local data exclusions leave no workable population."""
+
+    telemetry = getattr(univariate, "telemetry")
+    if "pairs_admissible" not in telemetry:
+        return
+    exploitable_targets = getattr(univariate, "exploitable_targets", ())
+    if telemetry["pairs_admissible"] == 0 or not exploitable_targets:
+        raise ValueError(
+            "Predictor prefilter has no exploitable pairs after insufficient "
+            "walk-forward observations were excluded"
+        )
+
+
 def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFrame | None:
     """Reuse qualified source sets for a duplicated threshold calibration.
 
@@ -380,6 +394,7 @@ def _walk_forward(
             progress_callback=progress_callback,
         )
         prefilter_walk_forward_telemetry = univariate.telemetry
+        _require_exploitable_prefilter(univariate)
         development = prepared.iloc[:-spec.config.final_holdout_size]
         _phase(progress_callback, "predictor_prefilter_selection", "started")
         prefilter = select_predictors(
@@ -388,6 +403,7 @@ def _walk_forward(
             targets=target_symbols,
             candidate_symbols=predictor_symbols,
             config=spec.config,
+            excluded_targets=getattr(univariate, "excluded_targets", {}),
         )
         _phase(
             progress_callback,
@@ -451,6 +467,7 @@ def _walk_forward(
                 {
                     "score_formula": PREFILTER_SCORE_FORMULA,
                     "targets": prefilter.diagnostics,
+                    "telemetry": prefilter_walk_forward_telemetry,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -563,6 +580,7 @@ def _resumable_walk_forward(
         checkpoint.commit_artifact("prefilter_qualification", univariate.qualification)
         checkpoint.phase_completed("predictor_prefilter_walk_forward")
         prefilter_telemetry = univariate.telemetry
+        _require_exploitable_prefilter(univariate)
         if checkpoint.artifact_exists("prefilter_selection"):
             prefilter = checkpoint.load_artifact("prefilter_selection")
         else:
@@ -576,6 +594,7 @@ def _resumable_walk_forward(
                 targets=target_symbols,
                 candidate_symbols=predictor_symbols,
                 config=spec.config,
+                excluded_targets=getattr(univariate, "excluded_targets", {}),
             )
             checkpoint.commit_artifact("prefilter_selection", prefilter)
             checkpoint.phase_completed("predictor_prefilter_selection")

@@ -20,6 +20,7 @@ from rstock.application.worker import RunLease, SlotLease, execute_run
 from rstock.application.workflows import (
     WorkflowRegistry,
     _prepared_experiment,
+    _require_exploitable_prefilter,
     _resumable_walk_forward,
     _walk_forward,
 )
@@ -66,6 +67,35 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     restored = RunRepository(tmp_path / "runs").load_spec(run_id)
     assert restored == spec
     assert restored.config.xgb_seed == 987
+
+
+def test_empty_market_context_remains_a_valid_predictor_population(tmp_path):
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"),
+        target_symbols=("AAA", "BBB"),
+        context_symbols=(),
+    )
+
+    assert spec.context_symbols == ()
+    assert spec.predictor_symbols == ("AAA", "BBB")
+
+
+@pytest.mark.parametrize(
+    ("pairs_admissible", "targets"),
+    [(0, ("T",)), (1, ())],
+)
+def test_prefilter_fails_clearly_without_exploitable_population(
+    pairs_admissible, targets
+):
+    result = SimpleNamespace(
+        telemetry={"pairs_admissible": pairs_admissible},
+        exploitable_targets=targets,
+    )
+
+    with pytest.raises(ValueError, match="no exploitable pairs"):
+        _require_exploitable_prefilter(result)
 
 
 def test_legacy_experiment_config_defaults_missing_batch_sizes(tmp_path):
@@ -247,7 +277,12 @@ def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
         evaluated_configs.append(config)
         evaluated_options.append(kwargs)
         if len(evaluated_sets) == 1:
-            return SimpleNamespace(qualification=qualification, telemetry={})
+            return SimpleNamespace(
+                qualification=qualification,
+                telemetry={"pairs_admissible": 2},
+                exploitable_targets=("T",),
+                excluded_targets={},
+            )
         return final_result
 
     monkeypatch.setattr(

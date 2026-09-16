@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,10 @@ from .risk import conditional_signal_metrics, intraday_risk_metrics
 from .telemetry import dataframe_bytes, process_rss_bytes
 
 
+LOGGER = logging.getLogger(__name__)
+INSUFFICIENT_WALK_FORWARD_OBSERVATIONS = "insufficient_walk_forward_observations"
+
+
 @dataclass(frozen=True, slots=True)
 class TemporalWindow:
     number: int
@@ -83,6 +88,16 @@ class PrefilterWalkForwardResult:
 
     qualification: pd.DataFrame
     telemetry: dict[str, object]
+    exploitable_targets: tuple[str, ...]
+    excluded_targets: dict[str, str]
+
+
+class InsufficientWalkForwardObservations(ValueError):
+    """A single combination cannot form even one development window."""
+
+    def __init__(self, details: dict[str, object]) -> None:
+        self.details = details
+        super().__init__("Not enough observations for one walk-forward test window")
 
 
 _WALK_FORWARD_TASK_CONTEXT: tuple[
@@ -153,6 +168,33 @@ def _walk_forward_combination(
     set_name = symbol_set_id(row)
     predictors_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
     development_data = model_data.loc[model_data.index < holdout_start]
+    if len(development_data) <= min_train:
+        def date_range(frame: pd.DataFrame) -> tuple[str | None, str | None]:
+            if frame.empty:
+                return None, None
+            return (
+                pd.Timestamp(frame.index.min()).date().isoformat(),
+                pd.Timestamp(frame.index.max()).date().isoformat(),
+            )
+
+        raw_min, raw_max = date_range(ordered)
+        model_min, model_max = date_range(model_data)
+        development_min, development_max = date_range(development_data)
+        raise InsufficientWalkForwardObservations(
+            {
+                "RawObservations": len(ordered),
+                "ModelObservations": len(model_data),
+                "DevelopmentObservations": len(development_data),
+                "RawDateMin": raw_min,
+                "RawDateMax": raw_max,
+                "ModelDateMin": model_min,
+                "ModelDateMax": model_max,
+                "DevelopmentDateMin": development_min,
+                "DevelopmentDateMax": development_max,
+                "MinimumRequiredObservations": min_train + 1,
+                "RowsLostToLags": rows_lost_to_lags,
+            }
+        )
     window_records: list[dict[str, object]] = []
     prediction_records: list[dict[str, object]] = []
     for window in expanding_windows(len(development_data), min_train, test_window, step):
@@ -242,13 +284,114 @@ def _prefilter_combination(
 ) -> dict[str, object]:
     """Return one exact qualification row and discard prediction-level detail."""
 
-    result = _walk_forward_combination(row_values, context, cancellation_check)
+    try:
+        result = _walk_forward_combination(row_values, context, cancellation_check)
+    except InsufficientWalkForwardObservations as error:
+        _, _, _, market_calendars, _, _, _ = context
+        row = pd.Series(row_values)
+        observation, feature_symbols = symbols_from_set(row)
+        predictors_json = json.dumps(
+            feature_symbols, ensure_ascii=False, separators=(",", ":")
+        )
+        details = error.details
+        LOGGER.warning(
+            "Prefilter skipped insufficient walk-forward observations: "
+            "target=%s predictors=%s raw=%s model=%s development=%s minimum=%s "
+            "raw_dates=%s..%s model_dates=%s..%s development_dates=%s..%s",
+            observation,
+            predictors_json,
+            details["RawObservations"],
+            details["ModelObservations"],
+            details["DevelopmentObservations"],
+            details["MinimumRequiredObservations"],
+            details["RawDateMin"],
+            details["RawDateMax"],
+            details["ModelDateMin"],
+            details["ModelDateMax"],
+            details["DevelopmentDateMin"],
+            details["DevelopmentDateMax"],
+        )
+        return {
+            "Set": symbol_set_id(row),
+            "Observation": observation,
+            "Predictors": predictors_json,
+            "MarketCalendar": market_calendars.get(observation),
+            "WindowsEvaluated": 0,
+            "AUCWindows": 0,
+            "ROCAUCMedian": np.nan,
+            "ROCAUCMean": np.nan,
+            "ROCAUCStd": np.nan,
+            "ROCAUCWorst": np.nan,
+            "PctWindowsAboveRandom": np.nan,
+            "PRAUCMedian": np.nan,
+            "MeanPrevalence": np.nan,
+            "TotalObservations": 0,
+            "PositiveObservations": 0,
+            "AggregatePrecision": np.nan,
+            "AggregateRecall": np.nan,
+            "AggregateF1": np.nan,
+            "Eligible": False,
+            "IneligibilityReasons": json.dumps(
+                [INSUFFICIENT_WALK_FORWARD_OBSERVATIONS], separators=(",", ":")
+            ),
+            "PrefilterSkipReason": INSUFFICIENT_WALK_FORWARD_OBSERVATIONS,
+            **details,
+        }
     qualification = qualify_combinations(
         pd.DataFrame(result.window_records),
         pd.DataFrame(result.prediction_records),
         context[1],
     )
     return qualification.drop(columns="EligibleRank").iloc[0].to_dict()
+
+
+def _prefilter_population_diagnostics(
+    records: list[dict[str, object]], task_rows: list[dict[str, object]]
+) -> tuple[dict[str, object], tuple[str, ...], dict[str, str]]:
+    """Summarize local data exclusions without conflating them with qualification."""
+
+    requested_targets = tuple(
+        dict.fromkeys(
+            symbols_from_set(pd.Series(values))[0] for values in task_rows
+        )
+    )
+    rows = pd.DataFrame(records)
+    skip_reason = rows.get(
+        "PrefilterSkipReason", pd.Series(pd.NA, index=rows.index, dtype="string")
+    ).fillna("")
+    skipped = skip_reason == INSUFFICIENT_WALK_FORWARD_OBSERVATIONS
+    admissible = ~skipped
+    exploitable_targets = tuple(
+        target
+        for target in requested_targets
+        if bool((rows["Observation"].eq(target) & admissible).any())
+    )
+    excluded_targets = {
+        target: INSUFFICIENT_WALK_FORWARD_OBSERVATIONS
+        for target in requested_targets
+        if target not in exploitable_targets
+    }
+    attempted = len(task_rows)
+    admissible_count = int(admissible.sum())
+    skipped_count = int(skipped.sum())
+    return (
+        {
+            "pairs_attempted": attempted,
+            "pairs_admissible": admissible_count,
+            "pairs_skipped": skipped_count,
+            "pair_coverage_percent": (
+                0.0 if attempted == 0 else 100.0 * admissible_count / attempted
+            ),
+            "targets_requested": len(requested_targets),
+            "targets_exploitable": len(exploitable_targets),
+            "targets_excluded": [
+                {"target": target, "reason": reason}
+                for target, reason in excluded_targets.items()
+            ],
+        },
+        exploitable_targets,
+        excluded_targets,
+    )
 
 
 def _prefilter_process_task(row_values: dict[str, object]) -> dict[str, object]:
@@ -860,6 +1003,9 @@ def evaluate_prefilter_walk_forward(
         for batch_id in range(total_batches):
             payload = manager.load_batch("predictor_prefilter_walk_forward", batch_id)
             records.extend(payload["qualification"].to_dict("records"))
+    population_diagnostics, exploitable_targets, excluded_targets = (
+        _prefilter_population_diagnostics(records, task_rows)
+    )
     qualification = rank_qualified_combinations(pd.DataFrame(records))
     elapsed = perf_counter() - started_at
     telemetry = {
@@ -871,6 +1017,7 @@ def evaluate_prefilter_walk_forward(
         "parent_rss_after_bytes": process_rss_bytes(),
         "combination_workers": config.combination_workers,
         "xgb_threads_per_worker": config.xgb_nthread,
+        **population_diagnostics,
     }
     report_progress(
         progress_callback,
@@ -878,7 +1025,12 @@ def evaluate_prefilter_walk_forward(
         substage="completed",
         details={"phase_event": "completed", **telemetry},
     )
-    return PrefilterWalkForwardResult(qualification, telemetry)
+    return PrefilterWalkForwardResult(
+        qualification,
+        telemetry,
+        exploitable_targets,
+        excluded_targets,
+    )
 
 
 def evaluate_walk_forward(
