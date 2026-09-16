@@ -532,6 +532,23 @@ Les enfants ne doivent pas produire un classement final qui fait autorité.
 
 Tout ce qui dépend de la population complète reste parent/global.
 
+## 14.1
+
+Règle de batching WF après préfiltrage :
+
+Le nombre affiché avant lancement est basé sur le nombre brut exact de combinaisons :
+preview_batch_count = ceil(raw_combination_count / walk_forward_max_combinations_per_batch)
+Après exécution du préfiltre, le nombre réel de batchs WF est recalculé sur la population retenue :
+planned_batch_count = ceil(prefiltered_combination_count / walk_forward_max_combinations_per_batch)
+Seuls les batchs du plan effectif post-préfiltre créent des runs enfants WALK_FORWARD_BATCH.
+Le manifest du WF parent doit conserver au minimum :
+- raw_combination_count
+- preview_batch_count
+- prefiltered_combination_count
+- planned_batch_count
+- prefilter_digest
+Le préfiltre doit rester scientifiquement global et déterministe : le batching ne doit jamais modifier la population retenue par rapport à un WF équivalent non batché.
+
 ---
 
 # 15. Artefacts scientifiques du WF parent
