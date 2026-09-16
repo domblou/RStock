@@ -443,16 +443,67 @@ def test_surveillance_uses_one_conditional_page_level_polling_fragment():
     assert "_evaluated_predictions_panel = st.fragment" not in source
 
 
-def test_surveillance_uses_internal_tabs_and_on_demand_technical_details():
+def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
     source = APP.read_text(encoding="utf-8")
+    surveillance = source.split("def _render_surveillance_page", 1)[1].split(
+        "def _surveillance_page", 1
+    )[0]
 
-    assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' in source
-    assert "_render_predictions_tab(predictions)" in source
-    assert "_render_signals_tab(signals, predictions, models)" in source
-    assert "_evaluated_predictions_panel(predictions, signals)" in source
-    assert "Voir les prédictions sans signal" in source
+    assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' not in source
+    assert "_render_predictions_tab" not in source
+    assert "_render_signals_section(" in surveillance
+    assert "_evaluated_predictions_panel(evaluated_view, runs)" in surveillance
+    assert "main, sidebar = st.columns([2.25, 1], gap=\"large\")" in surveillance
+    assert "_render_priorities_panel(signal_view.signals)" in surveillance
+    assert "Autres prédictions sans signal" in source
+    assert "Prédictions évaluées récemment" in source
     assert "Détails techniques" in source
     assert "Pourquoi ce signal ?" in source
+    assert surveillance.index("_render_signals_section") < surveillance.index(
+        "_evaluated_predictions_panel"
+    ) < surveillance.index('_live_job_panel(_service(), domain="production")')
+    assert 'expanded=False' in source
+
+
+def test_surveillance_keeps_operational_actions_and_only_production_jobs():
+    source = APP.read_text(encoding="utf-8")
+    surveillance = source.split("def _render_surveillance_page", 1)[1].split(
+        "def _surveillance_page", 1
+    )[0]
+    actions = source.split("def _render_production_actions", 1)[1].split(
+        "def _load_evaluated_predictions_view", 1
+    )[0]
+    job_panel = source.split("def _job_panel", 1)[1].split(
+        "def _live_job_panel", 1
+    )[0]
+
+    for label in (
+        "Mettre à jour le marché",
+        "Prédictions quotidiennes",
+        "Détecter les signaux",
+        "Évaluer les prédictions",
+        "Exécution complète",
+    ):
+        assert label in actions
+    assert "_render_production_actions(" in surveillance
+    assert 'type="primary" if index == 0 else "secondary"' in actions
+    assert surveillance.count('_live_job_panel(_service(), domain="production")') == 1
+    assert 'domain="experiment"' not in surveillance
+    assert 'domain="model"' not in surveillance
+    assert job_panel.index("if not runs:") < job_panel.index("title = job_domain_title")
+
+
+def test_surveillance_expander_counts_match_their_displayed_grids():
+    source = APP.read_text(encoding="utf-8")
+    signals = source.split("def _render_signals_section", 1)[1].split(
+        "def _evaluated_predictions_panel", 1
+    )[0]
+    evaluated = source.split("def _evaluated_predictions_panel", 1)[1].split(
+        "def _render_surveillance_page", 1
+    )[0]
+
+    assert 'f"Autres prédictions sans signal ({len(displayed.no_signal.table)})"' in signals
+    assert 'f"Prédictions évaluées récemment ({len(view.table)})"' in evaluated
 
 
 def test_surveillance_uses_active_views_and_clears_stale_row_selections():
@@ -470,18 +521,57 @@ def test_surveillance_uses_active_views_and_clears_stale_row_selections():
     assert models.count("_invalidate_surveillance_selection_state()") == 3
 
 
-def test_surveillance_kpis_keep_last_update_wide_and_prediction_secondary():
+def test_surveillance_uses_four_compact_kpi_cards_and_a_header_status():
     source = APP.read_text(encoding="utf-8")
     surveillance = source.split("def _render_surveillance_page", 1)[1].split(
         "if hasattr(st, \"fragment\")", 1
     )[0]
+    kpis = source.split("def _render_surveillance_kpis", 1)[1].split(
+        "def _styled_signal_table", 1
+    )[0]
+    header = source.split("def _render_surveillance_header", 1)[1].split(
+        "def _render_surveillance_kpis", 1
+    )[0]
 
-    assert 'columns = st.columns([1, 1.15, 1.2, 1.9, 0.7])' in surveillance
-    assert 'columns[3].metric("Dernière mise à jour", _compact_datetime(last_market))' in surveillance
-    assert 'columns[4].metric("Erreurs", len(errors))' in surveillance
-    assert 'st.caption(f"Dernière prédiction : {_compact_datetime(last_prediction)}")' in surveillance
-    assert 'columns[4].metric("Dernière prédiction"' not in surveillance
+    assert "_render_surveillance_header(" in surveillance
+    assert "_render_surveillance_kpis(" in surveillance
+    assert 'columns = st.columns(4, gap="small")' in kpis
+    for label in (
+        "Signaux haussiers aujourd’hui",
+        "Prédictions en attente",
+        "Modèles actifs",
+        "Dernière mise à jour",
+    ):
+        assert label in kpis
+    assert "with st.container(border=True):" in kpis
+    assert "error_count" in header
+    assert "_freshness_state(freshness)" in header
     assert 'timestamp.strftime("%Y-%m-%d %H:%M")' in source
+
+
+def test_surveillance_priorities_are_limited_and_have_an_empty_state():
+    source = APP.read_text(encoding="utf-8")
+    panel = source.split("def _render_priorities_panel", 1)[1].split(
+        "def _render_operational_info", 1
+    )[0]
+
+    assert 'st.subheader("Priorités du jour")' in panel
+    assert "prioritize_signals_view(signals, limit=3)" in panel
+    assert "_priority_card_html(index + 1, row, is_new=is_new)" in panel
+    assert "Aucune priorité pour le moment." in panel
+    assert "prediction_date" in panel
+
+
+def test_surveillance_css_is_scoped_to_its_page_marker():
+    source = APP.read_text(encoding="utf-8")
+    styles = source.split("def _surveillance_styles", 1)[1].split(
+        "def _freshness_state", 1
+    )[0]
+
+    assert "rstock-surveillance-scope" in styles
+    assert ':has(.rstock-surveillance-scope)' in styles
+    assert "rstock-priority-card" in styles
+    assert "max-width: 1520px" in styles
 
 
 def test_evaluated_predictions_grid_is_always_rendered_with_readable_audit_details():
@@ -493,7 +583,7 @@ def test_evaluated_predictions_grid_is_always_rendered_with_readable_audit_detai
     assert "main_table = evaluated_predictions_main_table(displayed_view.table)" in panel
     assert "if view.table.empty:" not in panel
     assert 'key="surveillance-evaluated-predictions"' in panel
-    assert "_render_prediction_audit_details(record)" in panel
+    assert "_render_prediction_audit_details(selected_record)" in panel
     assert "pending_columns = st.columns(2)" not in panel
     assert 'st.caption(' in panel
     assert "Prochaine validation" in panel
@@ -502,15 +592,12 @@ def test_evaluated_predictions_grid_is_always_rendered_with_readable_audit_detai
     assert "if new_results:" in panel
 
 
-def test_prediction_audit_ui_is_shared_by_predictions_signals_and_results():
+def test_prediction_audit_ui_is_shared_by_signals_and_results():
     source = APP.read_text(encoding="utf-8")
     helper = source.split("def _render_prediction_audit_details", 1)[1].split(
-        "def _render_predictions_tab", 1
+        "def _render_signals_section", 1
     )[0]
-    predictions = source.split("def _render_predictions_tab", 1)[1].split(
-        "def _render_signals_tab", 1
-    )[0]
-    signals = source.split("def _render_signals_tab", 1)[1].split(
+    signals = source.split("def _render_signals_section", 1)[1].split(
         "def _evaluated_predictions_panel", 1
     )[0]
     realized = source.split("def _evaluated_predictions_panel", 1)[1].split(
@@ -522,9 +609,8 @@ def test_prediction_audit_ui_is_shared_by_predictions_signals_and_results():
     assert "Entrées du modèle au moment de la prédiction" in helper
     assert "Observations sources" in helper
     assert "Non disponible pour cette prédiction historique." in helper
-    assert "_render_prediction_audit_details(technical)" in predictions
     assert "_render_prediction_audit_details(" in signals
-    assert "_render_prediction_audit_details(record)" in realized
+    assert "_render_prediction_audit_details(selected_record)" in realized
     assert source.count("def _render_prediction_audit_details") == 1
 
 

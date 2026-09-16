@@ -65,13 +65,17 @@ from rstock.application.history_analysis import (
 )
 from rstock.application.runner import running_duration
 from rstock.application.surveillance import (
+    EvaluatedPredictionsView,
     OperationalTableView,
+    SignalResultsView,
     build_predictions_view,
     build_evaluated_predictions_view,
     build_signals_view,
     evaluated_predictions_main_table,
     evaluation_feedback,
     filter_evaluated_predictions_view,
+    filter_signal_results_view,
+    prioritize_signals_view,
     prediction_feature_tables,
     source_observation_tables,
 )
@@ -2385,53 +2389,250 @@ def _render_prediction_audit_details(
         st.json(record if technical_payload is None else technical_payload)
 
 
-def _render_predictions_tab(predictions: pd.DataFrame) -> None:
-    view = build_predictions_view(predictions)
-    if view.table.empty:
-        st.info("Aucune prédiction disponible.")
-        return
-    event = st.dataframe(
-        view.table, hide_index=True, width="stretch",
-        on_select="rerun", selection_mode="single-row", key="surveillance-predictions",
+def _surveillance_styles() -> None:
+    """Install page-scoped polish without changing the rest of the application."""
+
+    st.markdown(
+        """
+        <div class="rstock-surveillance-scope"></div>
+        <style>
+          div[data-testid="stMainBlockContainer"]:has(.rstock-surveillance-scope) {
+            max-width: 1520px;
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+          }
+          div[data-testid="stMainBlockContainer"]:has(.rstock-surveillance-scope)
+          div[data-testid="stMetric"] {
+            padding: 0.1rem 0;
+          }
+          div[data-testid="stMainBlockContainer"]:has(.rstock-surveillance-scope)
+          div[data-testid="stButton"] button {
+            min-height: 2.45rem;
+            border-radius: 0.55rem;
+          }
+          div[data-testid="stMainBlockContainer"]:has(.rstock-surveillance-scope)
+          div[data-testid="stButton"] button[kind="primary"] {
+            background: linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%);
+            border-color: #2563eb;
+            color: #ffffff;
+          }
+          .rstock-surveillance-subtitle {
+            color: #64748b;
+            font-size: 0.98rem;
+            margin: -0.15rem 0 0.75rem;
+          }
+          .rstock-header-right-spacer { height: 0.8rem; }
+          .rstock-status-pill, .rstock-error-pill, .rstock-new-pill {
+            display: inline-block;
+            border-radius: 999px;
+            font-size: 0.73rem;
+            font-weight: 700;
+            padding: 0.18rem 0.55rem;
+            margin-top: 0.4rem;
+          }
+          .rstock-status-pill { background: #dcfce7; color: #15803d; margin-right: 0.35rem; }
+          .rstock-error-pill { background: #fee2e2; color: #b91c1c; margin-left: 0.35rem; }
+          .rstock-new-pill { background: #dbeafe; color: #1d4ed8; margin: 0; }
+          .rstock-priority-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 0.75rem;
+            padding: 0.8rem;
+            margin: 0.55rem 0;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+          }
+          .rstock-priority-card__top {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+          }
+          .rstock-priority-rank {
+            display: inline-grid;
+            place-items: center;
+            width: 1.65rem;
+            height: 1.65rem;
+            border-radius: 999px;
+            background: #eff6ff;
+            color: #2563eb;
+            font-weight: 800;
+          }
+          .rstock-priority-target { color: #0f172a; font-size: 1rem; font-weight: 800; }
+          .rstock-priority-predictors { color: #64748b; font-size: 0.78rem; margin: 0.35rem 0; }
+          .rstock-priority-metrics { display: flex; gap: 1.2rem; font-size: 0.8rem; }
+          .rstock-up { color: #059669; font-weight: 800; }
+          .rstock-down { color: #dc2626; font-weight: 800; }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    technical = _technical_record(view, _selected_rows(event))
-    if technical is not None:
-        _render_prediction_audit_details(technical)
 
 
-def _render_signals_tab(
-    signals: pd.DataFrame,
-    predictions: pd.DataFrame,
-    models: ModelService,
+def _freshness_state(freshness: dict[str, str | None]) -> tuple[str, str]:
+    if freshness and all(value for value in freshness.values()):
+        return "À jour", "rstock-status-pill"
+    return "À vérifier", "rstock-error-pill"
+
+
+def _render_surveillance_header(
+    *,
+    last_market: object,
+    freshness: dict[str, str | None],
+    error_count: int,
 ) -> None:
-    view = build_signals_view(signals, predictions)
-    selected_signal = None
-    if view.signals.table.empty:
-        st.info("Aucun signal haussier aujourd’hui.")
-    else:
-        event = st.dataframe(
-            view.signals.table, hide_index=True, width="stretch",
-            on_select="rerun", selection_mode="single-row", key="surveillance-signals",
+    left, right = st.columns([2.7, 1], gap="large")
+    with left:
+        _page_header("Surveillance")
+        st.markdown(
+            '<p class="rstock-surveillance-subtitle">'
+            "Détectez les opportunités, suivez les signaux et passez à l’action."
+            "</p>",
+            unsafe_allow_html=True,
         )
-        selected_signal = _technical_record(view.signals, _selected_rows(event))
+    state_label, state_class = _freshness_state(freshness)
+    error_class = "rstock-status-pill" if error_count == 0 else "rstock-error-pill"
+    with right:
+        st.markdown('<div class="rstock-header-right-spacer"></div>', unsafe_allow_html=True)
+        st.caption("Dernière mise à jour")
+        st.markdown(f"**{_compact_datetime(last_market)}**")
+        st.markdown(
+            f'<span class="{state_class}">{html.escape(state_label)}</span>'
+            f'<span class="{error_class}">'
+            f"{error_count} erreur{'s' if error_count != 1 else ''}</span>",
+            unsafe_allow_html=True,
+        )
+
+
+def _render_surveillance_kpis(
+    *,
+    today_signals: int,
+    pending_predictions: int,
+    active_models: int,
+    monitored_symbols: int,
+    last_market: object,
+    freshness: dict[str, str | None],
+) -> None:
+    state_label, _ = _freshness_state(freshness)
+    columns = st.columns(4, gap="small")
+    cards = (
+        (
+            "Signaux haussiers aujourd’hui",
+            today_signals,
+            "À surveiller maintenant",
+        ),
+        (
+            "Prédictions en attente",
+            pending_predictions,
+            "Validation à venir",
+        ),
+        (
+            "Modèles actifs",
+            active_models,
+            f"{monitored_symbols} symboles surveillés",
+        ),
+        (
+            "Dernière mise à jour",
+            _compact_datetime(last_market),
+            state_label,
+        ),
+    )
+    for column, (label, value, caption) in zip(columns, cards, strict=True):
+        with column:
+            with st.container(border=True):
+                st.metric(label, value)
+                st.caption(caption)
+
+
+def _styled_signal_table(table: pd.DataFrame) -> pd.io.formats.style.Styler:
+    return (
+        table.style
+        .map(lambda _: "font-weight: 750; color: #0f172a", subset=["Cible"])
+        .map(lambda _: "font-weight: 700; color: #059669", subset=["P(Up)"])
+        .map(lambda _: "font-weight: 700; color: #dc2626", subset=["P(Down)"])
+        .map(lambda _: "color: #475569", subset=["Date"])
+    )
+
+
+def _render_signals_section(
+    view: SignalResultsView,
+    models: ModelService,
+    *,
+    today_signal_count: int,
+) -> None:
+    selected_signal = None
+    with st.container(border=True):
+        heading, count = st.columns([3, 1], gap="small")
+        with heading:
+            st.subheader("Signaux haussiers à traiter")
+            st.caption("Opportunités détectées par les modèles actifs.")
+        with count:
+            st.metric("Aujourd’hui", today_signal_count)
+        period = st.radio(
+            "Afficher",
+            ["Aujourd’hui", "7 derniers jours", "Tous"],
+            horizontal=True,
+            key="surveillance-signals-period",
+        )
+        displayed = filter_signal_results_view(view, period)
+        if displayed.signals.table.empty:
+            empty_message = (
+                "Aucun signal haussier aujourd’hui."
+                if period == "Aujourd’hui"
+                else "Aucun signal haussier pour la période sélectionnée."
+            )
+            st.info(empty_message)
+        else:
+            event = st.dataframe(
+                _styled_signal_table(displayed.signals.table),
+                hide_index=True,
+                width="stretch",
+                height=max(78, min(420, 36 * len(displayed.signals.table) + 42)),
+                on_select="rerun",
+                selection_mode="single-row",
+                key="surveillance-signals",
+                column_config={
+                    "Date": st.column_config.TextColumn(width="small"),
+                    "Cible": st.column_config.TextColumn(width="small"),
+                    "Predictors": st.column_config.TextColumn(width="medium"),
+                    "P(Up)": st.column_config.TextColumn(width="small"),
+                    "P(Down)": st.column_config.TextColumn(width="small"),
+                    "Catégorie": st.column_config.TextColumn(width="medium"),
+                },
+            )
+            selected_signal = _technical_record(
+                displayed.signals, _selected_rows(event)
+            )
 
     no_signal_selection: list[int] = []
-    with st.expander(f"Voir les prédictions sans signal ({len(view.no_signal.table)})"):
-        if view.no_signal.table.empty:
+    with st.expander(
+        f"Autres prédictions sans signal ({len(displayed.no_signal.table)})",
+        expanded=False,
+    ):
+        if displayed.no_signal.table.empty:
             st.caption("Aucune prédiction sans signal.")
         else:
             event = st.dataframe(
-                view.no_signal.table, hide_index=True, width="stretch",
-                on_select="rerun", selection_mode="single-row", key="surveillance-no-signals",
+                displayed.no_signal.table,
+                hide_index=True,
+                width="stretch",
+                height=max(78, min(420, 36 * len(displayed.no_signal.table) + 42)),
+                on_select="rerun",
+                selection_mode="single-row",
+                key="surveillance-no-signals",
             )
             no_signal_selection = _selected_rows(event)
 
-    selected_no_signal = _technical_record(view.no_signal, no_signal_selection)
+    selected_no_signal = _technical_record(
+        displayed.no_signal, no_signal_selection
+    )
     selected = selected_signal or selected_no_signal
     if selected is not None:
         st.markdown("**Détail du signal**")
         source_model = next(
-            (model for model in models.active_models() if model.model_id == selected.get("model_id")),
+            (
+                model
+                for model in models.active_models()
+                if model.model_id == selected.get("model_id")
+            ),
             None,
         )
         _render_prediction_audit_details(
@@ -2444,13 +2645,121 @@ def _render_signals_tab(
         )
 
 
-def _evaluated_predictions_panel(
+def _priority_card_html(
+    rank: int,
+    row: pd.Series,
+    *,
+    is_new: bool,
+) -> str:
+    badge = '<span class="rstock-new-pill">Nouveau</span>' if is_new else ""
+    return f"""
+    <div class="rstock-priority-card">
+      <div class="rstock-priority-card__top">
+        <span class="rstock-priority-rank">{rank}</span>
+        <span class="rstock-priority-target">{html.escape(str(row.get('Cible', '—')))}</span>
+        {badge}
+      </div>
+      <div class="rstock-priority-predictors">{html.escape(str(row.get('Predictors', '—')))}</div>
+      <div class="rstock-priority-metrics">
+        <span>P(Up) <span class="rstock-up">{html.escape(str(row.get('P(Up)', '—')))}</span></span>
+        <span>P(Down) <span class="rstock-down">{html.escape(str(row.get('P(Down)', '—')))}</span></span>
+      </div>
+    </div>
+    """
+
+
+def _render_priorities_panel(signals: OperationalTableView) -> None:
+    priorities = prioritize_signals_view(signals, limit=3)
+    today = pd.Timestamp(date.today()).normalize()
+    with st.container(border=True):
+        st.subheader("Priorités du jour")
+        st.caption("Les signaux récents avec les P(Up) les plus élevées.")
+        if priorities.table.empty:
+            st.info("Aucune priorité pour le moment.")
+            return
+        for index, row in priorities.table.iterrows():
+            signal_date = pd.to_datetime(
+                priorities.technical.iloc[index].get("prediction_date"),
+                errors="coerce",
+                utc=True,
+            )
+            is_new = (
+                not pd.isna(signal_date)
+                and signal_date.tz_convert(None).normalize() == today
+            )
+            st.markdown(
+                _priority_card_html(index + 1, row, is_new=is_new),
+                unsafe_allow_html=True,
+            )
+
+
+def _render_operational_info(
+    *,
+    freshness: dict[str, str | None],
+    last_prediction: object,
+    errors: list[dict[str, object]],
+) -> None:
+    state_label, state_class = _freshness_state(freshness)
+    with st.container(border=True):
+        st.subheader("État opérationnel")
+        st.markdown(
+            f'<span class="{state_class}">{html.escape(state_label)}</span>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"{len(freshness)} symboles surveillés · "
+            f"Dernière prédiction : {_compact_datetime(last_prediction)}"
+        )
+        with st.expander("Informations techniques", expanded=False):
+            if freshness:
+                st.caption(
+                    "Fraîcheur des données : "
+                    + ", ".join(
+                        f"{symbol}={last_date or 'manquant'}"
+                        for symbol, last_date in freshness.items()
+                    )
+                )
+            else:
+                st.caption("Aucune donnée de fraîcheur disponible.")
+            if errors:
+                st.markdown("**Erreurs opérationnelles récentes**")
+                st.json(errors[:10])
+            else:
+                st.caption("Aucune erreur opérationnelle récente.")
+
+
+def _render_production_actions(*, active_model_count: int) -> None:
+    actions = [
+        ("Mettre à jour le marché", JobType.MARKET_UPDATE),
+        ("Prédictions quotidiennes", JobType.DAILY_PREDICTION),
+        ("Détecter les signaux", JobType.DAILY_SCREENING),
+        ("Évaluer les prédictions", JobType.REALIZED_VALIDATION),
+        ("Exécution complète", JobType.OPERATIONAL_RUN),
+    ]
+    with st.container(border=True):
+        st.caption("Actions de production")
+        action_columns = st.columns([1.2, 1, 1, 1, 1], gap="small")
+        for index, (column, (label, job_type)) in enumerate(
+            zip(action_columns, actions, strict=True)
+        ):
+            if column.button(
+                label,
+                disabled=active_model_count == 0,
+                type="primary" if index == 0 else "secondary",
+                width="stretch",
+            ):
+                _submit_operational_job(job_type)
+                # The first rerun installs the conditional polling fragment;
+                # later reruns are driven only while work is active.
+                st.rerun()
+
+
+def _load_evaluated_predictions_view(
     predictions: pd.DataFrame,
     signals: pd.DataFrame,
-) -> None:
-    """Render evaluated predictions, pending predictions and evaluation feedback."""
-
-    project_root = st.session_state.lab_config.project_root
+    *,
+    project_root: Path,
+) -> EvaluatedPredictionsView:
     signal_service = SignalService(project_root)
     realized = signal_service.active_realized_results()
     model_service = ModelService(project_root)
@@ -2466,60 +2775,78 @@ def _evaluated_predictions_panel(
         freshness_symbols,
         st.session_state.lab_config,
     )
-    view = build_evaluated_predictions_view(predictions, signals, realized, freshness)
-
-    prediction_word = "prédiction" if view.pending_count == 1 else "prédictions"
-    st.caption(
-        f"{view.pending_count} {prediction_word} en attente"
-        f" · Prochaine validation : {view.next_validation_date or '—'}"
-        f" · Données jusqu’au : {view.latest_market_date or '—'}"
+    return build_evaluated_predictions_view(
+        predictions, signals, realized, freshness
     )
+
+
+def _evaluated_predictions_panel(
+    view: EvaluatedPredictionsView,
+    runs: list[dict[str, object]],
+) -> None:
+    """Render evaluated predictions, pending predictions and evaluation feedback."""
 
     validation_jobs = [
         run
-        for run in _service().runs()
+        for run in runs
         if run["job_type"]
         in {JobType.REALIZED_VALIDATION.value, JobType.OPERATIONAL_RUN.value}
     ]
-    if validation_jobs:
-        latest = validation_jobs[0]
-        if latest["status"] in {"pending", "running"}:
-            st.info("Validation des résultats en cours…")
-        elif latest["status"] == "failed":
-            st.error(f"La dernière validation a échoué : {latest.get('error') or 'erreur inconnue'}")
-        elif latest["status"] == "completed":
-            summary = _service().run(str(latest["run_id"]))["summary"]
-            new_results = int(summary.get("realized_results", 0))
-            if new_results:
-                level, message = evaluation_feedback(new_results, view)
-                getattr(st, level)(message)
-
-    status_filter = st.selectbox(
-        "Afficher",
-        ["Toutes", "Signaux seulement", "Sans signal"],
-        key="surveillance-evaluated-predictions-filter",
-    )
-    displayed_view = filter_evaluated_predictions_view(view, status_filter)
-    main_table = evaluated_predictions_main_table(displayed_view.table)
-    event = st.dataframe(
-        main_table, hide_index=True, width="stretch",
-        on_select="rerun", selection_mode="single-row", key="surveillance-evaluated-predictions",
-    )
-    selected = _selected_rows(event)
-    if selected and selected[0] < len(displayed_view.technical):
-        record = json.loads(displayed_view.technical.iloc[selected[0]].to_json(date_format="iso"))
-        _render_prediction_audit_details(record)
-    if not view.pending.empty:
-        with st.expander("Voir les prédictions en attente"):
+    selected_record = None
+    with st.expander(
+        f"Prédictions évaluées récemment ({len(view.table)})",
+        expanded=False,
+    ):
+        prediction_word = "prédiction" if view.pending_count == 1 else "prédictions"
+        st.caption(
+            f"{view.pending_count} {prediction_word} en attente"
+            f" · Prochaine validation : {view.next_validation_date or '—'}"
+            f" · Données jusqu’au : {view.latest_market_date or '—'}"
+        )
+        if validation_jobs:
+            latest = validation_jobs[0]
+            if latest["status"] in {"pending", "running"}:
+                st.info("Validation des résultats en cours…")
+            elif latest["status"] == "failed":
+                st.error(
+                    "La dernière validation a échoué : "
+                    f"{latest.get('error') or 'erreur inconnue'}"
+                )
+            elif latest["status"] == "completed":
+                summary = _service().run(str(latest["run_id"]))["summary"]
+                new_results = int(summary.get("realized_results", 0))
+                if new_results:
+                    level, message = evaluation_feedback(new_results, view)
+                    getattr(st, level)(message)
+        status_filter = st.selectbox(
+            "Afficher",
+            ["Toutes", "Signaux seulement", "Sans signal"],
+            key="surveillance-evaluated-predictions-filter",
+        )
+        displayed_view = filter_evaluated_predictions_view(view, status_filter)
+        main_table = evaluated_predictions_main_table(displayed_view.table)
+        event = st.dataframe(
+            main_table, hide_index=True, width="stretch",
+            on_select="rerun", selection_mode="single-row", key="surveillance-evaluated-predictions",
+        )
+        selected = _selected_rows(event)
+        if selected and selected[0] < len(displayed_view.technical):
+            selected_record = json.loads(
+                displayed_view.technical.iloc[selected[0]].to_json(date_format="iso")
+            )
+        if not view.pending.empty:
+            st.markdown("**Prédictions en attente**")
             st.dataframe(
                 build_predictions_view(view.pending, limit=len(view.pending)).table,
                 hide_index=True,
                 width="stretch",
             )
+    if selected_record is not None:
+        _render_prediction_audit_details(selected_record)
 
 
 def _render_surveillance_page(*, polling: bool) -> None:
-    _page_header("Surveillance")
+    _surveillance_styles()
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
     universe = models.operational_universe()
@@ -2528,6 +2855,13 @@ def _render_surveillance_page(*, polling: bool) -> None:
     signals = signal_service.active_history()
     freshness = MarketDataService().freshness(universe.symbols, st.session_state.lab_config)
     runs = _service().runs()
+    signal_view = build_signals_view(signals, predictions)
+    today_signal_view = filter_signal_results_view(signal_view, "Aujourd’hui")
+    evaluated_view = _load_evaluated_predictions_view(
+        predictions,
+        signals,
+        project_root=project_root,
+    )
     last_market = next(
         (run.get("finished_at") or run.get("created_at") for run in runs if run["job_type"] in {JobType.MARKET_UPDATE.value, JobType.OPERATIONAL_RUN.value} and run["status"] == "completed"),
         None,
@@ -2542,21 +2876,20 @@ def _render_surveillance_page(*, polling: bool) -> None:
         for run in runs
         if run["status"] == "failed" and run["job_type"] in OPERATIONAL_JOB_TYPES
     ]
-    columns = st.columns([1, 1.15, 1.2, 1.9, 0.7])
-    columns[0].metric("Modèles actifs", len(universe.model_ids))
-    columns[1].metric("Symboles surveillés", len(universe.symbols))
-    columns[2].metric(
-        "Signaux haussiers",
-        int((signals.get("category") == "bullish_signal").sum()) if not signals.empty else 0,
+    _render_surveillance_header(
+        last_market=last_market,
+        freshness=freshness,
+        error_count=len(errors),
     )
-    columns[3].metric("Dernière mise à jour", _compact_datetime(last_market))
-    columns[4].metric("Erreurs", len(errors))
-    st.caption(f"Dernière prédiction : {_compact_datetime(last_prediction)}")
-    if freshness:
-        st.caption(
-            "Fraîcheur des données : "
-            + ", ".join(f"{symbol}={date or 'manquant'}" for symbol, date in freshness.items())
-        )
+    _render_surveillance_kpis(
+        today_signals=len(today_signal_view.signals.table),
+        pending_predictions=evaluated_view.pending_count,
+        active_models=len(universe.model_ids),
+        monitored_symbols=len(universe.symbols),
+        last_market=last_market,
+        freshness=freshness,
+    )
+    _render_production_actions(active_model_count=len(universe.model_ids))
     with st.expander("Univers opérationnel"):
         st.write(", ".join(universe.symbols) or "Aucun symbole")
         if universe.used_by:
@@ -2564,31 +2897,21 @@ def _render_surveillance_page(*, polling: bool) -> None:
                 [{"Symbole": symbol, "Modèles": ", ".join(ids)} for symbol, ids in universe.used_by.items()],
                 hide_index=True, width="stretch",
             )
-    action_columns = st.columns(5)
-    actions = [
-        ("Mettre à jour le marché", JobType.MARKET_UPDATE),
-        ("Prédictions quotidiennes", JobType.DAILY_PREDICTION),
-        ("Détecter les signaux", JobType.DAILY_SCREENING),
-        ("Évaluer les prédictions", JobType.REALIZED_VALIDATION),
-        ("Exécution complète", JobType.OPERATIONAL_RUN),
-    ]
-    for column, (label, job_type) in zip(action_columns, actions, strict=True):
-        if column.button(label, disabled=len(universe.model_ids) == 0):
-            _submit_operational_job(job_type)
-            # The first rerun installs the conditional polling fragment; later
-            # reruns are driven by that fragment only while work is active.
-            st.rerun()
-    st.divider()
-    content_tabs = st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])
-    with content_tabs[0]:
-        _render_predictions_tab(predictions)
-    with content_tabs[1]:
-        _render_signals_tab(signals, predictions, models)
-    with content_tabs[2]:
-        _evaluated_predictions_panel(predictions, signals)
-    if errors:
-        with st.expander("Erreurs opérationnelles récentes"):
-            st.json(errors[:10])
+    main, sidebar = st.columns([2.25, 1], gap="large")
+    with main:
+        _render_signals_section(
+            signal_view,
+            models,
+            today_signal_count=len(today_signal_view.signals.table),
+        )
+        _evaluated_predictions_panel(evaluated_view, runs)
+    with sidebar:
+        _render_priorities_panel(signal_view.signals)
+        _render_operational_info(
+            freshness=freshness,
+            last_prediction=last_prediction,
+            errors=errors,
+        )
     _live_job_panel(_service(), domain="production")
     if surveillance_refresh_decision(runs, polling=polling).final_rerun:
         st.rerun(scope="app")

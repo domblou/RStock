@@ -17,6 +17,8 @@ from rstock.application.surveillance import (
     source_observation_tables,
     source_observations_table,
     evaluation_feedback,
+    filter_signal_results_view,
+    prioritize_signals_view,
 )
 
 
@@ -254,6 +256,125 @@ def test_signal_view_separates_real_signals_from_folded_no_signal_rows():
     assert len(view.no_signal.table) == 1
     assert view.no_signal.table.iloc[0]["Catégorie"] == "Sans signal"
     assert view.no_signal.technical.iloc[0]["prediction_id"] == "quiet"
+
+
+def test_signal_view_is_sorted_by_descending_date_and_keeps_ties_stable():
+    rows = [
+        {**_signal("older"), **_prediction("older", "2026-09-12")},
+        {**_signal("latest-a"), **_prediction("latest-a", "2026-09-15")},
+        {**_signal("latest-b"), **_prediction("latest-b", "2026-09-15")},
+        {**_signal("middle"), **_prediction("middle", "2026-09-14")},
+    ]
+
+    view = build_signals_view(pd.DataFrame(rows))
+
+    assert view.signals.technical["prediction_id"].tolist() == [
+        "latest-a", "latest-b", "middle", "older",
+    ]
+
+
+def test_signal_period_filter_applies_to_signals_and_no_signal_counter_scope():
+    rows = [
+        {**_signal("today-bullish"), **_prediction("today-bullish", "2026-09-15")},
+        {
+            **_signal("today-quiet"),
+            **_prediction("today-quiet", "2026-09-15", "no_signal"),
+            "category": "no_signal",
+        },
+        {**_signal("week-bullish"), **_prediction("week-bullish", "2026-09-10")},
+        {
+            **_signal("old-quiet"),
+            **_prediction("old-quiet", "2026-09-08", "no_signal"),
+            "category": "no_signal",
+        },
+    ]
+    view = build_signals_view(pd.DataFrame(rows))
+
+    today = filter_signal_results_view(view, "Aujourd’hui", today="2026-09-15")
+    week = filter_signal_results_view(view, "7 derniers jours", today="2026-09-15")
+    all_rows = filter_signal_results_view(view, "Tous", today="2026-09-15")
+
+    assert today.signals.technical["prediction_id"].tolist() == ["today-bullish"]
+    assert today.no_signal.technical["prediction_id"].tolist() == ["today-quiet"]
+    assert week.signals.technical["prediction_id"].tolist() == [
+        "today-bullish", "week-bullish",
+    ]
+    assert week.no_signal.technical["prediction_id"].tolist() == ["today-quiet"]
+    assert all_rows is view
+
+
+def test_signal_period_filter_has_an_empty_today_state_without_hiding_other_predictions():
+    rows = [
+        {**_signal("old-bullish"), **_prediction("old-bullish", "2026-09-14")},
+        {
+            **_signal("today-quiet"),
+            **_prediction("today-quiet", "2026-09-15", "no_signal"),
+            "category": "no_signal",
+        },
+    ]
+
+    today = filter_signal_results_view(
+        build_signals_view(pd.DataFrame(rows)),
+        "Aujourd’hui",
+        today="2026-09-15",
+    )
+
+    assert today.signals.table.empty
+    assert len(today.no_signal.table) == 1
+
+
+def test_signal_priorities_put_today_first_then_sort_by_up_probability():
+    rows = [
+        {
+            **_signal("older-strong"),
+            **_prediction("older-strong", "2026-09-14"),
+            "up_probability": 0.99,
+        },
+        {
+            **_signal("today-low"),
+            **_prediction("today-low", "2026-09-15"),
+            "up_probability": 0.61,
+        },
+        {
+            **_signal("today-high"),
+            **_prediction("today-high", "2026-09-15"),
+            "up_probability": 0.82,
+        },
+        {
+            **_signal("older-medium"),
+            **_prediction("older-medium", "2026-09-13"),
+            "up_probability": 0.75,
+        },
+    ]
+    view = build_signals_view(pd.DataFrame(rows)).signals
+
+    priorities = prioritize_signals_view(view, today="2026-09-15")
+
+    assert priorities.technical["prediction_id"].tolist() == [
+        "today-high",
+        "today-low",
+        "older-strong",
+    ]
+    assert len(priorities.table) == 3
+
+
+def test_signal_priorities_are_stable_for_equal_probabilities_and_respect_limit():
+    rows = [
+        {
+            **_signal(identifier),
+            **_prediction(identifier, "2026-09-15"),
+            "up_probability": 0.7,
+        }
+        for identifier in ("first", "second", "third", "fourth")
+    ]
+    view = build_signals_view(pd.DataFrame(rows)).signals
+
+    priorities = prioritize_signals_view(view, today="2026-09-15", limit=2)
+    empty = prioritize_signals_view(view, today="2026-09-15", limit=0)
+
+    assert priorities.technical["prediction_id"].tolist() == ["first", "second"]
+    assert empty.table.empty
+    assert empty.technical.empty
 
 
 def test_signal_view_joins_prediction_audit_for_bullish_and_no_signal_rows():

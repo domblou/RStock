@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Mapping
 
 import pandas as pd
@@ -40,7 +41,7 @@ PREDICTION_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "P(Up)", "P(Down)", "Signal",
 )
 SIGNAL_MAIN_COLUMNS = (
-    "Date", "Cible", "Predictors", "Catégorie", "P(Up)", "P(Down)",
+    "Date", "Cible", "Predictors", "P(Up)", "P(Down)", "Catégorie",
 )
 EVALUATED_PREDICTIONS_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "Statut initial", "P(Up)", "P(Down)", "Open", "Close",
@@ -200,12 +201,111 @@ def build_signals_view(
         pd.DataFrame() if predictions is None else predictions,
         ("feature_names", "features", "source_observations"),
     )
-    recent = enriched.tail(limit).iloc[::-1].reset_index(drop=True)
+    if "prediction_date" in enriched:
+        recent = (
+            enriched.assign(
+                _prediction_date_order=pd.to_datetime(
+                    enriched["prediction_date"], errors="coerce", utc=True
+                )
+            )
+            .sort_values(
+                "_prediction_date_order",
+                ascending=False,
+                kind="stable",
+                na_position="last",
+            )
+            .head(limit)
+            .drop(columns="_prediction_date_order")
+            .reset_index(drop=True)
+        )
+    else:
+        recent = enriched.tail(limit).iloc[::-1].reset_index(drop=True)
     actual = recent[recent["category"] == "bullish_signal"].reset_index(drop=True)
     no_signal = recent[recent["category"] == "no_signal"].reset_index(drop=True)
     return SignalResultsView(
         _operational_table(actual, category_column="Catégorie", columns=SIGNAL_MAIN_COLUMNS),
         _operational_table(no_signal, category_column="Catégorie", columns=SIGNAL_MAIN_COLUMNS),
+    )
+
+
+def filter_signal_results_view(
+    view: SignalResultsView,
+    period: str,
+    *,
+    today: date | str | pd.Timestamp | None = None,
+) -> SignalResultsView:
+    """Filter both signal grids to one explicit operational date range."""
+
+    if period == "Tous":
+        return view
+    if period not in {"Aujourd’hui", "7 derniers jours"}:
+        raise ValueError(f"Période de surveillance inconnue : {period}")
+
+    reference = pd.Timestamp(date.today() if today is None else today).normalize()
+    if reference.tzinfo is not None:
+        reference = reference.tz_localize(None)
+    first_date = reference if period == "Aujourd’hui" else reference - timedelta(days=6)
+
+    def filtered(table_view: OperationalTableView) -> OperationalTableView:
+        if table_view.technical.empty or "prediction_date" not in table_view.technical:
+            return OperationalTableView(
+                table_view.table.iloc[0:0].copy(),
+                table_view.technical.iloc[0:0].copy(),
+            )
+        dates = pd.to_datetime(
+            table_view.technical["prediction_date"], errors="coerce", utc=True
+        ).dt.tz_convert(None).dt.normalize()
+        keep = dates.between(first_date, reference, inclusive="both").to_numpy()
+        return OperationalTableView(
+            table_view.table.iloc[keep].reset_index(drop=True),
+            table_view.technical.iloc[keep].reset_index(drop=True),
+        )
+
+    return SignalResultsView(filtered(view.signals), filtered(view.no_signal))
+
+
+def prioritize_signals_view(
+    view: OperationalTableView,
+    *,
+    today: date | str | pd.Timestamp | None = None,
+    limit: int = 3,
+) -> OperationalTableView:
+    """Return at most ``limit`` signals using only date and P(Up) ordering."""
+
+    if limit < 0:
+        raise ValueError("La limite des priorités doit être positive.")
+    if view.technical.empty or limit == 0:
+        return OperationalTableView(
+            view.table.iloc[0:0].copy(),
+            view.technical.iloc[0:0].copy(),
+        )
+
+    reference = pd.Timestamp(date.today() if today is None else today).normalize()
+    if reference.tzinfo is not None:
+        reference = reference.tz_localize(None)
+    dates = pd.to_datetime(
+        _column(view.technical, "prediction_date"), errors="coerce", utc=True
+    ).dt.tz_convert(None).dt.normalize()
+    probabilities = pd.to_numeric(
+        _column(view.technical, "up_probability"), errors="coerce"
+    ).fillna(float("-inf"))
+    order = (
+        pd.DataFrame({
+            "_today": dates.eq(reference),
+            "_up_probability": probabilities,
+            "_source_order": range(len(view.technical)),
+        })
+        .sort_values(
+            ["_today", "_up_probability", "_source_order"],
+            ascending=[False, False, True],
+            kind="stable",
+        )
+        .head(limit)
+        .index
+    )
+    return OperationalTableView(
+        view.table.iloc[order].reset_index(drop=True),
+        view.technical.iloc[order].reset_index(drop=True),
     )
 
 
