@@ -172,8 +172,19 @@ def _summary_text(
     job_type: str,
     summary: Mapping[str, object],
     configuration: Mapping[str, object],
+    status: str,
 ) -> str:
     if job_type == "threshold_parameter_calibration":
+        if status == "pending":
+            return "Calibration des paramètres en attente"
+        if status == "running":
+            return "Calibration des paramètres en cours"
+        if status == "failed":
+            return "Calibration des paramètres échouée"
+        if status == "cancelled":
+            return "Calibration des paramètres annulée"
+        if status == "interrupted":
+            return "Calibration des paramètres interrompue"
         selected = summary.get("selected_configuration")
         if isinstance(selected, Mapping):
             return f"Configuration gagnante : {selected.get('configuration', '—')}"
@@ -284,7 +295,7 @@ def history_row(
         context=_context_text(job_type, configuration, summary, models),
         status=str(status["status"]),
         duration=short_duration(status.get("duration_seconds")),
-        summary=_summary_text(job_type, summary, configuration),
+        summary=_summary_text(job_type, summary, configuration, str(status["status"])),
     )
 
 

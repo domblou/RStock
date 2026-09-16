@@ -150,6 +150,32 @@ def test_threshold_parameter_calibration_appears_with_direct_parent_and_winner()
     assert row.summary == "Configuration gagnante : candidate_03"
 
 
+def test_threshold_parameter_calibration_summary_matches_nonterminal_status():
+    detail = _detail()
+
+    running = history_row(
+        _run("parameter-running", "threshold_parameter_calibration", status="running"),
+        detail,
+        {},
+    )
+    pending = history_row(
+        _run("parameter-pending", "threshold_parameter_calibration", status="pending"),
+        detail,
+        {},
+    )
+
+    assert running.summary == "Calibration des paramètres en cours"
+    assert pending.summary == "Calibration des paramètres en attente"
+
+
+def test_threshold_parameter_calibration_completed_legacy_run_keeps_success_fallback():
+    row = history_row(
+        _run("parameter-completed", "threshold_parameter_calibration"), _detail(), {}
+    )
+
+    assert row.summary == "Calibration des paramètres terminée"
+
+
 def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallback():
     described = _detail(summary={"outcome": "completed"})
     described["configuration"]["run_description"] = "profondeur 2"
