@@ -100,16 +100,14 @@ def filter_runs(
         # before comparing it.  This notably keeps late-evening local runs in
         # "Aujourd’hui" even when their UTC date is already tomorrow.
         reference = pd.Timestamp(now or datetime.now().astimezone())
-        reference = (
-            reference.tz_localize("UTC")
-            if reference.tzinfo is None
-            else reference.tz_convert("UTC")
-        )
+        if reference.tzinfo is None:
+            reference = reference.tz_localize(datetime.now().astimezone().tzinfo)
+        local_timezone = reference.tz
         start = reference.normalize() - pd.Timedelta(days=PERIOD_DAYS[period])
         filtered = [
             run for run in filtered
             if (created := _timestamp(run.get("created_at"))) is not None
-            and created.tz_convert(reference.tz) >= start
+            and created.tz_convert(local_timezone) >= start
         ]
     if model_id is not None:
         if detail_loader is None:

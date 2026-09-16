@@ -24,7 +24,91 @@ Les crochets indiquent les étapes optionnelles.
 
 ---
 
-## 1.1 Propriété des paramètres par étape
+## 1.1 Cycle de vie complet d’un modèle
+
+Le processus s’inscrit dans un cycle : une méthodologie est développée,
+validée sur plusieurs périodes, promue, puis surveillée et réévaluée.
+
+### Phase 1 — Développement
+
+**Univers → Walk-forward récent → Calibration XGBoost → Calibration des
+paramètres de seuils → Calibration des seuils → Holdout**
+
+Objectif : définir une méthodologie et un modèle suffisamment robustes.
+
+### Phase 2 — Validation temporelle
+
+**Même méthodologie → Walk-forward décalé 63 → Walk-forward décalé 126 →
+éventuellement autres périodes**
+
+Objectif : vérifier que la méthodologie ne dépend pas uniquement de la période
+récente. Chaque période décalée est un nouveau Walk-forward ; ses étapes aval
+héritent ensuite de sa date de fin effective.
+
+### Phase 3 — Promotion
+
+Si les résultats demeurent suffisamment cohérents :
+
+**Promotion → Modèle de production → Signaux**
+
+### Phase 4 — Suivi en production
+
+Une fois en production, suivre notamment :
+
+- fréquence des signaux ;
+- précision réalisée ;
+- rendement réalisé ;
+- dérive des probabilités ;
+- stabilité des modèles ;
+- évolution du comportement des marchés.
+
+Les résultats réalisés deviennent progressivement une source de validation plus
+importante que les simulations historiques.
+
+### Phase 5 — Réentraînement périodique
+
+Un modèle n’est pas permanent. À intervalles réguliers, relancer le cycle avec
+les données récentes :
+
+**Nouvelles données → nouveau Walk-forward avec Décalage = 0 → recalibration
+XGBoost si nécessaire → recalibration des paramètres de seuils si nécessaire →
+recalibration des seuils → nouvelle validation temporelle → nouvelle promotion**
+
+Le réentraînement ne signifie pas nécessairement que tous les paramètres doivent
+changer : il vérifie d’abord que la méthodologie existante reste valide.
+
+### Phase 6 — Remplacement ou retrait
+
+Un modèle peut être remplacé ou retiré si sa performance réalisée ou sa stabilité
+se détériore, si les signaux deviennent insuffisants, si son comportement diverge
+des périodes historiques, ou si une nouvelle version démontre une robustesse
+supérieure. Le remplacement est une nouvelle expérience complète, jamais une
+modification silencieuse du modèle actif.
+
+### Vue d’ensemble du processus
+
+**Développement**
+
+Univers → Walk-forward récent → Calibration XGBoost → Calibration des paramètres
+de seuils → Calibration des seuils → Holdout
+
+**Validation**
+
+→ Walk-forward décalé 63 → Walk-forward décalé 126 → comparaison de robustesse
+temporelle
+
+**Production**
+
+→ Promotion → Signaux → Résultats réalisés
+
+**Maintenance**
+
+→ Surveillance → Réentraînement périodique → Nouvelle validation temporelle →
+Nouvelle promotion ou retrait
+
+---
+
+## 1.2 Propriété des paramètres par étape
 
 Chaque étape possède uniquement les paramètres qu’elle est chargée de choisir.
 Lorsqu’un run est dérivé, les décisions scientifiques déjà établies en amont
@@ -199,6 +283,11 @@ Exemple :
 `63`
 
 RStock recule alors la date de fin de 63 séances de marché et reconstruit la même profondeur historique relativement à cette nouvelle date.
+
+Le décalage appartient à la création d'un **nouveau Walk-forward**. Les
+calibrations qui en dérivent héritent de la date de fin effective du
+Walk-forward et ne réappliquent pas le décalage. Pour tester un autre décalage,
+il faut repartir d'un nouveau Walk-forward.
 
 Ce paramètre est particulièrement utile pour tester la robustesse temporelle de la méthodologie.
 
@@ -575,7 +664,7 @@ Proportion des signaux où le marché s’est déplacé significativement dans l
 
 ---
 
-## 11. Analyse de sensibilité au seuil
+## 10.1 Analyse de sensibilité au seuil
 
 L’analyse de sensibilité permet de voir ce qui se serait produit sur le holdout avec d’autres seuils.
 
@@ -598,7 +687,7 @@ Le holdout ne serait alors plus indépendant.
 
 ---
 
-## 12. Synthèse de sensibilité
+## 10.2 Synthèse de sensibilité
 
 La synthèse permet de comparer plusieurs modèles simultanément.
 
@@ -620,6 +709,87 @@ Exemples de diagnostics :
 - `unstable`
 
 Cette information sert à améliorer la **méthodologie générale de calibration**, pas à ajuster individuellement chaque modèle après coup.
+
+---
+
+# 11. Validation temporelle
+
+## 11.1 Rôle du décalage de fin
+
+Le paramètre **Décalage de fin (jours de marché)** appartient au Walk-forward.
+Sa valeur normale est `0` : le Walk-forward utilise alors les données les plus
+récentes disponibles.
+
+Une valeur positive permet de rejouer exactement la même méthodologie sur une
+période antérieure :
+
+- `63` : environ un trimestre de marché plus tôt ;
+- `126` : environ deux trimestres ;
+- `189` : environ trois trimestres.
+
+Le décalage n’est pas un paramètre à optimiser pour obtenir le meilleur résultat.
+Il sert à vérifier la **robustesse temporelle de la méthodologie**.
+
+## 11.2 Processus principal de développement
+
+Le processus normal de construction d’un modèle est :
+
+**Univers → Walk-forward (Décalage = 0) → [Calibration XGBoost] → [Calibration
+des paramètres de seuils] → Calibration des seuils → Holdout → Promotion**
+
+Les étapes entre crochets sont optionnelles. Pendant ce processus, les paramètres
+du Walk-forward sont établis, les paramètres XGBoost et du calibrateur de seuils
+peuvent être calibrés, les seuils finaux sont déterminés et le holdout vérifie la
+généralisation.
+
+Une fois ce processus satisfaisant, la méthodologie est **gelée pour la
+validation temporelle**.
+
+## 11.3 Validation temporelle
+
+Après une méthodologie satisfaisante avec `Décalage = 0`, RStock peut la rejouer
+dans le passé :
+
+**Walk-forward (Décalage = 63) → Calibration XGBoost → Calibration des paramètres
+de seuils → Calibration des seuils → comparaison**
+
+Puis, éventuellement :
+
+**Walk-forward (Décalage = 126) → même chaîne**
+
+L’objectif n’est pas d’obtenir exactement les mêmes métriques, mais de vérifier
+que :
+
+- la méthodologie continue de produire des modèles raisonnables ;
+- les calibrations ne deviennent pas complètement instables ;
+- les performances ne disparaissent pas complètement ;
+- le nombre de modèles admissibles reste cohérent ;
+- les résultats ne dépendent pas d’une seule période favorable.
+
+## 11.4 Règle importante
+
+La validation temporelle ne doit pas devenir une nouvelle boucle de fine-tuning.
+
+À éviter :
+
+1. tester Décalage = 0 ;
+2. modifier les paramètres ;
+3. tester Décalage = 63 ;
+4. modifier encore les paramètres ;
+5. tester Décalage = 126 ;
+6. modifier encore la méthodologie.
+
+Après suffisamment d’itérations, la méthodologie finirait par être optimisée sur
+l’ensemble des périodes historiques utilisées pour la vérifier.
+
+La bonne approche est :
+
+1. développer la méthodologie ;
+2. la figer ;
+3. la rejouer sur plusieurs périodes ;
+4. observer sa robustesse ;
+5. ne revenir au développement que si les résultats montrent un problème général
+   et explicable.
 
 ---
 
@@ -698,6 +868,20 @@ Une évolution naturelle consiste à combiner :
 L’historique permet d’obtenir davantage de profondeur, tandis que les résultats réalisés représentent la validation opérationnelle la plus forte.
 
 Les deux composantes doivent cependant demeurer clairement identifiées.
+
+## Simulations persistées
+
+Chaque simulation terminée est automatiquement enregistrée dans le stockage de
+l’environnement. Elle reste disponible après un rechargement de la page, un
+redémarrage de l’application ou une reconnexion.
+
+La liste « Simulations précédentes » permet de rouvrir une simulation et
+d’afficher ses résultats historiques sans les recalculer. La simulation conserve
+les paramètres effectifs ainsi que les modèles et leur provenance au moment du
+calcul.
+
+Une simulation peut être supprimée depuis cette liste. Cette suppression ne
+modifie ni les modèles, ni les prédictions, ni les signaux.
 
 ---
 

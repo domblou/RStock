@@ -474,6 +474,33 @@ def test_current_parameters_replace_only_the_technical_configuration(tmp_path):
     assert from_current.evaluate_final_holdout == from_run.evaluate_final_holdout
 
 
+def test_current_walk_forward_parameters_keep_offset_of_an_inherited_cutoff(tmp_path):
+    detail = _detail(snapshot={
+        "walk_forward_end_offset_sessions": 63,
+        "walk_forward_min_train_size": 252,
+    })
+    detail["summary"] = {
+        "traceability": {"prepared_market_last_date": "2025-01-31T00:00:00"}
+    }
+    current = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        walk_forward_end_offset_sessions=0,
+        walk_forward_min_train_size=111,
+    )
+
+    duplicated = experiment_spec_from_duplication(
+        walk_forward_duplication_draft("run_original", detail),
+        current_config=current,
+        use_run_config=False,
+        job_type=JobType.WALK_FORWARD,
+    )
+
+    assert duplicated.historical_data_cutoff == "2025-01-31T00:00:00"
+    assert duplicated.config.walk_forward_end_offset_sessions == 63
+    assert duplicated.config.walk_forward_min_train_size == 111
+
+
 def test_current_parameters_are_read_at_submission_after_the_draft_was_created(
     tmp_path,
 ):

@@ -6,7 +6,7 @@ import base64
 import html
 import json
 from dataclasses import asdict, replace
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import altair as alt
@@ -86,7 +86,16 @@ from rstock.application.services import (
     PredictionService,
     SignalService,
 )
+from rstock.application.production_repository import ProductionRepository
+from rstock.application.model_ui import (
+    DEFAULT_MODEL_STATUSES,
+    filter_models,
+    job_domain,
+    job_domain_title,
+    model_filter_options,
+)
 from rstock.application.simulation import SimulationResult, SimulationService
+from rstock.application.simulation_repository import SimulationRepository
 from rstock.application.universes import (
     CONTEXT_UNIVERSE_TYPE,
     SAMPLE_SOURCE,
@@ -357,8 +366,7 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
             st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
             st.rerun()
-    st.subheader("Jobs actifs")
-    _live_job_panel(service)
+    _live_job_panel(service, domain="experiment")
     return True
 
 
@@ -376,13 +384,22 @@ def _duration(value: float | None) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-def _job_panel(service: ExperimentService, *, active_only: bool = True) -> None:
+def _job_panel(
+    service: ExperimentService,
+    *,
+    active_only: bool = True,
+    domain: str | None = None,
+) -> bool:
     runs = service.runs()
     if active_only:
         runs = [run for run in runs if run["status"] in {"pending", "running"}]
+    if domain is not None:
+        runs = [run for run in runs if job_domain(run.get("job_type")) == domain]
     if not runs:
-        st.info("Aucun job actif.")
-        return
+        return False
+    title = job_domain_title(domain) if domain is not None else None
+    if title is not None:
+        st.subheader(title)
     for status in runs:
         run_id = str(status["run_id"])
         detail = service.run(run_id)
@@ -418,10 +435,11 @@ def _job_panel(service: ExperimentService, *, active_only: bool = True) -> None:
                 if st.button("Annuler", key=f"cancel-{run_id}"):
                     service.cancel(run_id)
                     st.rerun()
+    return True
 
 
-def _live_job_panel(service: ExperimentService) -> None:
-    _job_panel(service)
+def _live_job_panel(service: ExperimentService, *, domain: str | None = None) -> bool:
+    return _job_panel(service, domain=domain)
 
 
 if hasattr(st, "fragment"):
@@ -648,8 +666,7 @@ def _experiments(service: ExperimentService) -> None:
         "Les listes se gèrent dans Univers; la sélection résolue et la "
         "configuration sont figées au lancement."
     )
-    st.subheader("Jobs actifs")
-    _live_job_panel(service)
+    _live_job_panel(service, domain="experiment")
 
 
 def _settings() -> None:
@@ -1482,12 +1499,6 @@ def _render_history_detail(
 ) -> None:
     st.divider()
     st.subheader(summary_text if summary_text != "—" else "Détail du run")
-    columns = st.columns(5)
-    columns[0].metric("Type", JOB_LABELS.get(str(status["job_type"]), str(status["job_type"])))
-    columns[1].metric("Date", history_row(status, detail, {}).date_time)
-    columns[2].metric("Statut", str(status["status"]))
-    columns[3].metric("Durée", history_row(status, detail, {}).duration)
-    columns[4].metric("Contexte", context)
     st.caption(f"ID technique : {run_id}")
     _render_resume_controls(run_id, status, detail)
     if (
@@ -2286,6 +2297,8 @@ def _universes_page() -> None:
     selected = _selected_rows(event)
     if selected:
         st.session_state.selected_universe_id = records[selected[0]].universe_id
+    else:
+        st.session_state.pop("selected_universe_id", None)
     _create_universe_panel(service)
     selected_id = st.session_state.get("selected_universe_id")
     available = {record.universe_id for record in records}
@@ -2576,8 +2589,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
     if errors:
         with st.expander("Erreurs opérationnelles récentes"):
             st.json(errors[:10])
-    st.subheader("Jobs actifs")
-    _job_panel(_service())
+    _live_job_panel(_service(), domain="production")
     if surveillance_refresh_decision(runs, polling=polling).final_rerun:
         st.rerun(scope="app")
 
@@ -2600,7 +2612,38 @@ def _models_page() -> None:
     service = ModelService(st.session_state.lab_config.project_root)
     models = service.models()
     if not models:
-        st.info("Aucun candidat production. Promouvez une combinaison qualifiée depuis Historique.")
+        st.info("Aucun candidat production.")
+        return
+    status_options = model_filter_options(models)
+    target_options = sorted({str(model.target) for model in models})
+    filter_columns = st.columns([1.4, 1.2, 1.8])
+    selected_statuses = filter_columns[0].multiselect(
+        "Statut",
+        status_options,
+        default=[status for status in status_options if status in DEFAULT_MODEL_STATUSES],
+        key="models-status-filter",
+    )
+    selected_targets = filter_columns[1].multiselect(
+        "Cible",
+        target_options,
+        key="models-target-filter",
+    )
+    predictor_query = filter_columns[2].text_input(
+        "Pr\u00e9dicteurs",
+        placeholder="Rechercher un pr\u00e9dicteur",
+        key="models-predictor-filter",
+    )
+    visible_models = filter_models(
+        models,
+        statuses=selected_statuses,
+        targets=selected_targets,
+        predictor_query=predictor_query,
+    )
+    st.caption(f"{len(visible_models)} mod\u00e8les affich\u00e9s sur {len(models)}")
+    selected_key = "selected-model-id"
+    if not visible_models:
+        st.info("Aucun mod\u00e8le ne correspond aux filtres.")
+        _live_job_panel(_service(), domain="model")
         return
     table = pd.DataFrame([
         {
@@ -2613,7 +2656,7 @@ def _models_page() -> None:
             "AUC dev médiane": model.development_metrics.get("ROCAUCMedian"),
             "AUC holdout": model.holdout_metrics.get("FinalUpROCAUC"),
         }
-        for model in models
+        for model in visible_models
     ])
     event = st.dataframe(
         table,
@@ -2624,18 +2667,18 @@ def _models_page() -> None:
         key="models-grid",
     )
     selected_rows = _selected_rows(event)
-    selected_key = "selected-model-id"
-    if selected_rows and selected_rows[0] < len(models):
-        st.session_state[selected_key] = models[selected_rows[0]].model_id
-    available_ids = {model.model_id for model in models}
+    if selected_rows and selected_rows[0] < len(visible_models):
+        st.session_state[selected_key] = visible_models[selected_rows[0]].model_id
+    else:
+        st.session_state.pop(selected_key, None)
+    available_ids = {model.model_id for model in visible_models}
     selected_id = st.session_state.get(selected_key)
     if selected_id not in available_ids:
         st.session_state.pop(selected_key, None)
         st.caption("Sélectionnez un modèle dans la grille pour afficher les actions.")
-        st.subheader("Jobs actifs")
-        _live_job_panel(_service())
+        _live_job_panel(_service(), domain="model")
         return
-    selected = next(model for model in models if model.model_id == selected_id)
+    selected = next(model for model in visible_models if model.model_id == selected_id)
     st.markdown(f"**{selected.target} ← {' + '.join(selected.predictors)}**")
     st.caption(selected.model_id)
     if selected.calibrated_signal_threshold is not None:
@@ -2682,8 +2725,7 @@ def _models_page() -> None:
         st.rerun()
     with st.expander("Voir détails"):
         st.json(selected.to_dict())
-    st.subheader("Jobs actifs")
-    _live_job_panel(_service())
+    _live_job_panel(_service(), domain="model")
 
 
 def _history_page() -> None:
@@ -2782,7 +2824,7 @@ def _render_simulation_results(result: SimulationResult) -> None:
     kpis[4].metric("Signaux trouvés", metrics.signals_found)
     kpis[5].metric("Trades exclus", metrics.excluded_trades)
 
-    charts = st.columns([3, 2])
+    charts = st.columns([3, 1])
     with charts[0]:
         st.subheader("Évolution du résultat cumulé")
         if result.cumulative_results.empty:
@@ -2861,8 +2903,186 @@ def _render_simulation_results(result: SimulationResult) -> None:
             st.warning("Couverture partielle : certains trades ont été exclus.")
 
 
-def _simulation_page() -> None:
-    _page_header("Simulation")
+def _simulation_model_snapshots(project_root: Path, result: SimulationResult) -> list[dict[str, object]]:
+    try:
+        models = ProductionRepository(project_root).active_models()
+    except (OSError, ValueError, json.JSONDecodeError):
+        models = []
+    used_ids = set(result.trades.get("Modèle source", pd.Series(dtype=object)).dropna().astype(str))
+    selected = [model for model in models if not used_ids or model.model_id in used_ids]
+    return [model.to_dict() for model in selected]
+
+
+def _simulation_parameters(start_date, end_date, amount, exit_mode, simulation_mode) -> dict[str, object]:
+    return {
+        "start_date": pd.Timestamp(start_date).date().isoformat(),
+        "end_date": pd.Timestamp(end_date).date().isoformat(),
+        "amount_per_signal": float(amount),
+        "exit_mode": str(exit_mode),
+        "simulation_mode": str(simulation_mode),
+    }
+
+
+def _parse_simulation_date(value: object) -> date | None:
+    """Convert persisted simulation dates to the type expected by date_input."""
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _restore_simulation_parameters(parameters: object) -> None:
+    if not isinstance(parameters, dict):
+        return
+    start_date = _parse_simulation_date(parameters.get("start_date"))
+    end_date = _parse_simulation_date(parameters.get("end_date"))
+    if start_date is not None:
+        st.session_state["simulation-start-date"] = start_date
+    if end_date is not None:
+        st.session_state["simulation-end-date"] = end_date
+    amount = parameters.get("amount_per_signal")
+    try:
+        if amount is not None:
+            st.session_state["simulation-amount"] = float(amount)
+    except (TypeError, ValueError):
+        pass
+    exit_mode = parameters.get("exit_mode")
+    if exit_mode in {"Clôture du jour"}:
+        st.session_state["simulation-exit-mode"] = exit_mode
+    simulation_mode = parameters.get("simulation_mode")
+    if simulation_mode in {"Historique", "Prédictions évaluées"}:
+        st.session_state["simulation-mode"] = simulation_mode
+
+
+def _simulation_sidebar(project_root: Path) -> None:
+    repository = SimulationRepository(project_root)
+    records = repository.list_simulations()
+    st.markdown(
+        '<div style="font-size:1.4rem; line-height:1.2; font-weight:600; '
+        'margin-top:50px; margin-bottom:10px;">'
+        "Simulations précédentes"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    selected_record = st.session_state.get("simulation-record")
+    raw_selected_id = (
+        selected_record.get("simulation_id")
+        if isinstance(selected_record, dict)
+        else None
+    )
+    selected_id = str(raw_selected_id) if raw_selected_id else None
+    query = st.text_input(
+        "Rechercher…",
+        key="simulation-search",
+        placeholder="Recherche",
+        label_visibility="collapsed",
+    )
+    visible = [record for record in records if not query or str(record.get("created_at", "")).lower().find(query.lower()) >= 0]
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-simulation-card-"] {
+            border-radius: 12px;
+            margin-bottom: 8px;
+            position: relative;
+        }
+        div[class*="st-key-simulation-card-selected-"] {
+            background: #eef6ff;
+            border-color: #d9eaff;
+        }
+        div[class*="st-key-open-simulation-"] {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+        }
+        div[class*="st-key-open-simulation-"] button {
+            height: 100%;
+            opacity: 0;
+        }
+        div[class*="st-key-delete-simulation-"] {
+            position: relative;
+            z-index: 2;
+        }
+        div[class*="st-key-delete-simulation-"] [data-testid="stMarkdownContainer"] {
+            display: none;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    for record in visible:
+        simulation_id = str(record.get("simulation_id", ""))
+        created = str(record.get("created_at", "")).replace("T", " ")[:16]
+        params = record.get("parameters", {})
+        period = f"{params.get('start_date', '—')} → {params.get('end_date', '—')}"
+        pnl = float(record.get("metrics", {}).get("total_profit_loss", 0.0))
+        selected = (selected_id == simulation_id)
+        card_key = (
+            f"simulation-card-selected-{simulation_id}"
+            if selected
+            else f"simulation-card-{simulation_id}"
+        )
+        status = {"completed": "Terminée"}.get(
+            str(record.get("status", "completed")), str(record.get("status", "—"))
+        )
+        color = "#2f9e44" if pnl >= 0 else "#e03131"
+        amount = f"{float(params.get('amount_per_signal', 0)):,.0f}".replace(",", " ")
+        pnl_text = f"P/L {pnl:+,.0f} $".replace(",", " ")
+        with st.container(border=True, key=card_key):
+            header = st.columns([6, 1], vertical_alignment="center")
+            header[0].markdown(f"**{created}**")
+            delete_requested = header[1].button(
+                "Supprimer",
+                icon=":material/delete:",
+                key=f"delete-simulation-{simulation_id}",
+                help="Supprimer",
+            )
+            st.caption(period)
+            st.caption(f"{amount} $ | {params.get('simulation_mode', '—')}")
+            footer = st.columns([1, 1], vertical_alignment="center")
+            footer[0].markdown(
+                '<span style="background:#d8f3dc; color:#2b8a3e; border-radius:12px; '
+                'padding:3px 10px; font-size:0.85rem; font-weight:600;">'
+                f"{html.escape(status)}</span>",
+                unsafe_allow_html=True,
+            )
+            open_requested = st.button(
+                "Ouvrir la simulation",
+                key=f"open-simulation-{simulation_id}",
+                width="stretch",
+            )
+            footer[1].markdown(
+                f'<div style="text-align:right; color:{color}; font-weight:600;">'
+                f"{pnl_text}</div>",
+                unsafe_allow_html=True,
+            )
+        if delete_requested:
+            repository.delete(simulation_id)
+            if selected:
+                st.session_state.pop("simulation-record", None)
+                st.session_state.pop("simulation-result", None)
+            st.rerun()
+        if open_requested:
+            try:
+                metadata, result = repository.load(simulation_id)
+                st.session_state["simulation-result"] = result
+                st.session_state["simulation-record"] = metadata
+                _restore_simulation_parameters(metadata.get("parameters"))
+                st.rerun()
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                st.error(f"Simulation illisible : {error}")
+    if not records:
+        st.caption("Aucune simulation enregistrée")
+
+
+def _render_simulation_main(project_root: Path) -> None:
     st.caption("Évaluez les signaux haussiers actifs avec les prix réels Open/Close.")
     project_root = st.session_state.lab_config.project_root
     signals = SignalService(project_root).active_history()
@@ -2927,6 +3147,18 @@ def _simulation_page() -> None:
             else:
                 result = service.run(start_date, end_date, float(amount))
             st.session_state["simulation-result"] = result
+            try:
+                metadata = SimulationRepository(project_root).save(
+                    result,
+                    parameters=_simulation_parameters(
+                        start_date, end_date, amount, st.session_state["simulation-exit-mode"], simulation_mode
+                    ),
+                    models=_simulation_model_snapshots(project_root, result),
+                )
+                st.session_state["simulation-record"] = metadata
+                st.rerun()
+            except OSError as error:
+                st.error(f"Simulation calculée mais non persistée : {error}")
         except ValueError as error:
             st.error(str(error))
             st.session_state.pop("simulation-result", None)
@@ -2935,6 +3167,16 @@ def _simulation_page() -> None:
         _render_simulation_results(result)
     else:
         st.info("Configurez la période puis lancez la simulation.")
+
+
+def _simulation_page() -> None:
+    _page_header("Simulation")
+    project_root = st.session_state.lab_config.project_root
+    layout = st.columns([1, 4], gap="medium")
+    with layout[0]:
+        _simulation_sidebar(project_root)
+    with layout[1]:
+        _render_simulation_main(project_root)
 
 
 def _documentation_sections(markdown: str) -> list[tuple[str, str]]:

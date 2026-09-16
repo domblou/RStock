@@ -120,17 +120,35 @@ def _prepared_inputs(
         downloaded.prices = downloaded.prices.loc[
             downloaded.prices.index <= historical_cutoff
         ].copy()
-    offset = spec.config.walk_forward_end_offset_sessions
-    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-        raise ValueError(
-            "Décalage de fin walk-forward invalide : "
-            f"offset demandé={offset!r}; un entier >= 0 est requis."
-        )
-    # A duplicated run's cutoff is already the source run's final effective
-    # date. Applying the configured session offset again would move its
-    # historical period backwards a second time.
     effective_end_date: pd.Timestamp | None = historical_cutoff
-    if historical_cutoff is None and offset > 0:
+    # The offset belongs to the creation of a walk-forward period only. A
+    # descendant receives its already-resolved end date through the cutoff and
+    # must not consult the offset to resolve time. The legacy branch retains
+    # prior behavior for historical derived snapshots without traceability.
+    uses_legacy_derived_offset = (
+        historical_cutoff is None
+        and spec.job_type is not JobType.WALK_FORWARD
+        and any(
+            (
+                spec.source_experiment_run,
+                spec.source_walk_forward_run,
+                spec.source_xgboost_calibration_run,
+                spec.source_threshold_parameter_calibration_run,
+            )
+        )
+    )
+    applies_walk_forward_offset = historical_cutoff is None and (
+        spec.job_type is JobType.WALK_FORWARD or uses_legacy_derived_offset
+    )
+    offset = None
+    if applies_walk_forward_offset:
+        offset = spec.config.walk_forward_end_offset_sessions
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError(
+                "Décalage de fin walk-forward invalide : "
+                f"offset demandé={offset!r}; un entier >= 0 est requis."
+            )
+    if offset is not None and offset > 0:
         available_observations = len(downloaded.prices)
         if downloaded.prices.empty:
             raise ValueError(
@@ -156,10 +174,6 @@ def _prepared_inputs(
             progress_callback=_phase_callback(progress_callback, "data_preparation"),
             cancellation_check=cancellation_check,
         )
-        if historical_cutoff is not None:
-            downloaded.prices = downloaded.prices.loc[
-                downloaded.prices.index <= historical_cutoff
-            ].copy()
         if downloaded.prices.empty:
             raise ValueError(
                 "Décalage de fin walk-forward impossible : "
@@ -184,9 +198,13 @@ def _prepared_inputs(
         effective_end_date = pd.Timestamp(prepared.index.max()).normalize()
     if effective_end_date is not None:
         prepared.attrs["effective_end_date"] = effective_end_date.isoformat()
-    prepared.attrs["walk_forward_end_offset_sessions"] = offset
+    # Retained as provenance only; descendants with a cutoff did not use it to
+    # resolve their period.
+    prepared.attrs["walk_forward_end_offset_sessions"] = (
+        spec.config.walk_forward_end_offset_sessions
+    )
     prepared.attrs["symbols_used"] = len(downloaded.symbols)
-    if offset > 0:
+    if offset is not None and offset > 0:
         minimum_observations = (
             spec.config.walk_forward_min_train_size
             + spec.config.final_holdout_size

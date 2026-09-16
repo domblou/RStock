@@ -395,7 +395,9 @@ Test sur les prefiltres qui aapliquée un prédcateur à la fois peut éliminer 
 ✅ Traiment des combinaisons de walk-forward en batch
 A. plusieurs petits univers cohérents → B. variation du contexte → C. horizons différents → D. targets différents → E. régimes → F. nouvelles familles de modèles.
 Option encore plus robuste : séparer l’UI et le worker.
+-Donc ma réponse est : oui, probablement un jour, mais sous forme d’une nouvelle expérience distincte de “Calibration des paramètres walk-forward”, et avec une philosophie de robustesse temporelle, pas d’optimisation de performance brute.
 - Persister les simulations
+⬜ Ajout de nouveau modèle comme xgboost et généralisation de la calibration
 ⬜ Promotion et disqualification automatique de modèle
 ⬜ Calculer les profits non réalisés sur signaux positifs
 ⬜ Positions / portefeuille éventuel

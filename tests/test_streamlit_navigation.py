@@ -70,6 +70,9 @@ def test_simulation_page_offers_both_modes_with_evaluated_predictions_as_default
     page = source.split("def _simulation_page", 1)[1].split(
         "def _primary_pages", 1
     )[0]
+    page += source.split("def _render_simulation_main", 1)[1].split(
+        "def _documentation_sections", 1
+    )[0]
 
     assert '_page_header("Simulation")' in page
     assert 'SignalService(project_root).active_history()' in page
@@ -86,6 +89,79 @@ def test_simulation_page_offers_both_modes_with_evaluated_predictions_as_default
     assert "transaction indépendante. Tous les modèles actifs sont utilisés." in page
     assert "**Tous les modèles actifs**" not in page
     assert 'st.Page(_simulation_page, title="Simulation"' in source
+
+
+def test_simulation_page_exposes_persisted_history_sidebar_without_replacing_main_controls():
+    source = APP.read_text(encoding="utf-8")
+    assert "SimulationRepository(project_root)" in source
+    assert 'font-size:1.4rem' in source
+    assert 'margin-top:50px' in source
+    assert 'margin-bottom:10px' in source
+    assert 'placeholder="Recherche"' in source
+    assert "Simulations précédentes" in source
+    assert '"+ Nouvelle simulation", key="new-simulation"' not in source
+    assert 'key=f"delete-simulation-{simulation_id}"' in source
+    assert 'icon=":material/delete:"' in source
+    assert '"Ouvrir la simulation",' in source
+    assert 'position: absolute;' in source
+    assert 'div[class*="st-key-open-simulation-"] button' in source
+    assert '"completed": "Terminée"' in source
+    assert 'pnl_text = f"P/L {pnl:+,.0f} $"' in source
+    assert 'simulation-card-selected-{simulation_id}' in source
+    assert 'SimulationRepository(project_root).save(' in source
+    assert 'st.session_state["simulation-record"] = metadata\n                st.rerun()' in source
+    assert 'st.columns([1, 4], gap="medium")' in source
+
+
+def test_simulation_result_distribution_matches_data_quality_panel_width():
+    source = APP.read_text(encoding="utf-8")
+    results = source.split("def _render_simulation_results", 1)[1].split(
+        "def _simulation_model_snapshots", 1
+    )[0]
+
+    assert "charts = st.columns([3, 1])" in results
+    assert "details, quality = st.columns([3, 1])" in results
+
+
+def test_simulation_sidebar_does_not_offer_a_new_simulation_button():
+    source = APP.read_text(encoding="utf-8")
+    sidebar = source.split("def _simulation_sidebar", 1)[1].split(
+        "def _render_simulation_main", 1
+    )[0]
+
+    assert 'key="new-simulation"' not in sidebar
+    assert '"+ Nouvelle simulation"' not in sidebar
+
+
+def test_simulation_sidebar_derives_card_selection_from_the_persisted_record():
+    source = APP.read_text(encoding="utf-8")
+    sidebar = source.split("def _simulation_sidebar", 1)[1].split(
+        "def _render_simulation_main", 1
+    )[0]
+
+    assert 'selected_record = st.session_state.get("simulation-record")' in sidebar
+    assert 'raw_selected_id = (' in sidebar
+    assert 'selected_record.get("simulation_id")' in sidebar
+    assert 'selected_id = str(raw_selected_id) if raw_selected_id else None' in sidebar
+    assert 'selected = (selected_id == simulation_id)' in sidebar
+    assert sidebar.index('selected_id = str(raw_selected_id) if raw_selected_id else None') < sidebar.index(
+        "for record in visible:"
+    )
+    assert 'st.session_state["simulation-record"] = metadata' in sidebar
+    assert 'st.session_state.pop("simulation-record", None)' in sidebar
+
+
+def test_persisted_simulation_widget_values_are_restored_with_widget_types():
+    source = APP.read_text(encoding="utf-8")
+    restoration = source.split("def _parse_simulation_date", 1)[1].split(
+        "def _simulation_sidebar", 1
+    )[0]
+
+    assert "date.fromisoformat(value[:10])" in restoration
+    assert 'st.session_state["simulation-start-date"] = start_date' in restoration
+    assert 'st.session_state["simulation-end-date"] = end_date' in restoration
+    assert 'st.session_state["simulation-amount"] = float(amount)' in restoration
+    assert 'metadata.get("parameters")' in source
 
 
 def test_documentation_follows_simulation_and_loads_the_markdown_guide_read_only():
@@ -273,6 +349,12 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
         assert history_kind in source
     assert 'selection_mode="single-row"' in models_page
     assert 'key="models-grid"' in models_page
+    assert '"Statut"' in models_page
+    assert '"Cible"' in models_page
+    assert 'filter_models' in models_page
+    assert 'models-status-filter' in models_page
+    assert 'models-target-filter' in models_page
+    assert 'models-predictor-filter' in models_page
     assert 'st.selectbox("Modèle"' not in models_page
     assert '"selected-model-id"' in models_page
     assert "Sélectionnez un modèle dans la grille pour afficher les actions." in models_page
@@ -501,6 +583,18 @@ def test_generic_history_detail_uses_the_persisted_summary_as_its_title():
     )[0]
 
     assert 'st.subheader(summary_text if summary_text != "—" else "Détail du run")' in detail
+    assert 'st.caption(f"ID technique : {run_id}")' in detail
+
+
+def test_non_walk_forward_details_hide_generic_run_metadata():
+    source = APP.read_text(encoding="utf-8")
+    detail = source.split("def _render_history_detail", 1)[1].split(
+        "def _history_navigation", 1
+    )[0]
+
+    assert 'columns = st.columns(5)' not in detail
+    assert 'columns[0].metric("Type"' not in detail
+    assert 'columns[4].metric("Contexte"' not in detail
     assert 'st.caption(f"ID technique : {run_id}")' in detail
 
 

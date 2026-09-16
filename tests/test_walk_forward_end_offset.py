@@ -97,6 +97,112 @@ def test_historical_cutoff_is_applied_before_data_preparation(monkeypatch, tmp_p
     assert not (prepared.index > cutoff).any()
 
 
+@pytest.mark.parametrize(
+    "job_type",
+    [
+        JobType.XGBOOST_CALIBRATION,
+        JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        JobType.THRESHOLD_CALIBRATION,
+    ],
+)
+def test_derived_calibrations_use_cutoff_without_reapplying_offset(
+    monkeypatch, tmp_path, job_type
+):
+    sessions = xcals.get_calendar("XNYS").sessions_in_range("2021-01-01", "2026-01-30")
+    calls = []
+    _install_market_loader(monkeypatch, sessions, calls)
+    cutoff = pd.Timestamp(sessions[-100])
+    spec = replace(
+        _spec(tmp_path, 63),
+        job_type=job_type,
+        historical_data_cutoff=cutoff.isoformat(),
+        source_walk_forward_run="wf-parent",
+    )
+
+    monkeypatch.setattr(
+        "rstock.application.workflows.offset_market_session",
+        lambda *args, **kwargs: pytest.fail("a derived cutoff must not apply offset"),
+    )
+    prepared, _, _ = _prepared_experiment(spec, None, None)
+
+    assert calls == [{"history_days": None, "as_of": cutoff.date()}]
+    assert pd.Timestamp(prepared.attrs["effective_end_date"]) == cutoff
+
+
+def test_xgboost_to_threshold_parameter_to_threshold_keeps_one_cutoff_dataset(
+    monkeypatch, tmp_path
+):
+    sessions = xcals.get_calendar("XNYS").sessions_in_range("2021-01-01", "2026-01-30")
+    calls = []
+    _install_market_loader(monkeypatch, sessions, calls)
+    cutoff = pd.Timestamp(sessions[-100])
+    monkeypatch.setattr(
+        "rstock.application.workflows.offset_market_session",
+        lambda *args, **kwargs: pytest.fail("a derived cutoff must not apply offset"),
+    )
+    specs = (
+        replace(
+            _spec(tmp_path, 63),
+            job_type=JobType.XGBOOST_CALIBRATION,
+            historical_data_cutoff=cutoff.isoformat(),
+            source_walk_forward_run="wf-parent",
+        ),
+        replace(
+            _spec(tmp_path, 0),
+            job_type=JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            historical_data_cutoff=cutoff.isoformat(),
+            source_walk_forward_run="wf-parent",
+            source_xgboost_calibration_run="xgb-parent",
+        ),
+        replace(
+            _spec(tmp_path, 126),
+            job_type=JobType.THRESHOLD_CALIBRATION,
+            historical_data_cutoff=cutoff.isoformat(),
+            source_walk_forward_run="wf-parent",
+            source_xgboost_calibration_run="xgb-parent",
+            source_threshold_parameter_calibration_run="parameter-parent",
+        ),
+    )
+
+    prepared = [_prepared_experiment(spec, None, None)[0] for spec in specs]
+
+    assert [pd.Timestamp(frame.attrs["effective_end_date"]) for frame in prepared] == [
+        cutoff,
+        cutoff,
+        cutoff,
+    ]
+    assert len({prepared_dataset_hash(frame) for frame in prepared}) == 1
+    assert calls == [{"history_days": None, "as_of": cutoff.date()}] * 3
+
+
+def test_legacy_derived_run_without_cutoff_preserves_offset_behavior(
+    monkeypatch, tmp_path
+):
+    sessions = xcals.get_calendar("XNYS").sessions_in_range("2021-01-01", "2026-01-30")
+    calls = []
+    _install_market_loader(monkeypatch, sessions, calls)
+    original = __import__(
+        "rstock.application.workflows", fromlist=["offset_market_session"]
+    ).offset_market_session
+    offset_calls = []
+
+    def track_offset(*args, **kwargs):
+        offset_calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("rstock.application.workflows.offset_market_session", track_offset)
+    spec = replace(
+        _spec(tmp_path, 63),
+        job_type=JobType.XGBOOST_CALIBRATION,
+        source_walk_forward_run="legacy-wf-parent",
+    )
+
+    prepared, _, _ = _prepared_experiment(spec, None, None)
+
+    assert len(offset_calls) == 1
+    assert prepared.index.max() == pd.Timestamp(sessions[-64])
+
+
 def test_historical_duplication_keeps_parent_data_and_prefilter_results(
     monkeypatch, tmp_path
 ):

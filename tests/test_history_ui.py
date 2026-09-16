@@ -85,6 +85,33 @@ def test_today_uses_the_local_calendar_day_for_utc_persisted_runs():
     assert [run["run_id"] for run in filtered] == ["late-local-run"]
 
 
+def test_today_excludes_utc_timestamp_that_is_still_previous_local_day():
+    eastern = timezone(timedelta(hours=-4))
+    local_now = datetime(2026, 9, 12, 0, 30, tzinfo=eastern)
+    runs = [
+        {
+            "run_id": "previous-local-day",
+            "job_type": "walk_forward",
+            "status": "completed",
+            # 23:00 on September 11 in Eastern time.
+            "created_at": "2026-09-12T03:00:00+00:00",
+        },
+        {
+            "run_id": "current-local-day",
+            "job_type": "walk_forward",
+            "status": "completed",
+            # 00:30 on September 12 in Eastern time.
+            "created_at": "2026-09-12T04:30:00+00:00",
+        },
+    ]
+
+    filtered = filter_runs(
+        runs, allowed_types=EXPERIMENT_JOB_TYPES, period="Aujourd’hui", now=local_now
+    )
+
+    assert [run["run_id"] for run in filtered] == ["current-local-day"]
+
+
 def test_history_rows_display_run_id_and_direct_walk_forward_source():
     normal = history_row(
         _run("opaque-guid", "market_update"),

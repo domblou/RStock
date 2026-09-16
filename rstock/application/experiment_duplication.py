@@ -278,6 +278,16 @@ def resolve_stage_configuration(
     if use_run_config:
         return historical
     if target_job_type is JobType.WALK_FORWARD:
+        # A cutoff is already the effective end date of the source lineage.
+        # Current target-stage settings may change the walk-forward protocol,
+        # but must not make the persisted offset contradict that frozen period.
+        if draft.get("historical_data_cutoff") is not None:
+            return replace(
+                current_config,
+                walk_forward_end_offset_sessions=(
+                    historical.walk_forward_end_offset_sessions
+                ),
+            )
         return current_config
     if target_job_type is JobType.XGBOOST_CALIBRATION:
         # The calibration grid and selection protocol are fixed in calibration.py.
