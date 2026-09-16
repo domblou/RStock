@@ -397,6 +397,7 @@ A. plusieurs petits univers cohérents → B. variation du contexte → C. horiz
 Option encore plus robuste : séparer l’UI et le worker.
 -Donc ma réponse est : oui, probablement un jour, mais sous forme d’une nouvelle expérience distincte de “Calibration des paramètres walk-forward”, et avec une philosophie de robustesse temporelle, pas d’optimisation de performance brute.
 - Persister les simulations
+- Le WF matérialise encore la population entière avant ce batching, avec une limite max_generated_sets, actuellement 100 000 pour les nouveaux runs.
 ⬜ Ajout de nouveau modèle comme xgboost et généralisation de la calibration
 ⬜ Promotion et disqualification automatique de modèle
 URGENT : TAG sur les RUNS
