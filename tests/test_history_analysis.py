@@ -448,96 +448,90 @@ def test_threshold_calibration_quality_filters_combine_with_direction_and_signal
     assert filtered["Combinaison"].tolist() == ["AAA<-BBB"]
 
 
-def test_threshold_promotion_guidance_blocks_ineligible_holdout_rows_without_mutation():
-    results = pd.DataFrame([{
+def _promotion_row(**changes):
+    row = {
         "Combinaison": "AAA<-BBB", "Cible": "AAA", "Predictors": "BBB",
-        "Direction": "Up", "Seuil calibré": 0.60, "Signaux holdout": 19,
-        "AUC holdout": 0.70, "Précision holdout": 0.75,
-        "Rendement directionnel moyen": 0.02,
-        "Fréquence mouvement opposé": 0.10,
-    }])
+        "Direction": "Up", "Seuil calibré": 0.60, "Signaux holdout": 20,
+        "AUC holdout": 0.60, "Précision holdout": 0.40,
+        "Rendement directionnel moyen": 0.001,
+        "Fréquence mouvement opposé": 0.30,
+    }
+    row.update(changes)
+    return row
+
+
+def _selected_threshold(status="selected"):
+    return {"AAA<-BBB": {"Up": {"status": status, "threshold": 0.60}}}
+
+
+def test_threshold_promotion_guidance_accepts_all_minimum_criteria_without_mutation():
+    results = pd.DataFrame([_promotion_row()])
     original = results.copy(deep=True)
 
-    guided = threshold_promotion_guidance(
-        results,
-        pd.DataFrame([{
-            "Combinaison": "AAA<-BBB", "Direction": "Up", "Diagnostic": "near_optimal"
-        }]),
-        {"AAA<-BBB": {"Up": {"status": "selected", "threshold": 0.60}}},
-    )
+    guided = threshold_promotion_guidance(results, _selected_threshold())
 
-    assert guided.iloc[0]["Statut promotion"] == "Non candidat"
-    assert pd.isna(guided.iloc[0]["Score promotion"])
-    assert "Trop peu de signaux" in guided.iloc[0]["Raison promotion"]
+    assert guided.iloc[0]["Statut promotion"] == "Candidat"
+    assert guided.iloc[0]["Raison"] == "Tous les critères passent"
+    assert "Score promotion" not in guided
     assert guided.columns[:6].tolist() == [
-        "Combinaison", "Cible", "Predictors", "Direction", "Statut promotion", "Score promotion"
+        "Combinaison", "Cible", "Predictors", "Direction", "Statut promotion", "Raison"
     ]
+    assert filter_threshold_calibration_results(
+        guided, direction="Toutes", min_signals=0, promotion_status="Candidat"
+    )["Combinaison"].tolist() == ["AAA<-BBB"]
     pd.testing.assert_frame_equal(results, original)
 
 
-def test_threshold_promotion_score_is_normalized_and_maps_statuses_and_filters():
-    rows = [
-        ("STRONG<-BBB", 0.70, 0.75, 0.015, 0.15, 60, "near_optimal"),
-        ("REVIEW<-BBB", 0.65, 0.60, 0.010, 0.15, 50, "lower_threshold_better"),
-        ("LOW<-BBB", 0.56, 0.51, 0.001, 0.29, 21, "unstable"),
-    ]
-    results = pd.DataFrame([{
-        "Combinaison": set_name, "Cible": set_name.split("<-")[0], "Predictors": "BBB",
-        "Direction": "Up", "Seuil calibré": 0.60, "AUC holdout": auc,
-        "Précision holdout": precision, "Rendement directionnel moyen": directional_return,
-        "Fréquence mouvement opposé": opposite, "Signaux holdout": signals,
-    } for set_name, auc, precision, directional_return, opposite, signals, _ in rows])
-    sensitivity = pd.DataFrame([{
-        "Combinaison": set_name, "Direction": "Up", "Diagnostic": diagnostic
-    } for set_name, *_, diagnostic in rows])
-    selected = {
-        set_name: {"Up": {"status": "selected", "threshold": 0.60}}
-        for set_name, *_ in rows
-    }
+@pytest.mark.parametrize(
+    ("changes", "selection_status", "expected_reason"),
+    [
+        ({"AUC holdout": 0.59}, "selected", "AUC 0,59 < 0,60"),
+        ({"Précision holdout": 0.39}, "selected", "Précision 39 % < 40 %"),
+        ({"Signaux holdout": 19}, "selected", "19 signaux < 20"),
+        ({"Rendement directionnel moyen": 0.0}, "selected", "Rendement <= 0"),
+        ({"Fréquence mouvement opposé": 0.31}, "selected", "Mouvements opposés 31 % > 30 %"),
+        ({"Seuil calibré": None}, "selected", "Seuil calibré absent"),
+        ({}, "rejected", "Seuil non sélectionné"),
+    ],
+)
+def test_threshold_promotion_guidance_rejects_each_failed_criterion(
+    changes, selection_status, expected_reason
+):
+    guided = threshold_promotion_guidance(
+        pd.DataFrame([_promotion_row(**changes)]),
+        _selected_threshold(selection_status),
+    )
 
-    guided = threshold_promotion_guidance(results, sensitivity, selected)
-    statuses = dict(zip(guided["Combinaison"], guided["Statut promotion"], strict=True))
-    scores = dict(zip(guided["Combinaison"], guided["Score promotion"], strict=True))
+    assert guided.iloc[0]["Statut promotion"] == "Non candidat"
+    assert expected_reason in guided.iloc[0]["Raison"]
 
-    assert statuses == {
-        "STRONG<-BBB": "Candidat fort",
-        "REVIEW<-BBB": "À examiner",
-        "LOW<-BBB": "Non candidat",
-    }
-    assert scores["STRONG<-BBB"] == pytest.approx(96.2)
-    assert scores["REVIEW<-BBB"] == pytest.approx(73.8)
-    assert all(0 <= score <= 100 for score in scores.values())
+
+def test_threshold_promotion_guidance_rejects_missing_required_metric():
+    row = _promotion_row()
+    row.pop("AUC holdout")
+
+    guided = threshold_promotion_guidance(pd.DataFrame([row]), _selected_threshold())
+
+    assert guided.iloc[0]["Statut promotion"] == "Non candidat"
+    assert "AUC holdout absente" in guided.iloc[0]["Raison"]
+
+
+def test_threshold_promotion_guidance_reports_all_failed_criteria_and_filters_candidates():
+    guided = threshold_promotion_guidance(
+        pd.DataFrame([_promotion_row(
+            **{"Précision holdout": 0.36, "Signaux holdout": 18, "AUC holdout": 0.54}
+        )]),
+        _selected_threshold(),
+    )
+
+    reason = guided.iloc[0]["Raison"]
+    assert "Précision 36 % < 40 %" in reason
+    assert "18 signaux < 20" in reason
+    assert "AUC 0,54 < 0,60" in reason
+    assert ";" in reason
     assert filter_threshold_calibration_results(
-        guided, direction="Toutes", min_signals=0, promotion_status="Candidat fort"
-    )["Combinaison"].tolist() == ["STRONG<-BBB"]
-
-
-def test_threshold_promotion_uses_the_revised_normalization_bounds():
-    assert history_analysis._promotion_scale(0.55, 0.55, 0.70) == 0.0
-    assert history_analysis._promotion_scale(0.70, 0.55, 0.70) == 1.0
-    assert history_analysis._promotion_scale(0.40, 0.40, 0.65) == 0.0
-    assert history_analysis._promotion_scale(0.65, 0.40, 0.65) == 1.0
-    assert history_analysis._promotion_scale(0.00, 0.00, 0.015) == 0.0
-    assert history_analysis._promotion_scale(0.015, 0.00, 0.015) == 1.0
-    assert history_analysis._promotion_signal_scale(20) == 0.5
-    assert history_analysis._promotion_signal_scale(50) == 1.0
-    assert history_analysis._promotion_signal_scale(80) == 1.0
-
-    results = pd.DataFrame([{
-        "Combinaison": "AAA<-BBB", "Cible": "AAA", "Predictors": "BBB",
-        "Direction": "Up", "Seuil calibré": 0.60, "AUC holdout": 0.716,
-        "Précision holdout": 0.55, "Rendement directionnel moyen": 0.0077,
-        "Fréquence mouvement opposé": 0.10, "Signaux holdout": 20,
-    }])
-    sensitivity = pd.DataFrame([{
-        "Combinaison": "AAA<-BBB", "Direction": "Up", "Diagnostic": "near_optimal",
-    }])
-    selected = {"AAA<-BBB": {"Up": {"status": "selected", "threshold": 0.60}}}
-
-    guided = threshold_promotion_guidance(results, sensitivity, selected)
-
-    assert guided.iloc[0]["Score promotion"] == pytest.approx(77.3)
-    assert guided.iloc[0]["Statut promotion"] == "Candidat fort"
+        guided, direction="Toutes", min_signals=0, promotion_status="Candidat"
+    ).empty
 
 
 def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation():

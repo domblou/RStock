@@ -272,6 +272,42 @@ class RunRepository:
         self.write_json(run_id, "status.json", status)
         return status
 
+    def recover_interrupted_completion(
+        self, run_id: str, *, worker_pid: int
+    ) -> dict[str, Any]:
+        """Complete only the interrupted attempt still owned by its worker.
+
+        This deliberately remains outside ``STATUS_TRANSITIONS``: callers must
+        prove worker ownership and successful publication before using it.
+        """
+
+        status = self.status(run_id)
+        current = JobStatus(status["status"])
+        if current is not JobStatus.INTERRUPTED:
+            raise ValueError(
+                f"Run {run_id} is not recoverable from status {current.value}"
+            )
+        if status.get("pid") != worker_pid:
+            raise ValueError(f"Run {run_id} is not owned by worker {worker_pid}")
+        if status.get("cancellation_requested") or self.cancellation_requested(run_id):
+            raise ValueError(f"Run {run_id} has a pending cancellation request")
+        now = utc_now()
+        started = status.get("started_at") or status["created_at"]
+        status.update(
+            status=JobStatus.COMPLETED.value,
+            finished_at=now,
+            duration_seconds=max(
+                0.0,
+                (
+                    datetime.fromisoformat(now)
+                    - datetime.fromisoformat(str(started))
+                ).total_seconds(),
+            ),
+            error=None,
+        )
+        self.write_json(run_id, "status.json", status)
+        return status
+
     def prepare_resume(self, run_id: str) -> dict[str, Any]:
         status = self.status(run_id)
         current = JobStatus(status["status"])

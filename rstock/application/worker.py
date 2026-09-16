@@ -184,6 +184,45 @@ class RunLease:
         finally:
             self.acquired = False
 
+    def owned_by_current_process(self) -> bool:
+        if not self.acquired:
+            return False
+        try:
+            owner = json.loads((self.path / "owner.json").read_text(encoding="utf-8"))
+            return owner.get("run_id") == self.run_id and int(owner["pid"]) == os.getpid()
+        except (FileNotFoundError, OSError, ValueError, KeyError, json.JSONDecodeError):
+            return False
+
+
+def _publishing_completed(repository: RunRepository, run_id: str) -> bool:
+    progress = repository.progress(run_id)
+    return progress.get("stage") == "completed" and any(
+        phase.get("name") == "publishing" and phase.get("status") == "completed"
+        for phase in progress.get("phase_history", [])
+        if isinstance(phase, dict)
+    )
+
+
+def _complete_owned_run(
+    repository: RunRepository, run_id: str, run_lease: RunLease
+) -> None:
+    current = JobStatus(repository.status(run_id)["status"])
+    if current is JobStatus.RUNNING:
+        repository.transition(run_id, JobStatus.COMPLETED)
+        return
+    if (
+        current is JobStatus.INTERRUPTED
+        and run_lease.owned_by_current_process()
+        and _publishing_completed(repository, run_id)
+    ):
+        repository.recover_interrupted_completion(run_id, worker_pid=os.getpid())
+        repository.append_log(
+            run_id,
+            "Recovered inconsistent interrupted status after successful publication",
+        )
+        return
+    repository.transition(run_id, JobStatus.COMPLETED)
+
 
 def execute_run(
     repository: RunRepository,
@@ -238,7 +277,7 @@ def execute_run(
             reporter.phase_started("publishing")
             reporter.phase_completed("publishing")
             reporter.complete_workflow()
-            repository.transition(run_id, JobStatus.COMPLETED)
+            _complete_owned_run(repository, run_id, run_lease)
             if checkpoint is not None:
                 checkpoint.finish_attempt("completed")
             repository.append_log(run_id, "Worker completed after publication recovery")
@@ -259,7 +298,7 @@ def execute_run(
         working.rename(results)
         reporter.phase_completed("publishing")
         reporter.complete_workflow()
-        repository.transition(run_id, JobStatus.COMPLETED)
+        _complete_owned_run(repository, run_id, run_lease)
         if checkpoint is not None:
             checkpoint.finish_attempt("completed")
         repository.append_log(run_id, "Worker completed")

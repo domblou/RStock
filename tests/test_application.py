@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -12,6 +13,7 @@ import pytest
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 import rstock.application.repository as repository_module
+import rstock.application.runner as runner_module
 from rstock.application.repository import RunRepository
 from rstock.application.runner import ProgressReporter, RunService
 from rstock.application.worker import RunLease, SlotLease, execute_run
@@ -720,14 +722,201 @@ def test_resume_refuses_legacy_run_without_checkpoint(tmp_path):
         RunService(repository, backend=FakeBackend()).resume(run_id)
 
 
-def test_dead_running_worker_is_exposed_as_interrupted(tmp_path):
+def _age_running_run(repository, run_id, *, seconds=120):
+    old = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    status = repository.status(run_id)
+    status["started_at"] = old
+    repository.write_json(run_id, "status.json", status)
+    progress = repository.progress(run_id)
+    progress["updated_at"] = old
+    repository.write_json(run_id, "progress.json", progress)
+
+
+def test_transient_negative_pid_probe_just_after_running_is_ignored(
+    monkeypatch, tmp_path
+):
     repository = RunRepository(tmp_path / "runs")
     run_id = repository.create(_spec(tmp_path))
-    repository.transition(run_id, JobStatus.RUNNING, pid=999_999_999)
+    repository.transition(run_id, JobStatus.RUNNING, pid=4321)
+    monkeypatch.setattr(runner_module, "_pid_alive", lambda _: False)
 
     detail = RunService(repository, backend=FakeBackend()).get(run_id)
 
-    assert detail["status"]["status"] == "interrupted"
+    assert detail["status"]["status"] == "running"
+
+
+def test_dead_running_worker_is_interrupted_only_after_durable_confirmation(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.RUNNING, pid=999_999_999)
+    _age_running_run(repository, run_id)
+    monkeypatch.setattr(runner_module, "INTERRUPTION_CONFIRMATION_SECONDS", 0.0)
+    service = RunService(repository, backend=FakeBackend())
+
+    first = service.get(run_id)
+    second = service.get(run_id)
+
+    assert first["status"]["status"] == "running"
+    assert second["status"]["status"] == "interrupted"
+
+
+def test_recent_heartbeat_prevents_interruption_of_pid_negative_run(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.RUNNING, pid=999_999_999)
+    status = repository.status(run_id)
+    status["started_at"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=2)
+    ).isoformat()
+    repository.write_json(run_id, "status.json", status)
+    monkeypatch.setattr(runner_module, "_pid_alive", lambda _: False)
+    monkeypatch.setattr(runner_module, "INTERRUPTION_CONFIRMATION_SECONDS", 0.0)
+    service = RunService(repository, backend=FakeBackend())
+
+    service.get(run_id)
+    detail = service.get(run_id)
+
+    assert detail["status"]["status"] == "running"
+
+
+def test_live_worker_lease_protects_long_phase_without_progress(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.RUNNING, pid=os.getpid())
+    _age_running_run(repository, run_id)
+    lease = RunLease(repository, run_id)
+    lease.acquire()
+    probes = 0
+
+    def transient_primary_failure(_):
+        nonlocal probes
+        probes += 1
+        return probes % 2 == 0
+
+    monkeypatch.setattr(runner_module, "_pid_alive", transient_primary_failure)
+    service = RunService(repository, backend=FakeBackend())
+    try:
+        assert service.get(run_id)["status"]["status"] == "running"
+        assert service.list()[0]["status"] == "running"
+    finally:
+        lease.release()
+
+
+@pytest.mark.parametrize(
+    "job_type",
+    [JobType.THRESHOLD_PARAMETER_CALIBRATION, JobType.THRESHOLD_CALIBRATION],
+)
+def test_calibration_worker_completes_under_concurrent_polling(
+    monkeypatch, tmp_path, job_type
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path, job_type=job_type))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def calibration(spec, output, progress, cancellation):
+        entered.set()
+        assert release.wait(timeout=2)
+        (output / "result.txt").write_text(spec.job_type.value, encoding="utf-8")
+        return {"job_type": spec.job_type.value}
+
+    worker = threading.Thread(
+        target=execute_run,
+        args=(repository, run_id, 1),
+        kwargs={"registry": WorkflowRegistry({job_type: calibration})},
+    )
+    worker.start()
+    assert entered.wait(timeout=2)
+    real_pid_alive = runner_module._pid_alive
+    first_probe = True
+
+    def one_false_negative(pid):
+        nonlocal first_probe
+        if first_probe:
+            first_probe = False
+            return False
+        return real_pid_alive(pid)
+
+    monkeypatch.setattr(runner_module, "_pid_alive", one_false_negative)
+    service = RunService(RunRepository(repository.root), backend=FakeBackend())
+    assert service.get(run_id)["status"]["status"] == "running"
+    assert service.list()[0]["status"] == "running"
+    release.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert repository.status(run_id)["status"] == "completed"
+
+
+def test_worker_recovers_false_interrupted_status_after_publishing(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+
+    def succeed_after_false_interruption(spec, output, progress, cancellation):
+        (output / "result.txt").write_text("ready", encoding="utf-8")
+        repository.transition(
+            run_id,
+            JobStatus.INTERRUPTED,
+            error="Le processus worker n’est plus actif.",
+        )
+        return {"job_type": spec.job_type.value}
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry(
+            {JobType.WALK_FORWARD: succeed_after_false_interruption}
+        ),
+    )
+
+    status = repository.status(run_id)
+    assert status["status"] == "completed"
+    assert status["error"] is None
+    assert repository.progress(run_id)["workflow_percent"] == 100.0
+    assert "Recovered inconsistent interrupted status" in "\n".join(
+        repository.log_tail(run_id, lines=100)
+    )
+
+
+def test_repository_does_not_generally_allow_interrupted_to_completed(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.RUNNING, pid=123)
+    repository.transition(run_id, JobStatus.INTERRUPTED)
+
+    with pytest.raises(ValueError, match="Invalid job transition"):
+        repository.transition(run_id, JobStatus.COMPLETED)
+
+
+def test_polling_reader_tolerates_worker_completion_during_interruption_decision(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    repository.transition(run_id, JobStatus.RUNNING, pid=999_999_999)
+    _age_running_run(repository, run_id)
+    monkeypatch.setattr(runner_module, "INTERRUPTION_CONFIRMATION_SECONDS", 0.0)
+    service = RunService(repository, backend=FakeBackend())
+    service.get(run_id)
+    original_transition = repository.transition
+
+    def worker_wins(identifier, target, **kwargs):
+        if target is JobStatus.INTERRUPTED:
+            original_transition(identifier, JobStatus.COMPLETED)
+        return original_transition(identifier, target, **kwargs)
+
+    monkeypatch.setattr(repository, "transition", worker_wins)
+
+    detail = service.get(run_id)
+
+    assert detail["status"]["status"] == "completed"
 
 
 def test_attempt_history_survives_failed_then_successful_resume(tmp_path):

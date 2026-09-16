@@ -24,6 +24,9 @@ from rstock.checkpoints import (
 
 
 ACTIVE_STATUSES = {JobStatus.PENDING.value, JobStatus.RUNNING.value}
+INTERRUPTION_GRACE_SECONDS = 15.0
+INTERRUPTION_HEARTBEAT_STALE_SECONDS = 30.0
+INTERRUPTION_CONFIRMATION_SECONDS = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +96,37 @@ class RunService:
         self.repository = repository
         self.backend = backend or LocalProcessBackend()
         self.max_concurrent_heavy_jobs = max_concurrent_heavy_jobs
+        self._interruption_observations: dict[str, tuple[object, float]] = {}
+        self._interruption_lock = threading.Lock()
+
+    @staticmethod
+    def _timestamp_age_seconds(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            timestamp = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+
+    def _worker_lease_active(self, run_id: str, expected_pid: object) -> bool:
+        owner_path = self.repository.run_directory(run_id) / ".worker.lock" / "owner.json"
+        try:
+            import json
+
+            owner = json.loads(owner_path.read_text(encoding="utf-8"))
+            owner_pid = int(owner["pid"])
+        except (FileNotFoundError, OSError, ValueError, KeyError, json.JSONDecodeError):
+            return False
+        if owner.get("run_id") != run_id or str(owner_pid) != str(expected_pid):
+            return False
+        return _pid_alive(owner_pid)
+
+    def _forget_interruption_observation(self, run_id: str) -> None:
+        with self._interruption_lock:
+            self._interruption_observations.pop(run_id, None)
 
     @contextmanager
     def _submission_lock(self):
@@ -229,14 +263,60 @@ class RunService:
 
     def _refresh_interrupted(self, run_id: str) -> dict[str, object]:
         status = self.repository.status(run_id)
-        if status.get("status") == JobStatus.RUNNING.value and not _pid_alive(
-            status.get("pid")
+        if status.get("status") != JobStatus.RUNNING.value:
+            self._forget_interruption_observation(run_id)
+            return status
+
+        pid = status.get("pid")
+        if _pid_alive(pid):
+            self._forget_interruption_observation(run_id)
+            return status
+
+        started_age = self._timestamp_age_seconds(
+            status.get("started_at") or status.get("created_at")
+        )
+        if started_age is None or started_age < INTERRUPTION_GRACE_SECONDS:
+            self._forget_interruption_observation(run_id)
+            return status
+
+        progress = self.repository.progress(run_id)
+        heartbeat_age = self._timestamp_age_seconds(progress.get("updated_at"))
+        if (
+            heartbeat_age is not None
+            and heartbeat_age < INTERRUPTION_HEARTBEAT_STALE_SECONDS
         ):
+            self._forget_interruption_observation(run_id)
+            return status
+
+        if self._worker_lease_active(run_id, pid):
+            self._forget_interruption_observation(run_id)
+            return status
+
+        now = time.monotonic()
+        with self._interruption_lock:
+            previous = self._interruption_observations.get(run_id)
+            if previous is None or previous[0] != pid:
+                self._interruption_observations[run_id] = (pid, now)
+                return status
+            if now - previous[1] < INTERRUPTION_CONFIRMATION_SECONDS:
+                return status
+            self._interruption_observations.pop(run_id, None)
+
+        # Re-read after the confirmation window so an UI reader never applies a
+        # decision made from a stale RUNNING snapshot.
+        current = self.repository.status(run_id)
+        if current.get("status") != JobStatus.RUNNING.value or current.get("pid") != pid:
+            return current
+        try:
             status = self.repository.transition(
                 run_id,
                 JobStatus.INTERRUPTED,
                 error="Le processus worker n’est plus actif.",
             )
+        except ValueError:
+            # The worker may have completed or cancellation may have won after
+            # the final read. A polling read must not surface that benign race.
+            status = self.repository.status(run_id)
         return status
 
     def get(self, run_id: str) -> dict[str, object]:

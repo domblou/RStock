@@ -40,8 +40,13 @@ THRESHOLD_CALIBRATION_COLUMNS = (
 )
 PROMOTION_GUIDANCE_COLUMNS = (
     "Combinaison", "Cible", "Predictors", "Direction", "Statut promotion",
-    "Score promotion",
+    "Raison",
 )
+
+MIN_HOLDOUT_SIGNALS = 20
+MIN_HOLDOUT_AUC = 0.60
+MIN_HOLDOUT_PRECISION = 0.40
+MAX_OPPOSITE_MOVEMENT_FREQUENCY = 0.30
 
 DEFAULT_SENSITIVITY_THRESHOLD_MIN = 0.10
 DEFAULT_SENSITIVITY_THRESHOLD_MAX = 0.60
@@ -822,139 +827,84 @@ def threshold_calibration_table(
     return pd.DataFrame(rows).loc[:, columns]
 
 
-def _promotion_scale(value: object, minimum: float, maximum: float) -> float:
-    """Normalize one existing metric onto [0, 1] with explicit clipping."""
-
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if pd.isna(numeric):
-        return 0.0
-    return float(np.clip((float(numeric) - minimum) / (maximum - minimum), 0.0, 1.0))
-
-
-def _promotion_opposite_scale(value: object) -> float:
-    """Map 10% opposite moves to 1 and 30% to 0, with clipping."""
-
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if pd.isna(numeric):
-        return 0.0
-    return float(np.clip((0.30 - float(numeric)) / 0.20, 0.0, 1.0))
-
-
-def _promotion_signal_scale(value: object) -> float:
-    """Map 20 holdout signals to 0.5 and 50 signals to 1.0."""
-
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if pd.isna(numeric):
-        return 0.0
-    return float(np.clip(0.5 + (float(numeric) - 20.0) / 60.0, 0.0, 1.0))
-
-
-def _promotion_sensitivity_scale(diagnostic: object) -> float:
-    return {
-        "near_optimal": 1.0,
-        "higher_threshold_better": 0.65,
-        "lower_threshold_better": 0.65,
-        "unstable": 0.20,
-    }.get(str(diagnostic), 0.50)
-
-
-def _promotion_blockers(
+def _promotion_reasons(
     row: pd.Series, selected_by_set: Mapping[str, Any]
 ) -> list[str]:
     set_name = str(row.get("Combinaison", ""))
     direction = str(row.get("Direction", ""))
     selection = _selection_for(selected_by_set, set_name, direction)
     threshold = pd.to_numeric(pd.Series([row.get("Seuil calibré")]), errors="coerce").iloc[0]
-    valid_threshold = not pd.isna(threshold) and (
-        not selection or str(selection.get("status", "")).lower() == "selected"
-    )
-    blockers: list[str] = []
-    if not valid_threshold:
-        blockers.append("Seuil calibré non admissible")
-    checks = (
-        ("Signaux holdout", 20, "Trop peu de signaux"),
-        ("AUC holdout", 0.55, "AUC insuffisante"),
-        ("Rendement directionnel moyen", 0.0, "Rendement négatif"),
-    )
-    for column, limit, reason in checks:
+    reasons: list[str] = []
+    if pd.isna(threshold):
+        reasons.append("Seuil calibré absent")
+    elif str(selection.get("status", "")).lower() != "selected":
+        reasons.append("Seuil non sélectionné")
+
+    values: dict[str, float] = {}
+    for column in (
+        "Signaux holdout",
+        "AUC holdout",
+        "Précision holdout",
+        "Rendement directionnel moyen",
+        "Fréquence mouvement opposé",
+    ):
         value = pd.to_numeric(pd.Series([row.get(column)]), errors="coerce").iloc[0]
         if pd.isna(value):
-            blockers.append("Métriques holdout incomplètes")
-        elif (column == "Rendement directionnel moyen" and value <= limit) or (
-            column != "Rendement directionnel moyen" and value < limit
-        ):
-            blockers.append(reason)
-    opposite = pd.to_numeric(
-        pd.Series([row.get("Fréquence mouvement opposé")]), errors="coerce"
-    ).iloc[0]
-    if pd.isna(opposite):
-        blockers.append("Métriques holdout incomplètes")
-    elif opposite > 0.30:
-        blockers.append("Mouvement opposé trop fréquent")
-    return list(dict.fromkeys(blockers))
+            reasons.append(f"{column} absente")
+        else:
+            values[column] = float(value)
+
+    signals = values.get("Signaux holdout")
+    if signals is not None and signals < MIN_HOLDOUT_SIGNALS:
+        reasons.append(f"{signals:.0f} signaux < {MIN_HOLDOUT_SIGNALS}")
+    auc = values.get("AUC holdout")
+    if auc is not None and auc < MIN_HOLDOUT_AUC:
+        reasons.append(f"AUC {auc:.2f} < {MIN_HOLDOUT_AUC:.2f}".replace(".", ","))
+    precision = values.get("Précision holdout")
+    if precision is not None and precision < MIN_HOLDOUT_PRECISION:
+        reasons.append(
+            f"Précision {precision:.0%} < {MIN_HOLDOUT_PRECISION:.0%}".replace("%", " %")
+        )
+    directional_return = values.get("Rendement directionnel moyen")
+    if directional_return is not None and directional_return <= 0:
+        reasons.append("Rendement <= 0")
+    opposite = values.get("Fréquence mouvement opposé")
+    if opposite is not None and opposite > MAX_OPPOSITE_MOVEMENT_FREQUENCY:
+        reasons.append(
+            "Mouvements opposés "
+            f"{opposite:.0%} > {MAX_OPPOSITE_MOVEMENT_FREQUENCY:.0%}".replace("%", " %")
+        )
+    return reasons
 
 
 def threshold_promotion_guidance(
     results: pd.DataFrame,
-    sensitivity_summary: pd.DataFrame,
     selected_by_set: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Add read-only, manual-promotion guidance from holdout and sensitivity data."""
+    """Add read-only candidate guidance from fixed holdout acceptance rules."""
 
     if results.empty:
         return results.copy()
     selected = selected_by_set or {}
-    sensitivity = sensitivity_summary.copy()
-    if {"Combinaison", "Direction", "Diagnostic"}.issubset(sensitivity.columns):
-        sensitivity = sensitivity.loc[:, ["Combinaison", "Direction", "Diagnostic"]]
-        table = results.merge(sensitivity, on=["Combinaison", "Direction"], how="left")
-    else:
-        table = results.copy()
-        table["Diagnostic"] = pd.NA
-
+    table = results.copy()
     statuses: list[str] = []
-    scores: list[float | None] = []
     reasons: list[str] = []
     for _, row in table.iterrows():
-        blockers = _promotion_blockers(row, selected)
+        blockers = _promotion_reasons(row, selected)
         if blockers:
             statuses.append("Non candidat")
-            scores.append(None)
-            reasons.append(" · ".join(blockers[:2]))
+            reasons.append(" ; ".join(blockers))
             continue
-        auc = _promotion_scale(row.get("AUC holdout"), 0.55, 0.70)
-        precision = _promotion_scale(row.get("Précision holdout"), 0.40, 0.65)
-        directional_return = _promotion_scale(
-            row.get("Rendement directionnel moyen"), 0.0, 0.015
-        )
-        opposite = _promotion_opposite_scale(row.get("Fréquence mouvement opposé"))
-        signals = _promotion_signal_scale(row.get("Signaux holdout"))
-        sensitivity_score = _promotion_sensitivity_scale(row.get("Diagnostic"))
-        score = round(100 * (
-            0.25 * auc + 0.20 * precision + 0.20 * directional_return
-            + 0.15 * opposite + 0.10 * signals + 0.10 * sensitivity_score
-        ), 1)
-        scores.append(score)
-        status = "Candidat fort" if score >= 75 else "À examiner" if score >= 60 else "Non candidat"
-        statuses.append(status)
-        reason_parts = [
-            "AUC forte" if auc >= 0.50 else "AUC limite",
-            "rendement positif",
-            "seuil stable" if str(row.get("Diagnostic")) == "near_optimal" else "sensibilité à examiner",
-        ]
-        if signals < 0.50:
-            reason_parts.append("volume limité")
-        reasons.append(" · ".join(reason_parts))
+        statuses.append("Candidat")
+        reasons.append("Tous les critères passent")
 
     table["Statut promotion"] = statuses
-    table["Score promotion"] = scores
-    table["Raison promotion"] = reasons
+    table["Raison"] = reasons
     ordered = [
         *PROMOTION_GUIDANCE_COLUMNS,
         *[column for column in table.columns if column not in {
-            *PROMOTION_GUIDANCE_COLUMNS, "Diagnostic", "Raison promotion",
+            *PROMOTION_GUIDANCE_COLUMNS,
         }],
-        "Raison promotion",
     ]
     return table.loc[:, ordered]
 
@@ -1050,7 +1000,7 @@ def filter_threshold_calibration_results(
     table = results.copy()
     if direction in {"Up", "Down"} and "Direction" in table:
         table = table[table["Direction"].astype(str) == direction]
-    if promotion_status in {"Candidat fort", "À examiner", "Non candidat"}:
+    if promotion_status in {"Candidat", "Non candidat"}:
         table = table[table.get("Statut promotion", pd.Series("", index=table.index)) == promotion_status]
     if "Signaux holdout" in table:
         table = table[

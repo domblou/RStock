@@ -1131,19 +1131,7 @@ def _render_threshold_calibration_promotion(
         )
     )
     holdout_predictions = load_threshold_holdout_predictions(project_root, run_id)
-    promotion_sensitivity = threshold_sensitivity_summary(
-        results,
-        holdout_predictions,
-        up_target_threshold=float(rstock_config.get("intraday_target_threshold", 0.01)),
-        down_target_threshold=float(rstock_config.get("intraday_down_threshold", 0.01)),
-        minimum_robust_signals=minimum_robust_signals,
-        sensitivity_threshold_min=float(st.session_state.sensitivity_threshold_min),
-        sensitivity_threshold_max=float(st.session_state.sensitivity_threshold_max),
-        sensitivity_threshold_step=float(st.session_state.sensitivity_threshold_step),
-    )
-    results = threshold_promotion_guidance(
-        results, promotion_sensitivity, selected_by_set
-    )
+    results = threshold_promotion_guidance(results, selected_by_set)
     filter_defaults = {
         f"threshold-direction-{run_id}": "Up",
         f"threshold-min-signals-{run_id}": 20,
@@ -1168,8 +1156,6 @@ def _render_threshold_calibration_promotion(
     sort_options = [
         "Précision holdout", "AUC holdout", "Rendement directionnel moyen"
     ]
-    if "Score promotion" in results:
-        sort_options.append("Score promotion")
     if "Score" in results:
         sort_options.append("Score")
     sort_key = f"threshold-sort-{run_id}"
@@ -1182,7 +1168,7 @@ def _render_threshold_calibration_promotion(
     )
     promotion_status = filters[3].selectbox(
         "Statut promotion",
-        ["Tous", "Candidat fort", "À examiner", "Non candidat"],
+        ["Tous", "Candidat", "Non candidat"],
         key=f"threshold-promotion-status-{run_id}",
     )
     quality_filters = st.columns(4)
@@ -1218,9 +1204,8 @@ def _render_threshold_calibration_promotion(
         promotion_status=promotion_status,
         sort_by=sort_by,
     )
-    displayed = filtered.drop(columns=["Raison promotion"], errors="ignore")
     selection = st.dataframe(
-        displayed, hide_index=True, width="stretch", on_select="rerun",
+        filtered, hide_index=True, width="stretch", on_select="rerun",
         selection_mode="single-row", key=f"threshold-results-{run_id}",
     )
     st.subheader("Synthèse de sensibilité des seuils")
@@ -1274,7 +1259,7 @@ def _render_threshold_calibration_promotion(
         return
     st.caption(
         "Aide à la décision de promotion : "
-        f"{chosen.get('Raison promotion', 'Métriques insuffisantes.')}"
+        f"{chosen.get('Raison', 'Métriques insuffisantes.')}"
     )
     set_name = str(chosen.get("Combinaison", ""))
     selected_direction = str(chosen.get("Direction", ""))

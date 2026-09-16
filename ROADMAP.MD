@@ -399,6 +399,7 @@ Option encore plus robuste : séparer l’UI et le worker.
 - Persister les simulations
 ⬜ Ajout de nouveau modèle comme xgboost et généralisation de la calibration
 ⬜ Promotion et disqualification automatique de modèle
+URGENT : TAG sur les RUNS
 ⬜ Calculer les profits non réalisés sur signaux positifs
 ⬜ Positions / portefeuille éventuel
 ⬜ Automatisation quotidienne
