@@ -126,7 +126,10 @@ Un ancien snapshot dans lequel ces champs n’existent pas ne doit jamais recevo
 Sémantique historique :
 
 ```text
-walk_forward_max_combinations_per_batch = None
+walk_forward_max_combinations_per_batch absent
+→ capacité historique explicite de 2 200 000 combinaisons par batch
+
+walk_forward_max_combinations_per_batch = None explicitement persisté
 → comportement historique mono-run
 
 xgboost_global_max_qualified_combinations = None

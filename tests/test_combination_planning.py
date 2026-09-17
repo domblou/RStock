@@ -147,6 +147,21 @@ def test_preview_real_150_target_example_requires_51_batches():
     assert preview.effective_batch_count is None
 
 
+def test_preview_uses_configured_small_batch_capacity():
+    targets = [f"T{index:03d}" for index in range(150)]
+    contexts = [f"C{index:02d}" for index in range(15)]
+    plan = CombinationPlan([*targets, *contexts], 3, target_symbols=targets)
+
+    preview = build_combination_preview(
+        plan,
+        context_symbols=contexts,
+        max_combinations_per_batch=10_000,
+    )
+
+    assert preview.max_combinations_per_batch == 10_000
+    assert preview.preview_batch_count == 11_030
+
+
 def test_null_historical_capacity_means_one_monolithic_preview_batch():
     plan = CombinationPlan(["A", "B", "C"], 2)
 

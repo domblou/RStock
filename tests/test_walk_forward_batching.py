@@ -63,6 +63,14 @@ def test_manifest_reserves_ids_before_materializing_children_and_is_idempotent(t
     assert manifest["preview_batch_count"] == 3
     assert manifest["prefiltered_combination_count"] == 6
     assert manifest["effective_batch_count"] == 3
+    assert manifest["max_combinations_per_batch"] == 2
+    batch_indices = [
+        combination_index
+        for batch in manifest["batches"]
+        for combination_index in range(batch["range_start"], batch["range_stop"])
+    ]
+    assert batch_indices == list(range(plan.count()))
+    assert len(batch_indices) == len(set(batch_indices))
 
     materialize_reservations(
         repository, manifest=manifest, reservations=reservations
@@ -252,3 +260,9 @@ def test_batched_parent_runs_children_and_publishes_canonical_results(
     assert (results / "final_holdout.csv").exists()
     detail = RunService(repository).get(parent_id)
     assert len(detail["walk_forward_batches"]) == 2
+    manifest = detail["walk_forward_batch_manifest"]
+    assert manifest["max_combinations_per_batch"] == 1
+    assert [
+        (batch["range_start"], batch["range_stop"])
+        for batch in manifest["batches"]
+    ] == [(0, 1), (1, 2)]

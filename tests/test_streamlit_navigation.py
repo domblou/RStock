@@ -419,14 +419,23 @@ def test_settings_and_history_expose_resumable_walk_forward_controls():
         "def _render_history_detail", 1
     )[0]
 
-    for label in ("Batch préfiltre", "Batch walk-forward", "Batch holdout final"):
+    for label in (
+        "Batch préfiltre",
+        "Batch walk-forward",
+        "Batch holdout final",
+        "Taille maximale d’un batch de combinaisons",
+    ):
         assert label in settings
     for field in (
         "predictor_prefilter_batch_size",
         "walk_forward_batch_size",
         "final_holdout_batch_size",
+        "walk_forward_max_combinations_per_batch",
     ):
         assert field in settings
+    assert (
+        "Contrôle uniquement le découpage des combinaisons en batches" in settings
+    )
     assert "Reprendre le run" in detail
     assert "Relancer depuis le début" in detail
     assert "checkpoint_error" in detail

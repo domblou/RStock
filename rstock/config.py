@@ -198,7 +198,9 @@ DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
     "walk_forward_end_offset_sessions": 63,
     "max_generated_sets": 1_000_000_000,
-    "walk_forward_max_combinations_per_batch": None,
+    # Batch execution was introduced with the fixed capacity below. Snapshots
+    # created before the field was persisted must retain that capacity.
+    "walk_forward_max_combinations_per_batch": 2_200_000,
     "xgboost_global_max_qualified_combinations": None,
     "threshold_parameter_calibration_max_models": None,
 }

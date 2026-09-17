@@ -46,10 +46,15 @@ def test_sensitivity_threshold_settings_are_persisted_as_ui_settings(tmp_path):
     assert loaded_ui["sensitivity_threshold_step"] == 0.02
 
 
+def test_walk_forward_batch_capacity_default_is_2_200_000():
+    assert DEFAULT_CONFIG.walk_forward_max_combinations_per_batch == 2_200_000
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
         ("walk_forward_max_combinations_per_batch", 0),
+        ("walk_forward_max_combinations_per_batch", -1),
         ("xgboost_global_max_qualified_combinations", 0),
         ("threshold_parameter_calibration_max_models", 1),
         ("threshold_parameter_calibration_max_models", 501),

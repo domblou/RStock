@@ -792,7 +792,7 @@ def _settings() -> None:
                 "0 = données les plus récentes."
             ),
         )
-        b1, b2, b3 = st.columns(3)
+        b1, b2, b3, b4 = st.columns(4)
         prefilter_batch_size = b1.number_input(
             "Batch préfiltre",
             min_value=1,
@@ -810,6 +810,19 @@ def _settings() -> None:
             min_value=1,
             value=current.final_holdout_batch_size,
             help="Nombre de modèles admissibles évalués entre deux checkpoints holdout.",
+        )
+        max_combinations_per_batch = b4.number_input(
+            "Taille maximale d’un batch de combinaisons",
+            min_value=1,
+            value=(
+                current.walk_forward_max_combinations_per_batch
+                if current.walk_forward_max_combinations_per_batch is not None
+                else DEFAULT_CONFIG.walk_forward_max_combinations_per_batch
+            ),
+            help=(
+                "Contrôle uniquement le découpage des combinaisons en batches; "
+                "ne change ni les combinaisons générées ni les critères du modèle."
+            ),
         )
 
         st.subheader("Pré-filtrage des prédicteurs")
@@ -1003,6 +1016,9 @@ def _settings() -> None:
                 predictor_prefilter_batch_size=int(prefilter_batch_size),
                 walk_forward_batch_size=int(walk_forward_batch_size),
                 final_holdout_batch_size=int(final_holdout_batch_size),
+                walk_forward_max_combinations_per_batch=int(
+                    max_combinations_per_batch
+                ),
                 predictor_prefilter_enabled=bool(prefilter_enabled),
                 predictor_prefilter_top_n=int(prefilter_top_n),
                 predictor_prefilter_min_median_auc=float(prefilter_median_auc),

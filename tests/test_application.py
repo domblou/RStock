@@ -171,11 +171,28 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
     assert restored.combination_plan_sha256 is None
     assert restored.combination_range_start is None
     assert restored.combination_range_stop is None
-    assert restored.config.walk_forward_max_combinations_per_batch is None
+    assert restored.config.walk_forward_max_combinations_per_batch == 2_200_000
     assert restored.config.xgboost_global_max_qualified_combinations is None
     assert restored.config.threshold_parameter_calibration_max_models is None
     assert restored.fingerprint == hashlib.sha256(canonical.encode()).hexdigest()
     assert restored.to_dict()["schema_version"] == 1
+
+
+def test_walk_forward_batch_capacity_is_serialized_with_the_experiment(tmp_path):
+    spec = replace(
+        _spec(tmp_path),
+        config=replace(
+            _spec(tmp_path).config,
+            walk_forward_max_combinations_per_batch=10_000,
+        ),
+    )
+
+    restored = ExperimentSpec.from_dict(spec.to_dict())
+
+    assert restored.config.walk_forward_max_combinations_per_batch == 10_000
+    assert restored.to_dict()["rstock_config"][
+        "walk_forward_max_combinations_per_batch"
+    ] == 10_000
 
 
 def test_new_pipeline_fields_and_combination_range_are_part_of_snapshot_identity(
