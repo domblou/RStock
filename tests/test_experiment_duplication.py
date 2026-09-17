@@ -566,10 +566,29 @@ def test_duplication_can_change_walk_forward_to_a_compatible_experimental_job(
     assert from_current.config.xgb_seed == 99
     assert from_run.source_walk_forward_run == "run_original"
     assert from_current.source_walk_forward_run == "run_original"
+    assert from_run.calibration_sampling_policy_version == 2
+    assert from_current.calibration_sampling_policy_version == 2
     for field in ("target_symbols", "context_symbols", "predictor_symbols"):
         assert getattr(from_run, field) == tuple(draft[field])
         assert getattr(from_current, field) == tuple(draft[field])
     assert detail == _detail(snapshot={"xgb_seed": 99})
+
+
+def test_same_stage_historical_calibration_replay_keeps_v1_sampling(tmp_path):
+    draft = walk_forward_duplication_draft("historical-xgb", _detail())
+    draft.update(
+        job_type="xgboost_calibration",
+        source_walk_forward_run="historical-wf",
+        calibration_sampling_policy_version=1,
+    )
+    duplicated = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+        job_type=JobType.XGBOOST_CALIBRATION,
+    )
+
+    assert duplicated.calibration_sampling_policy_version == 1
 
 
 def test_walk_forward_to_xgboost_current_parameters_keep_upstream_baseline(tmp_path):

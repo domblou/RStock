@@ -8,6 +8,7 @@ import pytest
 from rstock.config import DEFAULT_CONFIG
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.combinations import generate_symbol_sets
+from rstock.calibration_sampling import GLOBAL_STRATIFIED_V2
 from rstock.features import prepare_dataset
 from rstock.modeling import XGBoostParameters
 from rstock.threshold_calibration import (
@@ -806,6 +807,37 @@ def test_both_eligible_directions_still_apply_frozen_thresholds(monkeypatch):
     assert result.run_configuration["outcome"] == "completed"
     assert result.run_configuration["holdout_evaluated"] is True
     assert not result.holdout_metrics.empty
+
+
+def test_final_threshold_v2_uses_every_qualified_set_without_resampling(monkeypatch):
+    prepared = pd.DataFrame(
+        {"placeholder": np.arange(20)},
+        index=pd.bdate_range("2025-01-01", periods=20),
+    )
+    generated = generate_symbol_sets(["AAA", "BBB", "CCC"], 1)
+    sampled_sizes = []
+
+    def fake_probabilities(development, sampled, *args, **kwargs):
+        sampled_sizes.append(len(sampled))
+        return _predictions()
+
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        fake_probabilities,
+    )
+    result = run_controlled_threshold_calibration(
+        prepared,
+        generated,
+        _config(final_holdout_size=3),
+        combinations_per_target=1,
+        sampling_policy=GLOBAL_STRATIFIED_V2,
+        evaluate_final_holdout=False,
+    )
+
+    assert sampled_sizes == [len(generated)]
+    assert result.run_configuration["sampling_manifest"]["sample_size"] == len(
+        generated
+    )
 
 
 def test_threshold_workflow_summary_reports_no_eligible_threshold(monkeypatch, tmp_path):

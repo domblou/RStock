@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -13,9 +14,11 @@ import numpy as np
 import pandas as pd
 
 from rstock.calibration import run_controlled_calibration, write_calibration_results
+from rstock.calibration_sampling import policy_name
 from rstock.calendars import offset_market_session
 from rstock.checkpoints import CheckpointManager
 from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets
+from rstock.combination_planning import CombinationPlan, build_combination_plan
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
 from rstock.modeling import (
@@ -48,11 +51,25 @@ from rstock.walk_forward import (
     evaluate_walk_forward,
     write_walk_forward_results,
 )
-from rstock.streaming_walk_forward import run_streamed_walk_forward
+from rstock.streaming_walk_forward import (
+    run_streamed_walk_forward,
+    run_streamed_walk_forward_batch,
+)
 
-from .domain import ExperimentSpec, JobType
+from .domain import ExperimentSpec, JobStatus, JobType
+from .end_to_end import run_end_to_end
+from .orchestration_runtime import execute_child
+from .processes import process_alive
 from .production_repository import ProductionRepository
 from .repository import RunRepository
+from .walk_forward_batches import (
+    PREFILTER_POLICY_VERSION,
+    build_manifest,
+    load_manifest,
+    materialize_reservations,
+    persist_or_validate_manifest,
+    prefilter_digest,
+)
 from .production_services import (
     DailyPredictionService,
     OperationalUniverseService,
@@ -297,7 +314,7 @@ def _require_exploitable_prefilter(univariate: object) -> None:
 
 
 def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFrame | None:
-    """Reuse qualified source sets for a duplicated threshold calibration.
+    """Reuse the global qualified population from a source walk-forward.
 
     A prefiltered walk-forward run and a calibration rebuilt from the full
     universe do not evaluate the same models.  When duplication records its
@@ -310,9 +327,9 @@ def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFra
     runs = RunRepository(spec.config.project_root / "runs")
     status = runs.status(source_run)
     if status.get("job_type") != JobType.WALK_FORWARD.value:
-        raise ValueError("Threshold calibration source must be a walk-forward run")
+        raise ValueError("Calibration source must be a walk-forward run")
     if status.get("status") != "completed":
-        raise ValueError("Threshold calibration source walk-forward is not completed")
+        raise ValueError("Calibration source walk-forward is not completed")
     source_spec = runs.load_spec(source_run)
     frozen_fields = (
         "target_symbols", "context_symbols", "predictor_symbols", "calendar",
@@ -327,7 +344,7 @@ def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFra
         qualification.get("Eligible", pd.Series(False, index=qualification.index))
         .map(lambda value: value is True or str(value).strip().lower() in {"true", "1", "yes"})
     ]
-    rows: list[list[object]] = []
+    rows_by_set: dict[str, list[object]] = {}
     for value in eligible.get("Set", pd.Series(dtype=object)):
         try:
             symbols = json.loads(str(value))
@@ -335,7 +352,10 @@ def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFra
             raise ValueError("Source walk-forward contains an invalid set identifier") from error
         if not isinstance(symbols, list) or len(symbols) < 2:
             raise ValueError("Source walk-forward contains an invalid qualified set")
-        rows.append([str(symbol) for symbol in symbols])
+        normalized = [str(symbol) for symbol in symbols]
+        set_id = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+        rows_by_set.setdefault(set_id, normalized)
+    rows = list(rows_by_set.values())
     if not rows:
         raise ValueError("Source walk-forward has no qualified combinations")
     width = max(len(row) for row in rows)
@@ -497,12 +517,19 @@ def _resumable_walk_forward(
 ) -> dict[str, Any]:
     """Production walk-forward path backed by versioned run checkpoints."""
 
+    if spec.config.walk_forward_max_combinations_per_batch is not None:
+        return _planned_walk_forward(
+            spec, output, progress_callback, cancellation_check
+        )
+
     run_directory = output.parent
     checkpoint = CheckpointManager(
         run_directory,
         run_id=run_directory.name,
         job_type=spec.job_type.value,
-        configuration_fingerprint=spec.fingerprint,
+        configuration_fingerprint=RunRepository(
+            run_directory.parent
+        ).configuration_fingerprint(run_directory.name, fallback=spec.fingerprint),
         batch_sizes={
             "predictor_prefilter_walk_forward": (
                 spec.config.predictor_prefilter_batch_size
@@ -721,20 +748,53 @@ def _resumable_walk_forward(
     }
 
 
+def _prepared_calibration_population(
+    spec: ExperimentSpec,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    source_generated = _qualified_sets_from_walk_forward_source(spec)
+    if source_generated is None:
+        prepared, generated, _ = _prepared_experiment(
+            spec, progress_callback, cancellation_check
+        )
+        return prepared, generated, False
+    prepared, _, _, _ = _prepared_inputs(
+        spec, progress_callback, cancellation_check
+    )
+    _phase(progress_callback, "combination_generation", "started")
+    _phase(
+        progress_callback,
+        "combination_generation",
+        "completed",
+        combinations=len(source_generated),
+        source_walk_forward_run=spec.source_walk_forward_run,
+    )
+    return prepared, source_generated, True
+
+
 def _xgboost_calibration(
     spec: ExperimentSpec,
     output: Path,
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
-    prepared, generated, _ = _prepared_experiment(
+    prepared, generated, qualified_source = _prepared_calibration_population(
         spec, progress_callback, cancellation_check
+    )
+    sampling_policy = policy_name(
+        spec.calibration_sampling_policy_version,
+        qualified_walk_forward_source=qualified_source,
     )
     result = run_controlled_calibration(
         prepared,
         generated,
         spec.config,
         combinations_per_target=spec.combinations_per_target,
+        sampling_policy=sampling_policy,
+        global_max_combinations=(
+            spec.config.xgboost_global_max_qualified_combinations
+        ),
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
@@ -752,6 +812,9 @@ def _xgboost_calibration(
         "result_files": sorted(path.name for path in output.iterdir()),
         **period,
         "traceability": traceability,
+        "sampling_manifest": _json_value(
+            result.run_configuration.get("sampling_manifest")
+        ),
     }
 
 
@@ -761,13 +824,14 @@ def _threshold_calibration(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
-    prepared, generated, _ = _prepared_experiment(
+    prepared, generated, qualified_source = _prepared_calibration_population(
         spec, progress_callback, cancellation_check
     )
     effective_xgboost = _resolve_threshold_xgboost_parameters(spec)
-    source_generated = _qualified_sets_from_walk_forward_source(spec)
-    if source_generated is not None:
-        generated = source_generated
+    sampling_policy = policy_name(
+        spec.calibration_sampling_policy_version,
+        qualified_walk_forward_source=qualified_source,
+    )
     effective_threshold_config, threshold_parameter_source = (
         _resolve_threshold_calibration_config(spec)
     )
@@ -776,6 +840,7 @@ def _threshold_calibration(
         generated,
         effective_threshold_config,
         combinations_per_target=spec.combinations_per_target,
+        sampling_policy=sampling_policy,
         evaluate_final_holdout=spec.evaluate_final_holdout,
         xgboost_parameters_by_direction={
             "Up": effective_xgboost.up,
@@ -830,7 +895,10 @@ def _threshold_calibration(
             spec.source_threshold_parameter_calibration_run
         ),
         "source_qualified_combinations": (
-            None if source_generated is None else len(source_generated)
+            len(generated) if qualified_source else None
+        ),
+        "sampling_manifest": _json_value(
+            result.run_configuration.get("sampling_manifest")
         ),
     }
 
@@ -850,13 +918,14 @@ def _threshold_parameter_calibration(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
-    prepared, generated, _ = _prepared_experiment(
+    prepared, generated, qualified_source = _prepared_calibration_population(
         spec, progress_callback, cancellation_check
     )
     effective_xgboost = _resolve_threshold_xgboost_parameters(spec)
-    source_generated = _qualified_sets_from_walk_forward_source(spec)
-    if source_generated is not None:
-        generated = source_generated
+    sampling_policy = policy_name(
+        spec.calibration_sampling_policy_version,
+        qualified_walk_forward_source=qualified_source,
+    )
     result = run_threshold_parameter_calibration(
         prepared,
         generated,
@@ -867,6 +936,10 @@ def _threshold_parameter_calibration(
         },
         xgboost_parameter_source=effective_xgboost.source,
         combinations_per_target=spec.combinations_per_target,
+        sampling_policy=sampling_policy,
+        max_directional_models=(
+            spec.config.threshold_parameter_calibration_max_models
+        ),
         candidates=frozen_threshold_parameter_candidates(output, spec.config),
         source_parent_run=_threshold_parameter_parent(spec),
         source_walk_forward_run=spec.source_walk_forward_run,
@@ -897,6 +970,520 @@ def _threshold_parameter_calibration(
         "result_files": sorted(path.name for path in output.iterdir()),
         **period,
         "traceability": traceability,
+        "sampling_manifest": _json_value(
+            result.run_configuration.get("sampling_manifest")
+        ),
+    }
+
+
+def _walk_forward_checkpoint(
+    repository: RunRepository, run_id: str, spec: ExperimentSpec
+) -> CheckpointManager:
+    return CheckpointManager(
+        repository.run_directory(run_id),
+        run_id=run_id,
+        job_type=spec.job_type.value,
+        configuration_fingerprint=repository.configuration_fingerprint(
+            run_id, fallback=spec.fingerprint
+        ),
+        batch_sizes={
+            "predictor_prefilter_walk_forward": (
+                spec.config.predictor_prefilter_batch_size
+            ),
+            "walk_forward": spec.config.walk_forward_batch_size,
+            "final_holdout": spec.config.final_holdout_batch_size,
+        },
+    )
+
+
+def _load_or_prepare_parent_inputs(
+    spec: ExperimentSpec,
+    checkpoint: CheckpointManager,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
+    if checkpoint.artifact_exists("prepared_snapshot"):
+        prepared, preparation = checkpoint.load_snapshot()
+        return (
+            prepared,
+            list(preparation["predictor_symbols"]),
+            list(preparation["target_symbols"]),
+            dict(preparation["calendars"]),
+        )
+    checkpoint.phase_started("data_preparation")
+    prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
+        spec, progress_callback, cancellation_check
+    )
+    checkpoint.commit_snapshot(
+        prepared,
+        {
+            "predictor_symbols": predictor_symbols,
+            "target_symbols": target_symbols,
+            "calendars": calendars,
+            "effective_end_date": prepared.attrs.get("effective_end_date"),
+        },
+    )
+    checkpoint.phase_completed("data_preparation")
+    return prepared, predictor_symbols, target_symbols, calendars
+
+
+def _planned_effective_plan(
+    spec: ExperimentSpec,
+    prepared: pd.DataFrame,
+    predictor_symbols: list[str],
+    target_symbols: list[str],
+    calendars: dict[str, str],
+    checkpoint: CheckpointManager,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> tuple[CombinationPlan, CombinationPlan, object | None, dict[str, object] | None, str, str]:
+    raw_plan = build_combination_plan(
+        target_symbols=target_symbols,
+        predictor_symbols=predictor_symbols,
+        permutation_depth=spec.config.permutation_depth,
+    )
+    if checkpoint.artifact_exists("raw_combination_plan"):
+        persisted_raw = CombinationPlan.from_dict(
+            checkpoint.load_artifact("raw_combination_plan")
+        )
+        if persisted_raw.plan_sha256 != raw_plan.plan_sha256:
+            raise ValueError("Le plan brut ne correspond plus au checkpoint.")
+        raw_plan = persisted_raw
+    else:
+        checkpoint.commit_artifact("raw_combination_plan", raw_plan.to_dict())
+
+    prefilter = None
+    telemetry: dict[str, object] | None = None
+    policy_version = "disabled_v1"
+    digest = prefilter_digest(raw_plan.predictors_by_target)
+    if spec.config.predictor_prefilter_enabled:
+        policy_version = PREFILTER_POLICY_VERSION
+        if checkpoint.artifact_exists("prefilter_univariate_sets"):
+            univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
+        else:
+            checkpoint.phase_started("predictor_prefilter_generation")
+            _phase(progress_callback, "predictor_prefilter_generation", "started")
+            univariate_plan = build_combination_plan(
+                target_symbols=target_symbols,
+                predictor_symbols=predictor_symbols,
+                permutation_depth=1,
+            )
+            univariate_sets = univariate_plan.slice(0, univariate_plan.count())
+            checkpoint.commit_artifact("prefilter_univariate_sets", univariate_sets)
+            checkpoint.phase_completed("predictor_prefilter_generation")
+            _phase(
+                progress_callback,
+                "predictor_prefilter_generation",
+                "completed",
+                combinations=univariate_plan.count(),
+            )
+        prefilter_config = replace(
+            spec.config,
+            qualification_min_median_auc=spec.config.predictor_prefilter_min_median_auc,
+            qualification_min_pct_windows_above_random=(
+                spec.config.predictor_prefilter_min_pct_above_random
+            ),
+            qualification_min_worst_window_auc=(
+                spec.config.predictor_prefilter_min_worst_auc
+            ),
+            qualification_max_auc_std=spec.config.predictor_prefilter_max_auc_std,
+        )
+        univariate = evaluate_prefilter_walk_forward(
+            prepared,
+            univariate_sets,
+            prefilter_config,
+            market_calendars=calendars,
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+            checkpoint_manager=checkpoint,
+        )
+        checkpoint.commit_artifact("prefilter_qualification", univariate.qualification)
+        checkpoint.phase_completed("predictor_prefilter_walk_forward")
+        telemetry = univariate.telemetry
+        _require_exploitable_prefilter(univariate)
+        if checkpoint.artifact_exists("prefilter_selection"):
+            prefilter = checkpoint.load_artifact("prefilter_selection")
+        else:
+            checkpoint.phase_started("predictor_prefilter_selection")
+            _phase(progress_callback, "predictor_prefilter_selection", "started")
+            prefilter = select_predictors(
+                univariate.qualification,
+                prepared.iloc[:-spec.config.final_holdout_size],
+                targets=target_symbols,
+                candidate_symbols=predictor_symbols,
+                config=spec.config,
+                excluded_targets=getattr(univariate, "excluded_targets", {}),
+            )
+            checkpoint.commit_artifact("prefilter_selection", prefilter)
+            checkpoint.phase_completed("predictor_prefilter_selection")
+            _phase(
+                progress_callback,
+                "predictor_prefilter_selection",
+                "completed",
+                retained=sum(
+                    len(values)
+                    for values in prefilter.predictors_by_target.values()
+                ),
+            )
+        effective_plan = CombinationPlan.from_target_predictors(
+            prefilter.predictors_by_target, spec.config.permutation_depth
+        )
+        digest = prefilter_digest(prefilter.predictors_by_target)
+    else:
+        effective_plan = raw_plan
+    if effective_plan.count() < 1:
+        raise ValueError("Le plan walk-forward effectif est vide.")
+    if checkpoint.artifact_exists("effective_combination_plan"):
+        persisted = CombinationPlan.from_dict(
+            checkpoint.load_artifact("effective_combination_plan")
+        )
+        if persisted.plan_sha256 != effective_plan.plan_sha256:
+            raise ValueError("Le plan effectif ne correspond plus au checkpoint.")
+        effective_plan = persisted
+    else:
+        checkpoint.phase_started("combination_generation")
+        checkpoint.commit_artifact(
+            "effective_combination_plan", effective_plan.to_dict()
+        )
+        checkpoint.phase_completed("combination_generation")
+    return raw_plan, effective_plan, prefilter, telemetry, policy_version, digest
+
+
+def _worker_pid_alive(pid: object) -> bool:
+    return process_alive(pid)
+
+
+def _execute_reserved_child(repository: RunRepository, run_id: str) -> None:
+    status = repository.status(run_id)
+    current = JobStatus(status["status"])
+    if current is JobStatus.COMPLETED:
+        return
+    if current is JobStatus.RUNNING:
+        if _worker_pid_alive(status.get("pid")):
+            raise RuntimeError(f"Le batch WF {run_id} est déjà en cours.")
+        repository.transition(
+            run_id,
+            JobStatus.INTERRUPTED,
+            error="Le processus worker enfant n'est plus actif.",
+        )
+        current = JobStatus.INTERRUPTED
+    if current in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}:
+        resumed = repository.prepare_resume(run_id)
+        resumed["resume_requested"] = True
+        repository.write_json(run_id, "status.json", resumed)
+    execute_child(run_id)
+    completed = repository.status(run_id)
+    if completed["status"] != JobStatus.COMPLETED.value:
+        raise RuntimeError(
+            f"Le batch WF {run_id} a échoué : "
+            f"{completed.get('error') or completed['status']}"
+        )
+
+
+def _ingest_child_checkpoints(
+    repository: RunRepository,
+    parent_checkpoint: CheckpointManager,
+    manifest: dict[str, Any],
+) -> int:
+    batch_size = int(parent_checkpoint.batch_sizes["walk_forward"])
+    expected_internal = sum(
+        math.ceil(int(item["combination_count"]) / batch_size)
+        for item in manifest["batches"]
+    )
+    parent_checkpoint.phase_started("walk_forward")
+    parent_checkpoint.set_total_batches("walk_forward", expected_internal)
+    completed_parent = set(parent_checkpoint.completed_batch_ids("walk_forward"))
+    global_batch_id = 0
+    for item in manifest["batches"]:
+        child_run_id = str(item["child_run_id"])
+        child_specification = repository.load_spec(child_run_id)
+        child_checkpoint = _walk_forward_checkpoint(
+            repository, child_run_id, child_specification
+        )
+        internal_count = math.ceil(int(item["combination_count"]) / batch_size)
+        if child_checkpoint.completed_batch_ids("walk_forward") != tuple(
+            range(internal_count)
+        ):
+            raise RuntimeError(f"Checkpoints incomplets pour {child_run_id}")
+        for local_batch_id in range(internal_count):
+            if global_batch_id not in completed_parent:
+                payload = child_checkpoint.load_batch("walk_forward", local_batch_id)
+                local_start = local_batch_id * batch_size
+                count = min(
+                    batch_size, int(item["combination_count"]) - local_start
+                )
+                first = int(item["range_start"]) + local_start
+                parent_checkpoint.commit_batch(
+                    "walk_forward",
+                    global_batch_id,
+                    payload,
+                    first_index=first,
+                    last_index=first + count - 1,
+                    combination_count=count,
+                    row_counts={
+                        "windows": len(payload["windows"]),
+                        "predictions": len(payload["predictions"]),
+                    },
+                )
+            global_batch_id += 1
+    if parent_checkpoint.completed_batch_ids("walk_forward") != tuple(
+        range(expected_internal)
+    ):
+        raise RuntimeError("Agrégation des checkpoints enfants incomplète")
+    parent_checkpoint.phase_completed("walk_forward")
+    return expected_internal
+
+
+def _planned_walk_forward(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    run_directory = output.parent
+    repository = RunRepository(run_directory.parent)
+    run_id = run_directory.name
+    checkpoint = _walk_forward_checkpoint(repository, run_id, spec)
+    prepared, predictor_symbols, target_symbols, calendars = (
+        _load_or_prepare_parent_inputs(
+            spec, checkpoint, progress_callback, cancellation_check
+        )
+    )
+    (
+        raw_plan,
+        effective_plan,
+        prefilter,
+        prefilter_telemetry,
+        policy_version,
+        digest,
+    ) = _planned_effective_plan(
+        spec,
+        prepared,
+        predictor_symbols,
+        target_symbols,
+        calendars,
+        checkpoint,
+        progress_callback,
+        cancellation_check,
+    )
+    capacity = spec.config.walk_forward_max_combinations_per_batch
+    assert capacity is not None
+    effective_batch_count = math.ceil(effective_plan.count() / capacity)
+    precomputed_batches: int | None = None
+    generated: pd.DataFrame | None
+    manifest = None
+    if effective_batch_count == 1:
+        generated = effective_plan.slice(0, effective_plan.count())
+    else:
+        generated = None
+        proposed, reservations = build_manifest(
+            repository,
+            parent_run_id=run_id,
+            parent_spec=spec,
+            raw_plan=raw_plan,
+            effective_plan=effective_plan,
+            max_combinations_per_batch=capacity,
+            prefilter_policy_version=policy_version,
+            prefilter_sha256=digest,
+        )
+        manifest = persist_or_validate_manifest(repository, run_id, proposed)
+        # IDs are durable before any child directory is created.
+        materialize_reservations(
+            repository, manifest=manifest, reservations=reservations
+        )
+        _phase(
+            progress_callback,
+            "walk_forward",
+            "started",
+            combinations=effective_plan.count(),
+            child_batches=effective_batch_count,
+        )
+        completed_combinations = 0
+        for batch_number, item in enumerate(manifest["batches"], start=1):
+            check_cancellation(cancellation_check)
+            _execute_reserved_child(repository, str(item["child_run_id"]))
+            completed_combinations += int(item["combination_count"])
+            report_progress(
+                progress_callback,
+                "walk_forward",
+                substage=f"batch enfant {batch_number}/{effective_batch_count}",
+                completed_units=completed_combinations,
+                total_units=effective_plan.count(),
+                details={
+                    "child_run_id": item["child_run_id"],
+                    "batch_index": item["batch_index"],
+                    "child_batches": effective_batch_count,
+                },
+            )
+        precomputed_batches = _ingest_child_checkpoints(
+            repository, checkpoint, manifest
+        )
+
+    period = {
+        "walk_forward_end_offset_sessions": int(
+            spec.config.walk_forward_end_offset_sessions
+        ),
+        "effective_end_date": prepared.attrs.get("effective_end_date"),
+    }
+    extras: dict[str, object] = {
+        **period,
+        "combination_plan": {
+            "version": effective_plan.plan_version,
+            "sha256": effective_plan.plan_sha256,
+            "raw_combination_count": raw_plan.count(),
+            "prefiltered_combination_count": effective_plan.count(),
+            "effective_batch_count": effective_batch_count,
+        },
+    }
+    traceability = _persist_prepared_traceability(extras, prepared, spec)
+    if prefilter is not None:
+        extras["predictor_prefilter"] = {
+            "enabled": True,
+            "score_formula": PREFILTER_SCORE_FORMULA,
+            "top_n": spec.config.predictor_prefilter_top_n,
+            "min_median_auc": spec.config.predictor_prefilter_min_median_auc,
+            "min_pct_above_random": (
+                spec.config.predictor_prefilter_min_pct_above_random
+            ),
+            "min_worst_auc": spec.config.predictor_prefilter_min_worst_auc,
+            "max_auc_std": spec.config.predictor_prefilter_max_auc_std,
+            "correlation_threshold": (
+                spec.config.predictor_prefilter_correlation_threshold
+            ),
+            "targets": prefilter.diagnostics,
+            "telemetry": prefilter_telemetry,
+        }
+    result = run_streamed_walk_forward(
+        prepared,
+        generated,
+        spec.config,
+        checkpoint,
+        output,
+        market_calendars=calendars,
+        evaluate_holdout=spec.evaluate_final_holdout,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        run_configuration_extras=extras,
+        precomputed_walk_forward_batches=precomputed_batches,
+        precomputed_combination_count=(
+            effective_plan.count() if precomputed_batches is not None else None
+        ),
+    )
+    if prefilter is not None:
+        prefilter.metrics.to_csv(output / "predictor_prefilter.csv", index=False)
+        (output / "predictor_prefilter.json").write_text(
+            json.dumps(
+                {
+                    "score_formula": PREFILTER_SCORE_FORMULA,
+                    "targets": prefilter.diagnostics,
+                    "telemetry": prefilter_telemetry,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return {
+        "job_type": spec.job_type.value,
+        "metrics": _json_value(result.aggregate_global.iloc[0].to_dict()),
+        "eligible_combinations": int(result.qualification["Eligible"].sum()),
+        "total_combinations": effective_plan.count(),
+        "raw_combination_count": raw_plan.count(),
+        "effective_batch_count": effective_batch_count,
+        "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
+        "traceability": traceability,
+        "execution_telemetry": _json_value(result.telemetry),
+        "checkpoint_manifest": "checkpoints/manifest.json",
+        **(
+            {"walk_forward_batch_manifest": "orchestration/walk_forward_batches.json"}
+            if manifest is not None
+            else {}
+        ),
+        **(
+            {"predictor_prefilter": _json_value(prefilter.diagnostics)}
+            if prefilter is not None
+            else {}
+        ),
+    }
+
+
+def _walk_forward_batch(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    if not spec.source_walk_forward_run:
+        raise ValueError("WALK_FORWARD_BATCH requires its parent run")
+    if spec.combination_range_start is None or spec.combination_range_stop is None:
+        raise ValueError("WALK_FORWARD_BATCH requires a frozen range")
+    repository = RunRepository(output.parent.parent)
+    run_id = output.parent.name
+    parent_id = spec.source_walk_forward_run
+    manifest = load_manifest(repository, parent_id)
+    if manifest is None:
+        raise ValueError("Manifest du parent WALK_FORWARD_BATCH introuvable")
+    matching = [
+        item for item in manifest["batches"] if item["child_run_id"] == run_id
+    ]
+    if len(matching) != 1:
+        raise ValueError("Réservation WALK_FORWARD_BATCH introuvable ou ambiguë")
+    reservation = matching[0]
+    if (
+        int(reservation["range_start"]) != spec.combination_range_start
+        or int(reservation["range_stop"]) != spec.combination_range_stop
+        or str(reservation["expected_child_fingerprint"])
+        != repository.configuration_fingerprint(run_id)
+    ):
+        raise ValueError("Identité WALK_FORWARD_BATCH incompatible avec le manifest")
+    parent_spec = repository.load_spec(parent_id)
+    parent_checkpoint = _walk_forward_checkpoint(repository, parent_id, parent_spec)
+    prepared, preparation = parent_checkpoint.load_snapshot()
+    plan = CombinationPlan.from_dict(
+        parent_checkpoint.load_artifact("effective_combination_plan")
+    )
+    if (
+        plan.plan_version != spec.combination_plan_version
+        or plan.plan_sha256 != spec.combination_plan_sha256
+        or plan.plan_sha256 != manifest["combination_plan_sha256"]
+    ):
+        raise ValueError("CombinationPlan enfant incompatible avec le parent")
+    generated = plan.slice(
+        spec.combination_range_start, spec.combination_range_stop
+    )
+    checkpoint = _walk_forward_checkpoint(repository, run_id, spec)
+    batch_summary = run_streamed_walk_forward_batch(
+        prepared,
+        generated,
+        spec.config,
+        checkpoint,
+        market_calendars=dict(preparation["calendars"]),
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "batch.json").write_text(
+        json.dumps(
+            {
+                **batch_summary,
+                "range_start": spec.combination_range_start,
+                "range_stop": spec.combination_range_stop,
+                "combination_plan_sha256": plan.plan_sha256,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "job_type": spec.job_type.value,
+        **batch_summary,
+        "range_start": spec.combination_range_start,
+        "range_stop": spec.combination_range_stop,
+        "result_files": ["batch.json"],
     }
 
 
@@ -1229,6 +1816,22 @@ def _operational_run(
     }
 
 
+def _end_to_end(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    return run_end_to_end(
+        spec,
+        output,
+        progress_callback,
+        cancellation_check,
+        execute_reserved_child=_execute_reserved_child,
+        phase_callback=_phase,
+    )
+
+
 @dataclass(slots=True)
 class WorkflowRegistry:
     handlers: dict[JobType, WorkflowHandler]
@@ -1238,6 +1841,7 @@ class WorkflowRegistry:
         return cls(
             {
                 JobType.WALK_FORWARD: _walk_forward,
+                JobType.WALK_FORWARD_BATCH: _walk_forward_batch,
                 JobType.XGBOOST_CALIBRATION: _xgboost_calibration,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION: (
                     _threshold_parameter_calibration
@@ -1249,6 +1853,7 @@ class WorkflowRegistry:
                 JobType.DAILY_SCREENING: _daily_screening,
                 JobType.REALIZED_VALIDATION: _realized_validation,
                 JobType.OPERATIONAL_RUN: _operational_run,
+                JobType.END_TO_END: _end_to_end,
             }
         )
 

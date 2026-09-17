@@ -114,6 +114,27 @@ class ProductionRepository:
             self._write_models(models)
         return model
 
+    def add_promoted_idempotently(
+        self, model: ProductionModel, promotion_fingerprint: str
+    ) -> tuple[ProductionModel, bool]:
+        """Atomically return an existing promotion or publish it once."""
+
+        if not promotion_fingerprint:
+            raise ValueError("promotion_fingerprint is required")
+        with self.transaction():
+            models = self.models()
+            for existing in models:
+                if (
+                    existing.training_metadata.get("promotion_fingerprint")
+                    == promotion_fingerprint
+                ):
+                    return existing, False
+            if any(item.model_id == model.model_id for item in models):
+                raise ValueError(f"Duplicate model_id: {model.model_id}")
+            models.append(model)
+            self._write_models(models)
+        return model, True
+
     def get(self, model_id: str) -> ProductionModel:
         for model in self.models():
             if model.model_id == model_id:

@@ -1,0 +1,36 @@
+{
+  "checkpoint_schema_version": 1,
+  "implementation_version": "walk-forward-v1",
+  "run_id": "child-0",
+  "job_type": "walk_forward_batch",
+  "configuration_fingerprint": "child-0",
+  "state": "running",
+  "current_phase": "walk_forward",
+  "phases_completed": [
+    "walk_forward"
+  ],
+  "batch_sizes": {
+    "predictor_prefilter_walk_forward": 1,
+    "walk_forward": 1,
+    "final_holdout": 1
+  },
+  "batches": {
+    "walk_forward": {
+      "total": 1,
+      "completed": [
+        0
+      ]
+    }
+  },
+  "created_at": "2026-09-17T02:13:53.707357+00:00",
+  "updated_at": "2026-09-17T02:13:53.783156+00:00",
+  "last_checkpoint": {
+    "phase": "walk_forward",
+    "event": "completed",
+    "at": "2026-09-17T02:13:53.783156+00:00"
+  },
+  "attempt_count": 0,
+  "resume_count": 0,
+  "attempts": [],
+  "error": null
+}

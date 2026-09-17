@@ -220,7 +220,22 @@ def walk_forward_duplication_draft(
         "source_xgboost_calibration_run": source_xgboost_run,
         "frozen_xgboost_parameters": frozen_xgboost,
         "source_threshold_parameter_calibration_run": source_threshold_parameter_run,
+        "source_end_to_end_run": configuration.get("source_end_to_end_run"),
+        "source_threshold_calibration_run": configuration.get(
+            "source_threshold_calibration_run"
+        ),
         "frozen_threshold_calibration_parameters": frozen_threshold_parameters,
+        "auto_promote_candidates": bool(
+            configuration.get("auto_promote_candidates", False)
+        ),
+        "pipeline_version": int(configuration.get("pipeline_version", 0)),
+        "calibration_sampling_policy_version": int(
+            configuration.get("calibration_sampling_policy_version", 1)
+        ),
+        "combination_plan_version": configuration.get("combination_plan_version"),
+        "combination_plan_sha256": configuration.get("combination_plan_sha256"),
+        "combination_range_start": configuration.get("combination_range_start"),
+        "combination_range_stop": configuration.get("combination_range_stop"),
         "xgboost_resolution_version": int(
             configuration.get("xgboost_resolution_version", 0)
         ),
@@ -328,6 +343,21 @@ def duplication_submission_values(
         target_job_type=selected_job_type,
     )
     values = {**deepcopy(dict(draft)), "config": config}
+    source_job_type = JobType(str(draft["job_type"]))
+    if (
+        selected_job_type is not source_job_type
+        and selected_job_type
+        in {
+            JobType.XGBOOST_CALIBRATION,
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            JobType.THRESHOLD_CALIBRATION,
+        }
+        and draft.get("source_walk_forward_run")
+    ):
+        # A newly created downstream calibration uses the modern policy when
+        # it has a qualified WF provenance. Same-stage historical replays keep
+        # the policy persisted in their original snapshot.
+        values["calibration_sampling_policy_version"] = 2
     if (
         not use_run_config
         and selected_job_type in {
@@ -496,5 +526,40 @@ def experiment_spec_from_duplication(
             None
             if values.get("source_prepared_dataset_sha256") is None
             else str(values["source_prepared_dataset_sha256"])
+        ),
+        source_end_to_end_run=(
+            None
+            if values.get("source_end_to_end_run") is None
+            else str(values["source_end_to_end_run"])
+        ),
+        source_threshold_calibration_run=(
+            None
+            if values.get("source_threshold_calibration_run") is None
+            else str(values["source_threshold_calibration_run"])
+        ),
+        auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),
+        pipeline_version=int(values.get("pipeline_version", 0)),
+        calibration_sampling_policy_version=int(
+            values.get("calibration_sampling_policy_version", 1)
+        ),
+        combination_plan_version=(
+            None
+            if values.get("combination_plan_version") is None
+            else int(values["combination_plan_version"])
+        ),
+        combination_plan_sha256=(
+            None
+            if values.get("combination_plan_sha256") is None
+            else str(values["combination_plan_sha256"])
+        ),
+        combination_range_start=(
+            None
+            if values.get("combination_range_start") is None
+            else int(values["combination_range_start"])
+        ),
+        combination_range_stop=(
+            None
+            if values.get("combination_range_stop") is None
+            else int(values["combination_range_stop"])
         ),
     )

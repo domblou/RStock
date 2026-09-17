@@ -64,6 +64,15 @@ from rstock.application.history_analysis import (
     xgboost_calibration_selection_table,
 )
 from rstock.application.runner import running_duration
+from rstock.application.run_detail_tabs import (
+    PIPELINE_CHILD_TABS,
+    batch_status_counts,
+    pipeline_stage_by_key,
+    pipeline_stage_rows,
+    render_lazy_tabs,
+    tabs_for_job,
+    walk_forward_batch_rows,
+)
 from rstock.application.surveillance import (
     EvaluatedPredictionsView,
     OperationalTableView,
@@ -111,6 +120,10 @@ from rstock.application.universes import (
     UniverseService,
 )
 from rstock.application.universe_ui import universe_display_name, universe_ui_preview
+from rstock.combination_planning import (
+    build_combination_plan,
+    build_combination_preview,
+)
 from rstock.config import (
     DEFAULT_CONFIG,
     UI_SETTINGS_DEFAULTS,
@@ -143,6 +156,9 @@ WORKFLOW_PHASE_LABELS = {
     "result_writing": "Écriture",
     "publishing": "Publication",
 }
+
+# Historical visual order retained by the shared registry:
+# st.tabs(["Résumé", "Analyse", "Combinaisons", "Validation", "Technique"])
 
 
 def _page_header(title: str) -> None:
@@ -454,6 +470,51 @@ def _universe_service() -> UniverseService:
     return UniverseService(root=st.session_state.lab_config.project_root)
 
 
+def _combination_plan_preview(job_type: JobType) -> bool:
+    """Render the raw plan shared with future WF and End-to-end execution."""
+
+    if job_type not in {JobType.WALK_FORWARD, JobType.END_TO_END}:
+        return True
+    try:
+        plan = build_combination_plan(
+            target_symbols=st.session_state.lab_target_symbols,
+            predictor_symbols=st.session_state.lab_symbols,
+            permutation_depth=st.session_state.lab_config.permutation_depth,
+        )
+        preview = build_combination_preview(
+            plan,
+            context_symbols=st.session_state.lab_context_symbols,
+            max_combinations_per_batch=(
+                st.session_state.lab_config.walk_forward_max_combinations_per_batch
+            ),
+        )
+    except ValueError as error:
+        st.error(f"Plan de combinaisons invalide : {error}")
+        return False
+    with st.container(border=True):
+        st.subheader("Prévisualisation des combinaisons")
+        first = st.columns(4)
+        first[0].metric("Cibles", f"{preview.target_count:,}")
+        first[1].metric("Contexte", f"{preview.context_count:,}")
+        first[2].metric("Prédicteurs", f"{preview.predictor_count:,}")
+        first[3].metric("Profondeur", preview.permutation_depth)
+        second = st.columns(3)
+        second[0].metric(
+            "Combinaisons brutes exactes",
+            f"{preview.raw_combination_count:,}",
+        )
+        capacity = preview.max_combinations_per_batch
+        second[1].metric(
+            "Maximum par batch",
+            "Mono-run historique" if capacity is None else f"{capacity:,}",
+        )
+        second[2].metric("Batchs requis (preview)", preview.preview_batch_count)
+        st.caption(
+            "Le nombre reel de batchs sera recalcule apres le prefiltrage global."
+        )
+    return True
+
+
 def _experiment_universe_selector() -> bool:
     """Resolve the exact experiment symbols before the job is submitted."""
 
@@ -637,10 +698,29 @@ def _experiments(service: ExperimentService) -> None:
             JobType.THRESHOLD_PARAMETER_CALIBRATION
         ),
         "Calibration des seuils": JobType.THRESHOLD_CALIBRATION,
+        "End-to-end": JobType.END_TO_END,
     }
     choice = st.selectbox("Type de job", list(labels))
+    auto_promote_candidates = False
+    if labels[choice] is JobType.END_TO_END:
+        auto_promote_candidates = st.checkbox(
+            "Promouvoir automatiquement les candidats admissibles",
+            value=False,
+            help=(
+                "La promotion est une etape interne persistee du pipeline; "
+                "elle n'entraine et n'active aucun modele."
+            ),
+        )
+        if auto_promote_candidates and not st.session_state.lab_evaluate_holdout:
+            st.error("La promotion automatique exige le holdout final.")
     valid_universe = _experiment_universe_selector()
-    if st.button("Soumettre l’expérience", type="primary", disabled=not valid_universe):
+    valid_plan = (
+        _combination_plan_preview(labels[choice]) if valid_universe else False
+    )
+    submit_disabled = not (valid_universe and valid_plan) or (
+        auto_promote_candidates and not st.session_state.lab_evaluate_holdout
+    )
+    if st.button("Soumettre l’expérience", type="primary", disabled=submit_disabled):
         spec = ExperimentSpec(
             job_type=labels[choice],
             config=st.session_state.lab_config,
@@ -657,6 +737,7 @@ def _experiments(service: ExperimentService) -> None:
             target_symbols=tuple(st.session_state.lab_target_symbols),
             context_symbols=tuple(st.session_state.lab_context_symbols),
             predictor_symbols=tuple(st.session_state.lab_symbols),
+            auto_promote_candidates=auto_promote_candidates,
             run_description=(
                 f"profondeur {st.session_state.lab_config.permutation_depth}"
             ),
@@ -1422,6 +1503,7 @@ def _render_resume_controls(
     resumable_types = {
         JobType.WALK_FORWARD.value,
         JobType.THRESHOLD_PARAMETER_CALIBRATION.value,
+        JobType.END_TO_END.value,
     }
     if status.get("job_type") not in resumable_types or status.get("status") not in {
         "failed", "cancelled", "interrupted"
@@ -1490,34 +1572,8 @@ def _render_history_detail(
     st.subheader(summary_text if summary_text != "—" else "Détail du run")
     st.caption(f"ID technique : {run_id}")
     _render_resume_controls(run_id, status, detail)
-    if (
-        status["job_type"] == JobType.WALK_FORWARD.value
-        and status["status"] == "completed"
-    ):
-        _render_walk_forward_promotion(
-            run_id, project_root=st.session_state.lab_config.project_root
-        )
-    elif (
-        status["job_type"] == JobType.THRESHOLD_CALIBRATION.value
-        and status["status"] == "completed"
-    ):
-        _render_threshold_calibration_promotion(
-            run_id,
-            project_root=st.session_state.lab_config.project_root,
-            configuration=detail["configuration"],
-        )
-    tabs = st.tabs(["Résultats", "Configuration", "Fichiers", "Logs"])
-    with tabs[0]:
-        if status["job_type"] == JobType.XGBOOST_CALIBRATION.value:
-            _render_xgboost_calibration_selection(run_id)
-        elif status["job_type"] == JobType.THRESHOLD_PARAMETER_CALIBRATION.value:
-            _render_threshold_parameter_calibration_selection(run_id)
-        st.json(detail["summary"])
-    tabs[1].json(detail["configuration"])
-    tabs[2].write(detail["files"] or "Aucun résultat publié")
-    tabs[3].code("\n".join(detail["log_tail"]) or "Aucun message")
-
-
+    _render_job_detail_tabs(_service(), run_id, status=status, detail=detail)
+    return
 def _history_navigation(mode: str, run_ids: list[str]) -> None:
     st.session_state["history-navigation"] = {"mode": mode, "run_ids": run_ids}
     st.rerun()
@@ -1711,146 +1767,605 @@ def _render_combination_filters(analytics: RunAnalytics) -> pd.DataFrame:
     )
 
 
+def _render_run_configuration(detail: dict[str, object]) -> None:
+    st.json(detail["configuration"])
+
+
+def _render_run_files(detail: dict[str, object]) -> None:
+    st.write(detail["files"] or "Aucun resultat publie")
+
+
+def _render_run_logs(detail: dict[str, object]) -> None:
+    st.code("\n".join(detail["log_tail"]) or "Aucun message")
+
+
+def _render_run_technical_tabs(run_id: str, detail: dict[str, object]) -> None:
+    st.caption(f"ID technique : {run_id}")
+    technical_tabs = tabs_for_job(JobType.XGBOOST_CALIBRATION)[1:]
+    render_lazy_tabs(
+        st,
+        technical_tabs,
+        {
+            "configuration": lambda: _render_run_configuration(detail),
+            "files": lambda: _render_run_files(detail),
+            "logs": lambda: _render_run_logs(detail),
+        },
+        key=f"run-technical-{run_id}",
+    )
+
+
+def _render_standard_results(
+    run_id: str, job_type: JobType, status: dict[str, object], detail: dict[str, object]
+) -> None:
+    if job_type is JobType.XGBOOST_CALIBRATION:
+        _render_xgboost_calibration_selection(run_id)
+    elif job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:
+        _render_threshold_parameter_calibration_selection(run_id)
+    elif (
+        job_type is JobType.THRESHOLD_CALIBRATION
+        and status.get("status") == "completed"
+    ):
+        _render_threshold_calibration_promotion(
+            run_id,
+            project_root=st.session_state.lab_config.project_root,
+            configuration=detail["configuration"],
+        )
+    st.json(detail["summary"])
+
+
+def _render_standard_job_tabs(
+    run_id: str, job_type: JobType, status: dict[str, object], detail: dict[str, object]
+) -> None:
+    render_lazy_tabs(
+        st,
+        tabs_for_job(job_type),
+        {
+            "results": lambda: _render_standard_results(
+                run_id, job_type, status, detail
+            ),
+            "configuration": lambda: _render_run_configuration(detail),
+            "files": lambda: _render_run_files(detail),
+            "logs": lambda: _render_run_logs(detail),
+        },
+        key=f"run-detail-{run_id}",
+    )
+
+
+def _walk_forward_analytics(
+    run_id: str, status: dict[str, object], detail: dict[str, object]
+) -> RunAnalytics:
+    return _load_run_analytics(run_id, status, detail)
+
+
+def _render_walk_forward_metrics(analytics: RunAnalytics) -> None:
+    metrics = st.columns(6)
+    metrics[0].metric(
+        "Combinaisons testees",
+        analytics.tested_count if analytics.tested_count is not None else "-",
+    )
+    metrics[1].metric("Qualifiees", analytics.qualified_count)
+    metrics[2].metric("Confirmees holdout", analytics.confirmed_count)
+    metrics[3].metric("AUC dev mediane", _format_metric(analytics.dev_auc_median))
+    metrics[4].metric("AUC holdout mediane", _format_metric(analytics.holdout_auc_median))
+    windows = (
+        pd.to_numeric(
+            analytics.combinations.get("Fen\u00eatres valides"), errors="coerce"
+        ).median()
+        if not analytics.combinations.empty
+        and "Fen\u00eatres valides" in analytics.combinations
+        else None
+    )
+    metrics[5].metric("Fenetres (mediane)", _format_metric(windows))
+
+
+def _render_walk_forward_summary(
+    run_id: str, status: dict[str, object], detail: dict[str, object]
+) -> None:
+    analytics = _walk_forward_analytics(run_id, status, detail)
+    _render_walk_forward_metrics(analytics)
+    prefilter_table = predictor_prefilter_summary(detail.get("summary", {}))
+    if not prefilter_table.empty:
+        st.subheader("Pré-filtrage des prédicteurs")
+        st.dataframe(prefilter_table, hide_index=True, width="stretch")
+    rates = st.columns(2)
+    rates[0].metric(
+        "Taux de qualification",
+        _format_metric(analytics.qualification_rate, percent=True),
+    )
+    rates[1].metric(
+        "Taux de confirmation holdout",
+        _format_metric(analytics.confirmation_rate, percent=True),
+    )
+    if analytics.combinations.empty:
+        st.info("Les artefacts analytiques ne sont pas disponibles pour ce run historique.")
+        return
+    chart = analytics.combinations[["AUC dev", "AUC holdout"]].dropna(how="all")
+    if not chart.empty:
+        st.bar_chart(chart)
+    scatter = analytics.combinations[["AUC dev", "AUC holdout"]].dropna()
+    if not scatter.empty:
+        st.caption("AUC developpement vs holdout - une ligne par combinaison")
+        st.scatter_chart(scatter, x="AUC dev", y="AUC holdout")
+
+
+def _render_walk_forward_analysis(
+    run_id: str, status: dict[str, object], detail: dict[str, object]
+) -> None:
+    analytics = _walk_forward_analytics(run_id, status, detail)
+    if analytics.combinations.empty:
+        st.caption("Aucune metrique de stabilite publiee pour ce run.")
+    else:
+        st.bar_chart(
+            analytics.combinations[["Worst AUC", "Dispersion", "Delta dev\u2192holdout"]]
+        )
+
+
+def _render_walk_forward_combinations(
+    run_id: str, status: dict[str, object], detail: dict[str, object]
+) -> None:
+    analytics = _walk_forward_analytics(run_id, status, detail)
+    st.caption(f"{analytics.qualified_count} combinaisons qualifiees")
+    filtered = _render_combination_filters(analytics)
+    st.caption(f"{len(filtered)} correspondent aux filtres")
+    selected = _selected_combination(run_id, filtered)
+    if selected is None:
+        return
+    with st.container(border=True):
+        st.subheader(f"{selected['Cible']} <- {selected['Predictors']}")
+        details_columns = st.columns(4)
+        for column, name in zip(
+            details_columns,
+            ("AUC dev", "AUC holdout", "Delta dev\u2192holdout", "Worst AUC"),
+            strict=True,
+        ):
+            column.metric(name, _format_metric(selected[name]))
+        diagnostic = pd.DataFrame(
+            [
+                {"Indicateur": "Dispersion", "Valeur": selected.get("Dispersion")},
+                {
+                    "Indicateur": "Fenetres valides",
+                    "Valeur": selected.get("Fen\u00eatres valides"),
+                },
+                {
+                    "Indicateur": "Seuil calibré",
+                    "Valeur": selected.get("Seuil calibr\u00e9", "-"),
+                },
+                {
+                    "Indicateur": "Qualité signal",
+                    "Valeur": selected.get("Score qualit\u00e9 signal", "-"),
+                },
+                {"Indicateur": "Score final", "Valeur": selected.get("Score", "-")},
+                {"Indicateur": "Rang", "Valeur": selected.get("Rang", "-")},
+            ]
+        )
+        st.dataframe(diagnostic, hide_index=True, width="stretch")
+        subscores = [
+            ("Qualité prédictive", "Score qualité prédictive"),
+            ("Stabilité", "Score stabilité"),
+            ("Holdout", "Score holdout"),
+            ("Qualité signal", "Score qualité signal"),
+            ("Adéquation échantillon", "Score adéquation échantillon"),
+        ]
+        if any(name in selected.index for _, name in subscores):
+            st.markdown("**Sous-scores**")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"Composante": label, "Score / 100": selected.get(name, "-")}
+                        for label, name in subscores
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        _promote_combination_action(run_id, selected)
+
+
+def _render_walk_forward_validation(
+    run_id: str, status: dict[str, object], detail: dict[str, object]
+) -> None:
+    analytics = _walk_forward_analytics(run_id, status, detail)
+    selected_name = st.session_state.get(f"analysis-selected-combination-{run_id}")
+    selected = analytics.combinations[
+        analytics.combinations["Combinaison"] == selected_name
+    ]
+    if selected.empty:
+        st.caption("Selectionnez une combinaison dans l'onglet Combinaisons.")
+        return
+    row = selected.iloc[0]
+    validation = pd.DataFrame(
+        [
+            {
+                "Phase": "Developpement",
+                "Fenetres": row["Fen\u00eatres valides"],
+                "AUC mediane": row["AUC dev"],
+                "AUC min": row["Worst AUC"],
+                "Dispersion": row["Dispersion"],
+                "Verdict": "Qualifiee developpement" if row["Eligible"] else "Non qualifiee",
+            },
+            {
+                "Phase": "Holdout final",
+                "Fenetres": "-",
+                "AUC mediane": row["AUC holdout"],
+                "AUC min": "-",
+                "Dispersion": "-",
+                "Verdict": "Holdout confirme" if row["Holdout confirm\u00e9"] else "Echec de confirmation holdout",
+            },
+        ]
+    )
+    st.dataframe(validation, hide_index=True, width="stretch")
+
+
+def _render_walk_forward_batches(
+    service: ExperimentService, run_id: str, detail: dict[str, object]
+) -> None:
+    manifest = detail.get("walk_forward_batch_manifest")
+    batches = detail.get("walk_forward_batches")
+    if not isinstance(manifest, dict):
+        st.caption("Aucun manifest de batchs pour ce run monolithique.")
+        return
+    rows = walk_forward_batch_rows(batches)
+    counts = batch_status_counts(batches)
+    raw = int(manifest.get("raw_combination_count", 0))
+    effective = int(manifest.get("prefiltered_combination_count", 0))
+    planned = int(manifest.get("planned_batch_count", manifest.get("batch_count", 0)))
+    maximum = manifest.get("max_combinations_per_batch", "-")
+    progress_weight = sum(
+        int(row.get("Combinaisons") or 0)
+        * (
+            100.0
+            if row.get("Statut") == "completed"
+            else float(row.get("Progression") or 0.0)
+        )
+        for row in rows
+    )
+    total_weight = sum(int(row.get("Combinaisons") or 0) for row in rows)
+    progress = progress_weight / total_weight if total_weight else 0.0
+    first = st.columns(4)
+    first[0].metric("Combinaisons brutes", f"{raw:,}")
+    first[1].metric("Apres prefiltre", f"{effective:,}")
+    first[2].metric("Batchs planifies", planned)
+    first[3].metric("Maximum par batch", maximum)
+    second = st.columns(5)
+    for column, status_name in zip(
+        second[:4], ("completed", "running", "failed", "pending"), strict=True
+    ):
+        column.metric(status_name.capitalize(), counts[status_name])
+    second[4].metric("Progression globale", f"{progress:.1f}%")
+    if raw:
+        st.caption(f"Reduction du prefiltre : {(raw - effective) / raw:.1%}")
+    failed = [row for row in rows if row.get("Statut") == "failed"]
+    if failed:
+        st.error(
+            "Batchs en echec : "
+            + ", ".join(str(row.get("Batch")) for row in failed)
+        )
+    st.caption(
+        "La reprise se fait sur le parent Walk-forward; les batchs completed "
+        "ne seront pas recalcules."
+    )
+    table = pd.DataFrame(rows)
+    event = st.dataframe(
+        table,
+        hide_index=True,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"wf-batches-{run_id}",
+        column_config={
+            "Progression": st.column_config.ProgressColumn(
+                min_value=0.0, max_value=100.0, format="%.1f%%"
+            )
+        },
+    )
+    selected_rows = _selected_rows(event)
+    if not selected_rows:
+        st.caption("Selectionnez un batch pour inspecter son statut et ses logs.")
+        return
+    selected = rows[selected_rows[0]]
+    child_run_id = str(selected["Run ID"])
+    if selected.get("Statut") == "reserved":
+        st.caption(f"Run technique reserve : {child_run_id}; repertoire non materialise.")
+        return
+    child = service.run(child_run_id)
+    with st.container(border=True):
+        st.subheader(f"Batch {selected['Batch']} - {selected['Statut']}")
+        st.caption(f"ID technique : {child_run_id}")
+        _render_run_technical_tabs(child_run_id, child)
+
+
+def _render_walk_forward_tabs(
+    service: ExperimentService,
+    run_id: str,
+    status: dict[str, object],
+    detail: dict[str, object],
+) -> None:
+    has_batches = isinstance(detail.get("walk_forward_batch_manifest"), dict)
+    render_lazy_tabs(
+        st,
+        tabs_for_job(JobType.WALK_FORWARD, has_walk_forward_batches=has_batches),
+        {
+            "summary": lambda: _render_walk_forward_summary(run_id, status, detail),
+            "analysis": lambda: _render_walk_forward_analysis(run_id, status, detail),
+            "combinations": lambda: _render_walk_forward_combinations(
+                run_id, status, detail
+            ),
+            "validation": lambda: _render_walk_forward_validation(
+                run_id, status, detail
+            ),
+            "walk_forward_batches": lambda: _render_walk_forward_batches(
+                service, run_id, detail
+            ),
+            "technical": lambda: _render_run_technical_tabs(run_id, detail),
+        },
+        key=f"run-detail-{run_id}",
+    )
+
+
+def _render_pipeline_summary(run_id: str, detail: dict[str, object]) -> None:
+    rows = pipeline_stage_rows(detail.get("pipeline_stages"))
+    if not rows:
+        st.info("Le manifest du pipeline n'est pas encore disponible.")
+        return
+    failed = [row for row in rows if row["Statut"] == "failed"]
+    running = [row for row in rows if row["Statut"] == "running"]
+    if failed:
+        st.error(f"Etape en echec : {failed[0]['Etape']}")
+    elif running:
+        st.info(f"Etape active : {running[0]['Etape']}")
+    elif all(row["Statut"] in {"completed", "disabled"} for row in rows):
+        st.success("Pipeline termine.")
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Progression": st.column_config.ProgressColumn(
+                min_value=0.0, max_value=100.0, format="%.1f%%"
+            )
+        },
+    )
+    children = [row for row in rows if row.get("Run ID enfant")]
+    if children:
+        child_by_label = {
+            f"{row['Etape']} - {row['Run ID enfant']}": str(row["Run ID enfant"])
+            for row in children
+        }
+        selected = st.selectbox(
+            "Acces direct a un run scientifique",
+            list(child_by_label),
+            key=f"pipeline-child-link-{run_id}",
+        )
+        if st.button("Ouvrir le run enfant", key=f"open-pipeline-child-{run_id}"):
+            _history_navigation("detail", [child_by_label[selected]])
+
+
+def _render_pipeline_child(
+    service: ExperimentService,
+    parent_run_id: str,
+    detail: dict[str, object],
+    renderer_key: str,
+) -> None:
+    stage_key = PIPELINE_CHILD_TABS[renderer_key]
+    stage = pipeline_stage_by_key(detail.get("pipeline_stages"), stage_key)
+    if stage is None:
+        st.info("Cette etape n'est pas encore reservee dans le manifest.")
+        return
+    child_run_id = stage.get("child_run_id")
+    if not child_run_id or stage.get("status") == "reserved":
+        st.caption(f"Etape {stage.get('status', 'pending')} - aucun artifact charge.")
+        return
+    child_detail = service.run(str(child_run_id))
+    child_status = child_detail["status"]
+    st.caption(
+        f"Run enfant : {child_run_id} - statut : {child_status.get('status', '-')}"
+    )
+    _render_job_detail_tabs(
+        service,
+        str(child_run_id),
+        status=child_status,
+        detail=child_detail,
+    )
+
+
+def _render_pipeline_promotion(detail: dict[str, object]) -> None:
+    stage = pipeline_stage_by_key(detail.get("pipeline_stages"), "promotion")
+    if stage is None:
+        st.info("L'etape Promotion n'est pas encore disponible.")
+        return
+    if stage.get("status") in {"not_requested", "disabled"}:
+        st.info("Promotion desactivee (auto_promote_candidates=False).")
+        return
+    promotion = stage.get("promotion")
+    if not isinstance(promotion, dict):
+        st.caption(f"Promotion {stage.get('status', 'pending')}.")
+        return
+    diagnostics = promotion.get("diagnostics", [])
+    candidates = promotion.get("candidates", [])
+    candidate_count = int(promotion.get("candidate_count", 0))
+    examined = len(diagnostics) if isinstance(diagnostics, list) else 0
+    columns = st.columns(7)
+    values = (
+        ("Examinees", examined),
+        ("Candidat", candidate_count),
+        ("Non candidat", max(0, examined - candidate_count)),
+        ("Crees", int(promotion.get("created_count", 0))),
+        ("Reutilises", int(promotion.get("reused_count", 0))),
+        (
+            "Echecs",
+            sum(
+                isinstance(item, dict) and item.get("status") == "failed"
+                for item in candidates
+            ),
+        ),
+        ("Statut", promotion.get("status", "pending")),
+    )
+    for column, (label, value) in zip(columns, values, strict=True):
+        column.metric(label, value)
+    completed = int(promotion.get("completed_count", 0))
+    progress = 100.0 if candidate_count == 0 and promotion.get("status") == "completed" else (
+        100.0 * completed / candidate_count if candidate_count else 0.0
+    )
+    st.progress(progress / 100.0, text=f"Progression : {progress:.1f}%")
+    diagnostic_table = pd.DataFrame(diagnostics)
+    candidates_table = pd.DataFrame(candidates)
+    if diagnostic_table.empty:
+        st.caption("Aucun diagnostic de promotion disponible.")
+        return
+    if not candidates_table.empty:
+        candidates_table = candidates_table.rename(
+            columns={
+                "set_name": "Combinaison",
+                "status": "Statut promotion technique",
+                "model_id": "Model ID",
+                "created": "Cree",
+                "error": "Erreur promotion",
+            }
+        )
+        diagnostic_table = diagnostic_table.merge(
+            candidates_table[
+                [
+                    "Combinaison",
+                    "Statut promotion technique",
+                    "Model ID",
+                    "Cree",
+                    "Erreur promotion",
+                ]
+            ],
+            on="Combinaison",
+            how="left",
+        )
+    st.dataframe(diagnostic_table, hide_index=True, width="stretch")
+
+
+def _read_light_json(path: Path) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
+    root = st.session_state.lab_config.project_root / "runs"
+    run_root = root / run_id
+    st.caption(f"Parent run_id : {run_id}")
+    st.subheader("Metadata et provenance")
+    st.json(detail.get("metadata", {}))
+    pipeline = _read_light_json(run_root / "orchestration" / "pipeline.json")
+    if pipeline is not None:
+        with st.expander("Pipeline manifest"):
+            st.json(pipeline)
+    stages = detail.get("pipeline_stages")
+    if isinstance(stages, list):
+        for stage in stages:
+            if not isinstance(stage, dict) or not stage.get("child_run_id"):
+                continue
+            child_id = str(stage["child_run_id"])
+            with st.expander(f"{stage.get('stage_key')} - {child_id}"):
+                st.json(
+                    {
+                        "child_run_id": child_id,
+                        "expected_fingerprint": stage.get("expected_fingerprint"),
+                        "artifact_digests": stage.get("artifact_digests"),
+                    }
+                )
+                light_paths = (
+                    root / child_id / "results" / "sampling_manifest.json",
+                    root / child_id / "orchestration" / "walk_forward_batches.json",
+                    root / child_id / "results" / "run_configuration.json",
+                )
+                for path in light_paths:
+                    values = _read_light_json(path)
+                    if values is not None:
+                        st.caption(path.name)
+                        st.json(values)
+    st.subheader("Artifacts du parent")
+    st.write(detail.get("files") or "Aucun resultat publie")
+
+
+def _render_end_to_end_tabs(
+    service: ExperimentService, run_id: str, detail: dict[str, object]
+) -> None:
+    child_renderers = {
+        renderer_key: (
+            lambda renderer_key=renderer_key: _render_pipeline_child(
+                service, run_id, detail, renderer_key
+            )
+        )
+        for renderer_key in PIPELINE_CHILD_TABS
+    }
+    render_lazy_tabs(
+        st,
+        tabs_for_job(JobType.END_TO_END),
+        {
+            "summary": lambda: _render_pipeline_summary(run_id, detail),
+            **child_renderers,
+            "promotion": lambda: _render_pipeline_promotion(detail),
+            "technical": lambda: _render_pipeline_technical(run_id, detail),
+        },
+        key=f"run-detail-{run_id}",
+    )
+
+
+def _render_job_detail_tabs(
+    service: ExperimentService,
+    run_id: str,
+    *,
+    status: dict[str, object],
+    detail: dict[str, object],
+) -> None:
+    try:
+        job_type = JobType(str(status["job_type"]))
+    except ValueError:
+        job_type = JobType.XGBOOST_CALIBRATION
+    if job_type is JobType.END_TO_END:
+        _render_end_to_end_tabs(service, run_id, detail)
+    elif job_type is JobType.WALK_FORWARD:
+        _render_walk_forward_tabs(service, run_id, status, detail)
+    else:
+        _render_standard_job_tabs(run_id, job_type, status, detail)
+
+
 def _render_run_detail_view(
     service: ExperimentService, run_id: str,
 ) -> None:
     detail = service.run(run_id)
     status = detail["status"]
     _page_header("Historique")
-    if status["job_type"] != JobType.WALK_FORWARD.value:
-        st.caption("Historique > Détail du run")
-        if st.button("← Retour à Historique"):
-            _clear_history_navigation()
-        _render_history_detail(
-            run_id, status=status, detail=detail,
-            context=history_row(status, detail, {}).context,
-            summary_text=history_row(status, detail, {}).summary,
-        )
-        return
-    if status["status"] != "completed":
-        st.caption("Historique > Détail du run")
-        if st.button("← Retour à Historique", key="history-back-incomplete"):
-            _clear_history_navigation()
-        row = history_row(status, detail, {})
-        _render_history_detail(
-            run_id,
-            status=status,
-            detail=detail,
-            context=row.context,
-            summary_text=row.summary,
-        )
-        return
-    analytics = _load_run_analytics(run_id, status, detail)
-    universe_summary = run_universe_summary(detail["configuration"])
-    history = history_row(status, detail, {})
     st.caption("Historique > Détail du run")
-    if st.button("← Retour à Historique", key="history-back-detail"):
+    if st.button("<- Retour a Historique", key="history-back-detail"):
         _clear_history_navigation()
-    st.subheader(
-        f"Walk-forward — {len(analytics.symbols)} symboles — profondeur {analytics.depth}"
-    )
-    context_universes = ", ".join(universe_summary["context_universe_ids"]) or "Aucun"
-    st.caption(
-        f"{universe_summary['primary_universe_id']} · {universe_summary['target_count']} cibles · "
-        f"{context_universes} · {universe_summary['predictor_count']} prédicteurs · "
-        f"{history.date_time} · {history.duration} · {analytics.status}"
-    )
-    metrics = st.columns(6)
-    metrics[0].metric("Combinaisons testées", analytics.tested_count if analytics.tested_count is not None else "—")
-    metrics[1].metric("Qualifiées", analytics.qualified_count)
-    metrics[2].metric("Confirmées holdout", analytics.confirmed_count)
-    metrics[3].metric("AUC dev médiane", _format_metric(analytics.dev_auc_median))
-    metrics[4].metric("AUC holdout médiane", _format_metric(analytics.holdout_auc_median))
-    metrics[5].metric("Fenêtres (médiane)", _format_metric(
-        pd.to_numeric(analytics.combinations.get("Fenêtres valides"), errors="coerce").median()
-        if not analytics.combinations.empty else None
-    ))
-    tabs = st.tabs(["Résumé", "Analyse", "Combinaisons", "Validation", "Technique"])
-    with tabs[0]:
-        prefilter_table = predictor_prefilter_summary(detail.get("summary", {}))
-        if not prefilter_table.empty:
-            st.subheader("Pré-filtrage des prédicteurs")
-            st.dataframe(prefilter_table, hide_index=True, width="stretch")
-        rate_columns = st.columns(2)
-        rate_columns[0].metric("Taux de qualification", _format_metric(analytics.qualification_rate, percent=True))
-        rate_columns[1].metric("Taux de confirmation holdout", _format_metric(analytics.confirmation_rate, percent=True))
-        if analytics.combinations.empty:
-            st.info("Les artefacts analytiques ne sont pas disponibles pour ce run historique.")
-        else:
-            chart = analytics.combinations[["AUC dev", "AUC holdout"]].dropna(how="all")
-            if not chart.empty:
-                st.bar_chart(chart)
-            scatter = analytics.combinations[["AUC dev", "AUC holdout"]].dropna()
-            if not scatter.empty:
-                st.caption("AUC développement vs holdout — une ligne par combinaison")
-                st.scatter_chart(scatter, x="AUC dev", y="AUC holdout")
-    with tabs[1]:
-        if analytics.combinations.empty:
-            st.caption("Aucune métrique de stabilité publiée pour ce run.")
-        else:
-            st.bar_chart(analytics.combinations[["Worst AUC", "Dispersion", "Delta dev→holdout"]])
-    with tabs[2]:
-        st.caption(f"{analytics.qualified_count} combinaisons qualifiées")
-        filtered = _render_combination_filters(analytics)
-        st.caption(f"{len(filtered)} correspondent aux filtres")
-        selected = _selected_combination(run_id, filtered)
-        if selected is not None:
-            with st.container(border=True):
-                st.subheader(f"{selected['Cible']} ← {selected['Predictors']}")
-                details_columns = st.columns(4)
-                for column, name in zip(
-                    details_columns,
-                    ("AUC dev", "AUC holdout", "Delta dev→holdout", "Worst AUC"),
-                    strict=True,
-                ):
-                    column.metric(name, _format_metric(selected[name]))
-                diagnostic = pd.DataFrame([
-                    {"Indicateur": "Dispersion", "Valeur": selected.get("Dispersion")},
-                    {"Indicateur": "Fenêtres valides", "Valeur": selected.get("Fenêtres valides")},
-                    {"Indicateur": "Seuil calibré", "Valeur": selected.get("Seuil calibré", "—")},
-                    {"Indicateur": "Qualité signal", "Valeur": selected.get("Score qualité signal", "—")},
-                    {"Indicateur": "Score final", "Valeur": selected.get("Score", "—")},
-                    {"Indicateur": "Rang", "Valeur": selected.get("Rang", "—")},
-                ])
-                st.dataframe(diagnostic, hide_index=True, width="stretch")
-                subscores = [
-                    ("Qualité prédictive", "Score qualité prédictive"),
-                    ("Stabilité", "Score stabilité"),
-                    ("Holdout", "Score holdout"),
-                    ("Qualité signal", "Score qualité signal"),
-                    ("Adéquation échantillon", "Score adéquation échantillon"),
-                ]
-                if any(name in selected.index for _, name in subscores):
-                    st.markdown("**Sous-scores**")
-                    st.dataframe(
-                        pd.DataFrame([
-                            {"Composante": label, "Score / 100": selected.get(name, "—")}
-                            for label, name in subscores
-                        ]),
-                        hide_index=True,
-                        width="stretch",
-                    )
-                _promote_combination_action(run_id, selected)
-    with tabs[3]:
-        selected_name = st.session_state.get(f"analysis-selected-combination-{run_id}")
-        selected = analytics.combinations[analytics.combinations["Combinaison"] == selected_name]
-        if selected.empty:
-            st.caption("Sélectionnez une combinaison dans l’onglet Combinaisons.")
-        else:
-            row = selected.iloc[0]
-            validation = pd.DataFrame([
-                {"Phase": "Développement", "Fenêtres": row["Fenêtres valides"], "AUC médiane": row["AUC dev"], "AUC min": row["Worst AUC"], "Dispersion": row["Dispersion"], "Verdict": "Qualifiée développement" if row["Eligible"] else "Non qualifiée"},
-                {"Phase": "Holdout final", "Fenêtres": "—", "AUC médiane": row["AUC holdout"], "AUC min": "—", "Dispersion": "—", "Verdict": "Holdout confirmé" if row["Holdout confirmé"] else "Échec de confirmation holdout"},
-            ])
-            st.dataframe(validation, hide_index=True, width="stretch")
-    with tabs[4]:
+    history = history_row(status, detail, {})
+    if status["job_type"] == JobType.WALK_FORWARD.value:
+        configuration = detail.get("configuration", {})
+        universe_summary = run_universe_summary(configuration)
+        targets = configuration.get("target_symbols") or configuration.get("symbols") or []
+        rstock_config = configuration.get("rstock_config", {})
+        depth = rstock_config.get("permutation_depth", "-") if isinstance(rstock_config, dict) else "-"
+        st.subheader(f"Walk-forward — {len(targets)} symboles — profondeur {depth}")
+        context_universes = ", ".join(universe_summary["context_universe_ids"]) or "Aucun"
+        st.caption(
+            f"{universe_summary['primary_universe_id']} · "
+            f"{universe_summary['target_count']} cibles · {context_universes} · "
+            f"{universe_summary['predictor_count']} prédicteurs · "
+            f"{history.date_time} · {history.duration} · {status.get('status', '-')} · "
+            f"ID technique : {run_id}"
+        )
+    elif status["job_type"] == JobType.END_TO_END.value:
+        st.subheader("Pipeline End-to-end")
+        st.caption(
+            f"{history.date_time} - {history.duration} - {status.get('status', '-')} - "
+            f"ID technique : {run_id}"
+        )
+    else:
+        st.subheader(history.summary if history.summary != "-" else "Detail du run")
         st.caption(f"ID technique : {run_id}")
-        technical = st.tabs(["Configuration", "Fichiers", "Logs"])
-        technical[0].json(detail["configuration"])
-        technical[1].write(detail["files"] or "Aucun résultat publié")
-        technical[2].code("\n".join(detail["log_tail"]) or "Aucun message")
-
-
+    _render_resume_controls(run_id, status, detail)
+    _render_job_detail_tabs(service, run_id, status=status, detail=detail)
+    return
 def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) -> None:
     details = [service.run(run_id) for run_id in run_ids]
     analytics = [_load_run_analytics(run_id, item["status"], item) for run_id, item in zip(run_ids, details, strict=True)]

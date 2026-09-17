@@ -1,0 +1,106 @@
+{
+  "calibration_protocol": "development_select_freeze_then_single_holdout_evaluation",
+  "holdout_used_for_selection": false,
+  "holdout_evaluation_count": 1,
+  "selection_digest_before_holdout": "916d1f1f93a31de225437c0fe7f542f825ff7e629b41a4351c48acc63e9f82a9",
+  "selection_formula": "0.30*ROCAUCMedian + 0.20*PRAUCMedian + 0.15*ROCAUCWorst + 0.10*PRAUCWorst + 0.10*F1Median + 0.05*ReasonablePositiveWindowPct + 0.05*UsefulProbabilityWindowPct - 0.10*ROCAUCStd - 0.05*PRAUCStd - 0.20*CatastrophicWindowPct",
+  "catastrophic_window_definition": "missing ROC/PR-AUC, ROC-AUC < 0.40, or PR-AUC < 0.50 * prevalence",
+  "useful_probability_definition": "probability standard deviation > 1e-6 and range >= 0.01",
+  "reasonable_positive_definition": "at least one positive prediction and rate <= max(0.50, 4 * prevalence)",
+  "candidate_configurations": 2,
+  "direction_configuration_evaluations": 4,
+  "combination_sampling": "per_target_v1",
+  "sampling_manifest": {
+    "schema_version": 1,
+    "policy_version": "per_target_v1",
+    "population_size": 6,
+    "sample_size": 3,
+    "cap": null,
+    "seed": 17,
+    "target_distribution": {
+      "AAA": {
+        "population": 2,
+        "allocated": 1
+      },
+      "BBB": {
+        "population": 2,
+        "allocated": 1
+      },
+      "CCC": {
+        "population": 2,
+        "allocated": 1
+      }
+    },
+    "sample_sha256": "f00dc1e77edf5fa40ee367c83f623ce62a906c2a5109ae5f94dcfc8afbd0b840",
+    "selected_set_ids": [
+      "[\"AAA\",\"CCC\"]",
+      "[\"BBB\",\"AAA\"]",
+      "[\"CCC\",\"BBB\"]"
+    ]
+  },
+  "combination_sampling_seed": 17,
+  "combination_workers": 1,
+  "combinations_per_target": 1,
+  "sampled_combinations": 3,
+  "permutation_depth": 1,
+  "symbols": [
+    "AAA",
+    "BBB",
+    "CCC"
+  ],
+  "lag_depth": 3,
+  "target": "intraday_return >= intraday_target_threshold",
+  "down_target": "intraday_return <= -intraday_down_threshold",
+  "intraday_target_threshold": 0.01,
+  "intraday_down_threshold": 0.01,
+  "prediction_threshold": 0.5,
+  "walk_forward_min_train_size": 20,
+  "walk_forward_test_size": 10,
+  "walk_forward_step_size": 10,
+  "development_start": "2024-01-01T00:00:00",
+  "development_end": "2024-03-22T00:00:00",
+  "final_holdout_start": "2024-03-25T00:00:00",
+  "final_holdout_end": "2024-03-29T00:00:00",
+  "final_holdout_size": 5,
+  "qualification_criteria_unchanged": {
+    "min_windows": 3,
+    "min_median_auc": 0.55,
+    "min_pct_windows_above_random": 0.6666666666666666,
+    "min_worst_window_auc": 0.45,
+    "min_positive_observations": 20,
+    "max_auc_std": 0.1,
+    "final_confirmation_min_auc": 0.5
+  },
+  "selected_configurations": {
+    "Up": {
+      "configuration": "baseline",
+      "parameters": {
+        "max_depth": 2,
+        "eta": 1.0,
+        "num_boost_round": 2,
+        "min_child_weight": 1.0,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+        "gamma": 0.0,
+        "reg_alpha": 0.0,
+        "reg_lambda": 1.0
+      },
+      "selection_score": 0.43073958623744685
+    },
+    "Down": {
+      "configuration": "baseline",
+      "parameters": {
+        "max_depth": 2,
+        "eta": 1.0,
+        "num_boost_round": 2,
+        "min_child_weight": 1.0,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+        "gamma": 0.0,
+        "reg_alpha": 0.0,
+        "reg_lambda": 1.0
+      },
+      "selection_score": 0.6829013662704512
+    }
+  }
+}

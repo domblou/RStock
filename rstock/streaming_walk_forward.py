@@ -417,9 +417,97 @@ def _workflow_configuration(
     return values
 
 
-def run_streamed_walk_forward(
+def run_streamed_walk_forward_batch(
     prepared: pd.DataFrame,
     generated_sets: pd.DataFrame,
+    config: RStockConfig,
+    checkpoint: CheckpointManager,
+    *,
+    market_calendars: Mapping[str, str] | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
+) -> dict[str, int]:
+    """Evaluate one technical child range and persist restartable sub-batches."""
+
+    _validate_prepared_index(prepared)
+    ordered = prepared.sort_index()
+    holdout_size = config.final_holdout_size
+    if holdout_size < 1 or holdout_size >= len(ordered):
+        raise ValueError("final_holdout_size must leave non-empty development history")
+    task_rows = [row.to_dict() for _, row in generated_sets.iterrows()]
+    task_context = (
+        ordered,
+        config,
+        ordered.index[-holdout_size],
+        market_calendars or {},
+        config.walk_forward_min_train_size,
+        config.walk_forward_test_size,
+        config.walk_forward_step_size,
+    )
+    phase = "walk_forward"
+    batch_size = config.walk_forward_batch_size
+    total_batches = (len(task_rows) + batch_size - 1) // batch_size
+    checkpoint.phase_started(phase)
+    checkpoint.set_total_batches(phase, total_batches)
+    completed = checkpoint.completed_batch_ids(phase)
+    for batch in iter_indexed_combination_batches(
+        task_rows,
+        batch_size=batch_size,
+        combination_workers=config.combination_workers,
+        worker_context=task_context,
+        context_initializer=_set_walk_forward_task_context,
+        process_task=_walk_forward_process_task,
+        serial_task=_walk_forward_combination,
+        item_label=lambda values: symbol_set_id(pd.Series(values)),
+        stage=phase,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        details={"combination_workers": config.combination_workers},
+        completed_batch_ids=completed,
+    ):
+        check_cancellation(cancellation_check)
+        windows = pd.DataFrame(
+            [record for result in batch.results for record in result.window_records]
+        )
+        predictions = pd.DataFrame(
+            [record for result in batch.results for record in result.prediction_records]
+        )
+        checkpoint.commit_batch(
+            phase,
+            batch.batch_id,
+            {"windows": windows, "predictions": predictions},
+            first_index=batch.first_index,
+            last_index=batch.last_index,
+            combination_count=len(batch.results),
+            row_counts={"windows": len(windows), "predictions": len(predictions)},
+        )
+    completed = checkpoint.completed_batch_ids(phase)
+    if completed != tuple(range(total_batches)):
+        raise RuntimeError("Le batch WF enfant n'a pas produit tous ses checkpoints.")
+    checkpoint.phase_completed(phase)
+    return {
+        "combinations": len(task_rows),
+        "internal_batches": total_batches,
+    }
+
+
+def _sets_from_qualification(qualification: pd.DataFrame) -> pd.DataFrame:
+    rows: list[list[object]] = []
+    for raw in qualification.get("Set", pd.Series(dtype=object)):
+        values = json.loads(str(raw))
+        if not isinstance(values, list) or len(values) < 2:
+            raise ValueError("Identifiant de combinaison walk-forward invalide")
+        rows.append([str(value) for value in values])
+    width = max((len(row) for row in rows), default=2)
+    return pd.DataFrame(
+        [row + [None] * (width - len(row)) for row in rows],
+        columns=[f"V{index}" for index in range(width)],
+    )
+
+
+def run_streamed_walk_forward(
+    prepared: pd.DataFrame,
+    generated_sets: pd.DataFrame | None,
     config: RStockConfig,
     checkpoint: CheckpointManager,
     output: Path,
@@ -429,6 +517,8 @@ def run_streamed_walk_forward(
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
     run_configuration_extras: Mapping[str, object] | None = None,
+    precomputed_walk_forward_batches: int | None = None,
+    precomputed_combination_count: int | None = None,
 ) -> StreamedWalkForwardResult:
     """Execute and finalize a walk-forward without retaining all detail in RAM."""
 
@@ -446,7 +536,16 @@ def run_streamed_walk_forward(
     task_context = (
         ordered, config, holdout_start, calendars, min_train, test_window, step
     )
-    task_rows = [row.to_dict() for _, row in generated_sets.iterrows()]
+    task_rows = (
+        [row.to_dict() for _, row in generated_sets.iterrows()]
+        if generated_sets is not None
+        else []
+    )
+    combination_count = (
+        len(task_rows)
+        if precomputed_combination_count is None
+        else int(precomputed_combination_count)
+    )
     telemetry: dict[str, object] = {
         "prepared_bytes": dataframe_bytes(ordered),
         "parent_rss_start_bytes": process_rss_bytes(),
@@ -463,7 +562,13 @@ def run_streamed_walk_forward(
     phase = "walk_forward"
     checkpoint.phase_started(phase)
     batch_size = config.walk_forward_batch_size
-    total_batches = (len(task_rows) + batch_size - 1) // batch_size
+    total_batches = (
+        (len(task_rows) + batch_size - 1) // batch_size
+        if precomputed_walk_forward_batches is None
+        else int(precomputed_walk_forward_batches)
+    )
+    if total_batches < 1 or combination_count < 1:
+        raise ValueError("Walk-forward requires at least one combination")
     checkpoint.set_total_batches(phase, total_batches)
     phase_started = perf_counter()
     completed_ids = checkpoint.completed_batch_ids(phase)
@@ -473,97 +578,96 @@ def run_streamed_walk_forward(
         substage="started",
         details={
             "phase_event": "started",
-            "combinations": len(task_rows),
+            "combinations": combination_count,
             "total_batches": total_batches,
             **telemetry,
         },
     )
-    for batch in iter_indexed_combination_batches(
-        task_rows,
-        batch_size=batch_size,
-        combination_workers=config.combination_workers,
-        worker_context=task_context,
-        context_initializer=_set_walk_forward_task_context,
-        process_task=_walk_forward_process_task,
-        serial_task=_walk_forward_combination,
-        item_label=lambda values: symbol_set_id(pd.Series(values)),
-        stage=phase,
-        progress_callback=progress_callback,
-        cancellation_check=cancellation_check,
-        details={"combination_workers": config.combination_workers},
-        completed_batch_ids=completed_ids,
-    ):
-        check_cancellation(cancellation_check)
-        checkpoint_started = perf_counter()
-        windows = pd.DataFrame([
-            record for result in batch.results for record in result.window_records
-        ])
-        predictions = pd.DataFrame([
-            record for result in batch.results for record in result.prediction_records
-        ])
-        checkpoint.commit_batch(
-            phase,
-            batch.batch_id,
-            {"windows": windows, "predictions": predictions},
-            first_index=batch.first_index,
-            last_index=batch.last_index,
-            combination_count=len(batch.results),
-            row_counts={"windows": len(windows), "predictions": len(predictions)},
-        )
-        telemetry["peak_batch_prediction_rows"] = max(
-            int(telemetry["peak_batch_prediction_rows"]), len(predictions)
-        )
-        current_rss = process_rss_bytes()
-        if current_rss is not None:
-            previous_peak = telemetry.get("parent_rss_peak_bytes")
-            telemetry["parent_rss_peak_bytes"] = max(
-                int(previous_peak or 0), current_rss
+    if precomputed_walk_forward_batches is None:
+        for batch in iter_indexed_combination_batches(
+            task_rows,
+            batch_size=batch_size,
+            combination_workers=config.combination_workers,
+            worker_context=task_context,
+            context_initializer=_set_walk_forward_task_context,
+            process_task=_walk_forward_process_task,
+            serial_task=_walk_forward_combination,
+            item_label=lambda values: symbol_set_id(pd.Series(values)),
+            stage=phase,
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+            details={"combination_workers": config.combination_workers},
+            completed_batch_ids=completed_ids,
+        ):
+            check_cancellation(cancellation_check)
+            checkpoint_started = perf_counter()
+            windows = pd.DataFrame([
+                record for result in batch.results for record in result.window_records
+            ])
+            predictions = pd.DataFrame([
+                record for result in batch.results for record in result.prediction_records
+            ])
+            checkpoint.commit_batch(
+                phase,
+                batch.batch_id,
+                {"windows": windows, "predictions": predictions},
+                first_index=batch.first_index,
+                last_index=batch.last_index,
+                combination_count=len(batch.results),
+                row_counts={"windows": len(windows), "predictions": len(predictions)},
             )
-        report_progress(
-            progress_callback,
-            phase,
-            substage=f"batch {batch.batch_id + 1}/{total_batches}",
-            completed_units=batch.last_index + 1,
-            total_units=len(task_rows),
-            details={
-                "batch_id": batch.batch_id,
-                "batch_number": batch.batch_id + 1,
-                "total_batches": total_batches,
-                "combinations": len(batch.results),
-                "rows": len(predictions),
-                "elapsed_seconds": (
-                    batch.elapsed_seconds + perf_counter() - checkpoint_started
-                ),
-                "calculation_seconds": batch.elapsed_seconds,
-                "parent_rss_bytes": current_rss,
-                "checkpoint_written": True,
-            },
-        )
+            telemetry["peak_batch_prediction_rows"] = max(
+                int(telemetry["peak_batch_prediction_rows"]), len(predictions)
+            )
+            current_rss = process_rss_bytes()
+            if current_rss is not None:
+                previous_peak = telemetry.get("parent_rss_peak_bytes")
+                telemetry["parent_rss_peak_bytes"] = max(
+                    int(previous_peak or 0), current_rss
+                )
+            report_progress(
+                progress_callback,
+                phase,
+                substage=f"batch {batch.batch_id + 1}/{total_batches}",
+                completed_units=batch.last_index + 1,
+                total_units=len(task_rows),
+                details={
+                    "batch_id": batch.batch_id,
+                    "batch_number": batch.batch_id + 1,
+                    "total_batches": total_batches,
+                    "combinations": len(batch.results),
+                    "rows": len(predictions),
+                    "elapsed_seconds": (
+                        batch.elapsed_seconds + perf_counter() - checkpoint_started
+                    ),
+                    "calculation_seconds": batch.elapsed_seconds,
+                    "parent_rss_bytes": current_rss,
+                    "checkpoint_written": True,
+                },
+            )
+    elif checkpoint.completed_batch_ids(phase) != tuple(range(total_batches)):
+        raise RuntimeError("Les résultats des enfants WF sont incomplets.")
     checkpoint.phase_completed(phase)
     telemetry["walk_forward_seconds"] = perf_counter() - phase_started
     phase_seconds[phase] = telemetry["walk_forward_seconds"]
     completed_ids = checkpoint.completed_batch_ids(phase)
-    completed_indices = {
-        index
-        for batch_id in completed_ids
-        if 0 <= batch_id < total_batches
-        for index in range(
-            batch_id * batch_size,
-            min((batch_id + 1) * batch_size, len(task_rows)),
-        )
-    }
-    processed_set_ids = {
-        symbol_set_id(pd.Series(task_rows[index])) for index in completed_indices
-    }
+    completed_indices = set(range(combination_count))
+    processed_set_ids = (
+        {symbol_set_id(pd.Series(row)) for row in task_rows}
+        if task_rows
+        else set()
+    )
     report_progress(
         progress_callback,
         phase,
         substage="completed",
         details={
             "phase_event": "completed",
-            "combinations_requested": len(task_rows),
+            "combinations_requested": combination_count,
             "combinations_processed": len(completed_indices),
-            "unique_combinations_processed": len(processed_set_ids),
+            "unique_combinations_processed": (
+                len(processed_set_ids) if processed_set_ids else combination_count
+            ),
             "expected_batches": total_batches,
             "completed_batches": len(completed_ids),
             "peak_batch_prediction_rows": telemetry["peak_batch_prediction_rows"],
@@ -695,6 +799,11 @@ def run_streamed_walk_forward(
 
     phase = "final_holdout"
     eligible = qualification[qualification["Eligible"]].sort_values("EligibleRank")
+    holdout_sets = (
+        generated_sets
+        if generated_sets is not None
+        else _sets_from_qualification(qualification)
+    )
     holdout_batch_size = config.final_holdout_batch_size
     total_holdout_batches = (
         (len(eligible) + holdout_batch_size - 1) // holdout_batch_size
@@ -716,7 +825,7 @@ def run_streamed_walk_forward(
             subset = eligible.iloc[start : start + holdout_batch_size]
             metrics, predictions = _evaluate_final_holdout(
                 ordered,
-                generated_sets,
+                holdout_sets,
                 subset,
                 config,
                 holdout_start,
@@ -772,7 +881,7 @@ def run_streamed_walk_forward(
         else:
             final_holdout, empty_predictions = _evaluate_final_holdout(
                 ordered,
-                generated_sets,
+                holdout_sets,
                 qualification.assign(Eligible=False),
                 config,
                 holdout_start,

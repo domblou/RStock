@@ -1,0 +1,12 @@
+{
+  "phase": "walk_forward",
+  "batch_id": 0,
+  "first_index": 0,
+  "last_index": 0,
+  "combination_count": 1,
+  "row_counts": {},
+  "payload_sha256": "c69faa2965676d183e794763b6df60457ed549f71abf63c6a52bba9dd61ddcca",
+  "completed_at": "2026-09-17T02:11:43.415103+00:00",
+  "configuration_fingerprint": "fingerprint",
+  "checkpoint_schema_version": 1
+}

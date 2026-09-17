@@ -1,0 +1,9 @@
+Configuration,Baseline,ConfigurationDigest,threshold_calibration_min_signals_per_window,threshold_calibration_min_robust_signals,threshold_calibration_min_window_fraction,threshold_calibration_precision_tolerance,threshold_calibration_quantiles,threshold_calibration_grid_decimals
+baseline,True,e46e1d2b9da70eee00f1dd05ecc45260dd5d2185c33cf1b3fca5776a8ca4ef62,1,1,0.5,0.01,"[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6
+candidate_01,False,ebd98faa24731601fa271df1653a755cde8d8dea0e2f7661b478519552ee7533,2,1,0.5,0.01,"[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6
+candidate_02,False,1d22adbfeed148f17e1f528ed763b4ee1b9e1476c5f864f618ac3fcb58bef68e,1,2,0.5,0.01,"[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6
+candidate_03,False,db9d2adb75b273817044851e00d5678796dfabdbd31adba454b77b8f25d88ae0,1,1,0.75,0.01,"[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6
+candidate_04,False,f9b1d17b5f637a8aec378416d9a79a79e765c4ff55feea85d95d69da6d7670a3,1,1,1.0,0.01,"[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6
+candidate_05,False,7fb291dc49a3c244deb5b2e31f24d948109f9bbf3d140faa2ded3b70b62006a1,1,1,0.5,0.0,"[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6
+candidate_06,False,8b64dec528c4a26a7ab370f8513b2472348572a3a3a2d4420b2077cdae49eb9a,1,1,0.5,0.01,"[0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.975, 0.99]",6
+candidate_07,False,0930fec4fb126fed25610da07976843fb0828aa430fe6d1882041ead6a13fb20,1,1,0.5,0.01,"[0.5, 0.65, 0.75, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99]",6

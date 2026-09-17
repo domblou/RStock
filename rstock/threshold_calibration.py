@@ -12,7 +12,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .calibration import deterministic_combination_sample, split_development_holdout
+from .calibration import split_development_holdout
+from .calibration_sampling import (
+    GLOBAL_STRATIFIED_V2,
+    PER_TARGET_V1,
+    exhaustive_v2_sample,
+    per_target_v1_sample,
+)
 from .combinations import symbol_set_id, symbols_from_set
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics
@@ -973,6 +979,7 @@ def run_controlled_threshold_calibration(
     config: RStockConfig,
     *,
     combinations_per_target: int = 3,
+    sampling_policy: str = PER_TARGET_V1,
     min_train_size: int | None = None,
     test_size: int | None = None,
     step_size: int | None = None,
@@ -996,11 +1003,17 @@ def run_controlled_threshold_calibration(
         "Up": EXPERIMENTAL_XGBOOST_PARAMETERS,
         "Down": EXPERIMENTAL_XGBOOST_PARAMETERS,
     }
-    sampled = deterministic_combination_sample(
-        generated_sets,
-        per_target=combinations_per_target,
-        seed=config.xgb_seed,
-    )
+    if sampling_policy == GLOBAL_STRATIFIED_V2:
+        sample = exhaustive_v2_sample(generated_sets, seed=config.xgb_seed)
+    elif sampling_policy == PER_TARGET_V1:
+        sample = per_target_v1_sample(
+            generated_sets,
+            per_target=combinations_per_target,
+            seed=config.xgb_seed,
+        )
+    else:
+        raise ValueError(f"Unsupported calibration sampling policy: {sampling_policy}")
+    sampled = sample.combinations
     development, holdout, holdout_start = split_development_holdout(
         prepared, holdout_size
     )
@@ -1147,6 +1160,8 @@ def run_controlled_threshold_calibration(
         "final_holdout_size": holdout_size,
         "combination_workers": config.combination_workers,
         "sampled_combinations": len(sampled),
+        "combination_sampling": sampling_policy,
+        "sampling_manifest": sample.manifest,
         "selected_thresholds": calibration.selected_thresholds,
         "selected_thresholds_by_set": selected_by_set,
         "threshold_diagnostics": diagnostics,
@@ -1215,6 +1230,10 @@ def write_threshold_calibration_results(
     )
     (directory / "run_configuration.json").write_text(
         json.dumps(result.run_configuration, indent=2) + "\n", encoding="utf-8"
+    )
+    (directory / "sampling_manifest.json").write_text(
+        json.dumps(result.run_configuration["sampling_manifest"], indent=2) + "\n",
+        encoding="utf-8",
     )
     if result.run_configuration["holdout_evaluated"]:
         result.holdout_predictions.to_csv(

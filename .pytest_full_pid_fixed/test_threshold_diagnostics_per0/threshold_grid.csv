@@ -1,0 +1,6 @@
+Direction,Threshold,Sources,ReferenceThreshold
+Down,0.5,"q0.5,reference",True
+Down,0.7375,q0.75,False
+Down,0.88,q0.9,False
+Up,0.1,"q0.5,q0.75,q0.9",False
+Up,0.5,reference,True

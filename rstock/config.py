@@ -34,6 +34,9 @@ class RStockConfig:
     predictor_prefilter_batch_size: int = 25
     walk_forward_batch_size: int = 25
     final_holdout_batch_size: int = 25
+    walk_forward_max_combinations_per_batch: int | None = 2_200_000
+    xgboost_global_max_qualified_combinations: int | None = 500
+    threshold_parameter_calibration_max_models: int | None = 500
     model_history_days: int = 730
     prediction_history_days: int = 10
 
@@ -118,6 +121,28 @@ class RStockConfig:
     )
     threshold_calibration_grid_decimals: int = 6
 
+    def __post_init__(self) -> None:
+        for name in (
+            "walk_forward_max_combinations_per_batch",
+            "xgboost_global_max_qualified_combinations",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise ValueError(f"{name} must be null or an integer >= 1")
+        threshold_cap = self.threshold_parameter_calibration_max_models
+        if threshold_cap is not None and (
+            not isinstance(threshold_cap, int)
+            or isinstance(threshold_cap, bool)
+            or threshold_cap < 2
+            or threshold_cap % 2
+        ):
+            raise ValueError(
+                "threshold_parameter_calibration_max_models must be null or an "
+                "even integer >= 2"
+            )
+
     def path(self, relative_name: str) -> Path:
         return self.project_root / relative_name
 
@@ -173,6 +198,9 @@ DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
     "walk_forward_end_offset_sessions": 63,
     "max_generated_sets": 1_000_000_000,
+    "walk_forward_max_combinations_per_batch": None,
+    "xgboost_global_max_qualified_combinations": None,
+    "threshold_parameter_calibration_max_models": None,
 }
 
 USER_SETTINGS_SCHEMA_VERSION = 1
@@ -197,6 +225,13 @@ def user_settings_path(project_root: Path) -> Path:
 def _coerce_config_value(name: str, value: object, default_value: object) -> object:
     """Validate a JSON value before applying it to ``RStockConfig``."""
 
+    if name in {
+        "walk_forward_max_combinations_per_batch",
+        "xgboost_global_max_qualified_combinations",
+        "threshold_parameter_calibration_max_models",
+    } and value is None:
+        return None
+
     if name == "selected_symbols":
         if value is None:
             return None
@@ -220,6 +255,15 @@ def _coerce_config_value(name: str, value: object, default_value: object) -> obj
                 raise ValueError(f"{name} must be an integer >= 0")
             if name.endswith("_batch_size") and value < 1:
                 raise ValueError(f"{name} must be an integer >= 1")
+            if name in {
+                "walk_forward_max_combinations_per_batch",
+                "xgboost_global_max_qualified_combinations",
+            } and value < 1:
+                raise ValueError(f"{name} must be an integer >= 1")
+            if name == "threshold_parameter_calibration_max_models" and (
+                value < 2 or value % 2
+            ):
+                raise ValueError(f"{name} must be an even integer >= 2")
             return value
         raise ValueError(f"{name} must be an integer")
 

@@ -1,0 +1,21 @@
+{
+  "checkpoint_schema_version": 1,
+  "implementation_version": "walk-forward-v1",
+  "run_id": "run-1",
+  "job_type": "walk_forward",
+  "configuration_fingerprint": "fingerprint",
+  "state": "created",
+  "current_phase": null,
+  "phases_completed": [],
+  "batch_sizes": {
+    "walk_forward": 2
+  },
+  "batches": {},
+  "created_at": "2026-09-17T02:13:22.201529+00:00",
+  "updated_at": "2026-09-17T02:13:22.201529+00:00",
+  "last_checkpoint": null,
+  "attempt_count": 0,
+  "resume_count": 0,
+  "attempts": [],
+  "error": null
+}

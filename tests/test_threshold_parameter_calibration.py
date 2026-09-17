@@ -9,6 +9,7 @@ from rstock.application.repository import RunRepository
 from rstock.application.runner import RunService
 from rstock.application.workflows import _resolve_threshold_calibration_config
 from rstock.combinations import generate_symbol_sets
+from rstock.calibration_sampling import GLOBAL_STRATIFIED_V2
 from rstock.config import DEFAULT_CONFIG
 from rstock.modeling import XGBoostParameters
 from rstock.threshold_parameter_calibration import (
@@ -206,6 +207,43 @@ def test_runner_reuses_probabilities_and_never_uses_holdout_for_selection(
     )
     assert len(result.development_by_configuration) == 2
     assert result.selected_configuration["parent_run"] == "wf-parent"
+
+
+def test_v2_directional_model_cap_counts_complete_up_down_pairs(
+    monkeypatch, tmp_path
+):
+    sampled_sizes = []
+
+    def fake_probabilities(development, sampled, *args, **kwargs):
+        sampled_sizes.append(len(sampled))
+        return _predictions()
+
+    monkeypatch.setattr(
+        "rstock.threshold_parameter_calibration.generate_development_probabilities",
+        fake_probabilities,
+    )
+    result = run_threshold_parameter_calibration(
+        pd.DataFrame(
+            {"placeholder": np.arange(20)},
+            index=pd.bdate_range("2025-01-01", periods=20),
+        ),
+        generate_symbol_sets(["AAA", "BBB", "CCC"], 1),
+        _config(tmp_path),
+        xgboost_parameters_by_direction={
+            "Up": XGBoostParameters(2, 0.05, 20),
+            "Down": XGBoostParameters(3, 0.1, 30),
+        },
+        xgboost_parameter_source="frozen_snapshot",
+        combinations_per_target=1,
+        sampling_policy=GLOBAL_STRATIFIED_V2,
+        max_directional_models=4,
+    )
+
+    assert sampled_sizes == [2]
+    manifest = result.run_configuration["sampling_manifest"]
+    assert manifest["sampled_directional_models"] == 4
+    assert manifest["sample_size"] == 2
+    assert manifest["complete_direction_pairs"] is True
 
 
 def test_holdout_values_cannot_affect_threshold_parameter_ranking(monkeypatch, tmp_path):

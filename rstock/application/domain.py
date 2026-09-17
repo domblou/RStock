@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from rstock.config import HISTORICAL_MISSING_CONFIG_DEFAULTS, RStockConfig
 
@@ -16,6 +16,7 @@ from .universes import UniverseSelection
 
 class JobType(str, Enum):
     WALK_FORWARD = "walk_forward"
+    WALK_FORWARD_BATCH = "walk_forward_batch"
     XGBOOST_CALIBRATION = "xgboost_calibration"
     THRESHOLD_PARAMETER_CALIBRATION = "threshold_parameter_calibration"
     THRESHOLD_CALIBRATION = "threshold_calibration"
@@ -27,11 +28,13 @@ class JobType(str, Enum):
     MARKET_UPDATE = "market_update"
     REALIZED_VALIDATION = "realized_validation"
     OPERATIONAL_RUN = "operational_run"
+    END_TO_END = "end_to_end"
 
     @property
     def implemented(self) -> bool:
         return self in {
             JobType.WALK_FORWARD,
+            JobType.WALK_FORWARD_BATCH,
             JobType.XGBOOST_CALIBRATION,
             JobType.THRESHOLD_PARAMETER_CALIBRATION,
             JobType.THRESHOLD_CALIBRATION,
@@ -41,6 +44,7 @@ class JobType(str, Enum):
             JobType.DAILY_SCREENING,
             JobType.REALIZED_VALIDATION,
             JobType.OPERATIONAL_RUN,
+            JobType.END_TO_END,
         }
 
 
@@ -60,6 +64,106 @@ class JobStatus(str, Enum):
             JobStatus.CANCELLED,
             JobStatus.INTERRUPTED,
         }
+
+
+class RunRole(str, Enum):
+    STANDALONE = "standalone"
+    PIPELINE_PARENT = "pipeline_parent"
+    PIPELINE_STAGE = "pipeline_stage"
+    TECHNICAL_BATCH = "technical_batch"
+
+    @property
+    def technical(self) -> bool:
+        return self is RunRole.TECHNICAL_BATCH
+
+
+@dataclass(frozen=True, slots=True)
+class RunMetadata:
+    """Relational run metadata kept outside the scientific snapshot."""
+
+    schema_version: int = 1
+    run_role: RunRole = RunRole.STANDALONE
+    visible_in_history: bool = True
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    created_by_run_id: str | None = None
+    relation_key: str | None = None
+    relation_type: str | None = None
+    stage_key: str | None = None
+    stage_index: int | None = None
+    batch_id: str | None = None
+    batch_index: int | None = None
+    batch_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("Unsupported run metadata schema")
+        if self.run_role.technical and self.visible_in_history:
+            raise ValueError("Technical runs must be hidden from history")
+        if self.run_role in {
+            RunRole.PIPELINE_STAGE,
+            RunRole.TECHNICAL_BATCH,
+        } and not self.parent_run_id:
+            raise ValueError("Child run metadata requires parent_run_id")
+        if self.parent_run_id and not self.relation_key:
+            raise ValueError("Child run metadata requires relation_key")
+        for name in ("stage_index", "batch_index"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.batch_count is not None and self.batch_count < 1:
+            raise ValueError("batch_count must be positive")
+        if (
+            self.batch_index is not None
+            and self.batch_count is not None
+            and self.batch_index >= self.batch_count
+        ):
+            raise ValueError("batch_index must be lower than batch_count")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "run_role": self.run_role.value,
+            "visible_in_history": self.visible_in_history,
+            "parent_run_id": self.parent_run_id,
+            "root_run_id": self.root_run_id,
+            "created_by_run_id": self.created_by_run_id,
+            "relation_key": self.relation_key,
+            "relation_type": self.relation_type,
+            "stage_key": self.stage_key,
+            "stage_index": self.stage_index,
+            "batch_id": self.batch_id,
+            "batch_index": self.batch_index,
+            "batch_count": self.batch_count,
+        }
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, object] | None) -> "RunMetadata":
+        if values is None:
+            return cls()
+        return cls(
+            schema_version=int(values.get("schema_version", 1)),
+            run_role=RunRole(str(values.get("run_role", RunRole.STANDALONE.value))),
+            visible_in_history=bool(values.get("visible_in_history", True)),
+            parent_run_id=_optional_string(values.get("parent_run_id")),
+            root_run_id=_optional_string(values.get("root_run_id")),
+            created_by_run_id=_optional_string(values.get("created_by_run_id")),
+            relation_key=_optional_string(values.get("relation_key")),
+            relation_type=_optional_string(values.get("relation_type")),
+            stage_key=_optional_string(values.get("stage_key")),
+            stage_index=_optional_int(values.get("stage_index")),
+            batch_id=_optional_string(values.get("batch_id")),
+            batch_index=_optional_int(values.get("batch_index")),
+            batch_count=_optional_int(values.get("batch_count")),
+        )
+
+
+def _optional_string(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
 
 
 def _config_to_dict(config: RStockConfig) -> dict[str, Any]:
@@ -113,6 +217,18 @@ class ExperimentSpec:
     run_description: str | None = None
     historical_data_cutoff: str | None = None
     source_prepared_dataset_sha256: str | None = None
+    source_end_to_end_run: str | None = None
+    source_threshold_calibration_run: str | None = None
+    auto_promote_candidates: bool = False
+    pipeline_version: int = 1
+    calibration_sampling_policy_version: int = 2
+    combination_plan_version: int | None = None
+    combination_plan_sha256: str | None = None
+    combination_range_start: int | None = None
+    combination_range_stop: int | None = None
+    _snapshot_fingerprint: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not self.job_type.implemented:
@@ -177,11 +293,32 @@ class ExperimentSpec:
             raise ValueError("At least two symbols are required")
         if self.combinations_per_target < 1:
             raise ValueError("combinations_per_target must be positive")
+        if self.pipeline_version < 0:
+            raise ValueError("pipeline_version must be non-negative")
+        if self.calibration_sampling_policy_version < 1:
+            raise ValueError("calibration_sampling_policy_version must be positive")
+        if self.combination_plan_version is not None and self.combination_plan_version < 1:
+            raise ValueError("combination_plan_version must be positive")
+        if (self.combination_range_start is None) != (self.combination_range_stop is None):
+            raise ValueError("combination range requires both start and stop")
+        if self.combination_range_start is not None and (
+            self.combination_range_start < 0
+            or self.combination_range_stop <= self.combination_range_start
+        ):
+            raise ValueError("combination range must be non-empty and non-negative")
         if self.job_type == JobType.PRODUCTION_TRAINING and not self.model_id:
             raise ValueError("production_training requires model_id")
+        if (
+            self.job_type is JobType.END_TO_END
+            and self.auto_promote_candidates
+            and not self.evaluate_final_holdout
+        ):
+            raise ValueError(
+                "La promotion automatique End-to-end exige le holdout final."
+            )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        values: dict[str, Any] = {
             "schema_version": 1,
             "job_type": self.job_type.value,
             "symbols": list(self.symbols),
@@ -220,12 +357,26 @@ class ExperimentSpec:
             "model_id": self.model_id,
             "rstock_config": _config_to_dict(self.config),
         }
+        values.update(
+            source_end_to_end_run=self.source_end_to_end_run,
+            source_threshold_calibration_run=self.source_threshold_calibration_run,
+            auto_promote_candidates=self.auto_promote_candidates,
+            pipeline_version=self.pipeline_version,
+            calibration_sampling_policy_version=(
+                self.calibration_sampling_policy_version
+            ),
+            combination_plan_version=self.combination_plan_version,
+            combination_plan_sha256=self.combination_plan_sha256,
+            combination_range_start=self.combination_range_start,
+            combination_range_stop=self.combination_range_stop,
+        )
+        return values
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "ExperimentSpec":
         if values.get("schema_version") != 1:
             raise ValueError("Unsupported experiment configuration schema")
-        return cls(
+        spec = cls(
             job_type=JobType(values["job_type"]),
             config=_config_from_dict(values["rstock_config"]),
             symbols=tuple(str(symbol) for symbol in values["symbols"]),
@@ -317,9 +468,41 @@ class ExperimentSpec:
                 if values.get("source_prepared_dataset_sha256") is None
                 else str(values["source_prepared_dataset_sha256"])
             ),
+            source_end_to_end_run=_optional_string(
+                values.get("source_end_to_end_run")
+            ),
+            source_threshold_calibration_run=_optional_string(
+                values.get("source_threshold_calibration_run")
+            ),
+            auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),
+            pipeline_version=int(values.get("pipeline_version", 0)),
+            calibration_sampling_policy_version=int(
+                values.get("calibration_sampling_policy_version", 1)
+            ),
+            combination_plan_version=_optional_int(
+                values.get("combination_plan_version")
+            ),
+            combination_plan_sha256=_optional_string(
+                values.get("combination_plan_sha256")
+            ),
+            combination_range_start=_optional_int(
+                values.get("combination_range_start")
+            ),
+            combination_range_stop=_optional_int(
+                values.get("combination_range_stop")
+            ),
         )
+        canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+        object.__setattr__(
+            spec,
+            "_snapshot_fingerprint",
+            hashlib.sha256(canonical.encode()).hexdigest(),
+        )
+        return spec
 
     @property
     def fingerprint(self) -> str:
+        if self._snapshot_fingerprint is not None:
+            return self._snapshot_fingerprint
         canonical = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()

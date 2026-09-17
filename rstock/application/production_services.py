@@ -228,9 +228,6 @@ class PromotionService:
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_values, sort_keys=True).encode()
         ).hexdigest()
-        for existing in self.production.models():
-            if existing.training_metadata.get("promotion_fingerprint") == fingerprint:
-                return existing, False
         model = ProductionModel(
             model_id=f"model_{uuid.uuid4().hex[:12]}",
             target=target,
@@ -275,7 +272,7 @@ class PromotionService:
             calibration_sample_size=calibration_sample_size,
             holdout_signal_metrics=holdout_signal_metrics,
         )
-        return self.production.add(model), True
+        return self.production.add_promoted_idempotently(model, fingerprint)
 
     def resolve_walk_forward_source(
         self, threshold_calibration_run: str, set_name: str

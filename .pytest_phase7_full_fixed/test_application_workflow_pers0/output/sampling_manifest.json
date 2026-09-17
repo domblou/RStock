@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "policy_version": "per_target_v1",
+  "population_size": 2,
+  "sample_size": 2,
+  "cap": null,
+  "seed": 1234,
+  "target_distribution": {
+    "AAA": {
+      "population": 1,
+      "allocated": 1
+    },
+    "BBB": {
+      "population": 1,
+      "allocated": 1
+    }
+  },
+  "sample_sha256": "0fffd5fc2eb1f9da6ed54bf5a1d83d6e68e8fda2f0dd6b6dd43ac9800217220e",
+  "selected_set_ids": [
+    "[\"AAA\",\"BBB\"]",
+    "[\"BBB\",\"AAA\"]"
+  ]
+}

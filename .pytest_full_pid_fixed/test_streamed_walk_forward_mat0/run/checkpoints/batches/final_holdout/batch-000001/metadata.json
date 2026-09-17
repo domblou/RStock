@@ -1,0 +1,15 @@
+{
+  "phase": "final_holdout",
+  "batch_id": 1,
+  "first_index": 1,
+  "last_index": 1,
+  "combination_count": 1,
+  "row_counts": {
+    "metrics": 1,
+    "predictions": 5
+  },
+  "payload_sha256": "0240e7618c98a6e94b830345128ed697ef80530311886f3bde1bbc8e01e4297a",
+  "completed_at": "2026-09-17T02:13:49.118694+00:00",
+  "configuration_fingerprint": "fixture",
+  "checkpoint_schema_version": 1
+}

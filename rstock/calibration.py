@@ -13,6 +13,12 @@ import numpy as np
 import pandas as pd
 
 from .combinations import symbol_set_id, symbols_from_set
+from .calibration_sampling import (
+    GLOBAL_STRATIFIED_V2,
+    PER_TARGET_V1,
+    global_stratified_v2_sample,
+    per_target_v1_sample,
+)
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics
 from .features import (
@@ -140,24 +146,9 @@ def deterministic_combination_sample(
 ) -> pd.DataFrame:
     """Select the same balanced set sample regardless of input row ordering."""
 
-    if per_target < 1:
-        raise ValueError("per_target must be positive")
-    ranked: list[tuple[str, str, str, pd.Series]] = []
-    for _, row in generated_sets.iterrows():
-        observation, _ = symbols_from_set(row)
-        set_name = symbol_set_id(row)
-        digest = hashlib.sha256(f"{seed}:{set_name}".encode()).hexdigest()
-        ranked.append((observation, digest, set_name, row))
-    selected: list[pd.Series] = []
-    by_target: dict[str, list[tuple[str, str, pd.Series]]] = {}
-    for observation, digest, set_name, row in ranked:
-        by_target.setdefault(observation, []).append((digest, set_name, row))
-    for observation in sorted(by_target):
-        choices = sorted(by_target[observation], key=lambda item: (item[0], item[1]))
-        selected.extend(item[2] for item in choices[:per_target])
-    if not selected:
-        raise ValueError("No combinations are available for calibration")
-    return pd.DataFrame(selected).reset_index(drop=True)
+    return per_target_v1_sample(
+        generated_sets, per_target=per_target, seed=seed
+    ).combinations
 
 
 def split_development_holdout(
@@ -620,6 +611,8 @@ def run_controlled_calibration(
     *,
     candidates: Sequence[XGBoostParameters] | None = None,
     combinations_per_target: int = 3,
+    sampling_policy: str = PER_TARGET_V1,
+    global_max_combinations: int | None = None,
     min_train_size: int | None = None,
     test_size: int | None = None,
     step_size: int | None = None,
@@ -634,9 +627,21 @@ def run_controlled_calibration(
     test_window = test_size or config.walk_forward_test_size
     step = step_size or config.walk_forward_step_size
     holdout_size = final_holdout_size or config.final_holdout_size
-    sampled = deterministic_combination_sample(
-        generated_sets, per_target=combinations_per_target, seed=config.xgb_seed
-    )
+    if sampling_policy == GLOBAL_STRATIFIED_V2:
+        sample = global_stratified_v2_sample(
+            generated_sets,
+            cap=global_max_combinations,
+            seed=config.xgb_seed,
+        )
+    elif sampling_policy == PER_TARGET_V1:
+        sample = per_target_v1_sample(
+            generated_sets,
+            per_target=combinations_per_target,
+            seed=config.xgb_seed,
+        )
+    else:
+        raise ValueError(f"Unsupported calibration sampling policy: {sampling_policy}")
+    sampled = sample.combinations
     development, holdout, holdout_start = split_development_holdout(
         prepared, holdout_size
     )
@@ -695,12 +700,13 @@ def run_controlled_calibration(
         ),
         "candidate_configurations": len(tested),
         "direction_configuration_evaluations": 2 * len(tested),
-        "combination_sampling": (
-            "SHA-256 rank of seed:set identifier; equal quota per target"
-        ),
+        "combination_sampling": sampling_policy,
+        "sampling_manifest": sample.manifest,
         "combination_sampling_seed": config.xgb_seed,
         "combination_workers": config.combination_workers,
-        "combinations_per_target": combinations_per_target,
+        "combinations_per_target": (
+            combinations_per_target if sampling_policy == PER_TARGET_V1 else None
+        ),
         "sampled_combinations": len(sampled),
         "permutation_depth": max(
             len(symbols_from_set(row)[1]) for _, row in sampled.iterrows()
@@ -762,5 +768,14 @@ def write_calibration_results(result: CalibrationResult, directory: Path) -> Non
     )
     (directory / "run_configuration.json").write_text(
         json.dumps(result.run_configuration, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "sampling_manifest.json").write_text(
+        json.dumps(
+            result.run_configuration["sampling_manifest"],
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )

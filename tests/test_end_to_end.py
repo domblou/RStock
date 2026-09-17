@@ -1,0 +1,492 @@
+import json
+from collections import Counter
+from dataclasses import replace
+
+import pandas as pd
+import pytest
+
+from rstock.application.auto_promotion import PROMOTION_CHECKPOINT
+from rstock.application.domain import (
+    ExperimentSpec,
+    JobStatus,
+    JobType,
+    RunMetadata,
+    RunRole,
+)
+from rstock.application.end_to_end import (
+    PIPELINE_MANIFEST,
+    SCIENTIFIC_STAGES,
+    build_pipeline_manifest,
+    load_pipeline_manifest,
+)
+from rstock.application.repository import RunRepository
+from rstock.application.production_repository import ProductionRepository
+from rstock.application.production_services import PromotionService
+from rstock.application.runner import RunService
+from rstock.application.worker import execute_run
+from rstock.application.workflows import WorkflowRegistry, _end_to_end
+from rstock.config import DEFAULT_CONFIG
+from rstock.progress import check_cancellation
+
+
+def _spec(tmp_path, **values):
+    return ExperimentSpec(
+        job_type=JobType.END_TO_END,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"),
+        target_symbols=("AAA", "BBB"),
+        context_symbols=(),
+        combinations_per_target=1,
+        **values,
+    )
+
+
+def _write_json(path, values):
+    path.write_text(json.dumps(values), encoding="utf-8")
+
+
+def _fake_registry(
+    repository,
+    calls,
+    fail_once=None,
+    *,
+    cancel_on=None,
+    promotion_rows=None,
+):
+    failed = set()
+
+    def handler(job_type):
+        def run(spec, output, progress_callback, cancellation_check):
+            calls[job_type] += 1
+            if cancel_on is job_type:
+                repository.request_cancellation(str(spec.source_end_to_end_run))
+                check_cancellation(cancellation_check)
+            if fail_once is job_type and job_type not in failed:
+                failed.add(job_type)
+                raise RuntimeError(f"injected failure: {job_type.value}")
+            output.mkdir(parents=True, exist_ok=True)
+            if job_type is JobType.WALK_FORWARD:
+                rows = promotion_rows or [
+                    {
+                        "Set": "AAA<-BBB",
+                        "Observation": "AAA",
+                        "Predictors": '["BBB"]',
+                    }
+                ]
+                pd.DataFrame(
+                    [
+                        {
+                            "Set": row["Set"],
+                            "Observation": row.get(
+                                "Observation", row["Set"].split("<-", 1)[0]
+                            ),
+                            "Predictors": row.get(
+                                "Predictors",
+                                json.dumps(row["Set"].split("<-", 1)[1].split("+")),
+                            ),
+                            "Eligible": True,
+                            "ROCAUCMedian": 0.65,
+                        }
+                        for row in rows
+                    ]
+                ).to_csv(output / "qualification.csv", index=False)
+                _write_json(output / "run_configuration.json", {"job_type": "walk_forward"})
+                return {
+                    "job_type": job_type.value,
+                    "traceability": {
+                        "prepared_market_last_date": "2026-09-15T00:00:00",
+                        "prepared_dataset_sha256": "d" * 64,
+                    },
+                }
+            if job_type is JobType.XGBOOST_CALIBRATION:
+                selected = {
+                    "Up": {
+                        "parameters": {
+                            "max_depth": 2,
+                            "eta": 0.05,
+                            "num_boost_round": 20,
+                        }
+                    },
+                    "Down": {
+                        "parameters": {
+                            "max_depth": 3,
+                            "eta": 0.05,
+                            "num_boost_round": 20,
+                        }
+                    },
+                }
+                _write_json(output / "selected_configurations.json", selected)
+                _write_json(output / "sampling_manifest.json", {"policy_version": 2})
+            elif job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:
+                _write_json(
+                    output / "selected_threshold_calibration_configuration.json",
+                    {
+                        "parameters": {
+                            "threshold_calibration_min_signals_per_window": 5,
+                            "threshold_calibration_quantiles": [0.5, 0.75],
+                        }
+                    },
+                )
+                _write_json(output / "sampling_manifest.json", {"policy_version": 2})
+            else:
+                rows = promotion_rows or []
+                _write_json(
+                    output / "selected_thresholds_by_set.json",
+                    {
+                        row["Set"]: {
+                            "Up": {"status": "selected", "threshold": 0.62},
+                            "Down": {"status": "selected", "threshold": 0.38},
+                        }
+                        for row in rows
+                    },
+                )
+                if rows:
+                    pd.DataFrame(
+                        [
+                            {
+                                "Set": row["Set"],
+                                "Observation": row.get(
+                                    "Observation", row["Set"].split("<-", 1)[0]
+                                ),
+                                "Direction": "Up",
+                                "Threshold": 0.62,
+                                "SignalCount": row.get("SignalCount", 20),
+                                "ROCAUC": row.get("ROCAUC", 0.60),
+                                "Precision": row.get("Precision", 0.40),
+                                "DirectionalReturnMean": row.get(
+                                    "DirectionalReturnMean", 0.01
+                                ),
+                                "OppositeMoveFrequency": row.get(
+                                    "OppositeMoveFrequency", 0.30
+                                ),
+                            }
+                            for row in rows
+                        ]
+                    ).to_csv(output / "holdout_metrics.csv", index=False)
+                _write_json(output / "run_configuration.json", {"outcome": "completed"})
+            return {"job_type": job_type.value}
+
+        return run
+
+    return WorkflowRegistry(
+        {
+            JobType.END_TO_END: _end_to_end,
+            **{
+                job_type: handler(job_type)
+                for _, job_type, _ in SCIENTIFIC_STAGES
+            },
+        }
+    )
+
+
+def _create_parent(repository, spec):
+    return repository.create(
+        spec, metadata=RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+    )
+
+
+def _resume(repository, run_id, registry):
+    status = repository.prepare_resume(run_id)
+    status["resume_requested"] = True
+    repository.write_json(run_id, "status.json", status)
+    execute_run(repository, run_id, 1, registry=registry)
+
+
+@pytest.mark.parametrize(
+    "failed_job_type",
+    [
+        JobType.WALK_FORWARD,
+        JobType.XGBOOST_CALIBRATION,
+        JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        JobType.THRESHOLD_CALIBRATION,
+    ],
+)
+def test_end_to_end_resume_reuses_completed_stages_and_failed_child_id(
+    tmp_path, failed_job_type
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+    calls = Counter()
+    registry = _fake_registry(repository, calls, fail_once=failed_job_type)
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.FAILED.value
+    manifest_before = load_pipeline_manifest(repository, run_id)
+    assert manifest_before is not None
+    reserved_ids = {
+        item["stage_key"]: item["child_run_id"]
+        for item in manifest_before["stages"]
+        if item["child_run_id"] is not None
+    }
+    failed_stage = next(
+        key
+        for key, job_type, _ in SCIENTIFIC_STAGES
+        if job_type is failed_job_type
+    )
+    assert repository.status(reserved_ids[failed_stage])["status"] == "failed"
+    assert reserved_ids[failed_stage] in repository.status(run_id)["error"]
+
+    _resume(repository, run_id, registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    manifest_after = load_pipeline_manifest(repository, run_id)
+    assert manifest_after is not None
+    assert {
+        item["stage_key"]: item["child_run_id"]
+        for item in manifest_after["stages"]
+        if item["child_run_id"] is not None
+    } == reserved_ids
+    failed_index = [item[1] for item in SCIENTIFIC_STAGES].index(failed_job_type)
+    for index, (_, job_type, _) in enumerate(SCIENTIFIC_STAGES):
+        assert calls[job_type] == (2 if index == failed_index else 1)
+    assert all(
+        item["expected_fingerprint"] and item["artifact_digests"]
+        for item in manifest_after["stages"][:-1]
+    )
+    assert all(
+        repository.run_metadata(child_id).run_role is RunRole.PIPELINE_STAGE
+        and repository.run_metadata(child_id).visible_in_history
+        for child_id in reserved_ids.values()
+    )
+
+
+def test_end_to_end_reserves_every_child_before_materializing_the_first(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+    registry = _fake_registry(
+        repository, Counter(), fail_once=JobType.WALK_FORWARD
+    )
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    manifest = repository.read_json(run_id, PIPELINE_MANIFEST)
+    child_ids = [item["child_run_id"] for item in manifest["stages"][:-1]]
+    assert all(child_ids)
+    assert repository.run_directory(child_ids[0]).exists()
+    assert all(not repository.run_directory(item).exists() for item in child_ids[1:])
+
+
+def test_end_to_end_resume_rejects_changed_completed_artifact(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+    registry = _fake_registry(
+        repository, Counter(), fail_once=JobType.XGBOOST_CALIBRATION
+    )
+    execute_run(repository, run_id, 1, registry=registry)
+    manifest = load_pipeline_manifest(repository, run_id)
+    walk_forward_id = manifest["stages"][0]["child_run_id"]
+    qualification = (
+        repository.run_directory(walk_forward_id) / "results" / "qualification.csv"
+    )
+    qualification.write_text("tampered", encoding="utf-8")
+
+    _resume(repository, run_id, registry)
+
+    status = repository.status(run_id)
+    assert status["status"] == JobStatus.FAILED.value
+    assert "ont changé" in status["error"]
+    assert repository.status(walk_forward_id)["status"] == JobStatus.COMPLETED.value
+
+
+def test_end_to_end_parent_cancellation_cancels_active_child_and_stops_pipeline(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+    registry = _fake_registry(
+        repository, Counter(), cancel_on=JobType.WALK_FORWARD
+    )
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.CANCELLED.value
+    manifest = load_pipeline_manifest(repository, run_id)
+    first = manifest["stages"][0]["child_run_id"]
+    assert repository.status(first)["status"] == JobStatus.CANCELLED.value
+    assert all(
+        not repository.run_directory(item["child_run_id"]).exists()
+        for item in manifest["stages"][1:-1]
+    )
+
+
+def test_end_to_end_auto_promotion_requires_holdout(tmp_path):
+    with pytest.raises(ValueError, match="exige le holdout"):
+        _spec(
+            tmp_path,
+            evaluate_final_holdout=False,
+            auto_promote_candidates=True,
+        )
+
+
+def test_end_to_end_auto_promotes_each_unique_up_candidate_once(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(
+        repository, _spec(tmp_path, auto_promote_candidates=True)
+    )
+    rows = [
+        {"Set": "AAA<-BBB"},
+        {"Set": "BBB<-AAA", "ROCAUC": 0.59},
+    ]
+    calls = Counter()
+    registry = _fake_registry(repository, calls, promotion_rows=rows)
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    models = ProductionRepository(tmp_path).models()
+    assert len(models) == 1
+    assert models[0].target == "AAA"
+    assert models[0].predictors == ("BBB",)
+    assert models[0].status.value == "candidate"
+    assert models[0].source_walk_forward_run
+    assert models[0].source_xgboost_calibration_run
+    assert models[0].source_threshold_calibration_run
+    assert models[0].training_metadata["selected_threshold_direction"] == "Up"
+
+    promotion = repository.read_json(run_id, PROMOTION_CHECKPOINT)
+    assert promotion["status"] == "completed"
+    assert promotion["policy_parameters"] == {
+        "minimum_holdout_signals": 20,
+        "minimum_holdout_auc": 0.6,
+        "minimum_holdout_precision": 0.4,
+        "minimum_directional_return_exclusive": 0.0,
+        "maximum_opposite_movement_frequency": 0.3,
+        "required_direction": "Up",
+    }
+    assert promotion["candidate_sets"] == ["AAA<-BBB"]
+    assert promotion["candidate_count"] == 1
+    assert promotion["created_count"] == 1
+    assert promotion["completed_count"] == 1
+    assert {
+        row["Combinaison"]: row["Statut promotion"]
+        for row in promotion["diagnostics"]
+    } == {"AAA<-BBB": "Candidat", "BBB<-AAA": "Non candidat"}
+    manifest = load_pipeline_manifest(repository, run_id)
+    promotion_stage = manifest["stages"][-1]
+    assert promotion_stage["expected_job_type"] is None
+    assert promotion_stage["child_run_id"] is None
+    assert promotion_stage["expected_fingerprint"] == promotion["plan_sha256"]
+    assert promotion_stage["artifact_digests"].keys() == {PROMOTION_CHECKPOINT}
+    assert repository.summary(run_id)["promotion"]["created_count"] == 1
+    assert all(calls[job_type] == 1 for _, job_type, _ in SCIENTIFIC_STAGES)
+    detail = RunService(repository).get(run_id)
+    assert detail["pipeline_stages"][-1]["status"] == "completed"
+    assert detail["pipeline_stages"][-1]["progress"] == 100.0
+    assert detail["pipeline_stages"][-1]["promotion"]["created_count"] == 1
+
+
+def test_end_to_end_promotion_resume_reconciles_model_created_before_checkpoint(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(
+        repository, _spec(tmp_path, auto_promote_candidates=True)
+    )
+    rows = [{"Set": "AAA<-BBB"}, {"Set": "BBB<-AAA"}]
+    calls = Counter()
+    registry = _fake_registry(repository, calls, promotion_rows=rows)
+    original = PromotionService.promote
+    injected = {"raised": False}
+
+    def create_then_fail(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if not injected["raised"]:
+            injected["raised"] = True
+            raise RuntimeError("injected failure after registry publication")
+        return result
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(PromotionService, "promote", create_then_fail)
+        execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.FAILED.value
+    failed = repository.read_json(run_id, PROMOTION_CHECKPOINT)
+    assert failed["status"] == "failed"
+    assert failed["candidates"][0]["status"] == "failed"
+    assert len(ProductionRepository(tmp_path).models()) == 1
+
+    _resume(repository, run_id, registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    models = ProductionRepository(tmp_path).models()
+    assert len(models) == 2
+    assert len({model.training_metadata["promotion_fingerprint"] for model in models}) == 2
+    completed = repository.read_json(run_id, PROMOTION_CHECKPOINT)
+    assert completed["status"] == "completed"
+    assert completed["completed_count"] == 2
+    assert completed["created_count"] == 1
+    assert completed["reused_count"] == 1
+    assert all(item["status"] == "completed" for item in completed["candidates"])
+    assert all(calls[job_type] == 1 for _, job_type, _ in SCIENTIFIC_STAGES)
+
+
+def test_end_to_end_auto_promotion_completes_without_candidates(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(
+        repository, _spec(tmp_path, auto_promote_candidates=True)
+    )
+    registry = _fake_registry(
+        repository,
+        Counter(),
+        promotion_rows=[{"Set": "AAA<-BBB", "SignalCount": 19}],
+    )
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    promotion = repository.read_json(run_id, PROMOTION_CHECKPOINT)
+    assert promotion["status"] == "completed"
+    assert promotion["candidate_count"] == 0
+    assert ProductionRepository(tmp_path).models() == []
+
+
+def test_run_service_marks_parent_and_exposes_live_pipeline_children(tmp_path):
+    class FakeBackend:
+        def launch(self, runs_root, run_id, max_concurrent_jobs):
+            return 1234
+
+    repository = RunRepository(tmp_path / "runs")
+    service = RunService(repository, backend=FakeBackend())
+    submitted = service.submit(_spec(tmp_path))
+    assert repository.run_metadata(submitted.run_id).run_role is RunRole.PIPELINE_PARENT
+
+    # The worker normally creates this manifest. Building it here isolates the
+    # read-side contract used later by the UI without launching scientific work.
+    from rstock.application.end_to_end import persist_or_validate_pipeline_manifest
+
+    persist_or_validate_pipeline_manifest(
+        repository, submitted.run_id, repository.load_spec(submitted.run_id)
+    )
+    detail = service.get(submitted.run_id)
+    assert [item["status"] for item in detail["pipeline_stages"]] == [
+        "reserved",
+        "reserved",
+        "reserved",
+        "reserved",
+        "not_requested",
+    ]
+
+
+def test_end_to_end_restart_creates_a_new_parent_and_new_child_chain(tmp_path):
+    class FakeBackend:
+        def launch(self, runs_root, run_id, max_concurrent_jobs):
+            return 1234
+
+    repository = RunRepository(tmp_path / "runs")
+    source_id = _create_parent(repository, _spec(tmp_path))
+    source_manifest = build_pipeline_manifest(
+        repository, source_id, repository.load_spec(source_id)
+    )
+    service = RunService(repository, backend=FakeBackend())
+
+    restarted = service.restart(source_id)
+    restarted_manifest = build_pipeline_manifest(
+        repository, restarted.run_id, repository.load_spec(restarted.run_id)
+    )
+
+    assert restarted.run_id != source_id
+    assert repository.run_metadata(restarted.run_id).run_role is RunRole.PIPELINE_PARENT
+    assert {
+        item["child_run_id"] for item in source_manifest["stages"][:-1]
+    }.isdisjoint(
+        {item["child_run_id"] for item in restarted_manifest["stages"][:-1]}
+    )

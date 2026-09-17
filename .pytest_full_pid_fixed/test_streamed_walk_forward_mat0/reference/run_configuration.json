@@ -1,0 +1,78 @@
+{
+  "target": "intraday_return >= intraday_target_threshold",
+  "down_target": "intraday_return <= -intraday_down_threshold",
+  "intraday_target_threshold": 0.01,
+  "intraday_down_threshold": 0.01,
+  "conditional_signal": "predicted class == 1 (probability > 0.5)",
+  "lag_depth": 3,
+  "lag_features": [
+    "intraday_J-1",
+    "intraday_J-2",
+    "intraday_J-3"
+  ],
+  "walk_forward_min_train_size": 10,
+  "walk_forward_test_size": 5,
+  "walk_forward_step_size": 5,
+  "combination_workers": 1,
+  "final_holdout_size": 5,
+  "development_end": "2024-02-02T00:00:00",
+  "final_holdout_start": "2024-02-05T00:00:00",
+  "qualification": {
+    "min_windows": 3,
+    "min_median_auc": 0.0,
+    "min_pct_windows_above_random": 0.0,
+    "min_worst_window_auc": 0.0,
+    "min_positive_observations": 1,
+    "max_auc_std": 1.0,
+    "final_confirmation_min_auc": 0.5
+  },
+  "model_selection": {
+    "scale": "0-100",
+    "weights": {
+      "predictive_quality_score": 0.15,
+      "stability_score": 0.3,
+      "holdout_score": 0.3,
+      "signal_quality_score": 0.1,
+      "sample_adequacy_score": 0.15
+    },
+    "missing_component_policy": "exclude_and_renormalize_available_weights",
+    "components": {
+      "predictive_quality_score": [
+        "ROCAUCMedian"
+      ],
+      "stability_score": [
+        "ROCAUCWorst",
+        "ROCAUCStd",
+        "PctWindowsAboveRandom"
+      ],
+      "holdout_score": [
+        "FinalUpROCAUC",
+        "abs(ROCAUCMedian - FinalUpROCAUC)"
+      ],
+      "signal_quality_score": [
+        "success_rate",
+        "window_coverage",
+        "total_signals",
+        "precision_stability",
+        "return_stability",
+        "mean_return"
+      ],
+      "sample_adequacy_score": [
+        "WindowsEvaluated",
+        "AUCWindows / WindowsEvaluated",
+        "PositiveObservations"
+      ]
+    },
+    "auc_normalization": "clip((auc - 0.50) / 0.50)",
+    "dispersion_normalization": "clip(1 - auc_std / qualification_max_auc_std)",
+    "holdout_gap_normalization": "clip(1 - abs(dev_auc - holdout_auc) / qualification_max_auc_std)",
+    "sample_target": "2 x qualification minimum"
+  },
+  "ranking_order": [
+    "PctWindowsAboveRandom desc",
+    "ROCAUCMedian desc",
+    "ROCAUCWorst desc",
+    "ROCAUCStd asc",
+    "PRAUCMedian desc"
+  ]
+}

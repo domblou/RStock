@@ -1,0 +1,52 @@
+{
+  "Down": {
+    "status": "selected",
+    "threshold": 0.7125,
+    "total_signals": 4,
+    "windows_meeting_min_signals": 2,
+    "calibration_sample_size": 16,
+    "calibration_metrics": {
+      "total_signals": 4,
+      "window_coverage": 1.0,
+      "success_rate": 1.0,
+      "mean_return": -0.02,
+      "median_return": -0.02,
+      "mfe_mean": 0.026000000000000002,
+      "mae_mean": -0.021,
+      "return_stability": 0.0,
+      "precision_stability": 0.0,
+      "precision": 1.0,
+      "directional_return_mean": 0.02,
+      "opposite_move_frequency": 0.0,
+      "robust_sample": false,
+      "robust_signal_minimum": 10
+    },
+    "selection_reason": "legacy_down_stability_order",
+    "selection_order": "Eligible desc; WindowsMeetingMinSignals desc; CatastrophicWindows asc; PrecisionMedian desc; DirectionalReturnMeanMedian desc; OppositeMoveFrequencyMedian asc; PrecisionStd asc; F1Median desc; abs(Threshold - 0.5) asc; Threshold desc"
+  },
+  "Up": {
+    "status": "selected",
+    "threshold": 0.35,
+    "total_signals": 4,
+    "windows_meeting_min_signals": 2,
+    "calibration_sample_size": 16,
+    "calibration_metrics": {
+      "total_signals": 4,
+      "window_coverage": 1.0,
+      "success_rate": 1.0,
+      "mean_return": 0.0175,
+      "median_return": 0.0175,
+      "mfe_mean": 0.026000000000000002,
+      "mae_mean": -0.020999999999999998,
+      "return_stability": 0.0,
+      "precision_stability": 0.0,
+      "precision": 1.0,
+      "directional_return_mean": 0.0175,
+      "opposite_move_frequency": 0.0,
+      "robust_sample": false,
+      "robust_signal_minimum": 10
+    },
+    "selection_reason": "precision_tolerance_economic_selection",
+    "selection_order": "Up Eligible requires temporal coverage, positive directional return, and OppositeMoveFrequency <= 0.30; RobustSample (TotalSignals >= 10) preferred; Precision within 0.01 of the best preferred precision; DirectionalReturnMean desc; OppositeMoveFrequency asc; PrecisionStd asc; DirectionalReturnMeanStd asc; TotalSignals desc; F1Median desc; Threshold asc"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "phase": "walk_forward",
+  "batch_id": 0,
+  "first_index": 0,
+  "last_index": 0,
+  "combination_count": 1,
+  "row_counts": {
+    "windows": 3,
+    "predictions": 9
+  },
+  "payload_sha256": "445bcc1006160f0849b45119046601d31399e6f60d0d2092de534cbdf1340010",
+  "completed_at": "2026-09-17T02:12:14.014296+00:00",
+  "configuration_fingerprint": "resume-fixture",
+  "checkpoint_schema_version": 1
+}

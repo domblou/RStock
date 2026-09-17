@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,7 @@ from rstock.atomic_io import (
     ATOMIC_WRITE_BACKOFF_SECONDS,
     is_temporary_file_lock,
 )
-from .domain import ExperimentSpec, JobStatus
+from .domain import ExperimentSpec, JobStatus, RunMetadata
 
 
 STATUS_TRANSITIONS = {
@@ -57,13 +59,58 @@ class RunRepository:
             raise ValueError("Invalid run_id")
         return self.root / run_id
 
-    def create(self, spec: ExperimentSpec) -> str:
+    @staticmethod
+    def deterministic_child_run_id(parent_run_id: str, relation_key: str) -> str:
+        if not parent_run_id or Path(parent_run_id).name != parent_run_id:
+            raise ValueError("Invalid parent_run_id")
+        normalized_relation = relation_key.strip()
+        if not normalized_relation:
+            raise ValueError("relation_key must not be empty")
+        digest = hashlib.sha256(
+            f"{parent_run_id}\0{normalized_relation}".encode()
+        ).hexdigest()[:24]
+        return f"child_{digest}"
+
+    def create(
+        self,
+        spec: ExperimentSpec,
+        *,
+        run_id: str | None = None,
+        metadata: RunMetadata | None = None,
+    ) -> str:
         self.root.mkdir(parents=True, exist_ok=True)
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:10]
+        run_id = run_id or (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            + "_"
+            + uuid.uuid4().hex[:10]
+        )
+        run_metadata = metadata or RunMetadata()
+        if run_metadata.parent_run_id is None:
+            expected_root_run_id = run_id
+        else:
+            parent_directory = self.run_directory(run_metadata.parent_run_id)
+            if not (parent_directory / "status.json").exists():
+                raise ValueError(
+                    f"Parent run does not exist: {run_metadata.parent_run_id}"
+                )
+            parent_metadata = self.run_metadata(run_metadata.parent_run_id)
+            expected_root_run_id = (
+                parent_metadata.root_run_id or run_metadata.parent_run_id
+            )
+        if run_metadata.root_run_id not in {None, expected_root_run_id}:
+            raise ValueError("root_run_id does not match the persisted parent relation")
+        run_metadata = replace(
+            run_metadata,
+            root_run_id=expected_root_run_id,
+            created_by_run_id=(
+                run_metadata.created_by_run_id or run_metadata.parent_run_id
+            ),
+        )
         directory = self.run_directory(run_id)
         directory.mkdir()
         created_at = utc_now()
         self.write_json(run_id, "config.json", spec.to_dict())
+        self.write_json(run_id, "metadata.json", run_metadata.to_dict())
         self.write_json(
             run_id,
             "status.json",
@@ -102,6 +149,48 @@ class RunRepository:
         self.write_json(run_id, "summary.json", {})
         (directory / "run.log").touch()
         return run_id
+
+    def run_metadata(self, run_id: str) -> RunMetadata:
+        path = self.run_directory(run_id) / "metadata.json"
+        if not path.exists():
+            return RunMetadata()
+        return RunMetadata.from_dict(self._read_json_path(path))
+
+    def list_children(self, parent_run_id: str) -> list[str]:
+        return [
+            run_id
+            for run_id in self.list_run_ids()
+            if self.run_metadata(run_id).parent_run_id == parent_run_id
+        ]
+
+    def child_for_relation(
+        self, parent_run_id: str, relation_key: str
+    ) -> str | None:
+        matches = [
+            run_id
+            for run_id in self.list_children(parent_run_id)
+            if self.run_metadata(run_id).relation_key == relation_key
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple children found for {parent_run_id}/{relation_key}"
+            )
+        return matches[0] if matches else None
+
+    def configuration_fingerprint(
+        self, run_id: str, *, fallback: str | None = None
+    ) -> str:
+        status_path = self.run_directory(run_id) / "status.json"
+        if status_path.exists():
+            persisted = self.status(run_id).get("configuration_fingerprint")
+            if persisted:
+                return str(persisted)
+        config_path = self.run_directory(run_id) / "config.json"
+        if config_path.exists():
+            return self.load_spec(run_id).fingerprint
+        if fallback is not None:
+            return fallback
+        raise FileNotFoundError(f"No persisted configuration exists for run {run_id}")
 
     def read_json(self, run_id: str, name: str) -> dict[str, Any]:
         path = self.run_directory(run_id) / name

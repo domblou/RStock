@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import json
 import os
 import sys
@@ -11,7 +12,13 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from rstock.application.domain import ExperimentSpec, JobStatus, JobType
+from rstock.application.domain import (
+    ExperimentSpec,
+    JobStatus,
+    JobType,
+    RunMetadata,
+    RunRole,
+)
 import rstock.application.repository as repository_module
 import rstock.application.runner as runner_module
 from rstock.application.repository import RunRepository
@@ -58,6 +65,7 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
 
     assert {
         "config.json",
+        "metadata.json",
         "status.json",
         "progress.json",
         "summary.json",
@@ -67,6 +75,131 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     restored = RunRepository(tmp_path / "runs").load_spec(run_id)
     assert restored == spec
     assert restored.config.xgb_seed == 987
+    snapshot = repository.read_json(run_id, "config.json")
+    assert snapshot["schema_version"] == 1
+    assert snapshot["pipeline_version"] == 1
+    assert snapshot["calibration_sampling_policy_version"] == 2
+
+
+def test_phase_five_enables_walk_forward_batch_and_end_to_end():
+    assert JobType.WALK_FORWARD_BATCH.value == "walk_forward_batch"
+    assert JobType.END_TO_END.value == "end_to_end"
+    assert JobType.WALK_FORWARD_BATCH.implemented
+    assert JobType.END_TO_END.implemented
+
+
+def test_repository_persists_queryable_parent_child_metadata(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    parent_id = repository.create(
+        _spec(tmp_path), metadata=RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+    )
+    relation_key = "walk_forward_batch:0003"
+    child_id = repository.deterministic_child_run_id(parent_id, relation_key)
+    metadata = RunMetadata(
+        run_role=RunRole.TECHNICAL_BATCH,
+        visible_in_history=False,
+        parent_run_id=parent_id,
+        relation_key=relation_key,
+        relation_type="walk_forward_batch",
+        stage_key="walk_forward",
+        stage_index=0,
+        batch_id="0003",
+        batch_index=3,
+        batch_count=8,
+    )
+
+    created_id = repository.create(_spec(tmp_path), run_id=child_id, metadata=metadata)
+
+    persisted = repository.run_metadata(child_id)
+    assert created_id == child_id
+    assert persisted.parent_run_id == parent_id
+    assert persisted.root_run_id == parent_id
+    assert persisted.created_by_run_id == parent_id
+    assert persisted.visible_in_history is False
+    assert repository.list_children(parent_id) == [child_id]
+    assert repository.child_for_relation(parent_id, relation_key) == child_id
+    assert repository.deterministic_child_run_id(parent_id, relation_key) == child_id
+    with pytest.raises(FileExistsError):
+        repository.create(_spec(tmp_path), run_id=child_id, metadata=metadata)
+
+
+def test_repository_reads_runs_without_metadata_as_visible_standalone_runs(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+    (repository.run_directory(run_id) / "metadata.json").unlink()
+
+    metadata = repository.run_metadata(run_id)
+
+    assert metadata.run_role is RunRole.STANDALONE
+    assert metadata.visible_in_history is True
+    assert metadata.parent_run_id is None
+
+
+def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerprint(
+    tmp_path,
+):
+    values = _spec(tmp_path).to_dict()
+    values["schema_version"] = 1
+    for name in (
+        "source_end_to_end_run",
+        "source_threshold_calibration_run",
+        "auto_promote_candidates",
+        "pipeline_version",
+        "calibration_sampling_policy_version",
+        "combination_plan_version",
+        "combination_plan_sha256",
+        "combination_range_start",
+        "combination_range_stop",
+    ):
+        values.pop(name)
+    for name in (
+        "walk_forward_max_combinations_per_batch",
+        "xgboost_global_max_qualified_combinations",
+        "threshold_parameter_calibration_max_models",
+    ):
+        values["rstock_config"].pop(name)
+    canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+    restored = ExperimentSpec.from_dict(values)
+
+    assert restored.source_end_to_end_run is None
+    assert restored.source_threshold_calibration_run is None
+    assert restored.auto_promote_candidates is False
+    assert restored.pipeline_version == 0
+    assert restored.calibration_sampling_policy_version == 1
+    assert restored.combination_plan_version is None
+    assert restored.combination_plan_sha256 is None
+    assert restored.combination_range_start is None
+    assert restored.combination_range_stop is None
+    assert restored.config.walk_forward_max_combinations_per_batch is None
+    assert restored.config.xgboost_global_max_qualified_combinations is None
+    assert restored.config.threshold_parameter_calibration_max_models is None
+    assert restored.fingerprint == hashlib.sha256(canonical.encode()).hexdigest()
+    assert restored.to_dict()["schema_version"] == 1
+
+
+def test_new_pipeline_fields_and_combination_range_are_part_of_snapshot_identity(
+    tmp_path,
+):
+    baseline = _spec(tmp_path)
+    pipeline_spec = replace(
+        baseline,
+        source_end_to_end_run="end-to-end-parent",
+        auto_promote_candidates=True,
+        combination_plan_version=2,
+        combination_plan_sha256="plan-sha256",
+        combination_range_start=100,
+        combination_range_stop=200,
+    )
+
+    snapshot = pipeline_spec.to_dict()
+
+    assert snapshot["schema_version"] == 1
+    assert snapshot["source_end_to_end_run"] == "end-to-end-parent"
+    assert snapshot["auto_promote_candidates"] is True
+    assert snapshot["combination_range_start"] == 100
+    assert snapshot["combination_range_stop"] == 200
+    assert pipeline_spec.fingerprint != baseline.fingerprint
 
 
 def test_empty_market_context_remains_a_valid_predictor_population(tmp_path):
@@ -673,6 +806,46 @@ def test_failed_walk_forward_can_resume_same_run_only_once(tmp_path):
     assert backend.launches[0][1] == run_id
     with pytest.raises(ValueError, match="déjà"):
         service.resume(run_id)
+
+
+def test_resume_uses_persisted_fingerprint_for_a_historical_snapshot(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path))
+
+    def fail(spec, output, progress, cancellation):
+        raise RuntimeError("boom")
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.WALK_FORWARD: fail}),
+    )
+    authoritative_fingerprint = repository.status(run_id)[
+        "configuration_fingerprint"
+    ]
+    historical = repository.read_json(run_id, "config.json")
+    historical["schema_version"] = 1
+    for name in (
+        "source_end_to_end_run",
+        "source_threshold_calibration_run",
+        "auto_promote_candidates",
+        "pipeline_version",
+        "calibration_sampling_policy_version",
+        "combination_plan_version",
+        "combination_plan_sha256",
+        "combination_range_start",
+        "combination_range_stop",
+    ):
+        historical.pop(name)
+    repository.write_json(run_id, "config.json", historical)
+
+    assert repository.load_spec(run_id).fingerprint != authoritative_fingerprint
+    resumed = RunService(repository, backend=FakeBackend()).resume(run_id)
+
+    assert resumed.run_id == run_id
+    assert repository.status(run_id)["status"] == JobStatus.PENDING.value
+    assert repository.read_json(run_id, "config.json")["schema_version"] == 1
 
 
 def test_restart_creates_new_run_and_keeps_failed_source_intact(tmp_path):

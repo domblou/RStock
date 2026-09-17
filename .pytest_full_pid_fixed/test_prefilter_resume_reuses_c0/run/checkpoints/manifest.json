@@ -1,0 +1,35 @@
+{
+  "checkpoint_schema_version": 1,
+  "implementation_version": "walk-forward-v1",
+  "run_id": "run",
+  "job_type": "walk_forward",
+  "configuration_fingerprint": "resume-fixture",
+  "state": "created",
+  "current_phase": null,
+  "phases_completed": [],
+  "batch_sizes": {
+    "predictor_prefilter_walk_forward": 1,
+    "walk_forward": 1,
+    "final_holdout": 1
+  },
+  "batches": {
+    "predictor_prefilter_walk_forward": {
+      "total": 2,
+      "completed": [
+        0,
+        1
+      ]
+    }
+  },
+  "created_at": "2026-09-17T02:13:56.700876+00:00",
+  "updated_at": "2026-09-17T02:13:56.868400+00:00",
+  "last_checkpoint": {
+    "phase": "predictor_prefilter_walk_forward",
+    "batch_id": 1,
+    "at": "2026-09-17T02:13:56.860542+00:00"
+  },
+  "attempt_count": 0,
+  "resume_count": 0,
+  "attempts": [],
+  "error": null
+}

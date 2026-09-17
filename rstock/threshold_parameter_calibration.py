@@ -13,7 +13,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from .calibration import deterministic_combination_sample, split_development_holdout
+from .calibration import split_development_holdout
+from .calibration_sampling import (
+    GLOBAL_STRATIFIED_V2,
+    PER_TARGET_V1,
+    global_stratified_v2_sample,
+    per_target_v1_sample,
+)
 from .checkpoints import _atomic_json
 from .config import RStockConfig
 from .modeling import XGBoostParameters
@@ -298,6 +304,8 @@ def run_threshold_parameter_calibration(
     xgboost_parameters_by_direction: Mapping[str, XGBoostParameters],
     xgboost_parameter_source: str,
     combinations_per_target: int = 3,
+    sampling_policy: str = PER_TARGET_V1,
+    max_directional_models: int | None = None,
     candidates: Sequence[ThresholdCalibrationParameters] | None = None,
     source_parent_run: str | None = None,
     source_walk_forward_run: str | None = None,
@@ -313,9 +321,33 @@ def run_threshold_parameter_calibration(
     if not candidate_list:
         raise ValueError("At least one threshold parameter candidate is required")
     tested = threshold_parameter_table(candidate_list)
-    sampled = deterministic_combination_sample(
-        generated_sets, per_target=combinations_per_target, seed=config.xgb_seed
-    )
+    if sampling_policy == GLOBAL_STRATIFIED_V2:
+        if max_directional_models is not None and (
+            max_directional_models < 2 or max_directional_models % 2
+        ):
+            raise ValueError(
+                "max_directional_models must be null or an even integer >= 2"
+            )
+        set_cap = (
+            None
+            if max_directional_models is None
+            else max_directional_models // 2
+        )
+        sample = global_stratified_v2_sample(
+            generated_sets,
+            cap=set_cap,
+            seed=config.xgb_seed,
+            directional_model_cap=max_directional_models,
+        )
+    elif sampling_policy == PER_TARGET_V1:
+        sample = per_target_v1_sample(
+            generated_sets,
+            per_target=combinations_per_target,
+            seed=config.xgb_seed,
+        )
+    else:
+        raise ValueError(f"Unsupported calibration sampling policy: {sampling_policy}")
+    sampled = sample.combinations
     development, _, holdout_start = split_development_holdout(
         prepared, config.final_holdout_size
     )
@@ -412,7 +444,11 @@ def run_threshold_parameter_calibration(
             for direction in ("Up", "Down")
         },
         "frozen_xgboost_parameters_sha256": frozen_xgboost_parameters_sha256,
-        "combinations_per_target": combinations_per_target,
+        "combinations_per_target": (
+            combinations_per_target if sampling_policy == PER_TARGET_V1 else None
+        ),
+        "combination_sampling": sampling_policy,
+        "sampling_manifest": sample.manifest,
         "sampled_combinations": len(sampled),
         "candidate_count": len(candidate_list),
         "eligible_candidate_count": int(ranked["EligibleConfiguration"].sum()),
@@ -457,5 +493,14 @@ def write_threshold_parameter_calibration_results(
     )
     (directory / "run_configuration.json").write_text(
         json.dumps(result.run_configuration, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (directory / "sampling_manifest.json").write_text(
+        json.dumps(
+            result.run_configuration["sampling_manifest"],
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )

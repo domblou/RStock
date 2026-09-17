@@ -14,6 +14,8 @@ from rstock.progress import CancellationRequested, check_cancellation
 from rstock.checkpoints import CheckpointManager
 
 from .domain import JobStatus, JobType
+from .orchestration_runtime import child_executor_context
+from .processes import process_alive
 from .repository import RunRepository
 from .runner import ProgressReporter
 from .workflows import WorkflowRegistry
@@ -32,6 +34,9 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("data_preparation", 12), ("combination_generation", 6),
         ("walk_forward", 65), ("final_holdout", 8), ("metrics", 4),
         ("result_writing", 3), ("publishing", 2),
+    ],
+    JobType.WALK_FORWARD_BATCH: [
+        ("walk_forward", 98), ("publishing", 2),
     ],
     JobType.THRESHOLD_PARAMETER_CALIBRATION: [
         ("data_preparation", 12), ("combination_generation", 6),
@@ -56,21 +61,19 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("market_update", 45), ("daily_prediction", 30), ("screening", 10),
         ("realized_validation", 10), ("publishing", 5),
     ],
+    JobType.END_TO_END: [
+        ("walk_forward", 22.5),
+        ("xgboost_calibration", 22.5),
+        ("threshold_parameter_calibration", 22.5),
+        ("threshold_calibration", 22.5),
+        ("promotion", 9),
+        ("publishing", 1),
+    ],
 }
 
 
 def _process_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return process_alive(pid)
 
 
 class SlotLease:
@@ -95,6 +98,10 @@ class SlotLease:
         try:
             owner = json.loads(owner_path.read_text(encoding="utf-8"))
             alive = _process_alive(int(owner["pid"]))
+        except PermissionError:
+            # A concurrent releaser or antivirus can briefly lock owner.json
+            # on Windows. Treat the slot as active and retry on the next poll.
+            return
         except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
             alive = False
         if not alive:
@@ -203,6 +210,16 @@ def _publishing_completed(repository: RunRepository, run_id: str) -> bool:
     )
 
 
+def _cancellation_requested(repository: RunRepository, run_id: str) -> bool:
+    if repository.cancellation_requested(run_id):
+        return True
+    metadata = repository.run_metadata(run_id)
+    return bool(
+        metadata.parent_run_id
+        and repository.cancellation_requested(metadata.parent_run_id)
+    )
+
+
 def _complete_owned_run(
     repository: RunRepository, run_id: str, run_lease: RunLease
 ) -> None:
@@ -249,17 +266,19 @@ def execute_run(
     try:
         run_lease.acquire()
         lease.acquire()
-        check_cancellation(lambda: repository.cancellation_requested(run_id))
+        check_cancellation(lambda: _cancellation_requested(repository, run_id))
         repository.transition(run_id, JobStatus.RUNNING, pid=os.getpid())
         repository.append_log(run_id, "Worker started")
         reporter = ProgressReporter(repository, run_id)
         spec = repository.load_spec(run_id)
-        if spec.job_type is JobType.WALK_FORWARD:
+        if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH}:
             checkpoint = CheckpointManager(
                 repository.run_directory(run_id),
                 run_id=run_id,
                 job_type=spec.job_type.value,
-                configuration_fingerprint=spec.fingerprint,
+                configuration_fingerprint=repository.configuration_fingerprint(
+                    run_id
+                ),
                 batch_sizes={
                     "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
                     "walk_forward": spec.config.walk_forward_batch_size,
@@ -270,7 +289,10 @@ def execute_run(
                 resumed=bool(status.get("resume_requested"))
                 or int(checkpoint.manifest.get("attempt_count", 0)) > 0
             )
-        reporter.configure_phases(WORKFLOW_PHASES[spec.job_type])
+        phases = WORKFLOW_PHASES[spec.job_type]
+        if spec.job_type is JobType.END_TO_END and not spec.auto_promote_candidates:
+            phases = [item for item in phases if item[0] != "promotion"]
+        reporter.configure_phases(phases)
         working = repository.run_directory(run_id) / "_working"
         results = repository.run_directory(run_id) / "results"
         if results.exists() and repository.summary(run_id):
@@ -284,15 +306,33 @@ def execute_run(
             return
         working.mkdir(exist_ok=bool(status.get("resume_requested")))
         active_registry = registry or WorkflowRegistry.production()
-        summary = active_registry.execute(
-            spec,
-            working,
-            progress_callback=reporter,
-            cancellation_check=lambda: repository.cancellation_requested(run_id),
-        )
+
+        def execute_child(child_run_id: str) -> None:
+            # Keep the parent's exclusive RunLease, but never monopolize the
+            # heavy slot while a technical child needs it (including max=1).
+            lease.release()
+            try:
+                execute_run(
+                    repository,
+                    child_run_id,
+                    max_concurrent_jobs,
+                    registry=active_registry,
+                )
+            finally:
+                lease.acquire()
+
+        with child_executor_context(execute_child):
+            summary = active_registry.execute(
+                spec,
+                working,
+                progress_callback=reporter,
+                cancellation_check=lambda: _cancellation_requested(
+                    repository, run_id
+                ),
+            )
         if spec.run_description:
             summary = {**summary, "run_description": spec.run_description}
-        check_cancellation(lambda: repository.cancellation_requested(run_id))
+        check_cancellation(lambda: _cancellation_requested(repository, run_id))
         reporter.phase_started("publishing")
         repository.write_json(run_id, "summary.json", summary)
         working.rename(results)

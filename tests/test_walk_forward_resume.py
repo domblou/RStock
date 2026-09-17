@@ -127,6 +127,64 @@ def test_resume_after_aggregation_failure_does_not_rerun_walk_forward(monkeypatc
     assert len(result.qualification) == 2
 
 
+def test_parent_aggregation_of_child_batches_matches_monolithic_run(tmp_path):
+    monolithic = _fixture(tmp_path / "monolithic")
+    _run(monolithic)
+
+    prepared, generated, config, parent, output = _fixture(tmp_path / "batched")
+    parent.set_total_batches("walk_forward", len(generated))
+    for batch_id in range(len(generated)):
+        child = CheckpointManager(
+            tmp_path / "batched" / f"child-{batch_id}",
+            run_id=f"child-{batch_id}",
+            job_type="walk_forward_batch",
+            configuration_fingerprint=f"child-{batch_id}",
+            batch_sizes={
+                "predictor_prefilter_walk_forward": config.predictor_prefilter_batch_size,
+                "walk_forward": config.walk_forward_batch_size,
+                "final_holdout": config.final_holdout_batch_size,
+            },
+        )
+        streaming.run_streamed_walk_forward_batch(
+            prepared, generated.iloc[[batch_id]], config, child
+        )
+        payload = child.load_batch("walk_forward", 0)
+        parent.commit_batch(
+            "walk_forward",
+            batch_id,
+            payload,
+            first_index=batch_id,
+            last_index=batch_id,
+            combination_count=1,
+            row_counts={
+                "windows": len(payload["windows"]),
+                "predictions": len(payload["predictions"]),
+            },
+        )
+    parent.phase_completed("walk_forward")
+
+    streaming.run_streamed_walk_forward(
+        prepared,
+        None,
+        config,
+        parent,
+        output,
+        precomputed_walk_forward_batches=len(generated),
+        precomputed_combination_count=len(generated),
+    )
+
+    for name in (
+        "aggregate_global.csv",
+        "qualification.csv",
+        "final_holdout.csv",
+        "selection_results.csv",
+        "risk_global.csv",
+    ):
+        expected = pd.read_csv(monolithic[4] / name)
+        actual = pd.read_csv(output / name)
+        pd.testing.assert_frame_equal(actual, expected, check_dtype=False, atol=1e-12)
+
+
 def test_resume_after_qualification_failure_reuses_aggregation(monkeypatch, tmp_path):
     values = _fixture(tmp_path)
     original = streaming.qualify_combinations

@@ -278,6 +278,23 @@ def test_experiment_summary_is_compact_and_submission_help_is_secondary():
     )
 
 
+def test_walk_forward_preview_uses_shared_lazy_combination_plan():
+    source = APP.read_text(encoding="utf-8")
+    preview = source.split("def _combination_plan_preview", 1)[1].split(
+        "def _experiments", 1
+    )[0]
+    experiments = source.split("def _experiments(", 1)[1].split(
+        "def _settings", 1
+    )[0]
+
+    assert "build_combination_plan(" in preview
+    assert "build_combination_preview(" in preview
+    assert "JobType.WALK_FORWARD, JobType.END_TO_END" in preview
+    assert "Combinaisons brutes exactes" in preview
+    assert "Batchs requis (preview)" in preview
+    assert "_combination_plan_preview(labels[choice])" in experiments
+
+
 def test_universe_page_exposes_persisted_type_without_weakening_system_protection():
     source = APP.read_text(encoding="utf-8")
     creation = source.split("def _create_universe_panel", 1)[1].split(
@@ -305,6 +322,9 @@ def test_experiment_submission_and_history_expose_frozen_universe_roles():
     )[0]
     detail = source.split("def _render_run_detail_view", 1)[1].split(
         "def _render_run_comparison_view", 1
+    )[0]
+    walk_forward_views = source.split("def _render_walk_forward_summary", 1)[1].split(
+        "def _render_pipeline_summary", 1
     )[0]
 
     for field in (
@@ -366,6 +386,9 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
 
 def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary():
     source = APP.read_text(encoding="utf-8")
+    walk_forward_views = source.split("def _render_walk_forward_summary", 1)[1].split(
+        "def _render_pipeline_summary", 1
+    )[0]
     settings = source.split("def _settings", 1)[1].split(
         "def _history_filters", 1
     )[0]
@@ -385,8 +408,8 @@ def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary
     ):
         assert name in settings
     assert settings.count("help=") >= 7
-    assert "predictor_prefilter_summary" in detail
-    assert 'st.subheader("Pré-filtrage des prédicteurs")' in detail
+    assert "predictor_prefilter_summary" in walk_forward_views
+    assert 'st.subheader("Pré-filtrage des prédicteurs")' in walk_forward_views
 
 
 def test_settings_and_history_expose_resumable_walk_forward_controls():
@@ -418,6 +441,9 @@ def test_settings_and_combination_detail_expose_model_selection_scores():
     detail = source.split("def _render_run_detail_view", 1)[1].split(
         "def _render_run_comparison_view", 1
     )[0]
+    walk_forward_views = source.split("def _render_walk_forward_summary", 1)[1].split(
+        "def _render_pipeline_summary", 1
+    )[0]
 
     assert 'st.subheader("Classement des modèles")' in settings
     for name in (
@@ -431,7 +457,7 @@ def test_settings_and_combination_detail_expose_model_selection_scores():
     for label in (
         "Seuil calibré", "Qualité signal", "Sous-scores", "Score final", "Rang"
     ):
-        assert label in detail
+        assert label in walk_forward_views
 
 
 def test_surveillance_uses_one_conditional_page_level_polling_fragment():

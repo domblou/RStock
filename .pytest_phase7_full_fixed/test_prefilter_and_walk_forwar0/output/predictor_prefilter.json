@@ -1,0 +1,5 @@
+{
+  "score_formula": "ROCAUCMedian + PctWindowsAboveRandom - ROCAUCStd - max(0, 0.50 - ROCAUCWorst)",
+  "targets": {},
+  "telemetry": {}
+}

@@ -1,0 +1,3 @@
+Set,Observation,Windows,TestObservations,UniqueTestDates,Predictions,UpPositiveOutcomes,DownPositiveOutcomes,UpTN,UpFP,UpFN,UpTP,UpAccuracy,UpPrecision,UpRecall,UpF1,UpROCAUC,UpPRAUC,UpPrevalence,DownTN,DownFP,DownFN,DownTP,DownAccuracy,DownPrecision,DownRecall,DownF1,DownROCAUC,DownPRAUC,DownPrevalence,UpAccuracyStd,UpAccuracyMin,UpAccuracyMax,DownAccuracyStd,DownAccuracyMin,DownAccuracyMax
+"[""AAA"",""BBB""]",AAA,3,12,12,12,6,0,6,0,0,6,1.0,1.0,1.0,1.0,1.0,1.0,0.5,12,0,0,0,1.0,0.0,0.0,0.0,,,0.0,0.0,1.0,1.0,0.0,1.0,1.0
+"[""BBB"",""AAA""]",BBB,3,12,12,12,6,0,6,0,0,6,1.0,1.0,1.0,1.0,1.0,1.0,0.5,12,0,0,0,1.0,0.0,0.0,0.0,,,0.0,0.0,1.0,1.0,0.0,1.0,1.0

@@ -168,8 +168,9 @@ def test_calibration_is_reproducible_temporal_and_holdout_isolated(tmp_path):
         "baseline_vs_calibrated_development.csv",
         "holdout_metrics.csv",
         "holdout_predictions.csv",
-        "sampled_combinations.csv",
-        "run_configuration.json",
+            "sampled_combinations.csv",
+            "sampling_manifest.json",
+            "run_configuration.json",
     } == {path.name for path in output.iterdir()}
 
 

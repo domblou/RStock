@@ -1,0 +1,2 @@
+Sets,WindowEvaluations,TestObservations,UniqueTestDates,Predictions,UpPositiveOutcomes,DownPositiveOutcomes,UpTN,UpFP,UpFN,UpTP,UpAccuracy,UpPrecision,UpRecall,UpF1,UpROCAUC,UpPRAUC,UpPrevalence,DownTN,DownFP,DownFN,DownTP,DownAccuracy,DownPrecision,DownRecall,DownF1,DownROCAUC,DownPRAUC,DownPrevalence,EligibleSets,EligiblePct,FinalConfirmedSets
+2,6,24,12,24,12,0,12,0,0,12,1.0,1.0,1.0,1.0,1.0,1.0,0.5,24,0,0,0,1.0,0.0,0.0,0.0,,,0.0,2,1.0,2

@@ -1,0 +1,12 @@
+{
+  "job_type": "market_update",
+  "requested_symbols": [
+    "AAA",
+    "BBB"
+  ],
+  "updated_symbols": [
+    "AAA",
+    "BBB"
+  ],
+  "failed_symbols": []
+}

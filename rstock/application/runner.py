@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import threading
@@ -15,7 +14,8 @@ from typing import Any, Protocol
 
 from rstock.progress import ProgressEvent
 
-from .domain import ExperimentSpec, JobStatus, JobType
+from .domain import ExperimentSpec, JobStatus, JobType, RunMetadata, RunRole
+from .processes import process_alive
 from .repository import RunRepository, utc_now
 from rstock.checkpoints import (
     CHECKPOINT_IMPLEMENTATION_VERSION,
@@ -67,18 +67,7 @@ class LocalProcessBackend:
 
 
 def _pid_alive(pid: object) -> bool:
-    try:
-        numeric = int(pid)
-        if numeric <= 0:
-            return False
-        os.kill(numeric, 0)
-    except (TypeError, ValueError, ProcessLookupError):
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return process_alive(pid)
 
 
 class RunService:
@@ -154,7 +143,12 @@ class RunService:
                     and status.get("configuration_fingerprint") == spec.fingerprint
                 ):
                     return SubmissionResult(str(status["run_id"]), False)
-            run_id = self.repository.create(spec)
+            metadata = (
+                RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+                if spec.job_type is JobType.END_TO_END
+                else None
+            )
+            run_id = self.repository.create(spec, metadata=metadata)
             try:
                 pid = self.backend.launch(
                     self.repository.root,
@@ -172,6 +166,10 @@ class RunService:
 
     def cancel(self, run_id: str) -> dict[str, object]:
         status = self.repository.request_cancellation(run_id)
+        for child_run_id in self.repository.list_children(run_id):
+            child_status = self.repository.status(child_run_id)
+            if child_status["status"] in ACTIVE_STATUSES:
+                self.repository.request_cancellation(child_run_id)
         if status["status"] == JobStatus.PENDING.value:
             return self.repository.transition(run_id, JobStatus.CANCELLED)
         return self.repository.status(run_id)
@@ -190,6 +188,7 @@ class RunService:
             resumable_types = {
                 JobType.WALK_FORWARD,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION,
+                JobType.END_TO_END,
             }
             if spec.job_type not in resumable_types:
                 raise ValueError(
@@ -208,7 +207,9 @@ class RunService:
                     self.repository.run_directory(run_id),
                     run_id=run_id,
                     job_type=spec.job_type.value,
-                    configuration_fingerprint=spec.fingerprint,
+                    configuration_fingerprint=(
+                        self.repository.configuration_fingerprint(run_id)
+                    ),
                     batch_sizes={
                         "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
                         "walk_forward": spec.config.walk_forward_batch_size,
@@ -251,7 +252,12 @@ class RunService:
         if replay_values:
             spec = replace(spec, **replay_values)
         with self._submission_lock():
-            new_run_id = self.repository.create(spec)
+            metadata = (
+                RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+                if spec.job_type is JobType.END_TO_END
+                else None
+            )
+            new_run_id = self.repository.create(spec, metadata=metadata)
             pid = self.backend.launch(
                 self.repository.root, new_run_id, self.max_concurrent_heavy_jobs
             )
@@ -347,8 +353,134 @@ class RunService:
                 checkpoint_error = "Manifest de checkpoint illisible ou corrompu."
         else:
             checkpoint_error = "Aucun checkpoint de reprise disponible pour cet ancien run."
+        batches = None
+        walk_forward_batch_manifest = None
+        try:
+            from .walk_forward_batches import load_manifest
+
+            manifest = load_manifest(self.repository, run_id)
+            if manifest is not None:
+                walk_forward_batch_manifest = manifest
+                batches = []
+                for item in manifest["batches"]:
+                    child_run_id = str(item["child_run_id"])
+                    child_directory = self.repository.run_directory(child_run_id)
+                    if not child_directory.exists():
+                        batches.append(
+                            {
+                                **item,
+                                "status": "reserved",
+                                "progress": None,
+                                "duration_seconds": None,
+                                "created_at": None,
+                                "started_at": None,
+                                "completed_at": None,
+                                "error": None,
+                            }
+                        )
+                        continue
+                    child_status = self.repository.status(child_run_id)
+                    child_progress = self.repository.progress(child_run_id)
+                    batches.append(
+                        {
+                            **item,
+                            "status": child_status["status"],
+                            "progress": child_progress.get("workflow_percent"),
+                            "duration_seconds": child_status.get("duration_seconds"),
+                            "created_at": child_status.get("created_at"),
+                            "started_at": child_status.get("started_at"),
+                            "completed_at": child_status.get("completed_at"),
+                            "error": child_status.get("error"),
+                        }
+                    )
+        except (FileNotFoundError, ValueError, OSError):
+            batches = None
+            walk_forward_batch_manifest = None
+        pipeline_stages = None
+        try:
+            from .end_to_end import load_pipeline_manifest
+
+            pipeline = load_pipeline_manifest(self.repository, run_id)
+            if pipeline is not None:
+                pipeline_stages = []
+                for item in pipeline["stages"]:
+                    child_run_id = item.get("child_run_id")
+                    if child_run_id is None:
+                        promotion = None
+                        promotion_path = (
+                            self.repository.run_directory(run_id)
+                            / "orchestration"
+                            / "promotion.json"
+                        )
+                        if promotion_path.exists():
+                            promotion = self.repository.read_json(
+                                run_id, "orchestration/promotion.json"
+                            )
+                        completed = (
+                            None
+                            if promotion is None
+                            else int(promotion.get("completed_count", 0))
+                        )
+                        total = (
+                            None
+                            if promotion is None
+                            else int(promotion.get("candidate_count", 0))
+                        )
+                        progress = (
+                            None
+                            if completed is None or total is None
+                            else 100.0 if total == 0 and promotion.get("status") == "completed"
+                            else 0.0 if total == 0
+                            else 100.0 * completed / total
+                        )
+                        pipeline_stages.append(
+                            {
+                                **item,
+                                "status": (
+                                    str(promotion.get("status"))
+                                    if promotion is not None
+                                    else "pending"
+                                    if pipeline["auto_promote_candidates"]
+                                    else "not_requested"
+                                ),
+                                "progress": progress,
+                                "duration_seconds": None,
+                                "error": (
+                                    None if promotion is None
+                                    else promotion.get("error")
+                                ),
+                                "promotion": promotion,
+                            }
+                        )
+                        continue
+                    child_directory = self.repository.run_directory(str(child_run_id))
+                    if not child_directory.exists():
+                        pipeline_stages.append(
+                            {
+                                **item,
+                                "status": "reserved",
+                                "progress": None,
+                                "duration_seconds": None,
+                                "error": None,
+                            }
+                        )
+                        continue
+                    child_status = self.repository.status(str(child_run_id))
+                    child_progress = self.repository.progress(str(child_run_id))
+                    pipeline_stages.append(
+                        {
+                            **item,
+                            "status": child_status["status"],
+                            "progress": child_progress.get("workflow_percent"),
+                            "duration_seconds": child_status.get("duration_seconds"),
+                            "error": child_status.get("error"),
+                        }
+                    )
+        except (FileNotFoundError, ValueError, OSError):
+            pipeline_stages = None
         return {
             "configuration": self.repository.load_spec(run_id).to_dict(),
+            "metadata": self.repository.run_metadata(run_id).to_dict(),
             "status": self.repository.status(run_id),
             "progress": self.repository.progress(run_id),
             "summary": self.repository.summary(run_id),
@@ -356,10 +488,17 @@ class RunService:
             "log_tail": self.repository.log_tail(run_id),
             "checkpoint": checkpoint,
             "checkpoint_error": checkpoint_error,
+            "walk_forward_batches": batches,
+            "walk_forward_batch_manifest": walk_forward_batch_manifest,
+            "pipeline_stages": pipeline_stages,
         }
 
     def list(self) -> list[dict[str, object]]:
-        return [self._refresh_interrupted(run_id) for run_id in self.repository.list_run_ids()]
+        return [
+            self._refresh_interrupted(run_id)
+            for run_id in self.repository.list_run_ids()
+            if self.repository.run_metadata(run_id).visible_in_history
+        ]
 
 
 class ProgressReporter:

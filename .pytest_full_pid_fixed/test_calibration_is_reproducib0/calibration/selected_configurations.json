@@ -1,0 +1,32 @@
+{
+  "Up": {
+    "configuration": "baseline",
+    "parameters": {
+      "max_depth": 2,
+      "eta": 1.0,
+      "num_boost_round": 2,
+      "min_child_weight": 1.0,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "gamma": 0.0,
+      "reg_alpha": 0.0,
+      "reg_lambda": 1.0
+    },
+    "selection_score": 0.43073958623744685
+  },
+  "Down": {
+    "configuration": "baseline",
+    "parameters": {
+      "max_depth": 2,
+      "eta": 1.0,
+      "num_boost_round": 2,
+      "min_child_weight": 1.0,
+      "subsample": 1.0,
+      "colsample_bytree": 1.0,
+      "gamma": 0.0,
+      "reg_alpha": 0.0,
+      "reg_lambda": 1.0
+    },
+    "selection_score": 0.6829013662704512
+  }
+}

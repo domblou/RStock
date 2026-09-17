@@ -12,13 +12,14 @@ import pandas as pd
 
 EXPERIMENT_JOB_TYPES = frozenset({
     "walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
-    "threshold_calibration",
+    "threshold_calibration", "end_to_end",
 })
 PRODUCTION_JOB_TYPES = frozenset({
     "production_training", "market_update", "daily_prediction",
     "daily_screening", "realized_validation", "operational_run",
 })
 JOB_LABELS = {
+    "end_to_end": "End-to-end",
     "walk_forward": "Walk-forward",
     "xgboost_calibration": "Calibration XGBoost",
     "threshold_parameter_calibration": "Calibration des paramètres de seuils",
@@ -213,6 +214,13 @@ def _summary_text(
         )
     if job_type == "walk_forward":
         return f"{int(summary.get('eligible_combinations', 0))} combinaisons qualifiées"
+    if job_type == "end_to_end":
+        if status == "running":
+            return "Pipeline End-to-end en cours"
+        if status in {"failed", "cancelled", "interrupted"}:
+            return f"Pipeline End-to-end {status}"
+        stages = summary.get("stages", ())
+        return f"Pipeline End-to-end termine - {len(stages)} etapes"
     if job_type == "threshold_calibration":
         if summary.get("outcome") == "completed_partial_holdout":
             partial = _partial_holdout_text(summary)
