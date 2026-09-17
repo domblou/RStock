@@ -6,6 +6,7 @@ from rstock.application.domain import JobType
 from rstock.application.history_ui import EXPERIMENT_JOB_TYPES
 from rstock.application.run_detail_tabs import (
     PIPELINE_CHILD_TABS,
+    PIPELINE_STAGE_LABEL_COLUMN,
     batch_status_counts,
     pipeline_stage_rows,
     render_lazy_tabs,
@@ -82,6 +83,8 @@ def test_pipeline_summary_maps_disabled_failed_and_preserves_completed_stages():
         "disabled",
     ]
     assert rows[2]["Erreur"] == "boom"
+    assert PIPELINE_STAGE_LABEL_COLUMN == "Étape"
+    assert rows[2][PIPELINE_STAGE_LABEL_COLUMN] == "Paramètres seuils"
 
 
 @dataclass

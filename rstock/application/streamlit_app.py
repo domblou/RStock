@@ -66,6 +66,7 @@ from rstock.application.history_analysis import (
 from rstock.application.runner import running_duration
 from rstock.application.run_detail_tabs import (
     PIPELINE_CHILD_TABS,
+    PIPELINE_STAGE_LABEL_COLUMN,
     batch_status_counts,
     pipeline_stage_by_key,
     pipeline_stage_rows,
@@ -2023,8 +2024,8 @@ def _render_walk_forward_batches(
     progress = progress_weight / total_weight if total_weight else 0.0
     first = st.columns(4)
     first[0].metric("Combinaisons brutes", f"{raw:,}")
-    first[1].metric("Apres prefiltre", f"{effective:,}")
-    first[2].metric("Batchs planifies", planned)
+    first[1].metric("Après préfiltre", f"{effective:,}")
+    first[2].metric("Batchs planifiés", planned)
     first[3].metric("Maximum par batch", maximum)
     second = st.columns(5)
     for column, status_name in zip(
@@ -2033,16 +2034,16 @@ def _render_walk_forward_batches(
         column.metric(status_name.capitalize(), counts[status_name])
     second[4].metric("Progression globale", f"{progress:.1f}%")
     if raw:
-        st.caption(f"Reduction du prefiltre : {(raw - effective) / raw:.1%}")
+        st.caption(f"Réduction du préfiltre : {(raw - effective) / raw:.1%}")
     failed = [row for row in rows if row.get("Statut") == "failed"]
     if failed:
         st.error(
-            "Batchs en echec : "
+            "Batchs en échec : "
             + ", ".join(str(row.get("Batch")) for row in failed)
         )
     st.caption(
         "La reprise se fait sur le parent Walk-forward; les batchs completed "
-        "ne seront pas recalcules."
+        "ne seront pas recalculés."
     )
     table = pd.DataFrame(rows)
     event = st.dataframe(
@@ -2060,12 +2061,14 @@ def _render_walk_forward_batches(
     )
     selected_rows = _selected_rows(event)
     if not selected_rows:
-        st.caption("Selectionnez un batch pour inspecter son statut et ses logs.")
+        st.caption("Sélectionnez un batch pour inspecter son statut et ses logs.")
         return
     selected = rows[selected_rows[0]]
     child_run_id = str(selected["Run ID"])
     if selected.get("Statut") == "reserved":
-        st.caption(f"Run technique reserve : {child_run_id}; repertoire non materialise.")
+        st.caption(
+            f"Run technique réservé : {child_run_id}; répertoire non matérialisé."
+        )
         return
     child = service.run(child_run_id)
     with st.container(border=True):
@@ -2110,11 +2113,15 @@ def _render_pipeline_summary(run_id: str, detail: dict[str, object]) -> None:
     failed = [row for row in rows if row["Statut"] == "failed"]
     running = [row for row in rows if row["Statut"] == "running"]
     if failed:
-        st.error(f"Etape en echec : {failed[0]['Etape']}")
+        st.error(
+            f"Étape en échec : {failed[0][PIPELINE_STAGE_LABEL_COLUMN]}"
+        )
     elif running:
-        st.info(f"Etape active : {running[0]['Etape']}")
+        st.info(
+            f"Étape active : {running[0][PIPELINE_STAGE_LABEL_COLUMN]}"
+        )
     elif all(row["Statut"] in {"completed", "disabled"} for row in rows):
-        st.success("Pipeline termine.")
+        st.success("Pipeline terminé.")
     st.dataframe(
         pd.DataFrame(rows),
         hide_index=True,
@@ -2128,11 +2135,13 @@ def _render_pipeline_summary(run_id: str, detail: dict[str, object]) -> None:
     children = [row for row in rows if row.get("Run ID enfant")]
     if children:
         child_by_label = {
-            f"{row['Etape']} - {row['Run ID enfant']}": str(row["Run ID enfant"])
+            f"{row[PIPELINE_STAGE_LABEL_COLUMN]} - {row['Run ID enfant']}": str(
+                row["Run ID enfant"]
+            )
             for row in children
         }
         selected = st.selectbox(
-            "Acces direct a un run scientifique",
+            "Accès direct à un run scientifique",
             list(child_by_label),
             key=f"pipeline-child-link-{run_id}",
         )
@@ -2149,11 +2158,13 @@ def _render_pipeline_child(
     stage_key = PIPELINE_CHILD_TABS[renderer_key]
     stage = pipeline_stage_by_key(detail.get("pipeline_stages"), stage_key)
     if stage is None:
-        st.info("Cette etape n'est pas encore reservee dans le manifest.")
+        st.info("Cette étape n'est pas encore réservée dans le manifest.")
         return
     child_run_id = stage.get("child_run_id")
     if not child_run_id or stage.get("status") == "reserved":
-        st.caption(f"Etape {stage.get('status', 'pending')} - aucun artifact charge.")
+        st.caption(
+            f"Étape {stage.get('status', 'pending')} - aucun artefact chargé."
+        )
         return
     child_detail = service.run(str(child_run_id))
     child_status = child_detail["status"]
@@ -2171,10 +2182,10 @@ def _render_pipeline_child(
 def _render_pipeline_promotion(detail: dict[str, object]) -> None:
     stage = pipeline_stage_by_key(detail.get("pipeline_stages"), "promotion")
     if stage is None:
-        st.info("L'etape Promotion n'est pas encore disponible.")
+        st.info("L'étape Promotion n'est pas encore disponible.")
         return
     if stage.get("status") in {"not_requested", "disabled"}:
-        st.info("Promotion desactivee (auto_promote_candidates=False).")
+        st.info("Promotion désactivée (auto_promote_candidates=False).")
         return
     promotion = stage.get("promotion")
     if not isinstance(promotion, dict):
@@ -2186,13 +2197,13 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
     examined = len(diagnostics) if isinstance(diagnostics, list) else 0
     columns = st.columns(7)
     values = (
-        ("Examinees", examined),
+        ("Examinées", examined),
         ("Candidat", candidate_count),
         ("Non candidat", max(0, examined - candidate_count)),
-        ("Crees", int(promotion.get("created_count", 0))),
-        ("Reutilises", int(promotion.get("reused_count", 0))),
+        ("Créés", int(promotion.get("created_count", 0))),
+        ("Réutilisés", int(promotion.get("reused_count", 0))),
         (
-            "Echecs",
+            "Échecs",
             sum(
                 isinstance(item, dict) and item.get("status") == "failed"
                 for item in candidates
@@ -2218,7 +2229,7 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
                 "set_name": "Combinaison",
                 "status": "Statut promotion technique",
                 "model_id": "Model ID",
-                "created": "Cree",
+                "created": "Créé",
                 "error": "Erreur promotion",
             }
         )
@@ -2228,7 +2239,7 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
                     "Combinaison",
                     "Statut promotion technique",
                     "Model ID",
-                    "Cree",
+                    "Créé",
                     "Erreur promotion",
                 ]
             ],
@@ -2252,7 +2263,7 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
     root = st.session_state.lab_config.project_root / "runs"
     run_root = root / run_id
     st.caption(f"Parent run_id : {run_id}")
-    st.subheader("Metadata et provenance")
+    st.subheader("Métadonnées et provenance")
     st.json(detail.get("metadata", {}))
     pipeline = _read_light_json(run_root / "orchestration" / "pipeline.json")
     if pipeline is not None:
@@ -2283,7 +2294,7 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
                         st.caption(path.name)
                         st.json(values)
     st.subheader("Artifacts du parent")
-    st.write(detail.get("files") or "Aucun resultat publie")
+    st.write(detail.get("files") or "Aucun résultat publié")
 
 
 def _render_end_to_end_tabs(

@@ -190,6 +190,8 @@ PIPELINE_STAGE_LABELS = {
     "promotion": "Promotion",
 }
 
+PIPELINE_STAGE_LABEL_COLUMN = "Étape"
+
 PIPELINE_CHILD_TABS = {
     "child_walk_forward": "walk_forward",
     "child_xgboost": "xgboost_calibration",
@@ -224,7 +226,9 @@ def pipeline_stage_rows(stages: object) -> list[dict[str, object]]:
         status = str(item.get("status") or "pending")
         rows.append(
             {
-                "Étape": PIPELINE_STAGE_LABELS.get(stage_key, stage_key),
+                PIPELINE_STAGE_LABEL_COLUMN: PIPELINE_STAGE_LABELS.get(
+                    stage_key, stage_key
+                ),
                 "Statut": "disabled" if status == "not_requested" else status,
                 "Progression": item.get("progress"),
                 "Durée (s)": item.get("duration_seconds"),

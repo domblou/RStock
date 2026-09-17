@@ -964,7 +964,7 @@ END_TO_END
 ├── XGBOOST_CALIBRATION
 ├── THRESHOLD_PARAMETER_CALIBRATION
 ├── THRESHOLD_CALIBRATION
-└── AUTO_PROMOTION éventuelle
+└── promotion automatique éventuelle (étape interne persistée)
 ```
 
 Le WF, XGBoost et les deux calibrations restent de vrais runs scientifiques existants.
@@ -1140,9 +1140,9 @@ Reprise :
 
 Utiliser le fingerprint/idempotence déjà fourni par `PromotionService`.
 
-La promotion peut être modélisée comme une étape technique `AUTO_PROMOTION` si cela simplifie la reprise.
+La promotion automatique n’est ni un `JobType` autonome ni un run enfant. Elle est une étape interne persistée du pipeline `END_TO_END`, reprise de manière idempotente grâce à `PromotionService`.
 
-Elle n’a pas besoin de polluer Historique si elle est strictement une action technique; son état doit toutefois être visible dans le détail End-to-end.
+Elle ne pollue donc pas Historique; son état, sa progression, ses diagnostics et ses erreurs restent visibles dans l’onglet `Promotion` du détail End-to-end.
 
 ---
 
@@ -1809,7 +1809,17 @@ reprise partielle
 
 ### Phase 7 — UI et documentation finale
 
-Polish seulement après validation du moteur.
+Polish seulement après validation du moteur :
+
+- proposer `End-to-end` dans le sélecteur de type d’expérience;
+- exposer `auto_promote_candidates` uniquement comme option du lancement End-to-end;
+- afficher la preview issue du `CombinationPlan` partagé;
+- utiliser un registre commun d’onglets et un rendu paresseux strict;
+- afficher, dans le détail End-to-end : `Résumé`, `Walk-forward`, `XGBoost`, `Paramètres seuils`, `Seuils`, `Promotion` et `Technique`;
+- réutiliser les vues scientifiques des runs enfants plutôt que dupliquer leur rendu;
+- afficher `Batchs WF` uniquement lorsqu’un manifest de batching existe;
+- masquer les batchs techniques de l’Historique tout en conservant les runs scientifiques et les parents End-to-end visibles;
+- documenter le lancement, le suivi, la reprise et la promotion automatique.
 
 L’ordre général rejoint celui recommandé par l’audit, qui place lui aussi contrats, planificateur, WF parent/enfants, calibrations globales, End-to-end puis promotion/UI dans cet ordre. 
 

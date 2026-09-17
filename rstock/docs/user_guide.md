@@ -951,6 +951,39 @@ Dans l’historique, **Calibration des paramètres de seuils** apparaît comme u
 type distinct. La grille indique son parent direct et sa configuration gagnante;
 le détail présente les candidats, leur rang et les métriques de développement.
 
+## Walk-forward batché et End-to-end
+
+Un walk-forward trop volumineux est automatiquement découpé en batchs techniques
+selon la capacité configurée. La prévisualisation affiche le nombre exact de
+combinaisons brutes et le nombre de batchs avant le lancement. Ce découpage ne
+change ni les combinaisons évaluées ni les règles scientifiques.
+
+Dans le détail d’un walk-forward batché, l’onglet **Batchs WF** présente les
+ranges, le statut, la progression et les erreurs de chaque batch. Il n’apparaît
+pas pour un walk-forward monolithique. Les batchs techniques sont masqués de la
+grille Historique; le parent walk-forward reste visible et porte les résultats
+agrégés.
+
+Le type d’expérience **End-to-end** enchaîne les étapes suivantes :
+
+1. walk-forward;
+2. calibration XGBoost;
+3. calibration automatique des paramètres de seuils;
+4. calibration des seuils;
+5. promotion automatique facultative.
+
+L’option **Promouvoir automatiquement les candidats** appartient uniquement au
+lancement End-to-end. La promotion est une étape interne persistée du pipeline,
+et non une expérience autonome. Elle réutilise les protections d’idempotence de
+la promotion manuelle.
+
+Le détail d’un End-to-end regroupe **Résumé**, **Walk-forward**, **XGBoost**,
+**Paramètres seuils**, **Seuils**, **Promotion** et **Technique**. Les onglets
+scientifiques ouvrent les mêmes résultats que les runs enfants correspondants.
+La synthèse permet de repérer une étape échouée ou en attente; une reprise
+conserve les identifiants réservés, réutilise les checkpoints disponibles et ne
+recalcule pas les étapes déjà terminées.
+
 ---
 
 # 17. Fine-tuning des paramètres
