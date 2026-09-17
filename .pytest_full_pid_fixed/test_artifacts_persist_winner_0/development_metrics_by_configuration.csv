@@ -1,9 +1,0 @@
-Configuration,ConfigurationDigest,EligibleConfiguration,ModelsEvaluated,ModelsEligible,EligibleModelPct,TotalSignals,PrecisionMedian,F1Median,WindowCoverageMedian,PrecisionStdMedian,DirectionalReturnMeanMedian,DirectionalReturnStdMedian,OppositeMoveFrequencyMedian,Selected,Rank,SelectionReason,RejectionReason
-baseline,e46e1d2b9da70eee00f1dd05ecc45260dd5d2185c33cf1b3fca5776a8ca4ef62,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,True,1,maximum_eligible_model_fraction_then_development_robustness_order,
-candidate_01,ebd98faa24731601fa271df1653a755cde8d8dea0e2f7661b478519552ee7533,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,2,,ranked_below_selected_configuration
-candidate_02,1d22adbfeed148f17e1f528ed763b4ee1b9e1476c5f864f618ac3fcb58bef68e,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,3,,ranked_below_selected_configuration
-candidate_03,db9d2adb75b273817044851e00d5678796dfabdbd31adba454b77b8f25d88ae0,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,4,,ranked_below_selected_configuration
-candidate_04,f9b1d17b5f637a8aec378416d9a79a79e765c4ff55feea85d95d69da6d7670a3,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,5,,ranked_below_selected_configuration
-candidate_05,7fb291dc49a3c244deb5b2e31f24d948109f9bbf3d140faa2ded3b70b62006a1,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,6,,ranked_below_selected_configuration
-candidate_06,8b64dec528c4a26a7ab370f8513b2472348572a3a3a2d4420b2077cdae49eb9a,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,7,,ranked_below_selected_configuration
-candidate_07,0930fec4fb126fed25610da07976843fb0828aa430fe6d1882041ead6a13fb20,True,2,2,1.0,8,1.0,1.0,1.0,0.0,0.02,0.0,0.0,False,8,,ranked_below_selected_configuration

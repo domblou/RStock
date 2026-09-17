@@ -1,9 +1,0 @@
-Direction,Threshold,Sources,ReferenceThreshold
-Down,0.45,q0.5,False
-Down,0.5,reference,True
-Down,0.7125,q0.75,False
-Down,0.775,q0.9,False
-Up,0.1,q0.5,False
-Up,0.35,q0.75,False
-Up,0.5,reference,True
-Up,0.725,q0.9,False

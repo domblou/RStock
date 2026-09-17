@@ -1,3 +1,0 @@
-Set,Observation,Predictors,WindowsEvaluated,AUCWindows,ROCAUCMedian,ROCAUCMean,ROCAUCStd,ROCAUCWorst,PctWindowsAboveRandom,PRAUCMedian,MeanPrevalence,TotalObservations,PositiveObservations,RowsLostToLags,AggregatePrecision,AggregateRecall,AggregateF1,Eligible,IneligibilityReasons,EligibleRank
-"[""AAA"",""BBB""]",AAA,"[""BBB""]",3,3,1.0,1.0,0.0,1.0,1.0,1.0,0.5,12,6,3,1.0,1.0,1.0,True,[],1
-"[""BBB"",""AAA""]",BBB,"[""AAA""]",3,3,1.0,1.0,0.0,1.0,1.0,1.0,0.5,12,6,3,1.0,1.0,1.0,True,[],2

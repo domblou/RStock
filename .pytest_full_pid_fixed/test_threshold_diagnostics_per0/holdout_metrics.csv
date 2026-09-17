@@ -1,2 +1,0 @@
-Set,Direction,Threshold,Observations,SignalCount,SignalProportion,IntradayReturnMean,IntradayReturnMedian,DirectionalReturnMean,FavorableMoveFrequency,OppositeMoveFrequency,MFEMean,MAEMean,TN,FP,FN,TP,Accuracy,Precision,Recall,F1,ROCAUC,PRAUC,Prevalence
-AAA<-BBB,Down,0.5,8,4,0.5,0.0,0.0,0.0,0.5,0.5,0.027500000000000004,-0.0225,2,2,2,2,0.5,0.5,0.5,0.5,0.75,0.8166666666666667,0.5

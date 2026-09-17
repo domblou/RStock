@@ -24,5 +24,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest_tmp/
+.pytest_*/
 *.egg-info/
 .venv/

@@ -1,3 +1,0 @@
-Direction,Configuration,max_depth,eta,num_boost_round,min_child_weight,subsample,colsample_bytree,gamma,reg_alpha,reg_lambda,Sets,Observations,PositivePredictionRate,ProbabilityStd,TN,FP,FN,TP,Accuracy,Precision,Recall,F1,ROCAUC,PRAUC,Prevalence
-Up,baseline,2,1.0,2,1.0,1.0,1.0,0.0,0.0,1.0,3,15,0.06666666666666667,0.24304129135265262,12,0,2,1,0.8666666666666667,1.0,0.3333333333333333,0.5,0.9444444444444444,0.7555555555555555,0.2
-Down,baseline,2,1.0,2,1.0,1.0,1.0,0.0,0.0,1.0,3,15,0.9333333333333333,0.24304128479477463,1,2,0,12,0.8666666666666667,0.8571428571428571,1.0,0.923076923076923,0.9444444444444444,0.9811507936507937,0.8

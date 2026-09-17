@@ -1,7 +1,0 @@
-Set,Observation,Predictors,MarketCalendar,Window,TrainStart,TrainEnd,TestStart,TestEnd,TrainObservations,TestObservations,Predictions,UpPositiveOutcomes,DownPositiveOutcomes,RowsLostToLags,UpTN,UpFP,UpFN,UpTP,UpAccuracy,UpPrecision,UpRecall,UpF1,UpROCAUC,UpPRAUC,UpPrevalence,DownTN,DownFP,DownFN,DownTP,DownAccuracy,DownPrecision,DownRecall,DownF1,DownROCAUC,DownPRAUC,DownPrevalence
-"[""AAA"",""BBB""]",AAA,"[""BBB""]",,1,2024-01-04,2024-01-15,2024-01-16,2024-01-19,8,4,4,2,0,3,2,0,0,2,1.0,1.0,1.0,1.0,1.0,1.0,0.5,4,0,0,0,1.0,0.0,0.0,0.0,,,0.0
-"[""AAA"",""BBB""]",AAA,"[""BBB""]",,2,2024-01-04,2024-01-19,2024-01-22,2024-01-25,12,4,4,2,0,3,2,0,0,2,1.0,1.0,1.0,1.0,1.0,1.0,0.5,4,0,0,0,1.0,0.0,0.0,0.0,,,0.0
-"[""AAA"",""BBB""]",AAA,"[""BBB""]",,3,2024-01-04,2024-01-25,2024-01-26,2024-01-26,16,1,1,1,0,3,0,0,0,1,1.0,1.0,1.0,1.0,,1.0,1.0,1,0,0,0,1.0,0.0,0.0,0.0,,,0.0
-"[""BBB"",""AAA""]",BBB,"[""AAA""]",,1,2024-01-04,2024-01-15,2024-01-16,2024-01-19,8,4,4,2,0,3,2,0,0,2,1.0,1.0,1.0,1.0,1.0,1.0,0.5,4,0,0,0,1.0,0.0,0.0,0.0,,,0.0
-"[""BBB"",""AAA""]",BBB,"[""AAA""]",,2,2024-01-04,2024-01-19,2024-01-22,2024-01-25,12,4,4,2,0,3,2,0,0,2,1.0,1.0,1.0,1.0,1.0,1.0,0.5,4,0,0,0,1.0,0.0,0.0,0.0,,,0.0
-"[""BBB"",""AAA""]",BBB,"[""AAA""]",,3,2024-01-04,2024-01-25,2024-01-26,2024-01-26,16,1,1,0,0,3,1,0,0,0,1.0,0.0,0.0,0.0,,,0.0,1,0,0,0,1.0,0.0,0.0,0.0,,,0.0
