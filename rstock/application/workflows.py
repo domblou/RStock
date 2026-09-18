@@ -1690,11 +1690,20 @@ def _daily_prediction(
         preparation_config=effective_config,
     )
     _phase(progress_callback, "daily_prediction", "started")
-    predictions = DailyPredictionService(repository).generate(
+    prediction_service = DailyPredictionService(repository)
+    backfilled_predictions = prediction_service.backfill(
+        prepared,
+        market_data=getattr(downloaded, "prices", None),
+        persist=False,
+    )
+    current_predictions = prediction_service.generate(
         prepared,
         effective_config,
         market_data=getattr(downloaded, "prices", None),
         persist=False,
+    )
+    predictions = pd.concat(
+        [backfilled_predictions, current_predictions], ignore_index=True
     )
     check_cancellation(cancellation_check)
     if not predictions.empty:
@@ -1773,11 +1782,20 @@ def _operational_run(
     )
     check_cancellation(cancellation_check)
     _phase(progress_callback, "daily_prediction", "started")
-    predictions = DailyPredictionService(repository).generate(
+    prediction_service = DailyPredictionService(repository)
+    backfilled_predictions = prediction_service.backfill(
+        prepared,
+        market_data=getattr(downloaded, "prices", None),
+        persist=False,
+    )
+    current_predictions = prediction_service.generate(
         prepared,
         effective_config,
         market_data=getattr(downloaded, "prices", None),
         persist=False,
+    )
+    predictions = pd.concat(
+        [backfilled_predictions, current_predictions], ignore_index=True
     )
     _phase(progress_callback, "daily_prediction", "completed", predictions=len(predictions))
     check_cancellation(cancellation_check)

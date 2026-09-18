@@ -238,13 +238,13 @@ def filter_signal_results_view(
 
     if period == "Tous":
         return view
-    if period not in {"Aujourd’hui", "7 derniers jours"}:
+    if period not in {"Aujourd’hui", "7 derniers jours", "Aujourd’hui et demain"}:
         raise ValueError(f"Période de surveillance inconnue : {period}")
 
     reference = pd.Timestamp(date.today() if today is None else today).normalize()
     if reference.tzinfo is not None:
         reference = reference.tz_localize(None)
-    first_date = reference if period == "Aujourd’hui" else reference - timedelta(days=6)
+    first_date = reference if period in {"Aujourd’hui", "Aujourd’hui et demain"} else reference - timedelta(days=6)
 
     def filtered(table_view: OperationalTableView) -> OperationalTableView:
         if table_view.technical.empty or "prediction_date" not in table_view.technical:
@@ -255,7 +255,7 @@ def filter_signal_results_view(
         dates = pd.to_datetime(
             table_view.technical["prediction_date"], errors="coerce", utc=True
         ).dt.tz_convert(None).dt.normalize()
-        keep = dates.between(first_date, reference, inclusive="both").to_numpy()
+        keep =         dates.between(first_date, reference + (timedelta(days=1) if period == "Aujourd’hui et demain" else timedelta(0)), inclusive="both").to_numpy()
         return OperationalTableView(
             table_view.table.iloc[keep].reset_index(drop=True),
             table_view.technical.iloc[keep].reset_index(drop=True),

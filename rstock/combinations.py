@@ -8,13 +8,24 @@ from math import comb
 
 import pandas as pd
 
+def count_target_symbol_sets(predictor_count: int, permutation_depth: int) -> int:
+    """Count one target's unordered feature sets without materialising them."""
+
+    if predictor_count < 0:
+        raise ValueError("predictor_count must be non-negative")
+    if permutation_depth < 1:
+        raise ValueError("permutation_depth must be at least 1")
+    return sum(
+        comb(predictor_count, feature_count)
+        for feature_count in range(1, min(permutation_depth, predictor_count) + 1)
+    )
+
 
 def count_symbol_sets(symbol_count: int, permutation_depth: int) -> int:
     if symbol_count < 0 or permutation_depth < 1 or permutation_depth >= symbol_count:
         raise ValueError("permutation_depth must be between 1 and symbol_count - 1")
-    return symbol_count * sum(
-        comb(symbol_count - 1, feature_count)
-        for feature_count in range(1, permutation_depth + 1)
+    return symbol_count * count_target_symbol_sets(
+        symbol_count - 1, permutation_depth
     )
 
 
@@ -41,9 +52,8 @@ def generate_symbol_sets(
         raise ValueError("target_symbols must be unique")
     if not set(targets) <= set(symbols):
         raise ValueError("target_symbols must be included in symbols")
-    expected = len(targets) * sum(
-        comb(len(symbols) - 1, feature_count)
-        for feature_count in range(1, permutation_depth + 1)
+    expected = len(targets) * count_target_symbol_sets(
+        len(symbols) - 1, permutation_depth
     )
     if expected > max_sets:
         raise ValueError(
@@ -80,9 +90,7 @@ def generate_target_symbol_sets(
     if permutation_depth < 1:
         raise ValueError("permutation_depth must be at least 1")
     expected = sum(
-        sum(comb(len(predictors), depth) for depth in range(1, min(
-            permutation_depth, len(predictors)
-        ) + 1))
+        count_target_symbol_sets(len(predictors), permutation_depth)
         for predictors in predictors_by_target.values()
     )
     if expected > max_sets:

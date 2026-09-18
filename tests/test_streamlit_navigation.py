@@ -291,7 +291,9 @@ def test_walk_forward_preview_uses_shared_lazy_combination_plan():
     assert "build_combination_preview(" in preview
     assert "JobType.WALK_FORWARD, JobType.END_TO_END" in preview
     assert "Combinaisons brutes exactes" in preview
-    assert "Batchs requis (preview)" in preview
+    assert "Maximum après préfiltrage" in preview
+    assert "Batchs max après préfiltrage" in preview
+    assert "Batchs requis (preview)" not in preview
     assert "_combination_plan_preview(labels[choice])" in experiments
 
 
@@ -489,7 +491,7 @@ def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
     assert "_render_signals_section(" in surveillance
     assert "_evaluated_predictions_panel(evaluated_view, runs)" in surveillance
     assert "main, sidebar = st.columns([2.25, 1], gap=\"large\")" in surveillance
-    assert "_render_priorities_panel(signal_view.signals)" in surveillance
+    assert "_render_priorities_panel(priority_view.signals)" in surveillance
     assert "Autres prédictions sans signal" in source
     assert "Prédictions évaluées récemment" in source
     assert "Détails techniques" in source

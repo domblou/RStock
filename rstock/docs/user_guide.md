@@ -16,11 +16,10 @@ L’objectif n’est pas de produire une prédiction unique, mais de construire 
 8. promouvoir ces modèles;
 9. suivre ensuite leurs signaux et leurs résultats.
 
-Le processus général est :
+  
+---
 
-**Univers → Walk-forward → [Calibration XGBoost] → [Calibration des paramètres de seuils] → Calibration des seuils → Holdout → Promotion → Signaux → Simulation**
-
-Les crochets indiquent les étapes optionnelles.
+![Processus général RStock](../assets/rstock_process_user_guide.png)
 
 ---
 
@@ -323,7 +322,7 @@ La profondeur doit donc rester raisonnable.
 
 ---
 
-## 5. Préfiltrage
+# 5. Préfiltrage
 
 Avant d'exécuter les analyses les plus coûteuses, RStock peut éliminer certaines combinaisons peu prometteuses.
 
@@ -340,7 +339,7 @@ L’objectif est de réduire le nombre de combinaisons qui doivent passer dans l
 
 ---
 
-## 6. Qualification walk-forward
+# 6. Qualification walk-forward
 
 Après le walk-forward, chaque combinaison est évaluée sur plusieurs fenêtres temporelles.
 
@@ -1005,7 +1004,7 @@ Sinon, il devient impossible de savoir quelle modification a réellement produit
 
 ---
 
-## 18. Fine-tuning du walk-forward
+# 18. Fine-tuning du walk-forward
 
 Les paramètres principaux sont :
 
@@ -1066,7 +1065,7 @@ Une méthodologie robuste devrait produire des résultats raisonnablement cohér
 
 ---
 
-## 19. Fine-tuning XGBoost
+# 19. Fine-tuning XGBoost
 
 Le fine-tuning XGBoost doit rester limité et contrôlé.
 
@@ -1109,7 +1108,7 @@ Privilégier :
 
 ---
 
-## 20. Fine-tuning de la calibration des seuils
+# 20. Fine-tuning de la calibration des seuils
 
 Le fine-tuning du seuil doit chercher un compromis entre :
 
@@ -1159,7 +1158,7 @@ méthode elle-même en source de surajustement.
 
 ---
 
-## 21. Comment évaluer une modification de paramètres
+# 21. Comment évaluer une modification de paramètres
 
 Lorsqu’un paramètre est modifié, ne regarder pas uniquement le meilleur modèle.
 
@@ -1204,7 +1203,7 @@ Pour limiter ce risque :
 
 ---
 
-## 23. Processus recommandé avant promotion
+# 23. Processus recommandé avant promotion
 
 Un modèle candidat devrait idéalement avoir :
 
@@ -1225,7 +1224,7 @@ La promotion demeure une décision contrôlée, et non une conséquence automati
 
 ---
 
-## 24. Lecture recommandée des résultats
+# 24. Lecture recommandée des résultats
 
 Un modèle présentant :
 
@@ -1250,7 +1249,7 @@ Il faut donc rechercher un **ensemble cohérent de métriques**, plutôt qu’un
 
 ---
 
-## 25. Principe directeur
+# 25. Principe directeur
 
 RStock doit favoriser :
 
@@ -1259,3 +1258,11 @@ RStock doit favoriser :
 L’objectif n’est pas de trouver le modèle qui aurait été parfait dans le passé.
 
 L’objectif est de trouver des modèles dont le comportement historique est suffisamment cohérent pour justifier leur utilisation sur des données futures.
+
+# 26. Rattrapage des prédictions quotidiennes
+
+La version V1 du rattrapage peut recréer les prédictions quotidiennes, les signaux et l’évaluation des journées qui n’ont pas été traitées. Le rattrapage est limité aux 30 derniers jours et utilise les modèles actuellement actifs au moment de son exécution.
+
+Les variables d’une prédiction restent calculées uniquement à partir des observations disponibles avant sa date cible (`D-X`). Les résultats ne sont évalués que lorsque les données `Open`, `High`, `Low` et `Close` requises sont présentes et valides.
+
+Cette V1 ne reconstitue donc pas nécessairement le modèle qui était actif à la date historique de chaque prédiction. Une V2 devra conserver et utiliser l’historique des modèles actifs à chaque date.

@@ -514,6 +514,54 @@ class DailyPredictionService:
             self.repository.append_table("predictions", frame, key="prediction_id")
         return frame
 
+    def backfill(
+        self,
+        prepared: pd.DataFrame,
+        *,
+        market_data: pd.DataFrame | None = None,
+        max_days: int = 30,
+        persist: bool = True,
+    ) -> pd.DataFrame:
+        """Create missing operational predictions for recent observed sessions.
+
+        This deliberately uses the production artifacts and active models at
+        execution time. It is not the historical simulation/replay mechanism.
+        """
+        if max_days < 1:
+            raise ValueError("max_days must be positive")
+        if prepared.empty:
+            return pd.DataFrame()
+        dates = pd.DatetimeIndex(prepared.index).normalize()
+        latest = dates.max()
+        target_dates = dates[dates >= latest - pd.Timedelta(days=max_days - 1)]
+        existing = set(
+            self.repository.read_table("predictions")
+            .get("prediction_id", pd.Series(dtype=str))
+            .astype(str)
+        )
+        rows: list[dict[str, Any]] = []
+        for model in self.repository.active_models():
+            for target_date in target_dates:
+                prediction_id = self._prediction_id(model, target_date)
+                if prediction_id in existing:
+                    continue
+                try:
+                    rows.append(
+                        self._predict_model_for_target(
+                            model,
+                            prepared,
+                            target_date=target_date,
+                            market_data=market_data,
+                        )
+                    )
+                except Exception:
+                    # A backfill is retryable. Do not persist a synthetic error
+                    # row that would prevent a later successful reconstruction.
+                    continue
+        frame = pd.DataFrame(rows)
+        if persist and not frame.empty:
+            self.repository.append_table("predictions", frame, key="prediction_id")
+        return frame
     def replay(
         self,
         price_loader: Callable[[str], pd.DataFrame | None],
@@ -725,6 +773,75 @@ class DailyPredictionService:
             "created_at": utc_now(),
         }
 
+    def _predict_model_for_target(
+        self,
+        model: ProductionModel,
+        prepared: pd.DataFrame,
+        *,
+        target_date: Any,
+        market_data: pd.DataFrame | None = None,
+    ) -> dict[str, Any]:
+        directory = self.repository.artifact_directory(model.model_id)
+        metadata = json.loads(
+            (directory / "production.metadata.json").read_text(encoding="utf-8")
+        )
+        if (
+            metadata.get("model_id") != model.model_id
+            or metadata.get("artifact_version") != model.artifact_version
+            or metadata.get("feature_version") != model.feature_version
+        ):
+            raise ValueError("incompatible production metadata")
+        return_name = intraday_return_column(model.target)
+        if return_name not in prepared:
+            raise ValueError("missing target history")
+        target = pd.Timestamp(target_date).normalize()
+        observations = prepared.loc[prepared.index < target, return_name].dropna()
+        if observations.empty:
+            raise ValueError("no prior market observation")
+        as_of = observations.index.max()
+        current = prepare_prediction_row(
+            prepared, as_of_date=as_of, target_date=target, lag_depth=model.lag_depth
+        )
+        names = list(metadata["predictor_columns"])
+        if any(name not in current or current[name].isna().any() for name in names):
+            raise ValueError("missing predictors")
+        features = _json_safe(current.loc[current.index[0], names].to_dict())
+        source_observations = prediction_source_observations(
+            prepared, names, as_of_date=as_of, market_data=market_data
+        )
+        up = float(predict_probabilities(load_booster(directory / "up.ubj"), current, names)[0])
+        down = float(predict_probabilities(load_booster(directory / "down.ubj"), current, names)[0])
+        signal_status = (
+            "bullish_signal"
+            if up >= model.signal_threshold and down < model.down_threshold
+            else "no_signal"
+        )
+        return {
+            "prediction_id": self._prediction_id(model, target),
+            "prediction_date": target.date().isoformat(),
+            "as_of_date": pd.Timestamp(as_of).date().isoformat(),
+            "target": model.target,
+            "predictors": json.dumps(model.predictors),
+            "feature_names": json.dumps(names),
+            "features": json.dumps(features, ensure_ascii=False),
+            "source_observations": json.dumps(source_observations, ensure_ascii=False),
+            "model_id": model.model_id,
+            "model_version": model.artifact_version,
+            "up_probability": up,
+            "down_probability": down,
+            "up_threshold": model.signal_threshold,
+            "down_threshold": model.down_threshold,
+            "signal_status": signal_status,
+            "status": "predicted",
+            "error": None,
+            "created_at": utc_now(),
+        }
+
+    @staticmethod
+    def _prediction_id(model: ProductionModel, target_date: Any) -> str:
+        return hashlib.sha256(
+            f"{model.model_id}:{model.artifact_version}:{pd.Timestamp(target_date).date()}".encode()
+        ).hexdigest()[:20]
     @staticmethod
     def _error_row(model: ProductionModel, error: str, date: Any = None) -> dict[str, Any]:
         token = f"{model.model_id}:{date}:{error}:{utc_now()}"
@@ -828,6 +945,12 @@ class RealizedResultService:
             if date not in normalised.index:
                 continue
             price = normalised.loc[date]
+            required_prices = pd.to_numeric(
+                pd.Series({name: price.get(name) for name in ("Open", "High", "Low", "Close")}),
+                errors="coerce",
+            )
+            if required_prices.isna().any() or not np.isfinite(required_prices.to_numpy()).all():
+                continue
             opened, high, low, closed = (float(price[name]) for name in ("Open", "High", "Low", "Close"))
             intraday = closed / opened - 1.0
             model = models.get(str(item["model_id"]))

@@ -11,6 +11,8 @@ from typing import Iterator, Mapping, Sequence
 
 import pandas as pd
 
+from .combinations import count_target_symbol_sets
+
 
 COMBINATION_PLAN_VERSION = 2
 RAW_POPULATION = "raw"
@@ -333,6 +335,8 @@ class CombinationPlanPreview:
     raw_combination_count: int
     max_combinations_per_batch: int | None
     preview_batch_count: int
+    max_combinations_after_prefilter: int
+    max_batches_after_prefilter: int
     prefiltered_combination_count: int | None = None
     effective_batch_count: int | None = None
 
@@ -351,6 +355,8 @@ class CombinationPlanPreview:
             "raw_combination_count": self.raw_combination_count,
             "max_combinations_per_batch": self.max_combinations_per_batch,
             "preview_batch_count": self.preview_batch_count,
+            "max_combinations_after_prefilter": self.max_combinations_after_prefilter,
+            "max_batches_after_prefilter": self.max_batches_after_prefilter,
             "prefiltered_combination_count": self.prefiltered_combination_count,
             "effective_batch_count": self.effective_batch_count,
         }
@@ -376,6 +382,8 @@ def build_combination_preview(
     *,
     context_symbols: Sequence[str] = (),
     max_combinations_per_batch: int | None,
+    prefilter_enabled: bool = False,
+    prefilter_top_n: int | None = None,
     effective_plan: CombinationPlan | None = None,
 ) -> CombinationPlanPreview:
     """Summarize raw preview counts and optional post-prefilter counts."""
@@ -386,6 +394,19 @@ def build_combination_preview(
     if not set(contexts) <= set(raw_plan.predictor_symbols):
         raise ValueError("context_symbols must be included in predictor_symbols")
     raw_count = raw_plan.count()
+    if prefilter_enabled and (prefilter_top_n is None or prefilter_top_n < 1):
+        raise ValueError("prefilter_top_n must be positive when prefilter is enabled")
+    max_after_prefilter = (
+        raw_count
+        if not prefilter_enabled
+        else sum(
+            count_target_symbol_sets(
+                min(len(predictors), int(prefilter_top_n)),
+                raw_plan.permutation_depth,
+            )
+            for predictors in raw_plan.predictors_by_target.values()
+        )
+    )
     if effective_plan is not None:
         if effective_plan.population_kind != PREFILTERED_POPULATION:
             raise ValueError("effective_plan must describe a prefiltered population")
@@ -404,6 +425,10 @@ def build_combination_preview(
         raw_combination_count=raw_count,
         max_combinations_per_batch=max_combinations_per_batch,
         preview_batch_count=_batch_count(raw_count, max_combinations_per_batch),
+        max_combinations_after_prefilter=max_after_prefilter,
+        max_batches_after_prefilter=_batch_count(
+            max_after_prefilter, max_combinations_per_batch
+        ),
         prefiltered_combination_count=effective_count,
         effective_batch_count=(
             None

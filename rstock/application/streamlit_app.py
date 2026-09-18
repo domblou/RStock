@@ -488,6 +488,12 @@ def _combination_plan_preview(job_type: JobType) -> bool:
             max_combinations_per_batch=(
                 st.session_state.lab_config.walk_forward_max_combinations_per_batch
             ),
+            prefilter_enabled=(
+                st.session_state.lab_config.predictor_prefilter_enabled
+            ),
+            prefilter_top_n=(
+                st.session_state.lab_config.predictor_prefilter_top_n
+            ),
         )
     except ValueError as error:
         st.error(f"Plan de combinaisons invalide : {error}")
@@ -499,19 +505,29 @@ def _combination_plan_preview(job_type: JobType) -> bool:
         first[1].metric("Contexte", f"{preview.context_count:,}")
         first[2].metric("Prédicteurs", f"{preview.predictor_count:,}")
         first[3].metric("Profondeur", preview.permutation_depth)
-        second = st.columns(3)
+        second = st.columns(4)
         second[0].metric(
             "Combinaisons brutes exactes",
             f"{preview.raw_combination_count:,}",
         )
-        capacity = preview.max_combinations_per_batch
         second[1].metric(
+            "Maximum après préfiltrage",
+            f"{preview.max_combinations_after_prefilter:,}",
+        )
+        capacity = preview.max_combinations_per_batch
+        second[2].metric(
             "Maximum par batch",
             "Mono-run historique" if capacity is None else f"{capacity:,}",
         )
-        second[2].metric("Batchs requis (preview)", preview.preview_batch_count)
+        second[3].metric(
+            "Batchs max après préfiltrage",
+            preview.max_batches_after_prefilter,
+        )
         st.caption(
-            "Le nombre reel de batchs sera recalcule apres le prefiltrage global."
+            "Borne supérieure calculée à partir du Top N du préfiltre, de la "
+            "profondeur des combinaisons et de la population de prédicteurs. Le "
+            "nombre réel peut être inférieur après qualification et suppression "
+            "des redondances."
         )
     return True
 
@@ -1117,7 +1133,7 @@ def _history_filters(
     statuses = ["Tous", *sorted({str(run["status"]) for run in runs})]
     selected_status = columns[1].selectbox("Statut", statuses, key=f"{key_prefix}-status")
     period = columns[2].selectbox(
-        "Période", ["Aujourd’hui", "7 jours", "30 jours", "Tout"], key=f"{key_prefix}-period"
+        "Période", ["Aujourd’hui", "7 jours", "30 jours", "Tout"], index=3, key=f"{key_prefix}-period"
     )
     model_options = [None, *sorted(models)]
     selected_model = columns[3].selectbox(
@@ -2148,22 +2164,6 @@ def _render_pipeline_summary(run_id: str, detail: dict[str, object]) -> None:
             )
         },
     )
-    children = [row for row in rows if row.get("Run ID enfant")]
-    if children:
-        child_by_label = {
-            f"{row[PIPELINE_STAGE_LABEL_COLUMN]} - {row['Run ID enfant']}": str(
-                row["Run ID enfant"]
-            )
-            for row in children
-        }
-        selected = st.selectbox(
-            "Accès direct à un run scientifique",
-            list(child_by_label),
-            key=f"pipeline-child-link-{run_id}",
-        )
-        if st.button("Ouvrir le run enfant", key=f"open-pipeline-child-{run_id}"):
-            _history_navigation("detail", [child_by_label[selected]])
-
 
 def _render_pipeline_child(
     service: ExperimentService,
@@ -3082,30 +3082,14 @@ def _styled_signal_table(table: pd.DataFrame) -> pd.io.formats.style.Styler:
 def _render_signals_section(
     view: SignalResultsView,
     models: ModelService,
-    *,
-    today_signal_count: int,
 ) -> None:
     selected_signal = None
     with st.container(border=True):
-        heading, count = st.columns([3, 1], gap="small")
-        with heading:
-            st.subheader("Signaux haussiers à traiter")
-            st.caption("Opportunités détectées par les modèles actifs.")
-        with count:
-            st.metric("Aujourd’hui", today_signal_count)
-        period = st.radio(
-            "Afficher",
-            ["Aujourd’hui", "7 derniers jours", "Tous"],
-            horizontal=True,
-            key="surveillance-signals-period",
-        )
-        displayed = filter_signal_results_view(view, period)
+        st.subheader("Signaux haussiers à traiter")
+        st.caption("Opportunités détectées par les modèles actifs.")
+        displayed = filter_signal_results_view(view, "Aujourd’hui et demain")
         if displayed.signals.table.empty:
-            empty_message = (
-                "Aucun signal haussier aujourd’hui."
-                if period == "Aujourd’hui"
-                else "Aucun signal haussier pour la période sélectionnée."
-            )
+            empty_message = "Aucun signal haussier aujourd’hui ou demain."
             st.info(empty_message)
         else:
             event = st.dataframe(
@@ -3186,6 +3170,7 @@ def _priority_card_html(
         <span class="rstock-priority-target">{html.escape(str(row.get('Cible', '—')))}</span>
         {badge}
       </div>
+      <div class="rstock-priority-date">Date : {html.escape(str(row.get('Date', '—')))}</div>
       <div class="rstock-priority-predictors">{html.escape(str(row.get('Predictors', '—')))}</div>
       <div class="rstock-priority-metrics">
         <span>P(Up) <span class="rstock-up">{html.escape(str(row.get('P(Up)', '—')))}</span></span>
@@ -3348,6 +3333,7 @@ def _evaluated_predictions_panel(
         status_filter = st.selectbox(
             "Afficher",
             ["Toutes", "Signaux seulement", "Sans signal"],
+            index=1,
             key="surveillance-evaluated-predictions-filter",
         )
         displayed_view = filter_evaluated_predictions_view(view, status_filter)
@@ -3383,7 +3369,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
     freshness = MarketDataService().freshness(universe.symbols, st.session_state.lab_config)
     runs = _service().runs()
     signal_view = build_signals_view(signals, predictions)
-    today_signal_view = filter_signal_results_view(signal_view, "Aujourd’hui")
+    today_signal_view = filter_signal_results_view(signal_view, "Aujourd’hui et demain")
     evaluated_view = _load_evaluated_predictions_view(
         predictions,
         signals,
@@ -3417,23 +3403,23 @@ def _render_surveillance_page(*, polling: bool) -> None:
         freshness=freshness,
     )
     _render_production_actions(active_model_count=len(universe.model_ids))
-    with st.expander("Univers opérationnel"):
-        st.write(", ".join(universe.symbols) or "Aucun symbole")
-        if universe.used_by:
-            st.dataframe(
-                [{"Symbole": symbol, "Modèles": ", ".join(ids)} for symbol, ids in universe.used_by.items()],
-                hide_index=True, width="stretch",
-            )
     main, sidebar = st.columns([2.25, 1], gap="large")
     with main:
         _render_signals_section(
             signal_view,
             models,
-            today_signal_count=len(today_signal_view.signals.table),
         )
         _evaluated_predictions_panel(evaluated_view, runs)
+        with st.expander("Univers opérationnel"):
+            st.write(", ".join(universe.symbols) or "Aucun symbole")
+            if universe.used_by:
+                st.dataframe(
+                    [{"Symbole": symbol, "Modèles": ", ".join(ids)} for symbol, ids in universe.used_by.items()],
+                    hide_index=True, width="stretch",
+                )
     with sidebar:
-        _render_priorities_panel(signal_view.signals)
+        priority_view = filter_signal_results_view(signal_view, "Aujourd’hui et demain")
+        _render_priorities_panel(priority_view.signals)
         _render_operational_info(
             freshness=freshness,
             last_prediction=last_prediction,
@@ -3505,6 +3491,9 @@ def _models_page() -> None:
             "Version": model.artifact_version,
             "AUC dev médiane": model.development_metrics.get("ROCAUCMedian"),
             "AUC holdout": model.holdout_metrics.get("FinalUpROCAUC"),
+            "Taux de réussite": _format_metric(
+                model.calibration_metrics.get("success_rate"), percent=True
+            ),
         }
         for model in visible_models
     ])
@@ -3717,41 +3706,39 @@ def _render_simulation_results(result: SimulationResult) -> None:
     synthesis[2].metric("Meilleur trade", _simulation_percent(metrics.best_trade))
     synthesis[3].metric("Pire trade", _simulation_percent(metrics.worst_trade))
 
-    details, quality = st.columns([3, 1])
-    with details:
-        st.subheader("Détail des trades")
-        st.download_button(
-            "Télécharger (CSV)",
-            result.trades.to_csv(index=False).encode("utf-8-sig"),
-            file_name="rstock_simulation.csv",
-            mime="text/csv",
-        )
-        st.dataframe(
-            result.trades,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "P(Up)": st.column_config.NumberColumn(format="%.4f"),
-                "Seuil Up": st.column_config.NumberColumn(format="%.4f"),
-                "Prix achat": st.column_config.NumberColumn(format="%.2f $"),
-                "Prix vente": st.column_config.NumberColumn(format="%.2f $"),
-                "Rendement": st.column_config.NumberColumn(format="percent"),
-                "Montant investi": st.column_config.NumberColumn(format="%.2f $"),
-                "Profit / perte": st.column_config.NumberColumn(format="%.2f $"),
-            },
-        )
-    with quality:
-        st.subheader("Qualité des données")
-        st.metric("Prix manquants", metrics.missing_prices)
-        st.metric("Signaux ignorés", metrics.excluded_trades)
-        st.metric("Couverture des prix", _simulation_percent(metrics.price_coverage))
-        if metrics.signals_found == 0:
-            st.info("Aucun signal haussier actif dans la période sélectionnée.")
-        elif metrics.price_coverage >= 0.9:
-            st.success("Données globalement conformes pour la simulation.")
-        else:
-            st.warning("Couverture partielle : certains trades ont été exclus.")
+    st.subheader("Détail des trades")
+    st.download_button(
+        "Télécharger (CSV)",
+        result.trades.to_csv(index=False).encode("utf-8-sig"),
+        file_name="rstock_simulation.csv",
+        mime="text/csv",
+    )
+    st.dataframe(
+        result.trades,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "P(Up)": st.column_config.NumberColumn(format="%.4f"),
+            "Seuil Up": st.column_config.NumberColumn(format="%.4f"),
+            "Prix achat": st.column_config.NumberColumn(format="%.2f $"),
+            "Prix vente": st.column_config.NumberColumn(format="%.2f $"),
+            "Rendement": st.column_config.NumberColumn(format="percent"),
+            "Montant investi": st.column_config.NumberColumn(format="%.2f $"),
+            "Profit / perte": st.column_config.NumberColumn(format="%.2f $"),
+        },
+    )
 
+    st.subheader("Qualité des données")
+    quality_kpis = st.columns(3)
+    quality_kpis[0].metric("Prix manquants", metrics.missing_prices)
+    quality_kpis[1].metric("Signaux ignorés", metrics.excluded_trades)
+    quality_kpis[2].metric("Couverture des prix", _simulation_percent(metrics.price_coverage))
+    if metrics.signals_found == 0:
+        st.info("Aucun signal haussier actif dans la période sélectionnée.")
+    elif metrics.price_coverage >= 0.9:
+        st.success("Données globalement conformes pour la simulation.")
+    else:
+        st.warning("Couverture partielle : certains trades ont été exclus.")
 
 def _simulation_model_snapshots(
     project_root: Path,
@@ -4071,7 +4058,25 @@ def _documentation_page() -> None:
     st.markdown("**Sommaire** · " + " · ".join(title for title, _ in sections))
     for index, (title, content) in enumerate(sections):
         with st.expander(title, expanded=index == 0):
-            st.markdown(content)
+            image_name = "rstock_process_user_guide.png"
+            image_markdown = f"![Processus général RStock](../assets/{image_name})"
+
+            if image_markdown in content:
+                before, after = content.split(image_markdown, 1)
+
+                st.markdown(before)
+
+                image_path = USER_GUIDE_PATH.parent.parent / "assets" / image_name
+                if image_path.is_file():
+                    st.image(
+                        str(image_path),
+                        caption="Processus général RStock",
+                        width=1000,
+                    )
+
+                st.markdown(after)
+            else:
+                st.markdown(content)
 
 
 def _primary_pages() -> list[st.Page]:

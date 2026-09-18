@@ -399,6 +399,7 @@ Option encore plus robuste : séparer l’UI et le worker.
 - Persister les simulations
 - Le WF matérialise encore la population entière avant ce batching, avec une limite max_generated_sets, actuellement 100 000 pour les nouveaux runs.
 ⬜ Ajout de nouveau modèle comme xgboost et généralisation de la calibration
+⬜ Intégrer la validation temporelle dans le end-to-end ou nouveau job-type End-to-end avec validation temporelle
 ⬜ Promotion et disqualification automatique de modèle
 URGENT : TAG sur les RUNS
 ⬜ Calculer les profits non réalisés sur signaux positifs
@@ -413,3 +414,4 @@ Et je changerais légèrement notre ordre de travail maintenant. Avant d'ajouter
 **Universe Manager → comparaison/résultats des expériences → promotion d'une configuration → entraînement complet → prédiction quotidienne → screening → dashboard.**
 
 À ce moment-là, RStock commence à passer d'un laboratoire de recherche à une **application qu'on peut réellement ouvrir chaque jour et utiliser**.
+⬜ Rattrapage V2 : utiliser l’historique des modèles actifs au moment de chaque prédiction

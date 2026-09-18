@@ -118,7 +118,15 @@ def filter_runs(
             if str(detail_loader(str(run["run_id"])).get("configuration", {}).get("model_id") or "")
             == model_id
         ]
-    return filtered
+    return sorted(
+        filtered,
+        key=lambda run: (
+            timestamp.value
+            if (timestamp := _timestamp(run.get("created_at"))) is not None
+            else -1
+        ),
+        reverse=True,
+    )
 
 
 def paginate_runs(

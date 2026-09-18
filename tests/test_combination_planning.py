@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import rstock.predictor_prefilter as predictor_prefilter
 
 from rstock.combination_planning import (
     COMBINATION_PLAN_VERSION,
@@ -8,6 +9,7 @@ from rstock.combination_planning import (
     build_combination_preview,
 )
 from rstock.combinations import (
+    count_target_symbol_sets,
     generate_symbol_sets,
     generate_target_symbol_sets,
     symbol_set_id,
@@ -217,3 +219,100 @@ def test_frozen_plan_round_trip_preserves_identity_and_rows():
         pd.testing.assert_frame_equal(
             restored.slice(0, restored.count()), plan.slice(0, plan.count())
         )
+
+
+def test_preview_uses_raw_count_as_upper_bound_when_prefilter_is_disabled():
+    plan = CombinationPlan(["A", "B", "C", "CONTEXT"], 2, target_symbols=["A", "B"])
+
+    preview = build_combination_preview(
+        plan,
+        context_symbols=["CONTEXT"],
+        max_combinations_per_batch=4,
+        prefilter_enabled=False,
+    )
+
+    assert preview.raw_combination_count == 12
+    assert preview.max_combinations_after_prefilter == 12
+    assert preview.max_batches_after_prefilter == 3
+
+
+@pytest.mark.parametrize(
+    ("depth", "top_n", "expected_count", "expected_batches"),
+    [
+        (1, 2, 4, 1),
+        (2, 2, 6, 2),
+        (2, 99, 12, 3),
+    ],
+)
+def test_preview_calculates_prefilter_upper_bound_per_target(
+    depth, top_n, expected_count, expected_batches
+):
+    plan = CombinationPlan(["A", "B", "C", "CONTEXT"], depth, target_symbols=["A", "B"])
+
+    preview = build_combination_preview(
+        plan,
+        context_symbols=["CONTEXT"],
+        max_combinations_per_batch=4,
+        prefilter_enabled=True,
+        prefilter_top_n=top_n,
+    )
+
+    assert preview.max_combinations_after_prefilter == expected_count
+    assert preview.max_batches_after_prefilter == expected_batches
+
+
+def test_preview_upper_bound_excludes_the_target_from_predictors():
+    plan = CombinationPlan(["A", "B", "C"], 1, target_symbols=["A"])
+
+    preview = build_combination_preview(
+        plan,
+        max_combinations_per_batch=1,
+        prefilter_enabled=True,
+        prefilter_top_n=99,
+    )
+
+    assert preview.max_combinations_after_prefilter == 2
+    assert preview.max_batches_after_prefilter == 2
+
+
+def test_preview_upper_bound_supports_depth_greater_than_two():
+    assert count_target_symbol_sets(4, 3) == 14
+
+
+def test_preview_upper_bound_does_not_materialize_combination_rows(monkeypatch):
+    plan = CombinationPlan(["A", "B", "C", "CONTEXT"], 2, target_symbols=["A", "B"])
+
+    def fail_if_materialized(*_args, **_kwargs):
+        pytest.fail("the preview must not materialize combinations")
+
+    monkeypatch.setattr(CombinationPlan, "slice", fail_if_materialized)
+    monkeypatch.setattr(predictor_prefilter, "select_predictors", fail_if_materialized)
+
+    preview = build_combination_preview(
+        plan,
+        context_symbols=["CONTEXT"],
+        max_combinations_per_batch=4,
+        prefilter_enabled=True,
+        prefilter_top_n=2,
+    )
+
+    assert preview.max_combinations_after_prefilter == 6
+
+def test_preview_upper_bound_contains_a_small_real_prefiltered_population():
+    raw_plan = CombinationPlan(
+        ["A", "B", "C", "CONTEXT"], 2, target_symbols=["A", "B"]
+    )
+    preview = build_combination_preview(
+        raw_plan,
+        context_symbols=["CONTEXT"],
+        max_combinations_per_batch=4,
+        prefilter_enabled=True,
+        prefilter_top_n=2,
+    )
+    actual = generate_target_symbol_sets(
+        {"A": ("B",), "B": ("A", "C")},
+        2,
+    )
+
+    assert len(actual) == 4
+    assert preview.max_combinations_after_prefilter >= len(actual)

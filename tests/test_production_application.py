@@ -876,3 +876,64 @@ def test_old_experiment_config_without_operational_fields_still_loads(tmp_path):
     assert restored.target_symbols == spec.symbols
     assert restored.context_symbols == ()
     assert restored.predictor_symbols == spec.symbols
+
+def test_daily_prediction_backfill_uses_prior_session_and_is_idempotent(monkeypatch, tmp_path):
+    repository = ProductionRepository(tmp_path)
+    model = replace(_model(), status=ProductionModelStatus.ACTIVE, artifact_version=1)
+    repository.add(model)
+    directory = repository.artifact_directory(model.model_id)
+    directory.mkdir(parents=True)
+    (directory / "production.metadata.json").write_text(
+        json.dumps({
+            "model_id": model.model_id,
+            "artifact_version": 1,
+            "feature_version": model.feature_version,
+            "predictor_columns": ["BBB_intraday_J-1"],
+        }),
+        encoding="utf-8",
+    )
+    for name in ("up.ubj", "down.ubj"):
+        (directory / name).write_bytes(b"x")
+    index = pd.bdate_range("2026-01-05", periods=4)
+    prepared = pd.DataFrame({
+        "AAA.intraday_return": [0.0, 0.01, -0.01, 0.02],
+        "BBB.intraday_return": [0.01, 0.02, -0.01, 0.03],
+    }, index=index)
+    market_data = pd.DataFrame({
+        "BBB.Open": [100.0] * 4,
+        "BBB.High": [102.0] * 4,
+        "BBB.Low": [99.0] * 4,
+        "BBB.Close": [101.0] * 4,
+    }, index=index)
+    monkeypatch.setattr(
+        "rstock.application.production_services.load_booster", lambda path: path.stem
+    )
+    monkeypatch.setattr(
+        "rstock.application.production_services.predict_probabilities",
+        lambda booster, *args: np.array([0.8 if booster == "up" else 0.2]),
+    )
+
+    created = DailyPredictionService(repository).backfill(
+        prepared, market_data=market_data, persist=True
+    )
+
+    assert created["prediction_date"].tolist() == [
+        value.date().isoformat() for value in index[1:]
+    ]
+    assert created["as_of_date"].tolist() == [
+        value.date().isoformat() for value in index[:-1]
+    ]
+    assert len(repository.read_table("predictions")) == 3
+    assert DailyPredictionService(repository).backfill(
+        prepared, market_data=market_data, persist=True
+    ).empty
+    assert len(repository.read_table("predictions")) == 3
+    signals = ProductionSignalService(repository).screen(created, persist=True)
+    assert len(signals) == 3
+    prices = pd.DataFrame(
+        {"Open": [100.0] * 3, "High": [102.0] * 3, "Low": [99.0] * 3, "Close": [101.0] * 3},
+        index=index[1:],
+    )
+    realized = RealizedResultService(repository).update(lambda _: prices)
+    assert len(realized) == 3
+    assert len(repository.read_table("realized_results")) == 3
