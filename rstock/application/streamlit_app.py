@@ -1167,7 +1167,7 @@ def _history_filters(
     service: ExperimentService,
     key_prefix: str,
 ) -> list[dict[str, object]]:
-    columns = st.columns(4)
+    columns = st.columns(5)
     job_options = ["Tous", *sorted(allowed_types, key=lambda item: JOB_LABELS[item])]
     selected_type = columns[0].selectbox(
         "Type de run",
@@ -1187,14 +1187,20 @@ def _history_filters(
         format_func=lambda item: "Tous" if item is None else models[item],
         key=f"{key_prefix}-model",
     )
+    selected_storage = columns[4].selectbox(
+        "Stockage",
+        ["Complet", "Résumé seulement", "Tous"],
+        key=f"{key_prefix}-storage",
+    )
     return list(filter_runs(
         runs,
         allowed_types=allowed_types,
         job_type=selected_type,
         status=selected_status,
         period=period,
+        storage=selected_storage,
         model_id=selected_model,
-        detail_loader=service.run if selected_model is not None else None,
+        detail_loader=service.run,
     ))
 
 

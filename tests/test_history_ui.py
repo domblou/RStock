@@ -67,6 +67,32 @@ def test_filters_cover_type_status_period_and_model():
     assert [run["run_id"] for run in model] == ["train-week"]
 
 
+def test_storage_filter_defaults_to_complete_and_can_show_summaries_only():
+    runs = [
+        _run("complete", "walk_forward"),
+        _run("summary-only", "walk_forward"),
+    ]
+    details = {
+        "complete": _detail(),
+        "summary-only": {**_detail(), "storage": {"state": "purged"}},
+    }
+
+    complete = filter_runs(
+        runs,
+        allowed_types=EXPERIMENT_JOB_TYPES,
+        detail_loader=lambda identifier: details[identifier],
+    )
+    summaries = filter_runs(
+        runs,
+        allowed_types=EXPERIMENT_JOB_TYPES,
+        storage="Résumé seulement",
+        detail_loader=lambda identifier: details[identifier],
+    )
+
+    assert [run["run_id"] for run in complete] == ["complete"]
+    assert [run["run_id"] for run in summaries] == ["summary-only"]
+
+
 def test_today_uses_the_local_calendar_day_for_utc_persisted_runs():
     eastern = timezone(timedelta(hours=-4))
     local_now = datetime(2026, 9, 12, 23, 41, tzinfo=eastern)

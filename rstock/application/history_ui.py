@@ -84,6 +84,7 @@ def filter_runs(
     job_type: str = "Tous",
     status: str = "Tous",
     period: str = "Tout",
+    storage: str = "Complet",
     model_id: str | None = None,
     detail_loader: Callable[[str], Mapping[str, object]] | None = None,
     now: datetime | None = None,
@@ -119,6 +120,15 @@ def filter_runs(
             run for run in filtered
             if str(detail_loader(str(run["run_id"])).get("configuration", {}).get("model_id") or "")
             == model_id
+        ]
+    if storage != "Tous" and detail_loader is not None:
+        filtered = [
+            run for run in filtered
+            if (
+                detail_loader(str(run["run_id"])).get("storage", {}).get("state")
+                == "purged"
+            )
+            == (storage == "Résumé seulement")
         ]
     return sorted(
         filtered,
