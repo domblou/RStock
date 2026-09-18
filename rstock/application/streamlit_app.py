@@ -3707,6 +3707,9 @@ def _render_simulation_results(result: SimulationResult) -> None:
     synthesis[3].metric("Pire trade", _simulation_percent(metrics.worst_trade))
 
     st.subheader("Détail des trades")
+    displayed_trades = result.trades.sort_values(
+        "Date signal", ascending=False, kind="stable"
+    )
     st.download_button(
         "Télécharger (CSV)",
         result.trades.to_csv(index=False).encode("utf-8-sig"),
@@ -3714,7 +3717,7 @@ def _render_simulation_results(result: SimulationResult) -> None:
         mime="text/csv",
     )
     st.dataframe(
-        result.trades,
+        displayed_trades,
         hide_index=True,
         width="stretch",
         column_config={
