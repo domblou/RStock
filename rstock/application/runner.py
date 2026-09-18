@@ -180,6 +180,8 @@ class RunService:
         from rstock.checkpoints import CheckpointManager
 
         with self._submission_lock():
+            if self.repository.storage(run_id)["state"] != "full":
+                raise ValueError("Un run purgé ne peut pas être repris.")
             self._refresh_interrupted(run_id)
             status = self.repository.status(run_id)
             if status["status"] in ACTIVE_STATUSES:
@@ -229,6 +231,8 @@ class RunService:
     def restart(self, run_id: str) -> SubmissionResult:
         """Create a fresh run from a historical spec without touching the source."""
 
+        if self.repository.storage(run_id)["state"] != "full":
+            raise ValueError("Un run purgé ne peut pas être relancé.")
         spec = self.repository.load_spec(run_id)
         traceability = self.repository.summary(run_id).get("traceability", {})
         replay_values: dict[str, object] = {}
@@ -481,6 +485,7 @@ class RunService:
         return {
             "configuration": self.repository.load_spec(run_id).to_dict(),
             "metadata": self.repository.run_metadata(run_id).to_dict(),
+            "storage": self.repository.storage(run_id),
             "status": self.repository.status(run_id),
             "progress": self.repository.progress(run_id),
             "summary": self.repository.summary(run_id),

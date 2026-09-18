@@ -22,6 +22,7 @@ from .production_services import (
     PromotionService,
 )
 from .repository import RunRepository
+from .run_storage import PurgeEligibility, PurgePlan, RunStorageService
 from .runner import RunService, SubmissionResult
 
 
@@ -202,6 +203,15 @@ class ExperimentService:
 
     def restart(self, run_id: str) -> SubmissionResult:
         return self.run_service.restart(run_id)
+
+    def purge_eligibility(self, run_id: str) -> PurgeEligibility:
+        return RunStorageService(self.run_service.repository).eligibility(run_id)
+
+    def purge_preview(self, run_id: str) -> PurgePlan:
+        return RunStorageService(self.run_service.repository).preview(run_id)
+
+    def purge(self, run_id: str) -> dict[str, object]:
+        return RunStorageService(self.run_service.repository).purge(run_id)
 
     def runs(self) -> list[dict[str, object]]:
         return self.run_service.list()

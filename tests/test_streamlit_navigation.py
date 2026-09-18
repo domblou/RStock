@@ -745,8 +745,13 @@ def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
 
     assert 'st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]' in history
     assert 'if selected_rows:' not in history
-    assert 'actions = st.columns([1.2, 2.4, 6])' in history
-    actions = history.split('actions = st.columns([1.2, 2.4, 6])', 1)[1].split(
+    assert 'actions = st.columns([1.2, 2.4, 2.6, 4])' in history
+    assert '"Purger les données lourdes"' in history
+    assert "service.purge_preview(selected_run_id)" in history
+    assert history.index('"Purger les données lourdes"') < history.index(
+        "service.purge_preview(selected_run_id)"
+    )
+    actions = history.split('actions = st.columns([1.2, 2.4, 2.6, 4])', 1)[1].split(
         'if action == "comparison"', 1
     )[0]
     assert 'width="stretch"' not in actions

@@ -129,7 +129,15 @@ def test_history_rows_display_run_id_and_direct_walk_forward_source():
     assert duplicated.display()["Run ID"] == "child-run"
     assert duplicated.display()["Run source"] == "parent-run"
     assert set(normal.display()) == {
-        "Run ID", "Run source", "Date / heure", "Type", "Contexte", "Statut", "Durée", "Résumé"
+        "Run ID",
+        "Run source",
+        "Date / heure",
+        "Type",
+        "Contexte",
+        "Statut",
+        "Stockage",
+        "Durée",
+        "Résumé",
     }
 
 

@@ -42,6 +42,7 @@ class HistoryRow:
     job_type: str
     context: str
     status: str
+    storage: str
     duration: str
     summary: str
 
@@ -53,6 +54,7 @@ class HistoryRow:
             "Type": JOB_LABELS.get(self.job_type, self.job_type),
             "Contexte": self.context,
             "Statut": self.status,
+            "Stockage": self.storage,
             "Durée": self.duration,
             "Résumé": self.summary,
         }
@@ -310,6 +312,11 @@ def history_row(
         job_type=job_type,
         context=_context_text(job_type, configuration, summary, models),
         status=str(status["status"]),
+        storage=(
+            "Résumé seulement"
+            if detail.get("storage", {}).get("state") == "purged"
+            else "Complet"
+        ),
         duration=short_duration(status.get("duration_seconds")),
         summary=_summary_text(job_type, summary, configuration, str(status["status"])),
     )

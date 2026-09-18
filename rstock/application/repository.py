@@ -323,6 +323,35 @@ class RunRepository:
     def summary(self, run_id: str) -> dict[str, Any]:
         return self.read_json(run_id, "summary.json")
 
+    def storage(self, run_id: str) -> dict[str, Any]:
+        """Return storage state without migrating historical run directories."""
+
+        path = self.run_directory(run_id) / "storage.json"
+        if not path.exists():
+            return {
+                "schema_version": 1,
+                "state": "full",
+                "policy_version": None,
+                "purged_at": None,
+                "reclaimed_bytes": 0,
+                "deleted_artifacts": [],
+            }
+        values = self._read_json_path(path)
+        if int(values.get("schema_version", 0)) != 1:
+            raise ValueError("Unsupported run storage schema")
+        if values.get("state") not in {"full", "purging", "purged"}:
+            raise ValueError("Invalid run storage state")
+        return values
+
+    def write_storage(self, run_id: str, values: dict[str, Any]) -> None:
+        """Atomically persist an explicit run-storage manifest."""
+
+        if int(values.get("schema_version", 0)) != 1:
+            raise ValueError("Unsupported run storage schema")
+        if values.get("state") not in {"full", "purging", "purged"}:
+            raise ValueError("Invalid run storage state")
+        self.write_json(run_id, "storage.json", values)
+
     def transition(
         self,
         run_id: str,

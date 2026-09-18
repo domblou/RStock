@@ -108,7 +108,11 @@ from rstock.application.model_ui import (
     job_domain_title,
     model_filter_options,
 )
-from rstock.application.simulation import SimulationResult, SimulationService
+from rstock.application.simulation import (
+    SimulationResult,
+    SimulationService,
+    summarize_simulation_trades,
+)
 from rstock.application.simulation_repository import SimulationRepository
 from rstock.application.universes import (
     CONTEXT_UNIVERSE_TYPE,
@@ -474,6 +478,7 @@ def _universe_service() -> UniverseService:
 def _combination_plan_preview(job_type: JobType) -> bool:
     """Render the raw plan shared with future WF and End-to-end execution."""
 
+    st.session_state.pop("experiment-combination-preview", None)
     if job_type not in {JobType.WALK_FORWARD, JobType.END_TO_END}:
         return True
     try:
@@ -498,6 +503,7 @@ def _combination_plan_preview(job_type: JobType) -> bool:
     except ValueError as error:
         st.error(f"Plan de combinaisons invalide : {error}")
         return False
+    st.session_state["experiment-combination-preview"] = preview
     with st.container(border=True):
         st.subheader("Prévisualisation des combinaisons")
         first = st.columns(4)
@@ -531,6 +537,40 @@ def _combination_plan_preview(job_type: JobType) -> bool:
         )
     return True
 
+
+def _render_experiment_submission_confirmation(
+    service: ExperimentService,
+    spec: ExperimentSpec,
+    label: str,
+    preview: object | None,
+) -> None:
+    """Render the inline confirmation immediately above the submit action."""
+
+    maximum = getattr(preview, "max_combinations_after_prefilter", None)
+    maximum_text = "—" if maximum is None else f"{maximum:,}"
+    st.success(
+        f"Soumettre l’expérience {label} ? "
+        f"{len(spec.target_symbols):,} cibles · "
+        f"{len(spec.context_symbols):,} contexte · "
+        f"offset {spec.config.walk_forward_end_offset_sessions} · "
+        f"max {maximum_text} combinaisons après préfiltrage"
+    )
+    confirm, cancel, _ = st.columns([0.2, 0.2, 1])
+    if confirm.button(
+        "Confirmer",
+        type="primary",
+        key="confirm-experiment-submission",
+    ):
+        submitted = service.submit(spec)
+        st.session_state.pop("pending-experiment-submission", None)
+        if submitted.created:
+            st.success(f"Run créé : {submitted.run_id}")
+        else:
+            st.warning(f"Configuration déjà active : {submitted.run_id}")
+        st.rerun()
+    if cancel.button("Annuler", key="cancel-experiment-submission"):
+        st.session_state.pop("pending-experiment-submission", None)
+        st.rerun()
 
 def _experiment_universe_selector() -> bool:
     """Resolve the exact experiment symbols before the job is submitted."""
@@ -737,7 +777,15 @@ def _experiments(service: ExperimentService) -> None:
     submit_disabled = not (valid_universe and valid_plan) or (
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
     )
-    if st.button("Soumettre l’expérience", type="primary", disabled=submit_disabled):
+    pending_spec = st.session_state.get("pending-experiment-submission")
+    if pending_spec is not None:
+        _render_experiment_submission_confirmation(
+            service,
+            pending_spec,
+            choice,
+            st.session_state.get("experiment-combination-preview"),
+        )
+    elif st.button("Soumettre l’expérience", type="primary", disabled=submit_disabled):
         spec = ExperimentSpec(
             job_type=labels[choice],
             config=st.session_state.lab_config,
@@ -759,11 +807,8 @@ def _experiments(service: ExperimentService) -> None:
                 f"profondeur {st.session_state.lab_config.permutation_depth}"
             ),
         )
-        submitted = service.submit(spec)
-        if submitted.created:
-            st.success(f"Run créé: {submitted.run_id}")
-        else:
-            st.warning(f"Configuration déjà active: {submitted.run_id}")
+        st.session_state["pending-experiment-submission"] = spec
+        st.rerun()
     st.caption(
         "Les listes se gèrent dans Univers; la sélection résolue et la "
         "configuration sont figées au lancement."
@@ -2344,6 +2389,11 @@ def _render_job_detail_tabs(
     status: dict[str, object],
     detail: dict[str, object],
 ) -> None:
+    if detail.get("storage", {}).get("state") == "purged":
+        st.info(
+            "Résumé seulement : les données lourdes de ce run ont été purgées. "
+            "Les détails intermédiaires supprimés ne sont plus disponibles."
+        )
     try:
         job_type = JobType(str(status["job_type"]))
     except ValueError:
@@ -2553,7 +2603,7 @@ def _history_runs_panel(
         selected_run = next(
             run for run in filtered if str(run["run_id"]) == selected_run_id
         )
-        actions = st.columns([1.2, 2.4, 6])
+        actions = st.columns([1.2, 2.4, 2.6, 4])
         if actions[0].button(
             "Ouvrir le run",
             type="primary",
@@ -2568,6 +2618,31 @@ def _history_runs_panel(
             key=f"duplicate-history-{key_prefix}",
         ):
             _start_walk_forward_duplication(selected_run_id, service.run(selected_run_id))
+        eligibility = service.purge_eligibility(selected_run_id)
+        if eligibility.eligible and actions[2].button(
+            "Purger les données lourdes",
+            key=f"purge-history-{key_prefix}",
+        ):
+            try:
+                plan = service.purge_preview(selected_run_id)
+            except (OSError, ValueError, RuntimeError) as error:
+                st.error(f"Purge impossible : {error}")
+            else:
+                st.session_state["pending-run-purge"] = {
+                    "run_id": selected_run_id,
+                    "reclaimable_bytes": plan.reclaimable_bytes,
+                }
+                st.rerun()
+        pending_purge = st.session_state.get("pending-run-purge")
+        if (
+            isinstance(pending_purge, dict)
+            and pending_purge.get("run_id") == selected_run_id
+        ):
+            _render_run_purge_confirmation(
+                service,
+                selected_run_id,
+                int(pending_purge.get("reclaimable_bytes", 0)),
+            )
         return
     if action == "comparison":
         selected_types = {
@@ -2580,6 +2655,50 @@ def _history_runs_panel(
             _history_navigation("comparison", selected)
         return
     st.warning("Sélectionnez au maximum 4 runs pour une comparaison.")
+
+
+def _format_storage_size(size_bytes: int) -> str:
+    value = float(max(0, size_bytes))
+    units = ("o", "Ko", "Mo", "Go", "To")
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.0f} {unit}" if unit in {"o", "Ko"} else f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} To"
+
+
+def _render_run_purge_confirmation(
+    service: ExperimentService, run_id: str, reclaimable_bytes: int
+) -> None:
+    with st.container(border=True):
+        st.warning(
+            f"Cette opération libérera environ "
+            f"{_format_storage_size(reclaimable_bytes)}.\n\n"
+            "L’expérience restera dans l’Historique avec sa configuration, "
+            "sa provenance et ses résultats synthétiques.\n\n"
+            "Les détails intermédiaires supprimés ne seront plus disponibles."
+        )
+        confirm, cancel, _ = st.columns([1.8, 1, 6])
+        if confirm.button(
+            "Purger les données lourdes",
+            type="primary",
+            key=f"confirm-run-purge-{run_id}",
+        ):
+            try:
+                storage = service.purge(run_id)
+            except (OSError, ValueError, RuntimeError) as error:
+                st.error(f"Purge impossible : {error}")
+            else:
+                st.session_state.pop("pending-run-purge", None)
+                st.success(
+                    "Purge terminée : "
+                    f"{_format_storage_size(int(storage.get('reclaimed_bytes', 0)))} "
+                    "libérés."
+                )
+                st.rerun()
+        if cancel.button("Annuler", key=f"cancel-run-purge-{run_id}"):
+            st.session_state.pop("pending-run-purge", None)
+            st.rerun()
 
 
 def _experiments_page() -> None:
@@ -3654,7 +3773,28 @@ def _simulation_percent(value: float | None) -> str:
 
 
 def _render_simulation_results(result: SimulationResult) -> None:
-    metrics = result.metrics
+    selected_symbol = st.session_state.get("simulation-trades-symbol-filter", "Tous")
+    selected_model = st.session_state.get("simulation-trades-model-filter", "Tous")
+    filtered_trades = result.trades
+    if selected_symbol != "Tous":
+        filtered_trades = filtered_trades[
+            filtered_trades["Symbole"].astype(str) == selected_symbol
+        ]
+    if selected_model != "Tous":
+        filtered_trades = filtered_trades[
+            filtered_trades["Modèle source"].astype(str) == selected_model
+        ]
+    filtered_result = summarize_simulation_trades(filtered_trades)
+    metrics = filtered_result.metrics
+    calculated_mask = pd.to_numeric(filtered_trades["Rendement"], errors="coerce").notna()
+    total_invested = pd.to_numeric(
+        filtered_trades.loc[calculated_mask, "Montant investi"], errors="coerce"
+    ).sum()
+    global_return = (
+        None
+        if total_invested == 0
+        else metrics.total_profit_loss / float(total_invested)
+    )
     kpis = st.columns(6)
     kpis[0].metric("Profit / perte total(e)", _simulation_currency(metrics.total_profit_loss))
     kpis[1].metric("Taux de trades gagnants", _simulation_percent(metrics.winning_trade_rate))
@@ -3666,11 +3806,11 @@ def _render_simulation_results(result: SimulationResult) -> None:
     charts = st.columns([3, 1])
     with charts[0]:
         st.subheader("Évolution du résultat cumulé")
-        if result.cumulative_results.empty:
+        if filtered_result.cumulative_results.empty:
             st.caption("Aucun trade calculé sur la période.")
         else:
             cumulative_chart = (
-                alt.Chart(result.cumulative_results)
+                alt.Chart(filtered_result.cumulative_results)
                 .mark_line(point=True, color="#1677ff")
                 .encode(
                     x=alt.X("Date:T", title="Date des trades"),
@@ -3685,7 +3825,7 @@ def _render_simulation_results(result: SimulationResult) -> None:
     with charts[1]:
         st.subheader("Répartition des résultats")
         distribution_chart = (
-            alt.Chart(result.result_distribution)
+            alt.Chart(filtered_result.result_distribution)
             .mark_bar()
             .encode(
                 x=alt.X("Résultat:N", title=None),
@@ -3700,21 +3840,29 @@ def _render_simulation_results(result: SimulationResult) -> None:
         )
         st.altair_chart(distribution_chart, width="stretch")
 
-    synthesis = st.columns(4)
+    synthesis = st.columns(5)
     synthesis[0].metric("Gain moyen", _simulation_percent(metrics.average_winning_return))
     synthesis[1].metric("Perte moyenne", _simulation_percent(metrics.average_losing_return))
     synthesis[2].metric("Meilleur trade", _simulation_percent(metrics.best_trade))
     synthesis[3].metric("Pire trade", _simulation_percent(metrics.worst_trade))
+    synthesis[4].metric("Rendement global", _simulation_percent(global_return))
 
     st.subheader("Détail des trades")
-    displayed_trades = result.trades.sort_values(
-        "Date signal", ascending=False, kind="stable"
+    filter_columns = st.columns(2)
+    symbols = ["Tous", *sorted(result.trades["Symbole"].dropna().astype(str).unique())]
+    models = ["Tous", *sorted(result.trades["Modèle source"].dropna().astype(str).unique())]
+    filter_columns[0].selectbox(
+        "Symbole",
+        symbols,
+        key="simulation-trades-symbol-filter",
     )
-    st.download_button(
-        "Télécharger (CSV)",
-        result.trades.to_csv(index=False).encode("utf-8-sig"),
-        file_name="rstock_simulation.csv",
-        mime="text/csv",
+    filter_columns[1].selectbox(
+        "Modèle source",
+        models,
+        key="simulation-trades-model-filter",
+    )
+    displayed_trades = filtered_trades.sort_values(
+        "Date signal", ascending=False, kind="stable"
     )
     st.dataframe(
         displayed_trades,
