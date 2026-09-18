@@ -9,7 +9,7 @@ from rstock.application.production_domain import ProductionModel, ProductionMode
 from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_services import DailyPredictionService
 from rstock.application.repository import utc_now
-from rstock.application.simulation import SimulationService
+from rstock.application.simulation import SimulationService, summarize_simulation_trades
 from rstock.application.simulation_repository import SimulationRepository
 from rstock.config import DEFAULT_CONFIG
 
@@ -525,3 +525,45 @@ def test_historical_mode_freezes_current_active_models_and_persisted_result(
     assert replay_calls[1]["model_ids"] == ()
     assert new_result.trades.empty
     assert new_result.model_snapshots == ()
+
+
+def test_summarize_simulation_trades_recalculates_metrics_and_charts_for_filtered_population():
+    trades = pd.DataFrame([
+        {
+            "Date trade": "2026-01-02",
+            "Symbole": "AAA",
+            "Modèle source": "model_a",
+            "Rendement": 0.10,
+            "Profit / perte": 100.0,
+        },
+        {
+            "Date trade": "2026-01-02",
+            "Symbole": "BBB",
+            "Modèle source": "model_b",
+            "Rendement": -0.05,
+            "Profit / perte": -50.0,
+        },
+        {
+            "Date trade": "2026-01-03",
+            "Symbole": "AAA",
+            "Modèle source": "model_a",
+            "Rendement": None,
+            "Profit / perte": None,
+        },
+    ])
+
+    result = summarize_simulation_trades(trades[trades["Symbole"] == "AAA"])
+
+    assert result.metrics.signals_found == 2
+    assert result.metrics.calculated_trades == 1
+    assert result.metrics.excluded_trades == 1
+    assert result.metrics.total_profit_loss == pytest.approx(100.0)
+    assert result.metrics.winning_trade_rate == pytest.approx(1.0)
+    assert result.metrics.price_coverage == pytest.approx(0.5)
+    assert result.cumulative_results.to_dict("records") == [
+        {"Date": pd.Timestamp("2026-01-02"), "Résultat cumulé": 100.0}
+    ]
+    assert result.result_distribution.to_dict("records") == [
+        {"Résultat": "Trades gagnants", "Trades": 1},
+        {"Résultat": "Trades perdants", "Trades": 0},
+    ]

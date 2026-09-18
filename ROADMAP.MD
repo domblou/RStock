@@ -393,13 +393,7 @@ Sélecteur de titres pour créer des univers
 ✅ Suivi descriptif rendement / risque des signaux
 Test sur les prefiltres qui aapliquée un prédcateur à la fois peut éliminer des combinaisons intéressantes. Voir fichier dans les notes.
 ✅ Traiment des combinaisons de walk-forward en batch
-A. plusieurs petits univers cohérents → B. variation du contexte → C. horizons différents → D. targets différents → E. régimes → F. nouvelles familles de modèles.
-Option encore plus robuste : séparer l’UI et le worker.
--Donc ma réponse est : oui, probablement un jour, mais sous forme d’une nouvelle expérience distincte de “Calibration des paramètres walk-forward”, et avec une philosophie de robustesse temporelle, pas d’optimisation de performance brute.
-- Persister les simulations
-- Le WF matérialise encore la population entière avant ce batching, avec une limite max_generated_sets, actuellement 100 000 pour les nouveaux runs.
 ⬜ Ajout de nouveau modèle comme xgboost et généralisation de la calibration
-⬜ Intégrer la validation temporelle dans le end-to-end ou nouveau job-type End-to-end avec validation temporelle
 ⬜ Promotion et disqualification automatique de modèle
 URGENT : TAG sur les RUNS
 ⬜ Calculer les profits non réalisés sur signaux positifs
@@ -407,11 +401,3 @@ URGENT : TAG sur les RUNS
 ⬜ Automatisation quotidienne
 ```
 
-Il y a donc encore du travail, mais **le moteur de recherche expérimental, qui était probablement la partie la plus délicate méthodologiquement, est déjà très avancé**.
-
-Et je changerais légèrement notre ordre de travail maintenant. Avant d'ajouter encore beaucoup d'algorithmes, je ferais probablement les prochaines briques dans cet ordre :
-
-**Universe Manager → comparaison/résultats des expériences → promotion d'une configuration → entraînement complet → prédiction quotidienne → screening → dashboard.**
-
-À ce moment-là, RStock commence à passer d'un laboratoire de recherche à une **application qu'on peut réellement ouvrir chaque jour et utiliser**.
-⬜ Rattrapage V2 : utiliser l’historique des modèles actifs au moment de chaque prédiction

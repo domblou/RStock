@@ -58,6 +58,10 @@ class SimulationResult:
     model_snapshots: tuple[dict[str, object], ...] = ()
 
 
+def summarize_simulation_trades(trades: pd.DataFrame) -> SimulationResult:
+    """Recalculate display metrics and charts from a selected trade population."""
+
+    return SimulationService._result(trades)
 def _date(value: date | str | pd.Timestamp, label: str) -> pd.Timestamp:
     try:
         parsed = pd.Timestamp(value)
