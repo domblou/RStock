@@ -5,19 +5,24 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
+import rstock.application.end_to_end as end_to_end
 from rstock.application.auto_promotion import PROMOTION_CHECKPOINT
 from rstock.application.domain import (
     ExperimentSpec,
     JobStatus,
     JobType,
     RunMetadata,
+    RunPurpose,
     RunRole,
 )
 from rstock.application.end_to_end import (
+    CHILD_ID_POLICY_RESERVED,
     PIPELINE_MANIFEST,
     SCIENTIFIC_STAGES,
+    TEMPORAL_VALIDATION_STAGE,
     build_pipeline_manifest,
     load_pipeline_manifest,
+    persist_or_validate_pipeline_manifest,
 )
 from rstock.application.repository import RunRepository
 from rstock.application.production_repository import ProductionRepository
@@ -181,7 +186,15 @@ def _fake_registry(
 
 def _create_parent(repository, spec):
     return repository.create(
-        spec, metadata=RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+        spec,
+        metadata=RunMetadata(
+            run_role=RunRole.PIPELINE_PARENT,
+            run_purpose=(
+                RunPurpose.REFERENCE
+                if spec.temporal_validation_enabled
+                else RunPurpose.STANDARD
+            ),
+        ),
     )
 
 
@@ -265,6 +278,218 @@ def test_end_to_end_reserves_every_child_before_materializing_the_first(tmp_path
     assert all(child_ids)
     assert repository.run_directory(child_ids[0]).exists()
     assert all(not repository.run_directory(item).exists() for item in child_ids[1:])
+
+
+def test_end_to_end_temporal_validation_runs_a_real_child_pipeline(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path, temporal_validation_enabled=True))
+    calls = Counter()
+    execute_run(repository, run_id, 1, registry=_fake_registry(repository, calls))
+
+    manifest = load_pipeline_manifest(repository, run_id)
+    temporal = next(
+        item for item in manifest["stages"]
+        if item["stage_key"] == TEMPORAL_VALIDATION_STAGE
+    )
+    child_id = temporal["child_run_id"]
+    child_spec = repository.load_spec(child_id)
+    child_metadata = repository.run_metadata(child_id)
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    assert repository.status(child_id)["status"] == JobStatus.COMPLETED.value
+    assert child_spec.job_type is JobType.END_TO_END
+    assert child_spec.config.walk_forward_end_offset_sessions == 63
+    assert child_spec.temporal_validation_enabled is False
+    assert child_spec.auto_promote_candidates is False
+    assert child_metadata.run_purpose is RunPurpose.TEMPORAL_VALIDATION
+    assert child_metadata.reference_run_id == run_id
+    assert load_pipeline_manifest(repository, child_id)["temporal_validation_enabled"] is False
+
+
+def test_temporal_validation_rejects_nonzero_reference_offset_and_allows_auto_promotion(tmp_path):
+    with pytest.raises(ValueError, match="offset 0"):
+        replace(
+            _spec(tmp_path, temporal_validation_enabled=True),
+            config=replace(
+                DEFAULT_CONFIG,
+                project_root=tmp_path,
+                walk_forward_end_offset_sessions=1,
+            ),
+        )
+    spec = _spec(
+        tmp_path,
+        temporal_validation_enabled=True,
+        auto_promote_candidates=True,
+    )
+    assert spec.auto_promote_candidates is True
+
+
+@pytest.mark.parametrize("comparison_status", ["failed", "inconclusive", "invalid"])
+def test_temporal_validation_blocks_promotion_unless_comparison_passes(
+    monkeypatch, tmp_path, comparison_status
+):
+    class FakeTemporalValidationRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def execute(self):
+            return {"final_status": comparison_status}
+
+    monkeypatch.setattr(end_to_end, "TemporalValidationRunner", FakeTemporalValidationRunner)
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(
+        repository,
+        _spec(
+            tmp_path,
+            temporal_validation_enabled=True,
+            auto_promote_candidates=True,
+        ),
+    )
+    registry = _fake_registry(
+        repository, Counter(), promotion_rows=[{"Set": "AAA<-BBB"}]
+    )
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    assert not (repository.run_directory(run_id) / PROMOTION_CHECKPOINT).exists()
+    assert ProductionRepository(tmp_path).models() == []
+
+
+def test_temporal_validation_passed_promotes_reference_only(monkeypatch, tmp_path):
+    class FakeTemporalValidationRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def execute(self):
+            return {"final_status": "passed"}
+
+    monkeypatch.setattr(end_to_end, "TemporalValidationRunner", FakeTemporalValidationRunner)
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(
+        repository,
+        _spec(
+            tmp_path,
+            temporal_validation_enabled=True,
+            auto_promote_candidates=True,
+        ),
+    )
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=_fake_registry(
+            repository, Counter(), promotion_rows=[{"Set": "AAA<-BBB"}]
+        ),
+    )
+
+    models = ProductionRepository(tmp_path).models()
+    assert len(models) == 1
+    assert (
+        repository.run_metadata(models[0].source_threshold_calibration_run).parent_run_id
+        == run_id
+    )
+    assert (repository.run_directory(run_id) / PROMOTION_CHECKPOINT).is_file()
+
+
+def test_temporal_validation_passed_without_promotion_keeps_production_empty(
+    monkeypatch, tmp_path
+):
+    class FakeTemporalValidationRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def execute(self):
+            return {"final_status": "passed"}
+
+    monkeypatch.setattr(end_to_end, "TemporalValidationRunner", FakeTemporalValidationRunner)
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path, temporal_validation_enabled=True))
+    execute_run(repository, run_id, 1, registry=_fake_registry(repository, Counter()))
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    assert ProductionRepository(tmp_path).models() == []
+
+
+def test_temporal_validation_reservation_is_reused_before_materialization(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path, temporal_validation_enabled=True))
+    first = persist_or_validate_pipeline_manifest(
+        repository, run_id, repository.load_spec(run_id)
+    )
+    child_id = next(
+        item["child_run_id"] for item in first["stages"]
+        if item["stage_key"] == TEMPORAL_VALIDATION_STAGE
+    )
+    monkeypatch.setattr(
+        repository, "generate_run_id", lambda: (_ for _ in ()).throw(AssertionError())
+    )
+    resumed = persist_or_validate_pipeline_manifest(
+        repository, run_id, repository.load_spec(run_id)
+    )
+    assert next(
+        item["child_run_id"] for item in resumed["stages"]
+        if item["stage_key"] == TEMPORAL_VALIDATION_STAGE
+    ) == child_id
+    assert not repository.run_directory(child_id).exists()
+
+
+def test_end_to_end_v2_reservation_is_reused_after_crash_before_materialization(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+
+    reserved = persist_or_validate_pipeline_manifest(
+        repository, run_id, repository.load_spec(run_id)
+    )
+    child_ids = [item["child_run_id"] for item in reserved["stages"][:-1]]
+    assert reserved["child_id_policy_version"] == CHILD_ID_POLICY_RESERVED
+    assert all(
+        child_id
+        != repository.deterministic_child_run_id(
+            run_id, f"pipeline_stage:{stage_key}"
+        )
+        for child_id, (stage_key, _, _) in zip(child_ids, SCIENTIFIC_STAGES)
+    )
+    assert all(not repository.run_directory(child_id).exists() for child_id in child_ids)
+
+    monkeypatch.setattr(
+        repository, "generate_run_id", lambda: (_ for _ in ()).throw(AssertionError())
+    )
+    resumed = persist_or_validate_pipeline_manifest(
+        repository, run_id, repository.load_spec(run_id)
+    )
+    assert [item["child_run_id"] for item in resumed["stages"][:-1]] == child_ids
+    assert repository.list_children(run_id) == []
+
+
+def test_end_to_end_v1_manifest_coexists_without_migration(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    historical_id = _create_parent(repository, _spec(tmp_path))
+    new_id = _create_parent(repository, _spec(tmp_path))
+    historical = build_pipeline_manifest(
+        repository,
+        historical_id,
+        repository.load_spec(historical_id),
+        child_id_policy_version=1,
+    )
+    historical.pop("child_id_policy_version")
+    (repository.run_directory(historical_id) / "orchestration").mkdir()
+    repository.write_json(historical_id, PIPELINE_MANIFEST, historical)
+
+    loaded = persist_or_validate_pipeline_manifest(
+        repository, historical_id, repository.load_spec(historical_id)
+    )
+    fresh = persist_or_validate_pipeline_manifest(
+        repository, new_id, repository.load_spec(new_id)
+    )
+    assert "child_id_policy_version" not in loaded
+    assert fresh["child_id_policy_version"] == CHILD_ID_POLICY_RESERVED
+    assert loaded["stages"][0]["child_run_id"] == repository.deterministic_child_run_id(
+        historical_id, "pipeline_stage:walk_forward"
+    )
 
 
 def test_end_to_end_resume_rejects_changed_completed_artifact(tmp_path):

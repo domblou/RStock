@@ -33,6 +33,7 @@ def _detail(*, job_type="walk_forward", snapshot=None):
             "job_type": job_type,
             "symbols": ["DIS", "AMZN", "NVDA"],
             "primary_universe_id": "primary",
+            "market_benchmark_symbol": "SPY",
             "context_universe_ids": ["market"],
             "context_sample_size": 1,
             "context_selection_method": "top_n",
@@ -63,6 +64,7 @@ def test_walk_forward_duplication_draft_copies_all_experiment_inputs():
     assert draft["source_run_id"] == "run_original"
     assert draft["job_type"] == "walk_forward"
     assert draft["primary_universe_id"] == "primary"
+    assert draft["market_benchmark_symbol"] == "SPY"
     assert draft["context_universe_ids"] == ["market"]
     assert draft["context_sample_size"] == 1
     assert draft["context_selection_method"] == "top_n"
@@ -95,6 +97,7 @@ def test_duplication_carries_the_source_traceability_cutoff(tmp_path):
 
     assert duplicated.historical_data_cutoff == "2025-01-31T00:00:00"
     assert duplicated.source_prepared_dataset_sha256 == "source-hash"
+    assert duplicated.market_benchmark_symbol == "SPY"
 
 
 def test_legacy_duplication_without_traceability_keeps_no_data_cutoff(tmp_path):
@@ -350,6 +353,12 @@ def test_historical_partial_config_uses_defaults_and_current_project_root(tmp_pa
     assert config.xgb_seed == 321
     assert config.selected_symbols == ("DIS", "AMZN")
     assert config.lag_depth == DEFAULT_CONFIG.lag_depth
+    assert config.temporal_min_candidate_yield_ratio == 0.25
+    assert config.temporal_max_auc_degradation == 0.03
+    assert config.temporal_min_precision_edge == 0.00
+    assert config.temporal_min_mean_directional_return == 0.00
+    assert config.temporal_confidence_level == 0.95
+    assert config.temporal_max_ci_width == 0.20
 
 
 def test_run_or_current_config_choice_preserves_current_project_root(tmp_path):

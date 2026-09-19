@@ -77,12 +77,19 @@ class RunRole(str, Enum):
         return self is RunRole.TECHNICAL_BATCH
 
 
+class RunPurpose(str, Enum):
+    STANDARD = "standard"
+    REFERENCE = "reference"
+    TEMPORAL_VALIDATION = "temporal_validation"
+
+
 @dataclass(frozen=True, slots=True)
 class RunMetadata:
     """Relational run metadata kept outside the scientific snapshot."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     run_role: RunRole = RunRole.STANDALONE
+    run_purpose: RunPurpose = RunPurpose.STANDARD
     visible_in_history: bool = True
     parent_run_id: str | None = None
     root_run_id: str | None = None
@@ -94,9 +101,10 @@ class RunMetadata:
     batch_id: str | None = None
     batch_index: int | None = None
     batch_count: int | None = None
+    reference_run_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version not in {1, 2}:
             raise ValueError("Unsupported run metadata schema")
         if self.run_role.technical and self.visible_in_history:
             raise ValueError("Technical runs must be hidden from history")
@@ -107,6 +115,8 @@ class RunMetadata:
             raise ValueError("Child run metadata requires parent_run_id")
         if self.parent_run_id and not self.relation_key:
             raise ValueError("Child run metadata requires relation_key")
+        if self.run_purpose is RunPurpose.TEMPORAL_VALIDATION and not self.reference_run_id:
+            raise ValueError("Temporal validation metadata requires reference_run_id")
         for name in ("stage_index", "batch_index"):
             value = getattr(self, name)
             if value is not None and value < 0:
@@ -124,6 +134,7 @@ class RunMetadata:
         return {
             "schema_version": self.schema_version,
             "run_role": self.run_role.value,
+            "run_purpose": self.run_purpose.value,
             "visible_in_history": self.visible_in_history,
             "parent_run_id": self.parent_run_id,
             "root_run_id": self.root_run_id,
@@ -135,6 +146,7 @@ class RunMetadata:
             "batch_id": self.batch_id,
             "batch_index": self.batch_index,
             "batch_count": self.batch_count,
+            "reference_run_id": self.reference_run_id,
         }
 
     @classmethod
@@ -144,6 +156,9 @@ class RunMetadata:
         return cls(
             schema_version=int(values.get("schema_version", 1)),
             run_role=RunRole(str(values.get("run_role", RunRole.STANDALONE.value))),
+            run_purpose=RunPurpose(
+                str(values.get("run_purpose", RunPurpose.STANDARD.value))
+            ),
             visible_in_history=bool(values.get("visible_in_history", True)),
             parent_run_id=_optional_string(values.get("parent_run_id")),
             root_run_id=_optional_string(values.get("root_run_id")),
@@ -155,6 +170,7 @@ class RunMetadata:
             batch_id=_optional_string(values.get("batch_id")),
             batch_index=_optional_int(values.get("batch_index")),
             batch_count=_optional_int(values.get("batch_count")),
+            reference_run_id=_optional_string(values.get("reference_run_id")),
         )
 
 
@@ -198,6 +214,7 @@ class ExperimentSpec:
     universe_selection: UniverseSelection = UniverseSelection()
     model_id: str | None = None
     primary_universe_id: str | None = None
+    market_benchmark_symbol: str | None = None
     context_universe_ids: tuple[str, ...] = ()
     context_sample_size: int | None = None
     context_selection_method: str | None = None
@@ -220,6 +237,7 @@ class ExperimentSpec:
     source_end_to_end_run: str | None = None
     source_threshold_calibration_run: str | None = None
     auto_promote_candidates: bool = False
+    temporal_validation_enabled: bool = False
     pipeline_version: int = 1
     calibration_sampling_policy_version: int = 2
     combination_plan_version: int | None = None
@@ -245,7 +263,13 @@ class ExperimentSpec:
         predictors = tuple(dict.fromkeys((*targets, *context)))
         context_ids = tuple(dict.fromkeys(self.context_universe_ids))
         primary_id = self.primary_universe_id or self.universe_selection.universe
+        benchmark = (
+            None
+            if self.market_benchmark_symbol is None
+            else str(self.market_benchmark_symbol).strip().upper() or None
+        )
         object.__setattr__(self, "primary_universe_id", primary_id)
+        object.__setattr__(self, "market_benchmark_symbol", benchmark)
         object.__setattr__(self, "context_universe_ids", context_ids)
         object.__setattr__(self, "target_symbols", targets)
         object.__setattr__(self, "context_symbols", context)
@@ -316,6 +340,13 @@ class ExperimentSpec:
             raise ValueError(
                 "La promotion automatique End-to-end exige le holdout final."
             )
+        if self.temporal_validation_enabled:
+            if self.job_type is not JobType.END_TO_END:
+                raise ValueError("La validation temporelle exige un End-to-end.")
+            if self.config.walk_forward_end_offset_sessions != 0:
+                raise ValueError(
+                    "La validation temporelle exige un End-to-end de référence avec offset 0."
+                )
 
     def to_dict(self) -> dict[str, Any]:
         values: dict[str, Any] = {
@@ -323,6 +354,7 @@ class ExperimentSpec:
             "job_type": self.job_type.value,
             "symbols": list(self.symbols),
             "primary_universe_id": self.primary_universe_id,
+            "market_benchmark_symbol": self.market_benchmark_symbol,
             "context_universe_ids": list(self.context_universe_ids),
             "context_sample_size": self.context_sample_size,
             "context_selection_method": self.context_selection_method,
@@ -361,6 +393,7 @@ class ExperimentSpec:
             source_end_to_end_run=self.source_end_to_end_run,
             source_threshold_calibration_run=self.source_threshold_calibration_run,
             auto_promote_candidates=self.auto_promote_candidates,
+            temporal_validation_enabled=self.temporal_validation_enabled,
             pipeline_version=self.pipeline_version,
             calibration_sampling_policy_version=(
                 self.calibration_sampling_policy_version
@@ -389,6 +422,9 @@ class ExperimentSpec:
                 None
                 if values.get("primary_universe_id") is None
                 else str(values["primary_universe_id"])
+            ),
+            market_benchmark_symbol=_optional_string(
+                values.get("market_benchmark_symbol")
             ),
             context_universe_ids=tuple(
                 str(item) for item in values.get("context_universe_ids", ())
@@ -475,6 +511,9 @@ class ExperimentSpec:
                 values.get("source_threshold_calibration_run")
             ),
             auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),
+            temporal_validation_enabled=bool(
+                values.get("temporal_validation_enabled", False)
+            ),
             pipeline_version=int(values.get("pipeline_version", 0)),
             calibration_sampling_policy_version=int(
                 values.get("calibration_sampling_policy_version", 1)

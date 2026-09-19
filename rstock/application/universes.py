@@ -23,6 +23,7 @@ SEEDED_SAMPLE = "seeded_sample"
 STANDARD_UNIVERSE_TYPE = "standard"
 CONTEXT_UNIVERSE_TYPE = "context"
 UNIVERSE_TYPES = {STANDARD_UNIVERSE_TYPE, CONTEXT_UNIVERSE_TYPE}
+_UNSET = object()
 
 
 # This is deliberately a local demonstration registry: no provider, ranking or
@@ -45,6 +46,7 @@ class UniverseRecord:
     updated_at: str | None
     system: bool = False
     type: str = STANDARD_UNIVERSE_TYPE
+    benchmark_symbol: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,7 @@ class ResolvedExperimentUniverse:
     target_symbols: tuple[str, ...]
     context_symbols: tuple[str, ...]
     predictor_symbols: tuple[str, ...]
+    benchmark_symbol: str | None
 
 
 class UniverseService:
@@ -154,6 +157,13 @@ class UniverseService:
             raise ValueError(f"Unknown universe type: {universe_type}")
         return universe_type
 
+    @staticmethod
+    def _normalise_benchmark_symbol(value: object | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().upper()
+        return normalized or None
+
     @property
     def directory(self) -> Path | None:
         return self._root
@@ -201,6 +211,7 @@ class UniverseService:
                 source=str(item.get("source", "Manuel")),
                 updated_at=None if item.get("updated_at") is None else str(item["updated_at"]),
                 type=self._normalise_type(item.get("type", STANDARD_UNIVERSE_TYPE)),
+                benchmark_symbol=self._normalise_benchmark_symbol(item.get("benchmark_symbol")),
             )
         return records
 
@@ -227,6 +238,7 @@ class UniverseService:
                     "source": record.source,
                     "updated_at": record.updated_at,
                     "type": record.type,
+                    "benchmark_symbol": record.benchmark_symbol,
                 }
                 for record in sorted(records.values(), key=lambda item: item.universe_id)
             ]
@@ -258,6 +270,7 @@ class UniverseService:
         *,
         source: str = "Manuel",
         universe_type: str = STANDARD_UNIVERSE_TYPE,
+        benchmark_symbol: str | None = None,
     ) -> UniverseRecord:
         clean_name = name.strip()
         if not clean_name:
@@ -272,6 +285,7 @@ class UniverseService:
             source,
             datetime.now(timezone.utc).isoformat(),
             type=self._normalise_type(universe_type),
+            benchmark_symbol=self._normalise_benchmark_symbol(benchmark_symbol),
         )
         self._write_symbols(record)
         users[identifier] = record
@@ -285,6 +299,7 @@ class UniverseService:
         *,
         column: str = "symbol",
         universe_type: str = STANDARD_UNIVERSE_TYPE,
+        benchmark_symbol: str | None = None,
     ) -> UniverseRecord:
         text = content.decode("utf-8-sig") if isinstance(content, bytes) else content
         reader = csv.DictReader(io.StringIO(text))
@@ -300,6 +315,7 @@ class UniverseService:
             (row.get(matching, "") for row in reader),
             source="Import CSV",
             universe_type=universe_type,
+            benchmark_symbol=benchmark_symbol,
         )
 
     def update(
@@ -309,6 +325,7 @@ class UniverseService:
         name: str,
         symbols: str | Iterable[object],
         universe_type: str | None = None,
+        benchmark_symbol: str | None | object = _UNSET,
     ) -> UniverseRecord:
         if universe_id in self._system:
             raise ValueError("Les univers système sont protégés")
@@ -325,6 +342,11 @@ class UniverseService:
             users[universe_id].source,
             datetime.now(timezone.utc).isoformat(),
             type=self._normalise_type(universe_type or users[universe_id].type),
+            benchmark_symbol=(
+                users[universe_id].benchmark_symbol
+                if benchmark_symbol is _UNSET
+                else self._normalise_benchmark_symbol(benchmark_symbol)
+            ),
         )
         self._write_symbols(record)
         users[universe_id] = record
@@ -338,6 +360,7 @@ class UniverseService:
             source.symbols,
             source="Copie",
             universe_type=source.type,
+            benchmark_symbol=source.benchmark_symbol,
         )
 
     def delete(self, universe_id: str) -> None:
@@ -435,6 +458,9 @@ class UniverseService:
         """Resolve and freeze distinct target and predictor roles for one run."""
 
         resolved_primary = self.resolve(primary, manual_symbols=manual_symbols)
+        benchmark_symbol = None
+        if primary.source in {SAVED_SOURCE, SAMPLE_SOURCE} and primary.universe:
+            benchmark_symbol = self.record(primary.universe).benchmark_symbol
         context_ids = tuple(dict.fromkeys(str(item) for item in context_universe_ids))
         target_set = set(resolved_primary.symbols)
         context_symbols = tuple(dict.fromkeys(
@@ -465,4 +491,5 @@ class UniverseService:
             target_symbols=resolved_primary.symbols,
             context_symbols=context_symbols,
             predictor_symbols=tuple((*resolved_primary.symbols, *context_symbols)),
+            benchmark_symbol=benchmark_symbol,
         )

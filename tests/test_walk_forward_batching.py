@@ -10,6 +10,8 @@ from rstock.application.orchestration_runtime import execute_child
 from rstock.application.repository import RunRepository
 from rstock.application.runner import RunService
 from rstock.application.walk_forward_batches import (
+    CHILD_ID_POLICY_RESERVED,
+    MANIFEST_NAME,
     build_manifest,
     materialize_reservations,
     persist_or_validate_manifest,
@@ -87,6 +89,92 @@ def test_manifest_reserves_ids_before_materializing_children_and_is_idempotent(t
         assert child.combination_range_start == index * 2
         assert child.combination_range_stop == (index + 1) * 2
         assert repository.run_metadata(run_id).visible_in_history is False
+
+
+def test_v2_batch_reservations_survive_crash_before_materialization(monkeypatch, tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    parent_spec = _spec(tmp_path)
+    parent_id = repository.create(parent_spec)
+    plan = CombinationPlan(parent_spec.symbols, 1)
+    proposed, _ = build_manifest(
+        repository,
+        parent_run_id=parent_id,
+        parent_spec=parent_spec,
+        raw_plan=plan,
+        effective_plan=plan,
+        max_combinations_per_batch=2,
+        prefilter_policy_version="disabled_v1",
+        prefilter_sha256=prefilter_digest(plan.predictors_by_target),
+    )
+    manifest = persist_or_validate_manifest(repository, parent_id, proposed)
+    child_ids = [item["child_run_id"] for item in manifest["batches"]]
+    assert manifest["child_id_policy_version"] == CHILD_ID_POLICY_RESERVED
+    assert repository.list_children(parent_id) == []
+
+    monkeypatch.setattr(
+        repository, "generate_run_id", lambda: (_ for _ in ()).throw(AssertionError())
+    )
+    resumed, reservations = build_manifest(
+        repository,
+        parent_run_id=parent_id,
+        parent_spec=parent_spec,
+        raw_plan=plan,
+        effective_plan=plan,
+        max_combinations_per_batch=2,
+        prefilter_policy_version="disabled_v1",
+        prefilter_sha256=prefilter_digest(plan.predictors_by_target),
+        child_id_policy_version=CHILD_ID_POLICY_RESERVED,
+        reserved_child_ids=child_ids,
+    )
+    persisted = persist_or_validate_manifest(repository, parent_id, resumed)
+    materialize_reservations(repository, manifest=persisted, reservations=reservations)
+    materialize_reservations(repository, manifest=persisted, reservations=reservations)
+    assert sorted(repository.list_children(parent_id)) == sorted(child_ids)
+
+
+def test_v1_and_v2_batch_manifests_coexist_without_migration(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    plan = CombinationPlan(_spec(tmp_path).symbols, 1)
+    historical_id = repository.create(_spec(tmp_path))
+    fresh_id = repository.create(_spec(tmp_path))
+    historical, _ = build_manifest(
+        repository,
+        parent_run_id=historical_id,
+        parent_spec=repository.load_spec(historical_id),
+        raw_plan=plan,
+        effective_plan=plan,
+        max_combinations_per_batch=2,
+        prefilter_policy_version="disabled_v1",
+        prefilter_sha256=prefilter_digest(plan.predictors_by_target),
+        child_id_policy_version=1,
+    )
+    historical.pop("child_id_policy_version")
+    (repository.run_directory(historical_id) / "orchestration").mkdir()
+    repository.write_json(historical_id, MANIFEST_NAME, historical)
+    resumed, _ = build_manifest(
+        repository,
+        parent_run_id=historical_id,
+        parent_spec=repository.load_spec(historical_id),
+        raw_plan=plan,
+        effective_plan=plan,
+        max_combinations_per_batch=2,
+        prefilter_policy_version="disabled_v1",
+        prefilter_sha256=prefilter_digest(plan.predictors_by_target),
+        child_id_policy_version=1,
+        reserved_child_ids=[item["child_run_id"] for item in historical["batches"]],
+    )
+    assert persist_or_validate_manifest(repository, historical_id, resumed) == historical
+    fresh, _ = build_manifest(
+        repository,
+        parent_run_id=fresh_id,
+        parent_spec=repository.load_spec(fresh_id),
+        raw_plan=plan,
+        effective_plan=plan,
+        max_combinations_per_batch=2,
+        prefilter_policy_version="disabled_v1",
+        prefilter_sha256=prefilter_digest(plan.predictors_by_target),
+    )
+    assert fresh["child_id_policy_version"] == CHILD_ID_POLICY_RESERVED
 
 
 def test_run_service_hides_technical_batches_and_exposes_them_on_parent(tmp_path):

@@ -14,7 +14,14 @@ from typing import Any, Protocol
 
 from rstock.progress import ProgressEvent
 
-from .domain import ExperimentSpec, JobStatus, JobType, RunMetadata, RunRole
+from .domain import (
+    ExperimentSpec,
+    JobStatus,
+    JobType,
+    RunMetadata,
+    RunPurpose,
+    RunRole,
+)
 from .processes import process_alive
 from .repository import RunRepository, utc_now
 from rstock.checkpoints import (
@@ -144,7 +151,14 @@ class RunService:
                 ):
                     return SubmissionResult(str(status["run_id"]), False)
             metadata = (
-                RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+                RunMetadata(
+                    run_role=RunRole.PIPELINE_PARENT,
+                    run_purpose=(
+                        RunPurpose.REFERENCE
+                        if spec.temporal_validation_enabled
+                        else RunPurpose.STANDARD
+                    ),
+                )
                 if spec.job_type is JobType.END_TO_END
                 else None
             )
@@ -257,7 +271,14 @@ class RunService:
             spec = replace(spec, **replay_values)
         with self._submission_lock():
             metadata = (
-                RunMetadata(run_role=RunRole.PIPELINE_PARENT)
+                RunMetadata(
+                    run_role=RunRole.PIPELINE_PARENT,
+                    run_purpose=(
+                        RunPurpose.REFERENCE
+                        if spec.temporal_validation_enabled
+                        else RunPurpose.STANDARD
+                    ),
+                )
                 if spec.job_type is JobType.END_TO_END
                 else None
             )

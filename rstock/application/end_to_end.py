@@ -12,12 +12,18 @@ from rstock.modeling import selected_xgboost_parameters
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation
 
 from .auto_promotion import AutoPromotionRunner, PROMOTION_CHECKPOINT
-from .domain import ExperimentSpec, JobType, RunMetadata, RunRole
+from .domain import ExperimentSpec, JobType, RunMetadata, RunPurpose, RunRole
 from .repository import RunRepository
+from .temporal_validation import (
+    TEMPORAL_VALIDATION_RESULT,
+    TemporalValidationRunner,
+)
 
 
 PIPELINE_SCHEMA_VERSION = 1
 PIPELINE_MANIFEST = "orchestration/pipeline.json"
+CHILD_ID_POLICY_DETERMINISTIC = 1
+CHILD_ID_POLICY_RESERVED = 2
 
 SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
     ("walk_forward", JobType.WALK_FORWARD, ()),
@@ -37,6 +43,7 @@ SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
         ),
     ),
 )
+TEMPORAL_VALIDATION_STAGE = "temporal_validation_end_to_end"
 
 REQUIRED_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "walk_forward": (
@@ -64,14 +71,39 @@ def _relation_key(stage_key: str) -> str:
 
 
 def build_pipeline_manifest(
-    repository: RunRepository, root_run_id: str, spec: ExperimentSpec
+    repository: RunRepository,
+    root_run_id: str,
+    spec: ExperimentSpec,
+    *,
+    child_id_policy_version: int = CHILD_ID_POLICY_RESERVED,
+    reserved_child_ids: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    child_ids = {
-        stage_key: repository.deterministic_child_run_id(
-            root_run_id, _relation_key(stage_key)
-        )
-        for stage_key, _, _ in SCIENTIFIC_STAGES
-    }
+    if child_id_policy_version not in {
+        CHILD_ID_POLICY_DETERMINISTIC,
+        CHILD_ID_POLICY_RESERVED,
+    }:
+        raise ValueError("Politique d'ID enfant End-to-end incompatible")
+    if reserved_child_ids is not None:
+        child_ids = dict(reserved_child_ids)
+    elif child_id_policy_version == CHILD_ID_POLICY_DETERMINISTIC:
+        child_ids = {
+            stage_key: repository.deterministic_child_run_id(
+                root_run_id, _relation_key(stage_key)
+            )
+            for stage_key, _, _ in SCIENTIFIC_STAGES
+        }
+    else:
+        child_ids = {
+            stage_key: repository.generate_run_id()
+            for stage_key, _, _ in SCIENTIFIC_STAGES
+        }
+    stage_keys = {stage_key for stage_key, _, _ in SCIENTIFIC_STAGES}
+    if spec.temporal_validation_enabled:
+        stage_keys.add(TEMPORAL_VALIDATION_STAGE)
+    if reserved_child_ids is not None and set(child_ids) != stage_keys:
+        raise ValueError("Réservations enfant End-to-end incomplètes")
+    if reserved_child_ids is None and spec.temporal_validation_enabled:
+        child_ids[TEMPORAL_VALIDATION_STAGE] = repository.generate_run_id()
     stages: list[dict[str, Any]] = []
     for stage_key, job_type, dependencies in SCIENTIFIC_STAGES:
         stages.append(
@@ -81,6 +113,17 @@ def build_pipeline_manifest(
                 "child_run_id": child_ids[stage_key],
                 "expected_fingerprint": None,
                 "dependency_run_ids": [child_ids[item] for item in dependencies],
+                "artifact_digests": {},
+            }
+        )
+    if spec.temporal_validation_enabled:
+        stages.append(
+            {
+                "stage_key": TEMPORAL_VALIDATION_STAGE,
+                "expected_job_type": JobType.END_TO_END.value,
+                "child_run_id": child_ids[TEMPORAL_VALIDATION_STAGE],
+                "expected_fingerprint": None,
+                "dependency_run_ids": [child_ids["threshold_calibration"]],
                 "artifact_digests": {},
             }
         )
@@ -99,9 +142,11 @@ def build_pipeline_manifest(
     )
     return {
         "schema_version": PIPELINE_SCHEMA_VERSION,
+        "child_id_policy_version": child_id_policy_version,
         "pipeline_version": spec.pipeline_version,
         "root_run_id": root_run_id,
         "auto_promote_candidates": spec.auto_promote_candidates,
+        "temporal_validation_enabled": spec.temporal_validation_enabled,
         "stages": stages,
     }
 
@@ -127,10 +172,22 @@ def validate_pipeline_manifest(
     stages = manifest.get("stages")
     if not isinstance(stages, list):
         raise ValueError("Étapes End-to-end absentes du manifest")
-    expected = [item[0] for item in SCIENTIFIC_STAGES] + ["promotion"]
+    expected = [item[0] for item in SCIENTIFIC_STAGES]
+    if manifest.get("temporal_validation_enabled", False):
+        expected.append(TEMPORAL_VALIDATION_STAGE)
+    expected.append("promotion")
     if [item.get("stage_key") for item in stages if isinstance(item, dict)] != expected:
         raise ValueError("Étapes End-to-end incompatibles avec le pipeline")
-    for item, (stage_key, job_type, _) in zip(stages, SCIENTIFIC_STAGES):
+    policy_version = int(
+        manifest.get("child_id_policy_version", CHILD_ID_POLICY_DETERMINISTIC)
+    )
+    if policy_version not in {
+        CHILD_ID_POLICY_DETERMINISTIC,
+        CHILD_ID_POLICY_RESERVED,
+    }:
+        raise ValueError("Politique d'ID enfant End-to-end incompatible")
+    child_ids: dict[str, str] = {}
+    for item, (stage_key, job_type, dependencies) in zip(stages, SCIENTIFIC_STAGES):
         if item.get("expected_job_type") != job_type.value:
             raise ValueError(f"JobType incompatible pour l'étape {stage_key}")
         if not item.get("child_run_id"):
@@ -139,6 +196,26 @@ def validate_pipeline_manifest(
             raise ValueError(f"Dépendances invalides pour l'étape {stage_key}")
         if not isinstance(item.get("artifact_digests"), dict):
             raise ValueError(f"Digests invalides pour l'étape {stage_key}")
+        child_ids[stage_key] = str(item["child_run_id"])
+        if policy_version == CHILD_ID_POLICY_DETERMINISTIC and item.get(
+            "child_run_id"
+        ) != RunRepository.deterministic_child_run_id(
+            root_run_id, _relation_key(stage_key)
+        ):
+            raise ValueError(f"Réservation historique invalide pour {stage_key}")
+        if item["dependency_run_ids"] != [child_ids[key] for key in dependencies]:
+            raise ValueError(f"Dépendances incompatibles pour l'étape {stage_key}")
+    temporal = None
+    if manifest.get("temporal_validation_enabled", False):
+        temporal = stages[len(SCIENTIFIC_STAGES)]
+        if (
+            temporal.get("expected_job_type") != JobType.END_TO_END.value
+            or not temporal.get("child_run_id")
+            or temporal.get("dependency_run_ids")
+            != [child_ids["threshold_calibration"]]
+            or not isinstance(temporal.get("artifact_digests"), dict)
+        ):
+            raise ValueError("Réservation de validation temporelle invalide")
     promotion = stages[-1]
     if (
         promotion.get("expected_job_type") is not None
@@ -147,24 +224,46 @@ def validate_pipeline_manifest(
         or not isinstance(promotion.get("artifact_digests"), dict)
     ):
         raise ValueError("Réservation de promotion End-to-end invalide")
+    if promotion["dependency_run_ids"] != [child_ids["threshold_calibration"]]:
+        raise ValueError("Dépendances de promotion End-to-end incompatibles")
 
 
 def persist_or_validate_pipeline_manifest(
     repository: RunRepository, run_id: str, spec: ExperimentSpec
 ) -> dict[str, Any]:
-    expected = build_pipeline_manifest(repository, run_id, spec)
     persisted = load_pipeline_manifest(repository, run_id)
     if persisted is None:
+        expected = build_pipeline_manifest(repository, run_id, spec)
         (repository.run_directory(run_id) / "orchestration").mkdir(exist_ok=True)
         repository.write_json(run_id, PIPELINE_MANIFEST, expected)
-        return expected
+        return load_pipeline_manifest(repository, run_id) or expected
+    policy_version = int(
+        persisted.get("child_id_policy_version", CHILD_ID_POLICY_DETERMINISTIC)
+    )
+    reserved_child_ids = {
+        str(item["stage_key"]): str(item["child_run_id"])
+        for item in persisted["stages"][:-1]
+    }
+    expected = build_pipeline_manifest(
+        repository,
+        run_id,
+        spec,
+        child_id_policy_version=policy_version,
+        reserved_child_ids=reserved_child_ids,
+    )
     immutable_keys = (
         "schema_version",
+        "child_id_policy_version",
         "pipeline_version",
         "root_run_id",
         "auto_promote_candidates",
+        "temporal_validation_enabled",
     )
-    if any(persisted.get(key) != expected.get(key) for key in immutable_keys):
+    if any(
+        (persisted.get(key) if key != "child_id_policy_version" else policy_version)
+        != expected.get(key)
+        for key in immutable_keys
+    ):
         raise ValueError("Le manifest End-to-end ne correspond plus au snapshot du run")
     for actual, wanted in zip(persisted["stages"], expected["stages"], strict=True):
         for key in (
@@ -231,6 +330,7 @@ def _base_child_spec(
         source_end_to_end_run=root_run_id,
         source_threshold_calibration_run=None,
         auto_promote_candidates=False,
+        temporal_validation_enabled=False,
         historical_data_cutoff=None,
         source_prepared_dataset_sha256=None,
         combination_plan_version=None,
@@ -420,6 +520,65 @@ def _materialize_stage(
     return child_run_id, specification
 
 
+def _temporal_validation_spec(parent: ExperimentSpec) -> ExperimentSpec:
+    return replace(
+        parent,
+        config=replace(parent.config, walk_forward_end_offset_sessions=63),
+        temporal_validation_enabled=False,
+        auto_promote_candidates=False,
+        run_description="Validation temporelle offset 63",
+    )
+
+
+def _materialize_temporal_validation(
+    repository: RunRepository, root_run_id: str, parent: ExperimentSpec
+) -> tuple[str, ExperimentSpec]:
+    manifest = load_pipeline_manifest(repository, root_run_id)
+    if manifest is None:
+        raise ValueError("Manifest End-to-end absent")
+    stage = _stage(manifest, TEMPORAL_VALIDATION_STAGE)
+    child_run_id = str(stage["child_run_id"])
+    specification = _temporal_validation_spec(parent)
+    expected = stage.get("expected_fingerprint")
+    if expected is None:
+        _persist_stage_values(
+            repository,
+            root_run_id,
+            TEMPORAL_VALIDATION_STAGE,
+            expected_fingerprint=specification.fingerprint,
+        )
+    elif expected != specification.fingerprint:
+        raise ValueError("Fingerprint de validation temporelle incompatible")
+    directory = repository.run_directory(child_run_id)
+    if not directory.exists():
+        repository.create(
+            specification,
+            run_id=child_run_id,
+            metadata=RunMetadata(
+                run_role=RunRole.PIPELINE_PARENT,
+                run_purpose=RunPurpose.TEMPORAL_VALIDATION,
+                visible_in_history=False,
+                parent_run_id=root_run_id,
+                relation_key=TEMPORAL_VALIDATION_STAGE,
+                relation_type="temporal_validation_end_to_end",
+                stage_key=TEMPORAL_VALIDATION_STAGE,
+                stage_index=len(SCIENTIFIC_STAGES),
+                reference_run_id=root_run_id,
+            ),
+        )
+    else:
+        metadata = repository.run_metadata(child_run_id)
+        if (
+            metadata.parent_run_id != root_run_id
+            or metadata.reference_run_id != root_run_id
+            or metadata.run_purpose is not RunPurpose.TEMPORAL_VALIDATION
+        ):
+            raise ValueError("Relation de validation temporelle incompatible")
+        if repository.configuration_fingerprint(child_run_id) != specification.fingerprint:
+            raise ValueError("Snapshot de validation temporelle incompatible")
+    return child_run_id, specification
+
+
 def run_end_to_end(
     spec: ExperimentSpec,
     output: Path,
@@ -432,7 +591,11 @@ def run_end_to_end(
     repository = RunRepository(output.parent.parent)
     root_run_id = output.parent.name
     manifest = persist_or_validate_pipeline_manifest(repository, root_run_id, spec)
-    stage_count = len(SCIENTIFIC_STAGES) + int(spec.auto_promote_candidates)
+    stage_count = (
+        len(SCIENTIFIC_STAGES)
+        + 2 * int(spec.temporal_validation_enabled)
+        + int(spec.auto_promote_candidates)
+    )
 
     completed: list[dict[str, Any]] = []
     for stage_index, (stage_key, job_type, dependencies) in enumerate(
@@ -492,11 +655,84 @@ def run_end_to_end(
         )
         manifest = load_pipeline_manifest(repository, root_run_id) or manifest
 
+    if spec.temporal_validation_enabled:
+        check_cancellation(cancellation_check)
+        child_run_id, child_spec = _materialize_temporal_validation(
+            repository, root_run_id, spec
+        )
+        phase_callback(
+            progress_callback,
+            TEMPORAL_VALIDATION_STAGE,
+            "started",
+            child_run_id=child_run_id,
+            job_type=child_spec.job_type.value,
+            stage_index=len(SCIENTIFIC_STAGES) + 1,
+            stage_count=stage_count,
+        )
+        execute_reserved_child(repository, child_run_id)
+        check_cancellation(cancellation_check)
+        phase_callback(
+            progress_callback,
+            TEMPORAL_VALIDATION_STAGE,
+            "completed",
+            child_run_id=child_run_id,
+            job_type=child_spec.job_type.value,
+            stage_index=len(SCIENTIFIC_STAGES) + 1,
+            stage_count=stage_count,
+        )
+        completed.append(
+            {
+                "stage_key": TEMPORAL_VALIDATION_STAGE,
+                "job_type": child_spec.job_type.value,
+                "child_run_id": child_run_id,
+                "artifact_digests": {},
+            }
+        )
+        manifest = load_pipeline_manifest(repository, root_run_id) or manifest
+
+    temporal_comparison: dict[str, Any] | None = None
+    if spec.temporal_validation_enabled:
+        check_cancellation(cancellation_check)
+        temporal_id = str(_stage(manifest, TEMPORAL_VALIDATION_STAGE)["child_run_id"])
+        phase_callback(
+            progress_callback,
+            "temporal_validation_comparison",
+            "started",
+            child_run_id=temporal_id,
+            stage_index=len(SCIENTIFIC_STAGES) + 2,
+            stage_count=stage_count,
+        )
+        temporal_comparison = TemporalValidationRunner(
+            repository,
+            root_run_id=root_run_id,
+            validation_run_id=temporal_id,
+            result_output=output / "temporal_validation_comparison.json",
+        ).execute()
+        phase_callback(
+            progress_callback,
+            "temporal_validation_comparison",
+            "completed",
+            child_run_id=temporal_id,
+            stage_index=len(SCIENTIFIC_STAGES) + 2,
+            stage_count=stage_count,
+            final_status=temporal_comparison["final_status"],
+        )
+
     promotion_summary: dict[str, Any] = {
         "requested": spec.auto_promote_candidates,
         "executed": False,
     }
-    if spec.auto_promote_candidates:
+    promotion_allowed = (
+        not spec.temporal_validation_enabled
+        or temporal_comparison is not None
+        and temporal_comparison.get("final_status") == "passed"
+    )
+    if spec.auto_promote_candidates and not promotion_allowed:
+        promotion_summary["reason"] = "temporal_validation_not_passed"
+        promotion_summary["temporal_validation_status"] = temporal_comparison.get(
+            "final_status"
+        ) if temporal_comparison is not None else None
+    if spec.auto_promote_candidates and promotion_allowed:
         check_cancellation(cancellation_check)
         walk_forward_id = str(_stage(manifest, "walk_forward")["child_run_id"])
         xgboost_id = str(
@@ -592,8 +828,9 @@ def run_end_to_end(
         "auto_promote_candidates": spec.auto_promote_candidates,
         "stages": completed,
         "promotion": promotion_summary,
+        "temporal_validation": temporal_comparison,
     }
-    if spec.auto_promote_candidates:
+    if promotion_summary["executed"]:
         (output / "promotion_results.json").write_text(
             json.dumps(promotion_state, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -610,8 +847,10 @@ def run_end_to_end(
         },
         "auto_promote_candidates": spec.auto_promote_candidates,
         "promotion": promotion_summary,
+        "temporal_validation": temporal_comparison,
         "result_files": [
             "pipeline_summary.json",
-            *(["promotion_results.json"] if spec.auto_promote_candidates else []),
+            *(["promotion_results.json"] if promotion_summary["executed"] else []),
+            *([TEMPORAL_VALIDATION_RESULT] if temporal_comparison is not None else []),
         ],
     }

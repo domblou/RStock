@@ -143,6 +143,7 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
     for name in (
         "source_end_to_end_run",
         "source_threshold_calibration_run",
+        "market_benchmark_symbol",
         "auto_promote_candidates",
         "pipeline_version",
         "calibration_sampling_policy_version",
@@ -156,6 +157,12 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
         "walk_forward_max_combinations_per_batch",
         "xgboost_global_max_qualified_combinations",
         "threshold_parameter_calibration_max_models",
+        "temporal_min_candidate_yield_ratio",
+        "temporal_max_auc_degradation",
+        "temporal_min_precision_edge",
+        "temporal_min_mean_directional_return",
+        "temporal_confidence_level",
+        "temporal_max_ci_width",
     ):
         values["rstock_config"].pop(name)
     canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
@@ -164,6 +171,7 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
 
     assert restored.source_end_to_end_run is None
     assert restored.source_threshold_calibration_run is None
+    assert restored.market_benchmark_symbol is None
     assert restored.auto_promote_candidates is False
     assert restored.pipeline_version == 0
     assert restored.calibration_sampling_policy_version == 1
@@ -174,6 +182,12 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
     assert restored.config.walk_forward_max_combinations_per_batch == 2_200_000
     assert restored.config.xgboost_global_max_qualified_combinations is None
     assert restored.config.threshold_parameter_calibration_max_models is None
+    assert restored.config.temporal_min_candidate_yield_ratio == 0.25
+    assert restored.config.temporal_max_auc_degradation == 0.03
+    assert restored.config.temporal_min_precision_edge == 0.00
+    assert restored.config.temporal_min_mean_directional_return == 0.00
+    assert restored.config.temporal_confidence_level == 0.95
+    assert restored.config.temporal_max_ci_width == 0.20
     assert restored.fingerprint == hashlib.sha256(canonical.encode()).hexdigest()
     assert restored.to_dict()["schema_version"] == 1
 

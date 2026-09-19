@@ -121,7 +121,39 @@ class RStockConfig:
     )
     threshold_calibration_grid_decimals: int = 6
 
+    # Temporal validation compares the completed reference End-to-end run with
+    # its reserved future-period child. These are policy inputs, persisted in
+    # each snapshot so an historical decision is reproducible.
+    temporal_min_candidate_yield_ratio: float = 0.25
+    temporal_max_auc_degradation: float = 0.03
+    temporal_min_precision_edge: float = 0.00
+    temporal_min_mean_directional_return: float = 0.00
+    temporal_confidence_level: float = 0.95
+    temporal_max_ci_width: float = 0.20
+
     def __post_init__(self) -> None:
+        for name in (
+            "temporal_min_candidate_yield_ratio",
+            "temporal_max_auc_degradation",
+            "temporal_max_ci_width",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be numeric and >= 0")
+        for name in (
+            "temporal_min_precision_edge",
+            "temporal_min_mean_directional_return",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"{name} must be numeric")
+        confidence = self.temporal_confidence_level
+        if (
+            not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not 0 < confidence < 1
+        ):
+            raise ValueError("temporal_confidence_level must be between 0 and 1")
         for name in (
             "walk_forward_max_combinations_per_batch",
             "xgboost_global_max_qualified_combinations",
@@ -203,6 +235,14 @@ HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
     "walk_forward_max_combinations_per_batch": 2_200_000,
     "xgboost_global_max_qualified_combinations": None,
     "threshold_parameter_calibration_max_models": None,
+    # Runs created before temporal validation could not execute its comparison;
+    # these values are inert unless the explicitly persisted feature flag is on.
+    "temporal_min_candidate_yield_ratio": 0.25,
+    "temporal_max_auc_degradation": 0.03,
+    "temporal_min_precision_edge": 0.00,
+    "temporal_min_mean_directional_return": 0.00,
+    "temporal_confidence_level": 0.95,
+    "temporal_max_ci_width": 0.20,
 }
 
 USER_SETTINGS_SCHEMA_VERSION = 1

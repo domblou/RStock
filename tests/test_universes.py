@@ -193,6 +193,7 @@ def test_historical_universe_without_type_defaults_to_standard(tmp_path):
     record = UniverseService(root=tmp_path).record("LEGACY")
 
     assert record.type == STANDARD_UNIVERSE_TYPE
+    assert record.benchmark_symbol is None
 
 
 def test_context_universe_is_persisted_editable_and_cannot_be_primary(tmp_path):
@@ -435,3 +436,95 @@ def test_no_context_keeps_legacy_symbols_behavior_and_context_run_is_frozen(tmp_
     assert restored.target_symbols == ("AAA", "BBB")
     assert restored.context_symbols == ("CCC",)
     assert restored.predictor_symbols == ("AAA", "BBB", "CCC")
+
+
+def test_universe_benchmark_is_persisted_updated_and_duplicated(tmp_path):
+    service = UniverseService(root=tmp_path)
+    created = service.create("Primary", ("AAA", "BBB"))
+
+    assert created.benchmark_symbol is None
+
+    with_spy = service.update(
+        created.universe_id,
+        name="Primary",
+        symbols=("AAA", "BBB"),
+        benchmark_symbol="spy",
+    )
+    assert with_spy.benchmark_symbol == "SPY"
+
+    with_qqq = service.update(
+        created.universe_id,
+        name="Primary",
+        symbols=("AAA", "BBB"),
+        benchmark_symbol="qqq",
+    )
+    assert with_qqq.benchmark_symbol == "QQQ"
+
+    without_benchmark = service.update(
+        created.universe_id,
+        name="Primary",
+        symbols=("AAA", "BBB"),
+        benchmark_symbol=None,
+    )
+    assert without_benchmark.benchmark_symbol is None
+    assert UniverseService(root=tmp_path).record(created.universe_id).benchmark_symbol is None
+
+    service.update(
+        created.universe_id,
+        name="Primary",
+        symbols=("AAA", "BBB"),
+        benchmark_symbol="qqq",
+    )
+    copied = service.duplicate(created.universe_id)
+
+    assert copied.benchmark_symbol == "QQQ"
+
+
+def test_context_symbols_never_infer_a_primary_universe_benchmark(tmp_path):
+    service = UniverseService(root=tmp_path)
+    primary = service.create("Primary", ("AAA", "BBB"))
+    context = service.create(
+        "Market context", ("SPY", "QQQ"), universe_type=CONTEXT_UNIVERSE_TYPE
+    )
+
+    resolved = service.resolve_experiment(
+        UniverseSelection(source=SAVED_SOURCE, universe=primary.universe_id),
+        (context.universe_id,),
+    )
+
+    assert resolved.context_symbols == ("SPY", "QQQ")
+    assert resolved.benchmark_symbol is None
+
+
+def test_run_snapshot_freezes_explicit_universe_benchmark_after_edit_and_delete(tmp_path):
+    service = UniverseService(root=tmp_path)
+    primary = service.create(
+        "Primary", ("AAA", "BBB"), benchmark_symbol="SPY"
+    )
+    selection = UniverseSelection(source=SAVED_SOURCE, universe=primary.universe_id)
+    resolved = service.resolve_experiment(selection)
+    spec = ExperimentSpec(
+        job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=resolved.predictor_symbols,
+        universe_selection=selection,
+        primary_universe_id=resolved.primary_universe_id,
+        target_symbols=resolved.target_symbols,
+        context_symbols=resolved.context_symbols,
+        predictor_symbols=resolved.predictor_symbols,
+        market_benchmark_symbol=resolved.benchmark_symbol,
+    )
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(spec)
+
+    service.update(
+        primary.universe_id,
+        name="Primary",
+        symbols=("ZZZ", "YYY"),
+        benchmark_symbol="QQQ",
+    )
+    service.delete(primary.universe_id)
+    restored = repository.load_spec(run_id)
+
+    assert repository.read_json(run_id, "config.json")["market_benchmark_symbol"] == "SPY"
+    assert restored.market_benchmark_symbol == "SPY"

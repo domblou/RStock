@@ -329,21 +329,44 @@ class RunStorageService:
         self, run_id: str, job_type: JobType
     ) -> tuple[tuple[str, ...], str | None]:
         related: list[str] = []
-        if job_type is JobType.END_TO_END:
-            from .end_to_end import load_pipeline_manifest
+        visited: set[str] = set()
 
+        def visit_end_to_end(parent_id: str) -> str | None:
+            if parent_id in visited:
+                return "Cycle de dépendances End-to-end détecté."
+            visited.add(parent_id)
+            from .end_to_end import load_pipeline_manifest
             try:
-                manifest = load_pipeline_manifest(self.repository, run_id)
+                manifest = load_pipeline_manifest(self.repository, parent_id)
             except (OSError, ValueError) as error:
-                return (), f"Manifest End-to-end invalide : {error}"
+                return f"Manifest End-to-end invalide : {error}"
             if manifest is None:
-                return (), "Le manifest End-to-end est absent."
+                return "Le manifest End-to-end est absent."
             for stage in manifest.get("stages", ()):
                 if not isinstance(stage, Mapping):
                     continue
                 child_id = stage.get("child_run_id")
                 if child_id:
-                    related.append(str(child_id))
+                    child_id = str(child_id)
+                    related.append(child_id)
+                    try:
+                        child_type = JobType(
+                            str(self.repository.status(child_id)["job_type"])
+                        )
+                    except (FileNotFoundError, KeyError, ValueError):
+                        continue
+                    if child_type is JobType.END_TO_END:
+                        error = visit_end_to_end(child_id)
+                        if error is not None:
+                            return error
+                    elif child_type is JobType.WALK_FORWARD:
+                        related.extend(self._technical_children(child_id))
+            return None
+
+        if job_type is JobType.END_TO_END:
+            error = visit_end_to_end(run_id)
+            if error is not None:
+                return (), error
         if job_type is JobType.WALK_FORWARD:
             related.extend(self._technical_children(run_id))
         for child_id in tuple(related):
@@ -454,17 +477,17 @@ class RunStorageService:
 
     def _manifest_protected_files(self, run_id: str) -> set[str]:
         metadata = self.repository.run_metadata(run_id)
-        root_id = metadata.root_run_id
-        if not root_id or root_id == run_id:
+        owner_id = metadata.parent_run_id
+        if not owner_id:
             return set()
         manifest_path = (
-            self.repository.run_directory(root_id) / "orchestration" / "pipeline.json"
+            self.repository.run_directory(owner_id) / "orchestration" / "pipeline.json"
         )
         if not manifest_path.is_file():
             return set()
         try:
             manifest = self.repository.read_json(
-                root_id, "orchestration/pipeline.json"
+                owner_id, "orchestration/pipeline.json"
             )
         except (OSError, ValueError):
             return set()

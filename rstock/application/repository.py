@@ -71,6 +71,16 @@ class RunRepository:
         ).hexdigest()[:24]
         return f"child_{digest}"
 
+    @staticmethod
+    def generate_run_id() -> str:
+        """Return an ordinary physical run ID without creating its directory."""
+
+        return (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            + "_"
+            + uuid.uuid4().hex[:10]
+        )
+
     def create(
         self,
         spec: ExperimentSpec,
@@ -79,11 +89,7 @@ class RunRepository:
         metadata: RunMetadata | None = None,
     ) -> str:
         self.root.mkdir(parents=True, exist_ok=True)
-        run_id = run_id or (
-            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-            + "_"
-            + uuid.uuid4().hex[:10]
-        )
+        run_id = run_id or self.generate_run_id()
         run_metadata = metadata or RunMetadata()
         if run_metadata.parent_run_id is None:
             expected_root_run_id = run_id

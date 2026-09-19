@@ -17,6 +17,8 @@ from .repository import RunRepository
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_NAME = "orchestration/walk_forward_batches.json"
 PREFILTER_POLICY_VERSION = "per_target_v1"
+CHILD_ID_POLICY_DETERMINISTIC = 1
+CHILD_ID_POLICY_RESERVED = 2
 
 
 def _utc_now() -> str:
@@ -100,19 +102,34 @@ def build_manifest(
     max_combinations_per_batch: int,
     prefilter_policy_version: str,
     prefilter_sha256: str,
+    child_id_policy_version: int = CHILD_ID_POLICY_RESERVED,
+    reserved_child_ids: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[ExperimentSpec, RunMetadata]]]:
-    """Reserve deterministic child IDs and return one immutable manifest."""
+    """Reserve child IDs and return one immutable manifest."""
+
+    if child_id_policy_version not in {
+        CHILD_ID_POLICY_DETERMINISTIC,
+        CHILD_ID_POLICY_RESERVED,
+    }:
+        raise ValueError("Politique d'ID enfant WF incompatible")
 
     effective_count = effective_plan.count()
     batch_count = ceil(effective_count / max_combinations_per_batch)
     preview_batch_count = ceil(raw_plan.count() / max_combinations_per_batch)
+    if reserved_child_ids is not None and len(reserved_child_ids) != batch_count:
+        raise ValueError("Réservations enfant WF incomplètes")
     children: list[dict[str, Any]] = []
     reservations: list[tuple[ExperimentSpec, RunMetadata]] = []
     for batch_index in range(batch_count):
         start = batch_index * max_combinations_per_batch
         stop = min(start + max_combinations_per_batch, effective_count)
         relation_key = f"walk_forward_batch:{batch_index:06d}"
-        run_id = repository.deterministic_child_run_id(parent_run_id, relation_key)
+        if reserved_child_ids is not None:
+            run_id = str(reserved_child_ids[batch_index])
+        elif child_id_policy_version == CHILD_ID_POLICY_DETERMINISTIC:
+            run_id = repository.deterministic_child_run_id(parent_run_id, relation_key)
+        else:
+            run_id = repository.generate_run_id()
         spec = child_spec(
             parent_spec,
             parent_run_id=parent_run_id,
@@ -147,6 +164,7 @@ def build_manifest(
         reservations.append((spec, metadata))
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
+        "child_id_policy_version": child_id_policy_version,
         "parent_run_id": parent_run_id,
         "parent_fingerprint": repository.configuration_fingerprint(
             parent_run_id, fallback=parent_spec.fingerprint
@@ -186,6 +204,10 @@ def persist_or_validate_manifest(
         persisted = repository.read_json(run_id, MANIFEST_NAME)
         comparable = dict(proposed)
         comparable["created_at"] = persisted.get("created_at")
+        # V1 manifests predate the explicit policy field.  Their deterministic
+        # reservations remain authoritative and are never rewritten.
+        if "child_id_policy_version" not in persisted:
+            comparable.pop("child_id_policy_version", None)
         if persisted != comparable:
             raise ValueError(
                 "Le manifest des batchs WF ne correspond plus au plan gelé."

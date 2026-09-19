@@ -104,6 +104,13 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
         "threshold child id",
     ),
     RunTabDefinition(
+        "temporal_validation",
+        "Validation temporelle",
+        frozenset({JobType.END_TO_END}),
+        "temporal_validation",
+        "temporal validation child",
+    ),
+    RunTabDefinition(
         "promotion",
         "Promotion",
         frozenset({JobType.END_TO_END}),
@@ -142,6 +149,7 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "xgboost",
         "threshold_parameters",
         "thresholds",
+        "temporal_validation",
         "promotion",
         "technical",
     ),
@@ -187,6 +195,7 @@ PIPELINE_STAGE_LABELS = {
     "xgboost_calibration": "Calibration XGBoost",
     "threshold_parameter_calibration": "Paramètres seuils",
     "threshold_calibration": "Seuils",
+    "temporal_validation_end_to_end": "Validation temporelle",
     "promotion": "Promotion",
 }
 

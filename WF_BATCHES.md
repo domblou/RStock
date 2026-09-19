@@ -1149,6 +1149,23 @@ Elle ne pollue donc pas Historique; son état, sa progression, ses diagnostics e
 
 ---
 
+La validation temporelle optionnelle réserve un enfant `END_TO_END` autonome,
+portant son propre snapshot avec offset 63. Après la chaîne enfant, le parent
+exécute une comparaison versionnée et persistée dans
+`orchestration/temporal_validation.json` et
+`results/temporal_validation_comparison.json`.
+
+La comparaison contrôle : candidate yield, AUC holdout, precision edge par
+bootstrap de blocs de dates et rendement directionnel. La largeur maximale d IC
+ne concerne que precision edge. Les sources, digests, paramètres et décision
+`passed` / `failed` / `inconclusive` / `invalid` sont checkpointés. Une source ou
+un paramètre modifié déclenche un nouveau calcul explicitement relié au digest
+précédent; une exécution interrompue reprend le checkpoint pending.
+
+La promotion reste une étape séparée : si elle est demandée avec validation
+active, elle utilise uniquement la chaîne de référence et seulement après une
+décision `passed`. Le checkpoint de comparaison reste consultable après purge.
+
 # 34. Reprise End-to-end
 
 Exemple :

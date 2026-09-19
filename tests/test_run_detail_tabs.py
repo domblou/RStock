@@ -45,6 +45,7 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
         "xgboost",
         "threshold_parameters",
         "thresholds",
+        "temporal_validation",
         "promotion",
         "technical",
     ]

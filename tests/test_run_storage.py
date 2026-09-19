@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -398,6 +399,14 @@ def test_end_to_end_waits_for_all_children_and_preserves_manifest_artifacts(
     orchestration = repository.run_directory(parent) / "orchestration"
     orchestration.mkdir()
     repository.write_json(parent, "orchestration/pipeline.json", manifest)
+    repository.write_json(
+        parent,
+        "orchestration/temporal_validation.json",
+        {"final_status": "passed", "gates": {"candidate_yield": {"status": "passed"}}},
+    )
+    comparison = repository.run_directory(parent) / "results" / "temporal_validation_comparison.json"
+    comparison.parent.mkdir()
+    comparison.write_text('{"final_status":"passed"}\n', encoding="utf-8")
     _complete(repository, parent)
     for child_id in children[:-1]:
         _complete(repository, child_id)
@@ -429,6 +438,8 @@ def test_end_to_end_waits_for_all_children_and_preserves_manifest_artifacts(
     assert (
         repository.run_directory(parent) / "orchestration" / "pipeline.json"
     ).read_bytes() == manifest_before
+    assert repository.read_json(parent, "orchestration/temporal_validation.json")["final_status"] == "passed"
+    assert json.loads(comparison.read_text(encoding="utf-8"))["final_status"] == "passed"
     for key, value in required_before.items():
         child_id, relative = key
         assert (repository.run_directory(child_id) / relative).read_bytes() == value

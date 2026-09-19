@@ -313,7 +313,12 @@ def test_universe_page_exposes_persisted_type_without_weakening_system_protectio
     assert "universe_type=universe_type" in creation
     assert "edit-universe-type" in detail
     assert "universe_type=edited_type" in detail
+    assert "Benchmark de marché" in creation
+    assert "Benchmark de marché" in detail
+    assert "benchmark_symbol=benchmark_symbol" in detail
+    assert "_market_benchmark_options" in creation
     assert '"Type": "Standard"' in page
+    assert '"Benchmark": record.benchmark_symbol' in page
     assert "Univers système protégé" in detail
 
 
@@ -871,7 +876,7 @@ def test_threshold_calibration_filter_defaults_are_session_safe():
         "def _render_history_detail", 1
     )[0]
 
-    for value in ('"Up"', ": 20", ": 0.50", ": 0.60", ": 0.30", ": 0.00"):
+    for value in ('"Up"', ": 20", ": 0.40", ": 0.60", ": 0.30", ": 0.00"):
         assert value in panel
     assert "st.session_state.setdefault(key, value)" in panel
     assert '"Signaux holdout minimum", min_value=0, step=1' in panel

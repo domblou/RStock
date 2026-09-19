@@ -1276,6 +1276,7 @@ def _planned_walk_forward(
         generated = effective_plan.slice(0, effective_plan.count())
     else:
         generated = None
+        existing_manifest = load_manifest(repository, run_id)
         proposed, reservations = build_manifest(
             repository,
             parent_run_id=run_id,
@@ -1285,6 +1286,16 @@ def _planned_walk_forward(
             max_combinations_per_batch=capacity,
             prefilter_policy_version=policy_version,
             prefilter_sha256=digest,
+            child_id_policy_version=(
+                int(existing_manifest.get("child_id_policy_version", 1))
+                if existing_manifest is not None
+                else 2
+            ),
+            reserved_child_ids=(
+                [str(item["child_run_id"]) for item in existing_manifest["batches"]]
+                if existing_manifest is not None
+                else None
+            ),
         )
         manifest = persist_or_validate_manifest(repository, run_id, proposed)
         # IDs are durable before any child directory is created.

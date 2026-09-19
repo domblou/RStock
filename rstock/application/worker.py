@@ -292,6 +292,13 @@ def execute_run(
         phases = WORKFLOW_PHASES[spec.job_type]
         if spec.job_type is JobType.END_TO_END and not spec.auto_promote_candidates:
             phases = [item for item in phases if item[0] != "promotion"]
+        if spec.job_type is JobType.END_TO_END and spec.temporal_validation_enabled:
+            phases = [
+                *[item for item in phases if item[0] != "publishing"],
+                ("temporal_validation_end_to_end", 90),
+                ("temporal_validation_comparison", 95),
+                ("publishing", 1),
+            ]
         reporter.configure_phases(phases)
         working = repository.run_directory(run_id) / "_working"
         results = repository.run_directory(run_id) / "results"

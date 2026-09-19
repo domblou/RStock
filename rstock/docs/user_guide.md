@@ -983,6 +983,23 @@ La synthèse permet de repérer une étape échouée ou en attente; une reprise
 conserve les identifiants réservés, réutilise les checkpoints disponibles et ne
 recalcule pas les étapes déjà terminées.
 
+La validation temporelle optionnelle lance, après la chaîne de référence offset
+0, un second End-to-end autonome offset 63. Les deux chaînes utilisent le même
+snapshot scientifique, sauf cet offset et les options du child.
+
+Après leur achèvement, RStock compare automatiquement quatre gates : rendement
+des candidats, AUC holdout médiane, avantage de précision par rapport à la
+fréquence naturelle de la direction, puis rendement directionnel moyen. Les IC
+sont construits par bootstrap de blocs de dates déterministe. `passed`, `failed`,
+`inconclusive` et `invalid` restent des états distincts; aucun score composite
+ne produit aucun score composite. La largeur maximale d IC s applique seulement à la précision.
+
+La promotion automatique reste indépendante : sans validation temporelle, son
+comportement historique est inchangé; avec validation, elle est exécutée seulement si
+la comparaison est `passed`, et ne promeut que les candidats de la référence.
+La vue **Validation temporelle** conserve la décision, les paramètres, les
+digests et les quatre gates, y compris après purge des artefacts lourds.
+
 ---
 
 # 17. Fine-tuning des paramètres

@@ -207,6 +207,7 @@ def _state() -> None:
     cached = MarketDataService().available_symbols(st.session_state.lab_config)
     st.session_state.setdefault("lab_symbols", cached or ["AAPL", "MSFT"])
     st.session_state.setdefault("lab_universe_selection", UniverseSelection())
+    st.session_state.setdefault("lab_market_benchmark_symbol", None)
     st.session_state.setdefault("lab_context_universe_ids", [])
     st.session_state.setdefault("lab_context_sample_size", None)
     st.session_state.setdefault("lab_context_selection_method", None)
@@ -475,6 +476,23 @@ def _universe_service() -> UniverseService:
     return UniverseService(root=st.session_state.lab_config.project_root)
 
 
+def _market_benchmark_options(
+    service: UniverseService, *, current: str | None = None
+) -> list[str]:
+    """Return explicit benchmark choices; context membership never selects one."""
+
+    symbols = {
+        symbol
+        for record in service.records()
+        if record.type == CONTEXT_UNIVERSE_TYPE
+        for symbol in record.symbols
+    }
+    options = ["Aucun", *sorted(symbols)]
+    if current is not None and current not in options:
+        options.append(current)
+    return options
+
+
 def _combination_plan_preview(job_type: JobType) -> bool:
     """Render the raw plan shared with future WF and End-to-end execution."""
 
@@ -555,6 +573,16 @@ def _render_experiment_submission_confirmation(
         f"offset {spec.config.walk_forward_end_offset_sessions} · "
         f"max {maximum_text} combinaisons après préfiltrage"
     )
+    if spec.temporal_validation_enabled:
+        promotion_text = (
+            "promotion only if comparison passes"
+            if spec.auto_promote_candidates
+            else "no automatic promotion"
+        )
+        st.info(
+            "Temporal validation: enabled (reference offset 0, validation offset 63); "
+            f"{promotion_text}."
+        )
     confirm, cancel, _ = st.columns([0.2, 0.2, 1])
     if confirm.button(
         "Confirmer",
@@ -726,6 +754,7 @@ def _experiment_universe_selector() -> bool:
     st.session_state.lab_target_symbols = list(target_symbols)
     st.session_state.lab_context_symbols = list(context_symbols)
     st.session_state.lab_symbols = list(predictor_symbols)
+    st.session_state.lab_market_benchmark_symbol = resolved.benchmark_symbol
     context_label = ", ".join(selected_contexts) if selected_contexts else "Aucun"
     st.caption(
         f"Univers principal : {universe_id} · {len(target_symbols)} cibles · "
@@ -759,6 +788,7 @@ def _experiments(service: ExperimentService) -> None:
     }
     choice = st.selectbox("Type de job", list(labels))
     auto_promote_candidates = False
+    temporal_validation_enabled = False
     if labels[choice] is JobType.END_TO_END:
         auto_promote_candidates = st.checkbox(
             "Promouvoir automatiquement les candidats admissibles",
@@ -770,13 +800,33 @@ def _experiments(service: ExperimentService) -> None:
         )
         if auto_promote_candidates and not st.session_state.lab_evaluate_holdout:
             st.error("La promotion automatique exige le holdout final.")
+        temporal_validation_enabled = st.checkbox(
+            "Exécuter une validation temporelle",
+            value=False,
+            help=(
+                "Exécute automatiquement un second End-to-end sur une période "
+                "décalée de 63 séances afin de permettre une validation temporelle "
+                "de la méthodologie."
+            ),
+        )
+        if temporal_validation_enabled and auto_promote_candidates:
+            st.info(
+                "Temporal comparison precedes promotion; four passed gates are required for automatic promotion.",
+            )
+        if (
+            temporal_validation_enabled
+            and st.session_state.lab_config.walk_forward_end_offset_sessions != 0
+        ):
+            st.error("La validation temporelle exige un End-to-end de référence avec offset 0.")
     valid_universe = _experiment_universe_selector()
     valid_plan = (
         _combination_plan_preview(labels[choice]) if valid_universe else False
     )
     submit_disabled = not (valid_universe and valid_plan) or (
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
-    )
+    ) or (temporal_validation_enabled and (
+        st.session_state.lab_config.walk_forward_end_offset_sessions != 0
+    ))
     pending_spec = st.session_state.get("pending-experiment-submission")
     if pending_spec is not None:
         _render_experiment_submission_confirmation(
@@ -795,6 +845,7 @@ def _experiments(service: ExperimentService) -> None:
             evaluate_final_holdout=st.session_state.lab_evaluate_holdout,
             universe_selection=st.session_state.lab_universe_selection,
             primary_universe_id=st.session_state.lab_universe_selection.universe,
+            market_benchmark_symbol=st.session_state.lab_market_benchmark_symbol,
             context_universe_ids=tuple(st.session_state.lab_context_universe_ids),
             context_sample_size=st.session_state.lab_context_sample_size,
             context_selection_method=st.session_state.lab_context_selection_method,
@@ -803,6 +854,7 @@ def _experiments(service: ExperimentService) -> None:
             context_symbols=tuple(st.session_state.lab_context_symbols),
             predictor_symbols=tuple(st.session_state.lab_symbols),
             auto_promote_candidates=auto_promote_candidates,
+            temporal_validation_enabled=temporal_validation_enabled,
             run_description=(
                 f"profondeur {st.session_state.lab_config.permutation_depth}"
             ),
@@ -1057,6 +1109,40 @@ def _settings() -> None:
             format="%.4f",
         )
 
+        st.subheader("Temporal validation")
+        st.caption(
+            "These values are frozen in the reference End-to-end snapshot. "
+            "Maximum CI width applies only to precision edge."
+        )
+        tv1, tv2, tv3 = st.columns(3)
+        temporal_candidate_yield = tv1.number_input(
+            "Minimum candidate ratio", min_value=0.0,
+            value=current.temporal_min_candidate_yield_ratio,
+            help="Minimum validation candidate yield divided by reference candidate yield.",
+        )
+        temporal_auc_degradation = tv2.number_input(
+            "Maximum AUC degradation", min_value=0.0,
+            value=current.temporal_max_auc_degradation,
+            help="Maximum permitted reduction in median holdout AUC.",
+        )
+        temporal_precision_edge = tv3.number_input(
+            "Minimum precision edge", value=current.temporal_min_precision_edge,
+            help="Precision minus natural direction rate must clear this interval threshold.",
+        )
+        temporal_directional_return = tv1.number_input(
+            "Minimum directional return", value=current.temporal_min_mean_directional_return,
+            help="Directional-return confidence interval must clear this threshold.",
+        )
+        temporal_confidence = tv2.number_input(
+            "Confidence level", min_value=0.01, max_value=0.99,
+            value=current.temporal_confidence_level,
+            help="Confidence level for deterministic date-block bootstrap.",
+        )
+        temporal_ci_width = tv3.number_input(
+            "Maximum CI width for precision edge", min_value=0.0,
+            value=current.temporal_max_ci_width,
+            help="This does not apply to directional return.",
+        )
         if st.button("Enregistrer les paramètres", type="primary"):
             parsed_quantiles = tuple(
                 float(item.strip()) for item in quantiles.split(",") if item.strip()
@@ -1080,6 +1166,12 @@ def _settings() -> None:
                 walk_forward_max_combinations_per_batch=int(
                     max_combinations_per_batch
                 ),
+                temporal_min_candidate_yield_ratio=float(temporal_candidate_yield),
+                temporal_max_auc_degradation=float(temporal_auc_degradation),
+                temporal_min_precision_edge=float(temporal_precision_edge),
+                temporal_min_mean_directional_return=float(temporal_directional_return),
+                temporal_confidence_level=float(temporal_confidence),
+                temporal_max_ci_width=float(temporal_ci_width),
                 predictor_prefilter_enabled=bool(prefilter_enabled),
                 predictor_prefilter_top_n=int(prefilter_top_n),
                 predictor_prefilter_min_median_auc=float(prefilter_median_auc),
@@ -1300,7 +1392,7 @@ def _render_threshold_calibration_promotion(
     filter_defaults = {
         f"threshold-direction-{run_id}": "Up",
         f"threshold-min-signals-{run_id}": 20,
-        f"threshold-min-precision-{run_id}": 0.50,
+        f"threshold-min-precision-{run_id}": 0.40,
         f"threshold-min-auc-{run_id}": 0.60,
         f"threshold-max-opposite-{run_id}": 0.30,
         f"threshold-min-directional-return-{run_id}": 0.00,
@@ -2316,6 +2408,75 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
     st.dataframe(diagnostic_table, hide_index=True, width="stretch")
 
 
+def _render_temporal_validation(
+    service: ExperimentService, parent_run_id: str, detail: dict[str, object]
+) -> None:
+    stage = pipeline_stage_by_key(
+        detail.get("pipeline_stages"), "temporal_validation_end_to_end"
+    )
+    if stage is None:
+        st.info("Temporal validation was not enabled for this End-to-end.")
+        return
+    child_run_id = str(stage["child_run_id"])
+    st.caption(
+        f"Reference: {parent_run_id}, offset 0 | validation: {child_run_id}, offset 63"
+    )
+    root = st.session_state.lab_config.project_root / "runs"
+    comparison = _read_light_json(
+        root / parent_run_id / "results" / "temporal_validation_comparison.json"
+    )
+    if comparison is None:
+        st.info("Quality comparison is pending until both chains complete.")
+    else:
+        st.subheader(f"Decision: {comparison.get('final_status', 'unknown')}")
+        gates = comparison.get("gates", {})
+        if isinstance(gates, dict):
+            rows = [
+                {
+                    "Gate": key,
+                    "Status": value.get("status"),
+                    "Reason": value.get("reason"),
+                    "Metrics": value.get("metrics"),
+                }
+                for key, value in gates.items()
+                if isinstance(value, dict)
+            ]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.caption(f"Compared at: {comparison.get('executed_at', 'n/a')}")
+        with st.expander("Comparison parameters and provenance"):
+            st.json({
+                "parameters": comparison.get("parameters", {}),
+                "source_artifact_digests": comparison.get("source_artifact_digests", {}),
+            })
+        pipeline_summary = _read_light_json(
+            root / parent_run_id / "results" / "pipeline_summary.json"
+        ) or {}
+        promotion = pipeline_summary.get("promotion", {})
+        if isinstance(promotion, dict):
+            status = "executed" if promotion.get("executed") else promotion.get("reason", "not requested")
+            st.caption(f"Automatic promotion: {status}")
+    st.dataframe(
+        pd.DataFrame(pipeline_stage_rows([stage])), hide_index=True, width="stretch"
+    )
+    if stage.get("status") == "reserved":
+        return
+    child_detail = service.run(child_run_id)
+    child_metadata = child_detail.get("metadata", {})
+    st.json(
+        {
+            "reference_run_id": child_metadata.get("reference_run_id"),
+            "run_purpose": child_metadata.get("run_purpose"),
+            "offset": child_detail["configuration"]["rstock_config"].get(
+                "walk_forward_end_offset_sessions"
+            ),
+        }
+    )
+    _render_pipeline_summary(child_run_id, child_detail)
+    if st.button("Open validation End-to-end", key=f"open-temporal-{parent_run_id}"):
+        st.session_state["selected-run-id"] = child_run_id
+        st.rerun()
+
+
 def _read_light_json(path: Path) -> dict[str, object] | None:
     if not path.is_file():
         return None
@@ -2382,6 +2543,9 @@ def _render_end_to_end_tabs(
             "summary": lambda: _render_pipeline_summary(run_id, detail),
             **child_renderers,
             "promotion": lambda: _render_pipeline_promotion(detail),
+            "temporal_validation": lambda: _render_temporal_validation(
+                service, run_id, detail
+            ),
             "technical": lambda: _render_pipeline_technical(run_id, detail),
         },
         key=f"run-detail-{run_id}",
@@ -2736,6 +2900,15 @@ def _create_universe_panel(service: UniverseService) -> None:
         universe_type = (
             STANDARD_UNIVERSE_TYPE if type_label == "Standard" else CONTEXT_UNIVERSE_TYPE
         )
+        benchmark_symbol = None
+        if universe_type == STANDARD_UNIVERSE_TYPE:
+            benchmark_choice = st.selectbox(
+                "Benchmark de marché", _market_benchmark_options(service),
+                key="create-universe-benchmark",
+            )
+            benchmark_symbol = None if benchmark_choice == "Aucun" else benchmark_choice
+        else:
+            st.caption("Le benchmark est une propriété des univers principaux.")
         if mode == "Création manuelle":
             symbols = st.text_area(
                 "Symboles",
@@ -2744,7 +2917,10 @@ def _create_universe_panel(service: UniverseService) -> None:
             )
             if st.button("Enregistrer", type="primary", key="save-manual-universe"):
                 try:
-                    created = service.create(name, symbols, universe_type=universe_type)
+                    created = service.create(
+                        name, symbols, universe_type=universe_type,
+                        benchmark_symbol=benchmark_symbol,
+                    )
                 except ValueError as error:
                     st.error(str(error))
                 else:
@@ -2780,6 +2956,7 @@ def _create_universe_panel(service: UniverseService) -> None:
                     created = service.create_from_csv(
                         name, uploaded.getvalue(), column=selected_column,
                         universe_type=universe_type,
+                        benchmark_symbol=benchmark_symbol,
                     )
                 except ValueError as error:
                     st.error(str(error))
@@ -2838,6 +3015,8 @@ def _universe_detail(service: UniverseService, universe_id: str) -> None:
         f"{len(record.symbols)} symboles · Type : {type_label} · Source : {record.source}"
     )
     st.write(", ".join(record.symbols[:8]) + (", …" if len(record.symbols) > 8 else ""))
+    benchmark_label = record.benchmark_symbol or "Aucun"
+    st.caption(f"Benchmark de marché : {benchmark_label}")
     with st.expander("Voir tous les symboles"):
         st.code(", ".join(record.symbols))
 
@@ -2865,6 +3044,22 @@ def _universe_detail(service: UniverseService, universe_id: str) -> None:
                 if edited_type_label == "Standard"
                 else CONTEXT_UNIVERSE_TYPE
             )
+            benchmark_symbol = None
+            if edited_type == STANDARD_UNIVERSE_TYPE:
+                benchmark_options = _market_benchmark_options(
+                    service, current=record.benchmark_symbol
+                )
+                benchmark_choice = st.selectbox(
+                    "Benchmark de marché",
+                    benchmark_options,
+                    index=benchmark_options.index(record.benchmark_symbol or "Aucun"),
+                    key=f"edit-universe-benchmark-{universe_id}",
+                )
+                benchmark_symbol = (
+                    None if benchmark_choice == "Aucun" else benchmark_choice
+                )
+            else:
+                st.caption("Le benchmark est une propriété des univers principaux.")
             st.caption("Vous pouvez ajouter, retirer ou remplacer les symboles avant d’enregistrer.")
             if st.button("Enregistrer les modifications", key=f"update-universe-{universe_id}"):
                 try:
@@ -2873,6 +3068,7 @@ def _universe_detail(service: UniverseService, universe_id: str) -> None:
                         name=name,
                         symbols=symbols,
                         universe_type=edited_type,
+                        benchmark_symbol=benchmark_symbol,
                     )
                 except ValueError as error:
                     st.error(str(error))
@@ -2938,6 +3134,7 @@ def _universes_page() -> None:
             "Nom": record.name,
             "Nombre de symboles": len(record.symbols),
             "Type": "Standard" if record.type == STANDARD_UNIVERSE_TYPE else "Contexte",
+            "Benchmark": record.benchmark_symbol or "—",
             "Source": record.source,
             "Dernière modification": (
                 "—" if record.updated_at is None

@@ -195,6 +195,7 @@ def walk_forward_duplication_draft(
         "source_run_id": str(run_id),
         "job_type": source_job_type.value,
         "primary_universe_id": configuration.get("primary_universe_id"),
+        "market_benchmark_symbol": configuration.get("market_benchmark_symbol"),
         "context_universe_ids": list(configuration.get("context_universe_ids", ())),
         "context_sample_size": configuration.get("context_sample_size"),
         "context_selection_method": configuration.get("context_selection_method"),
@@ -451,6 +452,11 @@ def experiment_spec_from_duplication(
             None
             if values["primary_universe_id"] is None
             else str(values["primary_universe_id"])
+        ),
+        market_benchmark_symbol=(
+            None
+            if values.get("market_benchmark_symbol") is None
+            else str(values["market_benchmark_symbol"])
         ),
         context_universe_ids=tuple(str(item) for item in values["context_universe_ids"]),
         context_sample_size=(
