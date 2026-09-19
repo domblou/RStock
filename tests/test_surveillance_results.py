@@ -218,6 +218,23 @@ def test_evaluated_predictions_include_no_signal_rows_and_filter_display_only():
     pd.testing.assert_frame_equal(realized, original_realized)
 
 
+def test_evaluated_predictions_filter_also_applies_to_pending_predictions():
+    predictions = pd.DataFrame([
+        _prediction("evaluated", signal_status="bullish_signal"),
+        _prediction("pending-up", "2026-09-15", "bullish_signal"),
+        _prediction("pending-none", "2026-09-16", "no_signal"),
+    ])
+    realized = pd.DataFrame([_realized("evaluated")])
+
+    view = build_evaluated_predictions_view(predictions, pd.DataFrame(), realized)
+    signals_only = filter_evaluated_predictions_view(view, "Signaux seulement")
+    without_signal = filter_evaluated_predictions_view(view, "Sans signal")
+
+    assert signals_only.pending["prediction_id"].tolist() == ["pending-up"]
+    assert signals_only.pending_count == 1
+    assert without_signal.pending["prediction_id"].tolist() == ["pending-none"]
+
+
 def test_prediction_view_is_concise_formatted_and_keeps_technical_details():
     prediction = _prediction()
     prediction.update({"created_at": "2026-09-12T22:30:00+00:00", "error": None})

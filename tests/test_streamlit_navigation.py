@@ -23,6 +23,7 @@ def test_primary_native_pages_cover_the_laboratory_sections():
 
     for title in (
         "Surveillance",
+        "Rendement",
         "Expériences",
         "Modèles",
         "Historique",
@@ -32,7 +33,7 @@ def test_primary_native_pages_cover_the_laboratory_sections():
     ):
         assert f'title="{title}"' in source
     assert 'title="Simulation"' in source
-    assert source.count("st.Page(") == 8
+    assert source.count("st.Page(") == 9
 
 
 def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
@@ -494,7 +495,7 @@ def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
     assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' not in source
     assert "_render_predictions_tab" not in source
     assert "_render_signals_section(" in surveillance
-    assert "_evaluated_predictions_panel(evaluated_view, runs)" in surveillance
+    assert "_evaluated_predictions_panel(evaluated_view, runs, project_root=project_root)" in surveillance
     assert "main, sidebar = st.columns([2.25, 1], gap=\"large\")" in surveillance
     assert "_render_priorities_panel(priority_view.signals)" in surveillance
     assert "Autres prédictions sans signal" in source
@@ -507,28 +508,57 @@ def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
     assert 'expanded=False' in source
 
 
-def test_surveillance_keeps_operational_actions_and_only_production_jobs():
+def test_real_trade_action_is_rendered_before_pending_predictions():
+    source = APP.read_text(encoding="utf-8")
+    panel = source.split("def _evaluated_predictions_panel", 1)[1].split(
+        "def _render_surveillance_page", 1
+    )[0]
+
+    assert panel.index('key="surveillance-evaluated-predictions"') < panel.index(
+        "_render_real_trade_from_prediction(selected_record, project_root=project_root)"
+    ) < panel.index("if not displayed_view.pending.empty:")
+
+
+def test_real_trade_form_uses_prices_with_two_decimals_and_integer_quantity():
+    source = APP.read_text(encoding="utf-8")
+    form = source.split("def _render_real_trade_from_prediction", 1)[1].split(
+        "def _evaluated_predictions_panel", 1
+    )[0]
+
+    assert form.count('format="%.2f"') == 2
+    assert '"Quantité", min_value=1,' in form
+    assert "step=1," in form
+    panel = source.split("def _evaluated_predictions_panel", 1)[1].split(
+        "def _render_surveillance_page", 1
+    )[0]
+    assert "displayed_view.pending" in panel
+
+
+def test_surveillance_uses_one_daily_operational_update_card():
     source = APP.read_text(encoding="utf-8")
     surveillance = source.split("def _render_surveillance_page", 1)[1].split(
         "def _surveillance_page", 1
     )[0]
-    actions = source.split("def _render_production_actions", 1)[1].split(
+    card = source.split("def _render_daily_update_card", 1)[1].split(
         "def _load_evaluated_predictions_view", 1
     )[0]
     job_panel = source.split("def _job_panel", 1)[1].split(
         "def _live_job_panel", 1
     )[0]
 
-    for label in (
-        "Mettre à jour le marché",
-        "Prédictions quotidiennes",
-        "Détecter les signaux",
-        "Évaluer les prédictions",
-        "Exécution complète",
-    ):
-        assert label in actions
-    assert "_render_production_actions(" in surveillance
-    assert 'type="primary" if index == 0 else "secondary"' in actions
+    assert "Mise à jour quotidienne" in card
+    assert card.count('"Mettre à jour RStock"') == 1
+    assert card.count("st.button(") == 1
+    assert "Lance la mise à jour quotidienne de bout en bout." in card
+    assert "JobType.OPERATIONAL_RUN" in card
+    assert "_DAILY_UPDATE_STAGES" in card
+    assert "st.error" in card
+    assert "Mise à jour quotidienne terminée." in card
+    assert "_render_daily_update_card(runs, active_model_count=len(universe.model_ids))" in surveillance
+    assert surveillance.index("_render_daily_update_card") < surveillance.index(
+        "_render_priorities_panel"
+    )
+    assert "_render_production_actions(" not in surveillance
     assert surveillance.count('_live_job_panel(_service(), domain="production")') == 1
     assert 'domain="experiment"' not in surveillance
     assert 'domain="model"' not in surveillance

@@ -101,6 +101,12 @@ from rstock.application.services import (
     SignalService,
 )
 from rstock.application.production_repository import ProductionRepository
+from rstock.application.real_trades import (
+    RealTradeService,
+    filter_performance,
+    performance_kpis,
+    performance_table,
+)
 from rstock.application.model_ui import (
     DEFAULT_MODEL_STATUSES,
     filter_models,
@@ -3562,30 +3568,69 @@ def _render_operational_info(
                 st.caption("Aucune erreur opérationnelle récente.")
 
 
-def _render_production_actions(*, active_model_count: int) -> None:
-    actions = [
-        ("Mettre à jour le marché", JobType.MARKET_UPDATE),
-        ("Prédictions quotidiennes", JobType.DAILY_PREDICTION),
-        ("Détecter les signaux", JobType.DAILY_SCREENING),
-        ("Évaluer les prédictions", JobType.REALIZED_VALIDATION),
-        ("Exécution complète", JobType.OPERATIONAL_RUN),
-    ]
+_DAILY_UPDATE_STAGES = (
+    ("market_update", "Mise à jour du marché"),
+    ("daily_prediction", "Prédictions quotidiennes"),
+    ("screening", "Détection des signaux"),
+    ("realized_validation", "Évaluation des prédictions"),
+)
+
+
+def _render_daily_update_card(
+    runs: list[dict[str, object]], *, active_model_count: int
+) -> None:
+    """Submit and follow the existing full operational workflow in one place."""
+
+    current = next(
+        (
+            run for run in runs
+            if run.get("job_type") == JobType.OPERATIONAL_RUN.value
+            and run.get("status") in {"pending", "running", "failed"}
+        ),
+        None,
+    )
+    latest = next(
+        (run for run in runs if run.get("job_type") == JobType.OPERATIONAL_RUN.value),
+        None,
+    )
     with st.container(border=True):
-        st.caption("Actions de production")
-        action_columns = st.columns([1.2, 1, 1, 1, 1], gap="small")
-        for index, (column, (label, job_type)) in enumerate(
-            zip(action_columns, actions, strict=True)
+        st.subheader("Mise à jour quotidienne")
+        if current is not None:
+            detail = _service().run(str(current["run_id"]))
+            progress = detail["progress"]
+            stage = str(progress.get("stage") or "market_update")
+            stage_index, stage_label = next(
+                (
+                    (index, label)
+                    for index, (name, label) in enumerate(_DAILY_UPDATE_STAGES, start=1)
+                    if name == stage
+                ),
+                (1, "Mise à jour du marché"),
+            )
+            st.caption(f"Étape {stage_index}/4 — {stage_label}")
+            workflow_percent = progress.get("workflow_percent")
+            if workflow_percent is not None:
+                st.progress(float(workflow_percent) / 100.0)
+            if current.get("status") == "failed":
+                st.error(str(current.get("error") or "La mise à jour a échoué."))
+            elif current.get("status") == "running":
+                st.info("Mise à jour quotidienne en cours…")
+            else:
+                st.info("Mise à jour quotidienne en attente…")
+        elif latest is not None and latest.get("status") == "completed":
+            st.success("Mise à jour quotidienne terminée.")
+        if st.button(
+            "Mettre à jour RStock",
+            type="primary",
+            width="stretch",
+            disabled=active_model_count == 0 or (
+                current is not None and current.get("status") in {"pending", "running"}
+            ),
+            key="daily-operational-update",
         ):
-            if column.button(
-                label,
-                disabled=active_model_count == 0,
-                type="primary" if index == 0 else "secondary",
-                width="stretch",
-            ):
-                _submit_operational_job(job_type)
-                # The first rerun installs the conditional polling fragment;
-                # later reruns are driven only while work is active.
-                st.rerun()
+            _submit_operational_job(JobType.OPERATIONAL_RUN)
+            st.rerun()
+        st.caption("Lance la mise à jour quotidienne de bout en bout.")
 
 
 def _load_evaluated_predictions_view(
@@ -3614,9 +3659,78 @@ def _load_evaluated_predictions_view(
     )
 
 
+def _render_real_trade_from_prediction(
+    record: dict[str, object], *, project_root: Path
+) -> None:
+    """Render the explicit, inline real-trade action for one evaluated signal."""
+
+    category = str(record.get("category") or record.get("signal_status") or "")
+    if category != "bullish_signal":
+        st.caption("Une transaction réelle peut être enregistrée uniquement pour un signal haussier.")
+        return
+    prediction_id = str(record.get("prediction_id") or "")
+    if not prediction_id:
+        st.warning("Cette prédiction ne possède pas d’identifiant stable exploitable.")
+        return
+    trades = RealTradeService(project_root)
+    existing = trades.for_prediction(prediction_id)
+    action_label = (
+        "Modifier la transaction réelle" if existing is not None
+        else "Enregistrer une transaction réelle"
+    )
+    state_key = "real-trade-prediction-editor"
+    if st.button(action_label, key=f"real-trade-action-{prediction_id}"):
+        st.session_state[state_key] = prediction_id
+    if st.session_state.get(state_key) != prediction_id:
+        return
+    st.markdown("#### Transaction réelle")
+    st.caption(
+        f"{record.get('prediction_date', '—')} · {record.get('target', '—')} · "
+        f"modèle {record.get('model_id', '—')} · signal Up"
+    )
+    with st.form(f"real-trade-form-{prediction_id}"):
+        columns = st.columns(3)
+        entry = columns[0].number_input(
+            "Prix d’achat", min_value=0.01,
+            value=float(existing.entry_price) if existing else 1.0,
+            step=0.01,
+            format="%.2f",
+        )
+        exit_price = columns[1].number_input(
+            "Prix de vente", min_value=0.01,
+            value=float(existing.exit_price) if existing else 1.0,
+            step=0.01,
+            format="%.2f",
+        )
+        quantity = columns[2].number_input(
+            "Quantité", min_value=1,
+            value=int(existing.quantity) if existing else 1,
+            step=1,
+        )
+        note = st.text_area("Note facultative", value=existing.note or "" if existing else "")
+        saved = st.form_submit_button("Enregistrer la transaction", type="primary")
+        if saved:
+            try:
+                trades.save_from_prediction(
+                    record,
+                    entry_price=entry,
+                    exit_price=exit_price,
+                    quantity=quantity,
+                    note=note,
+                )
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.session_state.pop(state_key, None)
+                st.success("Transaction réelle enregistrée.")
+                st.rerun()
+
+
 def _evaluated_predictions_panel(
     view: EvaluatedPredictionsView,
     runs: list[dict[str, object]],
+    *,
+    project_root: Path,
 ) -> None:
     """Render evaluated predictions, pending predictions and evaluation feedback."""
 
@@ -3669,10 +3783,14 @@ def _evaluated_predictions_panel(
             selected_record = json.loads(
                 displayed_view.technical.iloc[selected[0]].to_json(date_format="iso")
             )
-        if not view.pending.empty:
+        if selected_record is not None:
+            _render_real_trade_from_prediction(selected_record, project_root=project_root)
+        if not displayed_view.pending.empty:
             st.markdown("**Prédictions en attente**")
             st.dataframe(
-                build_predictions_view(view.pending, limit=len(view.pending)).table,
+                build_predictions_view(
+                    displayed_view.pending, limit=len(displayed_view.pending)
+                ).table,
                 hide_index=True,
                 width="stretch",
             )
@@ -3724,14 +3842,13 @@ def _render_surveillance_page(*, polling: bool) -> None:
         last_market=last_market,
         freshness=freshness,
     )
-    _render_production_actions(active_model_count=len(universe.model_ids))
     main, sidebar = st.columns([2.25, 1], gap="large")
     with main:
         _render_signals_section(
             signal_view,
             models,
         )
-        _evaluated_predictions_panel(evaluated_view, runs)
+        _evaluated_predictions_panel(evaluated_view, runs, project_root=project_root)
         with st.expander("Univers opérationnel"):
             st.write(", ".join(universe.symbols) or "Aucun symbole")
             if universe.used_by:
@@ -3740,6 +3857,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
                     hide_index=True, width="stretch",
                 )
     with sidebar:
+        _render_daily_update_card(runs, active_model_count=len(universe.model_ids))
         priority_view = filter_signal_results_view(signal_view, "Aujourd’hui et demain")
         _render_priorities_panel(priority_view.signals)
         _render_operational_info(
@@ -3763,6 +3881,99 @@ def _surveillance_page() -> None:
         _polling_surveillance_page(polling=True)
     else:
         _render_surveillance_page(polling=False)
+
+
+def _render_real_trade_editor(trades: RealTradeService, trade) -> None:
+    with st.form(f"returns-edit-{trade.trade_id}"):
+        columns = st.columns(3)
+        entry = columns[0].number_input("Prix d’achat", min_value=0.01, value=float(trade.entry_price), step=0.01, format="%.2f")
+        exit_price = columns[1].number_input("Prix de vente", min_value=0.01, value=float(trade.exit_price), step=0.01, format="%.2f")
+        quantity = columns[2].number_input("Quantité", min_value=1, value=int(trade.quantity), step=1)
+        note = st.text_area("Note facultative", value=trade.note or "")
+        if st.form_submit_button("Enregistrer les modifications", type="primary"):
+            trades.update(
+                trade.trade_id,
+                entry_price=entry,
+                exit_price=exit_price,
+                quantity=quantity,
+                note=note,
+            )
+            st.session_state.pop("returns-edit-trade", None)
+            st.success("Transaction réelle mise à jour.")
+            st.rerun()
+
+
+def _returns_page() -> None:
+    _page_header("Rendement")
+    st.caption("Analyse des transactions réelles saisies manuellement. Cette page ne modifie pas les modèles.")
+    project_root = st.session_state.lab_config.project_root
+    trades = RealTradeService(project_root)
+    realized = SignalService(project_root).realized_results()
+    table = performance_table(trades.trades(), realized)
+    if table.empty:
+        st.info("Aucune transaction réelle enregistrée.")
+        return
+    dates = pd.to_datetime(table["date"], errors="coerce").dropna()
+    filters = st.columns(4)
+    start = filters[0].date_input("Date de début", value=dates.min().date())
+    end = filters[1].date_input("Date de fin", value=dates.max().date())
+    targets = ["Toutes", *sorted(table["target"].dropna().astype(str).unique())]
+    target = filters[2].selectbox("Cible", targets)
+    models = ["Tous", *sorted(table["model_id"].dropna().astype(str).unique())]
+    model_id = filters[3].selectbox("Modèle / combinaison", models)
+    filtered = filter_performance(table, start=start, end=end, target=target, model_id=model_id)
+    metrics = performance_kpis(filtered)
+    labels = (
+        ("Transactions", metrics["transaction_count"], None),
+        ("P&L total", metrics["total_pnl"], ".2f"),
+        ("Rendement moyen", metrics["mean_return"], ".2%"),
+        ("Rendement médian", metrics["median_return"], ".2%"),
+        ("Taux gagnant", metrics["win_rate"], ".2%"),
+        ("Gain moyen", metrics["average_gain"], ".2f"),
+        ("Perte moyenne", metrics["average_loss"], ".2f"),
+        ("Profit factor", metrics["profit_factor"], ".2f"),
+    )
+    for row in (labels[:4], labels[4:]):
+        for column, (label, value, fmt) in zip(st.columns(4), row, strict=True):
+            rendered = "Indisponible" if value is None else (
+                str(value) if fmt is None else format(float(value), fmt)
+            )
+            column.metric(label, rendered)
+    display = filtered.rename(columns={
+        "date": "Date", "target": "Cible", "model_id": "Modèle / combinaison",
+        "entry_price": "Prix d’achat", "exit_price": "Prix de vente", "quantity": "Quantité",
+        "real_return": "Rendement réel", "gross_pnl": "P&L",
+        "theoretical_return": "Rendement théorique", "real_vs_theoretical": "Écart réel vs théorique",
+        "note": "Note",
+    })
+    visible = [
+        "Date", "Cible", "Modèle / combinaison", "Prix d’achat", "Prix de vente", "Quantité",
+        "Rendement réel", "P&L", "Rendement théorique", "Écart réel vs théorique", "Note",
+    ]
+    event = st.dataframe(display.loc[:, visible], hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="real-trades-grid")
+    selected = _selected_rows(event)
+    if not selected or selected[0] >= len(filtered):
+        return
+    selected_trade_id = str(filtered.iloc[selected[0]]["transaction_id"])
+    selected_trade = next(item for item in trades.trades() if item.trade_id == selected_trade_id)
+    actions = st.columns(2)
+    if actions[0].button("Modifier", key=f"edit-real-trade-{selected_trade_id}"):
+        st.session_state["returns-edit-trade"] = selected_trade_id
+    if actions[1].button("Supprimer / Annuler", key=f"delete-real-trade-{selected_trade_id}"):
+        st.session_state["returns-delete-trade"] = selected_trade_id
+    if st.session_state.get("returns-edit-trade") == selected_trade_id:
+        _render_real_trade_editor(trades, selected_trade)
+    if st.session_state.get("returns-delete-trade") == selected_trade_id:
+        st.warning("Confirmer la suppression de cette transaction réelle ? La prédiction source sera conservée.")
+        confirmation = st.columns(2)
+        if confirmation[0].button("Confirmer la suppression", type="primary", key=f"confirm-delete-real-trade-{selected_trade_id}"):
+            trades.delete(selected_trade_id)
+            st.session_state.pop("returns-delete-trade", None)
+            st.success("Transaction réelle supprimée.")
+            st.rerun()
+        if confirmation[1].button("Annuler", key=f"cancel-delete-real-trade-{selected_trade_id}"):
+            st.session_state.pop("returns-delete-trade", None)
+            st.rerun()
 
 
 def _models_page() -> None:
@@ -4441,6 +4652,7 @@ def _primary_pages() -> list[st.Page]:
         return _PRIMARY_PAGES
     _PRIMARY_PAGES = [
         st.Page(_surveillance_page, title="Surveillance", icon=":material/monitoring:", default=True),
+        st.Page(_returns_page, title="Rendement", icon=":material/attach_money:"),
         st.Page(_models_page, title="Modèles", icon=":material/model_training:"),
         st.Page(_history_page, title="Historique", icon=":material/history:"),
         st.Page(_experiments_page, title="Expériences", icon=":material/science:"),

@@ -10,7 +10,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import pandas as pd
 
@@ -27,6 +27,7 @@ class ProductionRepository:
         self.registry_path = self.root / "model_registry.json"
         self.artifacts_root = self.root / "artifacts"
         self.history_root = self.root / "history"
+        self.real_trades_path = self.root / "real_trades.json"
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -236,3 +237,38 @@ class ProductionRepository:
             finally:
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
+
+    def update_real_trades(
+        self,
+        updater: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """Atomically update the separate user-entered real-trade register."""
+
+        with self.transaction():
+            current: list[dict[str, Any]] = []
+            if self.real_trades_path.exists():
+                payload = json.loads(self.real_trades_path.read_text(encoding="utf-8"))
+                if payload.get("schema_version") != 1 or not isinstance(
+                    payload.get("trades"), list
+                ):
+                    raise ValueError("Unsupported real trade registry schema")
+                current = [dict(item) for item in payload["trades"] if isinstance(item, dict)]
+            updated = updater(current)
+            self._atomic_text(
+                self.real_trades_path,
+                json.dumps(
+                    {"schema_version": 1, "trades": updated},
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+            return [dict(item) for item in updated]
+
+    def read_real_trades(self) -> list[dict[str, Any]]:
+        if not self.real_trades_path.exists():
+            return []
+        payload = json.loads(self.real_trades_path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 1 or not isinstance(payload.get("trades"), list):
+            raise ValueError("Unsupported real trade registry schema")
+        return [dict(item) for item in payload["trades"] if isinstance(item, dict)]

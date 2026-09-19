@@ -593,15 +593,30 @@ def filter_evaluated_predictions_view(
         "Sans signal": "no_signal",
     }
     category = categories.get(status_filter)
-    if category is None or view.technical.empty or "category" not in view.technical:
+    if category is None:
         return view
-    keep = view.technical["category"].astype(str).eq(category).to_numpy()
+    if not view.technical.empty and "category" in view.technical:
+        keep = view.technical["category"].astype(str).eq(category).to_numpy()
+        table = view.table.iloc[keep].reset_index(drop=True)
+        technical = view.technical.iloc[keep].reset_index(drop=True)
+    else:
+        table = view.table
+        technical = view.technical
+    pending = view.pending
+    pending_status = next(
+        (name for name in ("signal_status", "category") if name in pending), None
+    )
+    if pending_status is not None:
+        pending = pending.loc[
+            pending[pending_status].astype(str).eq(category)
+        ].reset_index(drop=True)
+    next_date = None if pending.empty else str(pending["prediction_date"].min())
     return EvaluatedPredictionsView(
-        view.table.iloc[keep].reset_index(drop=True),
-        view.pending,
-        view.next_validation_date,
+        table,
+        pending,
+        next_date,
         view.latest_market_date,
-        view.technical.iloc[keep].reset_index(drop=True),
+        technical,
     )
 
 

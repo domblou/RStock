@@ -23,7 +23,7 @@ from rstock.application.production_services import (
 )
 from rstock.application.repository import RunRepository, utc_now
 from rstock.application.surveillance import build_evaluated_predictions_view
-from rstock.application.worker import execute_run
+from rstock.application.worker import WORKFLOW_PHASES, execute_run
 from rstock.application.workflows import WorkflowRegistry, _market_update, _operational_run
 from rstock.config import DEFAULT_CONFIG
 from rstock.progress import CancellationRequested
@@ -834,6 +834,17 @@ def test_all_operational_workflows_are_registered():
         JobType.REALIZED_VALIDATION,
         JobType.OPERATIONAL_RUN,
     } <= set(handlers)
+
+
+def test_operational_run_keeps_the_four_daily_stages_in_order():
+    phases = [name for name, _weight in WORKFLOW_PHASES[JobType.OPERATIONAL_RUN]]
+
+    assert phases[:4] == [
+        "market_update",
+        "daily_prediction",
+        "screening",
+        "realized_validation",
+    ]
 
 
 def test_cli_derives_production_training_symbols_from_candidate(

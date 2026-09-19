@@ -863,6 +863,14 @@ production de nouveaux signaux.
 
 Cette partie devient progressivement la source la plus importante pour mesurer la performance opérationnelle réelle.
 
+## Transactions réelles et rendement
+
+Depuis une prédiction évaluée portant un signal haussier, l’action **Enregistrer une transaction réelle** permet de saisir le prix d’achat, le prix de vente, la quantité et une note facultative. La date de la transaction est celle du signal ; cette V1 intraday ne demande pas de dates d’entrée ou de sortie distinctes.
+
+Les transactions sont enregistrées séparément dans `production/real_trades.json`. Elles pointent vers l’identifiant immuable de la prédiction et la version du modèle, sans modifier les résultats scientifiques, les modèles ou les runs. Une même prédiction ne possède qu’une transaction réelle : une nouvelle saisie la met à jour. La suppression retire uniquement cette transaction, de sorte que le signal source peut ensuite être enregistré à nouveau.
+
+La page **Rendement** présente les transactions réellement saisies, leurs KPI, les filtres temporels, et la comparaison avec le rendement théorique lorsque le résultat réalisé du signal est encore disponible. Cette vue est distincte du simulateur et ne participe jamais à l’entraînement, à la calibration ou à la promotion.
+
 `Prédictions évaluées` répond à « Qu’est-ce qui s’est réellement produit? »,
 tandis que `Historique` répond à « Qu’auraient fait mes modèles actifs actuels
 sur cette période passée? ».
