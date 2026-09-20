@@ -69,6 +69,10 @@ _PURGE_FILES: dict[JobType, tuple[str, ...]] = {
         "results/sampled_combinations.csv",
         "results/threshold_diagnostics_by_set.json",
     ),
+    JobType.FIXED_CANDIDATE_EVALUATION: (
+        "results/holdout_predictions.csv",
+        "results/sampled_combinations.csv",
+    ),
 }
 
 _ESSENTIAL_FILES: dict[JobType, tuple[str, ...]] = {
@@ -98,6 +102,11 @@ _ESSENTIAL_FILES: dict[JobType, tuple[str, ...]] = {
         "results/threshold_metrics_by_set.csv",
         "results/run_configuration.json",
         "results/sampling_manifest.json",
+    ),
+    JobType.FIXED_CANDIDATE_EVALUATION: (
+        "results/selected_thresholds_by_set.json",
+        "results/holdout_metrics.csv",
+        "results/run_configuration.json",
     ),
 }
 
@@ -172,7 +181,11 @@ class RunStorageService:
             return PurgeEligibility(
                 False, "Seuls les runs terminés peuvent être purgés."
             )
-        if job_type not in {*_PURGE_FILES, JobType.END_TO_END}:
+        if job_type not in {
+            *_PURGE_FILES,
+            JobType.END_TO_END,
+            JobType.FORCED_CANDIDATE_VALIDATION,
+        }:
             return PurgeEligibility(False, "Ce type de run n’est pas purgeable.")
         if self._worker_is_active(run_id, status):
             return PurgeEligibility(False, "Un worker traite encore ce run.")

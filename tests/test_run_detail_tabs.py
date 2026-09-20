@@ -57,6 +57,7 @@ def test_each_end_to_end_scientific_tab_targets_the_expected_child_stage():
         "child_xgboost": "xgboost_calibration",
         "child_threshold_parameters": "threshold_parameter_calibration",
         "child_thresholds": "threshold_calibration",
+        "child_fixed_candidate_evaluation": "fixed_candidate_evaluation",
     }
 
 

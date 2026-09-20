@@ -152,12 +152,14 @@ class AutoPromotionRunner:
         walk_forward_run_id: str,
         xgboost_calibration_run_id: str,
         threshold_calibration_run_id: str,
+        promotion_provenance: dict[str, object] | None = None,
     ) -> None:
         self.repository = repository
         self.root_run_id = root_run_id
         self.walk_forward_run_id = walk_forward_run_id
         self.xgboost_calibration_run_id = xgboost_calibration_run_id
         self.threshold_calibration_run_id = threshold_calibration_run_id
+        self.promotion_provenance = dict(promotion_provenance or {})
 
     @property
     def checkpoint_path(self) -> Path:
@@ -182,16 +184,7 @@ class AutoPromotionRunner:
         return source_digests, _promotion_guidance(threshold_results, selected)
 
     def prepare(self) -> dict[str, Any]:
-        source_digests, guidance = self._source_values()
-        candidate_sets = sorted(
-            set(
-                guidance.loc[
-                    guidance["Statut promotion"] == "Candidat", "Combinaison"
-                ].astype(str)
-            )
-            if not guidance.empty
-            else set()
-        )
+        source_digests, guidance, candidate_sets = self.source_candidates()
         identity = {
             "schema_version": PROMOTION_SCHEMA_VERSION,
             "policy_version": PROMOTION_POLICY_VERSION,
@@ -247,6 +240,21 @@ class AutoPromotionRunner:
         state.update(_counts(state))
         self.repository.write_json(self.root_run_id, PROMOTION_CHECKPOINT, state)
         return state
+
+    def source_candidates(self) -> tuple[dict[str, str | None], pd.DataFrame, list[str]]:
+        """Return the canonical promotion population without persisting a plan."""
+
+        source_digests, guidance = self._source_values()
+        candidate_sets = sorted(
+            set(
+                guidance.loc[
+                    guidance["Statut promotion"] == "Candidat", "Combinaison"
+                ].astype(str)
+            )
+            if not guidance.empty
+            else set()
+        )
+        return source_digests, guidance, candidate_sets
 
     def _load(self) -> dict[str, Any]:
         return self.repository.read_json(self.root_run_id, PROMOTION_CHECKPOINT)
@@ -311,6 +319,7 @@ class AutoPromotionRunner:
                     xgboost_calibration_run=self.xgboost_calibration_run_id,
                     threshold_calibration_run=self.threshold_calibration_run_id,
                     selected_threshold_direction="Up",
+                    promotion_provenance=self.promotion_provenance,
                 )
                 state = self._persist_candidate(
                     set_name,

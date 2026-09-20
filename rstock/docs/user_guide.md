@@ -991,9 +991,17 @@ La synthèse permet de repérer une étape échouée ou en attente; une reprise
 conserve les identifiants réservés, réutilise les checkpoints disponibles et ne
 recalcule pas les étapes déjà terminées.
 
-La validation temporelle optionnelle lance, après la chaîne de référence offset
-0, un second End-to-end autonome offset 63. Les deux chaînes utilisent le même
-snapshot scientifique, sauf cet offset et les options du child.
+La validation temporelle optionnelle utilise trois passes. Après la chaîne de
+référence offset 0, un second End-to-end autonome offset 63 redécouvre les
+candidats avec son préfiltre normal. Un troisième child, **Revalidation des
+candidats de référence**, reçoit ensuite exactement les candidats scientifiques
+de la référence et les réévalue sur le même offset 63. Ce troisième child
+n’exécute ni préfiltre, ni Top N, ni génération globale de combinaisons; à partir
+du Walk-forward, il conserve l’identité `(Set, Direction)`, les hyperparamètres
+XGBoost et le seuil sélectionné dans la référence. Le modèle est réentraîné sur
+les données offset 63 avec ces hyperparamètres figés, puis le seuil de référence
+est appliqué directement au holdout. Cette passe ne relance ni calibration
+XGBoost, ni calibration des paramètres de seuil, ni sélection de seuil.
 
 Après leur achèvement, RStock compare automatiquement quatre gates : rendement
 des candidats, AUC holdout médiane, avantage de précision par rapport à la
@@ -1002,11 +1010,18 @@ sont construits par bootstrap de blocs de dates déterministe. `passed`, `failed
 `inconclusive` et `invalid` restent des états distincts; aucun score composite
 ne produit aucun score composite. La largeur maximale d IC s applique seulement à la précision.
 
-La promotion automatique reste indépendante : sans validation temporelle, son
-comportement historique est inchangé; avec validation, elle est exécutée seulement si
-la comparaison est `passed`, et ne promeut que les candidats de la référence.
+Sans validation temporelle, la promotion automatique conserve son comportement
+historique après la chaîne normale. Avec validation temporelle, aucune promotion
+n’a lieu après la référence : elle est différée jusqu’à la fin de la troisième
+passe, exige une comparaison temporelle `passed`, et ne considère que les
+candidats redevenus `Candidat` avec le modèle et le seuil de référence dans la
+revalidation forcée.
 La vue **Validation temporelle** conserve la décision, les paramètres, les
-digests et les quatre gates, y compris après purge des artefacts lourds.
+digests et les quatre gates, puis présente la revalidation candidat par candidat.
+Une revalidation historique peut être lancée manuellement depuis cet onglet.
+Elle crée un job dédié **Revalidation forcée des candidats**, distinct d’un
+End-to-end, avec seulement un Walk-forward ciblé et une évaluation au seuil figé.
+Ce diagnostic ne modifie ni le run historique, ni la production, ni la promotion.
 
 ---
 

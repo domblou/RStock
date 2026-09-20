@@ -163,6 +163,36 @@ class RunService:
                 raise
             return SubmissionResult(run_id, True)
 
+    def start_historical_forced_validation(
+        self, parent_run_id: str
+    ) -> SubmissionResult:
+        """Launch the one reserved diagnostic pass-three child of a historical run."""
+
+        from .end_to_end import materialize_historical_forced_candidate_validation
+
+        with self._submission_lock():
+            run_id, _specification, created = (
+                materialize_historical_forced_candidate_validation(
+                    self.repository, parent_run_id
+                )
+            )
+            if not created:
+                return SubmissionResult(run_id, False)
+            try:
+                pid = self.backend.launch(
+                    self.repository.root,
+                    run_id,
+                    self.max_concurrent_heavy_jobs,
+                )
+                status = self.repository.status(run_id)
+                status["launcher_pid"] = pid
+                self.repository.write_json(run_id, "status.json", status)
+            except Exception as error:
+                self.repository.append_log(run_id, f"Worker launch failed: {error}")
+                self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
+                raise
+            return SubmissionResult(run_id, True)
+
     def cancel(self, run_id: str) -> dict[str, object]:
         status = self.repository.request_cancellation(run_id)
         for child_run_id in self.repository.list_children(run_id):
@@ -190,6 +220,7 @@ class RunService:
                 JobType.WALK_FORWARD,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION,
                 JobType.END_TO_END,
+                JobType.FORCED_CANDIDATE_VALIDATION,
             }
             if spec.job_type not in resumable_types:
                 raise ValueError(
@@ -397,8 +428,14 @@ class RunService:
         pipeline_stages = None
         try:
             from .end_to_end import load_pipeline_manifest
+            from .forced_candidate_validation import load_forced_validation_manifest
 
-            pipeline = load_pipeline_manifest(self.repository, run_id)
+            current_spec = self.repository.load_spec(run_id)
+            pipeline = (
+                load_forced_validation_manifest(self.repository, run_id)
+                if current_spec.job_type is JobType.FORCED_CANDIDATE_VALIDATION
+                else load_pipeline_manifest(self.repository, run_id)
+            )
             if pipeline is not None:
                 pipeline_stages = []
                 for item in pipeline["stages"]:

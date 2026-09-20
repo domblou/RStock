@@ -26,6 +26,7 @@ from rstock.application.runner import ProgressReporter, RunService
 from rstock.application.worker import RunLease, SlotLease, execute_run
 from rstock.application.workflows import (
     WorkflowRegistry,
+    _fixed_candidate_evaluation,
     _prepared_experiment,
     _require_exploitable_prefilter,
     _resumable_walk_forward,
@@ -77,8 +78,24 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     assert restored.config.xgb_seed == 987
     snapshot = repository.read_json(run_id, "config.json")
     assert snapshot["schema_version"] == 1
-    assert snapshot["pipeline_version"] == 1
+    assert snapshot["pipeline_version"] == 2
     assert snapshot["calibration_sampling_policy_version"] == 2
+
+
+def test_historical_snapshot_without_forced_sets_remains_unforced(tmp_path):
+    spec = _spec(tmp_path)
+    snapshot = spec.to_dict()
+    snapshot.pop("forced_symbol_sets")
+    snapshot.pop("forced_candidate_identities")
+    snapshot.pop("frozen_selected_thresholds_by_set")
+    snapshot.pop("frozen_selected_thresholds_sha256")
+    snapshot["pipeline_version"] = 1
+    restored = ExperimentSpec.from_dict(snapshot)
+    assert restored.forced_symbol_sets is None
+    assert restored.forced_candidate_identities is None
+    assert restored.frozen_selected_thresholds_by_set is None
+    assert restored.frozen_selected_thresholds_sha256 is None
+    assert restored.pipeline_version == 1
 
 
 def test_phase_five_enables_walk_forward_batch_and_end_to_end():
@@ -1242,8 +1259,228 @@ def test_resumable_workflow_reuses_prepared_and_generated_snapshots(monkeypatch,
     assert summary["eligible_combinations"] == 1
 
 
+def test_forced_symbol_sets_bypass_prefilter_top_n_and_global_generation(monkeypatch, tmp_path):
+    run = tmp_path / "runs" / "forced-fixture"
+    output = run / "_working"
+    prepared = pd.DataFrame(index=pd.bdate_range("2026-01-01", periods=12))
+    captured = {}
+    spec = replace(
+        _spec(tmp_path, predictor_prefilter_enabled=True),
+        forced_symbol_sets=(("AAA", "BBB"),),
+        target_symbols=("AAA",),
+        context_symbols=("BBB",),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows._prepared_inputs",
+        lambda *_args, **_kwargs: (prepared, ["AAA", "BBB"], ["AAA"], {"AAA": "XNYS"}),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_prefilter_walk_forward",
+        lambda *_args, **_kwargs: pytest.fail("prefilter must not execute"),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.generate_symbol_sets",
+        lambda *_args, **_kwargs: pytest.fail("global generation must not execute"),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.generate_target_symbol_sets",
+        lambda *_args, **_kwargs: pytest.fail("target generation must not execute"),
+    )
+
+    def streamed(_prepared, generated, *_args, **_kwargs):
+        captured["sets"] = generated.copy()
+        output.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            aggregate_global=pd.DataFrame([{"Sets": 1}]),
+            qualification=pd.DataFrame([{"Eligible": True}]),
+            run_configuration={}, telemetry={},
+        )
+
+    monkeypatch.setattr("rstock.application.workflows.run_streamed_walk_forward", streamed)
+    summary = _resumable_walk_forward(spec, output, None, None)
+
+    assert captured["sets"].to_dict("records") == [{"V0": "AAA", "V1": "BBB"}]
+    assert summary["eligible_combinations"] == 1
+
+
+def test_fixed_candidate_evaluation_retrains_with_reference_parameters_and_threshold(
+    monkeypatch, tmp_path
+):
+    prepared = pd.DataFrame(
+        {"value": range(10)}, index=pd.bdate_range("2026-01-01", periods=10)
+    )
+    generated = pd.DataFrame([{"V0": "AAA", "V1": "BBB"}])
+    reference_thresholds = {
+        '["AAA","BBB"]': {
+            "Up": {"status": "selected", "threshold": 0.61},
+            "Down": {"status": "selected", "threshold": 0.39},
+        }
+    }
+    spec = replace(
+        _spec(tmp_path, job_type=JobType.FIXED_CANDIDATE_EVALUATION),
+        config=replace(
+            DEFAULT_CONFIG,
+            project_root=tmp_path,
+            walk_forward_end_offset_sessions=63,
+            final_holdout_size=2,
+        ),
+        source_walk_forward_run="forced-wf",
+        source_xgboost_calibration_run="reference-xgb",
+        frozen_xgboost_parameters={
+            "Up": {"max_depth": 2},
+            "Down": {"max_depth": 3},
+        },
+        source_threshold_parameter_calibration_run="reference-threshold-parameters",
+        frozen_threshold_calibration_parameters={
+            "threshold_calibration_min_signals_per_window": 5
+        },
+        source_threshold_calibration_run="reference-thresholds",
+        forced_candidate_identities=(('["AAA","BBB"]', "Up"),),
+        frozen_selected_thresholds_by_set=reference_thresholds,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "rstock.application.workflows._prepared_calibration_population",
+        lambda *_args, **_kwargs: (prepared, generated, True),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows._resolve_threshold_xgboost_parameters",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            up="reference-up", down="reference-down", source="frozen_snapshot"
+        ),
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows._resolve_threshold_calibration_config",
+        lambda *_args, **_kwargs: (spec.config, "frozen_snapshot"),
+    )
+
+    def generate(development, holdout, sets, config, **kwargs):
+        captured["development"] = development.copy()
+        captured["holdout"] = holdout.copy()
+        captured["sets"] = sets.copy()
+        captured["parameters"] = kwargs["parameters_by_direction"]
+        captured["offset"] = config.walk_forward_end_offset_sessions
+        return pd.DataFrame(
+            [
+                {
+                    "Set": '["AAA","BBB"]',
+                    "Observation": "AAA",
+                    "Direction": direction,
+                    "Window": 0,
+                    "TrainEnd": development.index.max(),
+                    "Date": holdout.index[0],
+                    "Probability": probability,
+                    "Target": 1,
+                    "IntradayReturn": 0.01,
+                    "MFE": 0.02,
+                    "MAE": -0.01,
+                }
+                for direction, probability in (("Up", 0.70), ("Down", 0.30))
+            ]
+        )
+
+    def apply(predictions, selected):
+        captured["selected"] = selected
+        result = predictions.copy()
+        result["Threshold"] = 0.61
+        result["Prediction"] = 1
+        return result
+
+    monkeypatch.setattr(
+        "rstock.application.workflows.generate_holdout_probabilities", generate
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.apply_frozen_thresholds_by_set", apply
+    )
+    monkeypatch.setattr(
+        "rstock.application.workflows.evaluate_applied_thresholds",
+        lambda predictions, _config: pd.DataFrame(
+            [
+                {
+                    "Set": predictions.iloc[0]["Set"],
+                    "Observation": "AAA",
+                    "Direction": "Up",
+                    "Threshold": predictions.iloc[0]["Threshold"],
+                    "SignalCount": 1,
+                }
+            ]
+        ),
+    )
+    for forbidden in (
+        "run_controlled_calibration",
+        "run_threshold_parameter_calibration",
+        "run_controlled_threshold_calibration",
+    ):
+        monkeypatch.setattr(
+            f"rstock.application.workflows.{forbidden}",
+            lambda *_args, _name=forbidden, **_kwargs: pytest.fail(
+                f"{_name} must not execute"
+            ),
+        )
+
+    output = tmp_path / "fixed-results"
+    summary = _fixed_candidate_evaluation(spec, output, None, None)
+
+    assert captured["parameters"] == {
+        "Up": "reference-up",
+        "Down": "reference-down",
+    }
+    assert captured["selected"] == reference_thresholds
+    assert captured["offset"] == 63
+    assert list(pd.read_csv(output / "holdout_predictions.csv")["Direction"]) == [
+        "Up"
+    ]
+    assert pd.read_csv(output / "holdout_metrics.csv").iloc[0]["Threshold"] == 0.61
+    configuration = json.loads(
+        (output / "run_configuration.json").read_text(encoding="utf-8")
+    )
+    assert configuration["xgboost_calibration_performed"] is False
+    assert configuration["threshold_parameter_calibration_performed"] is False
+    assert configuration["threshold_selection_performed"] is False
+    assert summary["protocol"] == "fixed_reference_model_and_threshold_evaluation_v1"
+
+
 def test_services_import_without_streamlit(monkeypatch):
     monkeypatch.setitem(sys.modules, "streamlit", None)
     module = importlib.import_module("rstock.application.services")
     importlib.reload(module)
     assert module.ExperimentService is not None
+
+
+def test_forced_walk_forward_progress_accepts_candidate_loading_phase(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    spec = replace(
+        _spec(tmp_path),
+        forced_symbol_sets=(("AAA", "BBB"),),
+    )
+    run_id = repository.create(spec)
+
+    def workflow(_specification, output, progress_callback, _cancellation_check):
+        progress_callback(
+            ProgressEvent(
+                stage="forced_candidate_loading",
+                details={"phase_event": "started"},
+            )
+        )
+        progress_callback(
+            ProgressEvent(
+                stage="forced_candidate_loading",
+                details={"phase_event": "completed", "combinations": 1},
+            )
+        )
+        output.mkdir(parents=True, exist_ok=True)
+        return {"job_type": JobType.WALK_FORWARD.value}
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.WALK_FORWARD: workflow}),
+    )
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    assert any(
+        item["name"] == "forced_candidate_loading"
+        and item["status"] == "completed"
+        for item in repository.progress(run_id)["phase_history"]
+    )

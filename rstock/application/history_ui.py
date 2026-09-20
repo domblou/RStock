@@ -13,6 +13,8 @@ import pandas as pd
 EXPERIMENT_JOB_TYPES = frozenset({
     "walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
     "threshold_calibration", "end_to_end",
+    "fixed_candidate_evaluation",
+    "forced_candidate_validation",
 })
 PRODUCTION_JOB_TYPES = frozenset({
     "production_training", "market_update", "daily_prediction",
@@ -24,6 +26,8 @@ JOB_LABELS = {
     "xgboost_calibration": "Calibration XGBoost",
     "threshold_parameter_calibration": "Calibration des paramètres de seuils",
     "threshold_calibration": "Calibration des seuils",
+    "fixed_candidate_evaluation": "Évaluation des candidats à seuil figé",
+    "forced_candidate_validation": "Revalidation forcée des candidats",
     "production_training": "Entraînement production",
     "market_update": "Mise à jour marché",
     "daily_prediction": "Prédictions quotidiennes",
@@ -211,6 +215,14 @@ def _summary_text(
             return f"Configuration gagnante : {selected.get('configuration', '—')}"
         return "Calibration des paramètres terminée"
     description = configuration.get("run_description")
+    if (
+        job_type in {"forced_candidate_validation", "fixed_candidate_evaluation"}
+        and configuration.get("historical_forced_validation_backfill") is True
+    ):
+        # Existing immutable snapshots may contain the pre-UTF-8-fix label.
+        # Keep their scientific fingerprint intact while displaying the canonical
+        # persisted meaning of this system-generated description.
+        description = "Revalidation des candidats de référence"
     if isinstance(description, str) and description.strip():
         return f"{JOB_LABELS.get(job_type, job_type)} — {description.strip()}"
     if job_type == "market_update":

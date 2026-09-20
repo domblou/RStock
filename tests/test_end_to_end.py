@@ -25,11 +25,18 @@ from rstock.application.end_to_end import (
     persist_or_validate_pipeline_manifest,
 )
 from rstock.application.repository import RunRepository
+from rstock.application.forced_candidate_validation import (
+    load_forced_validation_manifest,
+)
 from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_services import PromotionService
 from rstock.application.runner import RunService
 from rstock.application.worker import execute_run
-from rstock.application.workflows import WorkflowRegistry, _end_to_end
+from rstock.application.workflows import (
+    WorkflowRegistry,
+    _end_to_end,
+    _forced_candidate_validation,
+)
 from rstock.config import DEFAULT_CONFIG
 from rstock.progress import check_cancellation
 
@@ -86,9 +93,8 @@ def _fake_registry(
                                 "Observation", row["Set"].split("<-", 1)[0]
                             ),
                             "Predictors": row.get(
-                                "Predictors",
-                                json.dumps(row["Set"].split("<-", 1)[1].split("+")),
-                            ),
+                                "Predictors"
+                            ) or json.dumps(row["Set"].split("<-", 1)[1].split("+")),
                             "Eligible": True,
                             "ROCAUCMedian": 0.65,
                         }
@@ -176,6 +182,10 @@ def _fake_registry(
     return WorkflowRegistry(
         {
             JobType.END_TO_END: _end_to_end,
+            JobType.FORCED_CANDIDATE_VALIDATION: _forced_candidate_validation,
+            JobType.FIXED_CANDIDATE_EVALUATION: handler(
+                JobType.FIXED_CANDIDATE_EVALUATION
+            ),
             **{
                 job_type: handler(job_type)
                 for _, job_type, _ in SCIENTIFIC_STAGES
@@ -305,6 +315,159 @@ def test_end_to_end_temporal_validation_runs_a_real_child_pipeline(tmp_path):
     assert load_pipeline_manifest(repository, child_id)["temporal_validation_enabled"] is False
 
 
+def test_three_pass_child_freezes_exact_reference_candidates_and_relations(monkeypatch, tmp_path):
+    class FakeTemporalValidationRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def execute(self):
+            return {"final_status": "passed"}
+
+    monkeypatch.setattr(end_to_end, "TemporalValidationRunner", FakeTemporalValidationRunner)
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path, temporal_validation_enabled=True))
+    rows = [
+        {"Set": '["DDOG","REGN"]', "Observation": "DDOG", "Predictors": '["REGN"]'},
+        {"Set": '["VLO","TMO","MMM"]', "Observation": "VLO", "Predictors": '["TMO","MMM"]'},
+    ]
+    calls = Counter()
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=_fake_registry(repository, calls, promotion_rows=rows),
+    )
+
+    manifest = load_pipeline_manifest(repository, run_id)
+    temporal_id = next(item["child_run_id"] for item in manifest["stages"] if item["stage_key"] == TEMPORAL_VALIDATION_STAGE)
+    forced_id = next(item["child_run_id"] for item in manifest["stages"] if item["stage_key"] == end_to_end.FORCED_CANDIDATE_VALIDATION_STAGE)
+    forced_spec = repository.load_spec(forced_id)
+    metadata = repository.run_metadata(forced_id)
+    assert forced_spec.job_type is JobType.FORCED_CANDIDATE_VALIDATION
+    assert forced_spec.forced_symbol_sets == (("DDOG", "REGN"), ("VLO", "TMO", "MMM"))
+    assert forced_spec.forced_candidate_identities == (
+        ('["DDOG","REGN"]', "Up"),
+        ('["VLO","TMO","MMM"]', "Up"),
+    )
+    assert forced_spec.frozen_xgboost_parameters["Up"]["max_depth"] == 2
+    assert forced_spec.frozen_xgboost_parameters["Down"]["max_depth"] == 3
+    assert forced_spec.frozen_xgboost_parameters["Up"]["eta"] == 0.05
+    assert forced_spec.frozen_xgboost_parameters["Up"]["num_boost_round"] == 20
+    assert forced_spec.frozen_selected_thresholds_by_set == {
+        '["DDOG","REGN"]': {
+            "Up": {"status": "selected", "threshold": 0.62},
+            "Down": {"status": "selected", "threshold": 0.38},
+        },
+        '["VLO","TMO","MMM"]': {
+            "Up": {"status": "selected", "threshold": 0.62},
+            "Down": {"status": "selected", "threshold": 0.38},
+        },
+    }
+    assert forced_spec.config.walk_forward_end_offset_sessions == 63
+    assert metadata.run_role is RunRole.FORCED_CANDIDATE_VALIDATION
+    assert metadata.run_purpose is RunPurpose.FORCED_CANDIDATE_VALIDATION
+    assert metadata.parent_run_id == run_id
+    assert metadata.reference_run_id == run_id
+    assert metadata.validation_run_id == temporal_id
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    forced_manifest = load_forced_validation_manifest(repository, forced_id)
+    assert [item["stage_key"] for item in forced_manifest["stages"]] == [
+        "walk_forward",
+        "fixed_candidate_evaluation",
+    ]
+    assert calls[JobType.XGBOOST_CALIBRATION] == 2
+    assert calls[JobType.THRESHOLD_PARAMETER_CALIBRATION] == 2
+    assert calls[JobType.THRESHOLD_CALIBRATION] == 2
+    assert calls[JobType.FIXED_CANDIDATE_EVALUATION] == 1
+    fixed_id = next(
+        item["child_run_id"]
+        for item in forced_manifest["stages"]
+        if item["stage_key"] == "fixed_candidate_evaluation"
+    )
+    fixed_spec = repository.load_spec(fixed_id)
+    assert fixed_spec.frozen_xgboost_parameters == (
+        forced_spec.frozen_xgboost_parameters
+    )
+    assert fixed_spec.frozen_selected_thresholds_by_set == (
+        forced_spec.frozen_selected_thresholds_by_set
+    )
+    assert fixed_spec.config.walk_forward_end_offset_sessions == 63
+
+
+def test_three_pass_resume_reuses_forced_walk_forward_after_fixed_evaluation_failure(
+    monkeypatch, tmp_path
+):
+    class FakeTemporalValidationRunner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def execute(self):
+            return {"final_status": "passed"}
+
+    monkeypatch.setattr(end_to_end, "TemporalValidationRunner", FakeTemporalValidationRunner)
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(
+        repository, _spec(tmp_path, temporal_validation_enabled=True)
+    )
+    calls = Counter()
+    registry = _fake_registry(
+        repository,
+        calls,
+        fail_once=JobType.FIXED_CANDIDATE_EVALUATION,
+        promotion_rows=[
+            {
+                "Set": '["AAA","BBB"]',
+                "Observation": "AAA",
+                "Predictors": '["BBB"]',
+            }
+        ],
+    )
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.FAILED.value
+    outer = load_pipeline_manifest(repository, run_id)
+    forced_id = next(
+        item["child_run_id"]
+        for item in outer["stages"]
+        if item["stage_key"] == end_to_end.FORCED_CANDIDATE_VALIDATION_STAGE
+    )
+    forced_manifest = load_forced_validation_manifest(repository, forced_id)
+    forced_walk_id = next(
+        item["child_run_id"]
+        for item in forced_manifest["stages"]
+        if item["stage_key"] == "walk_forward"
+    )
+    fixed_id = next(
+        item["child_run_id"]
+        for item in forced_manifest["stages"]
+        if item["stage_key"] == "fixed_candidate_evaluation"
+    )
+    assert repository.status(forced_walk_id)["status"] == "completed"
+    assert repository.status(fixed_id)["status"] == "failed"
+
+    _resume(repository, run_id, registry)
+
+    assert repository.status(run_id)["status"] == JobStatus.COMPLETED.value
+    assert calls[JobType.WALK_FORWARD] == 3
+    assert calls[JobType.XGBOOST_CALIBRATION] == 2
+    assert calls[JobType.THRESHOLD_PARAMETER_CALIBRATION] == 2
+    assert calls[JobType.THRESHOLD_CALIBRATION] == 2
+    assert calls[JobType.FIXED_CANDIDATE_EVALUATION] == 2
+
+
+def test_historical_pipeline_v1_keeps_two_pass_shape(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    spec = replace(_spec(tmp_path, temporal_validation_enabled=True), pipeline_version=1)
+    run_id = _create_parent(repository, spec)
+    manifest = build_pipeline_manifest(repository, run_id, spec)
+    keys = [item["stage_key"] for item in manifest["stages"]]
+    assert end_to_end.FORCED_CANDIDATE_VALIDATION_STAGE not in keys
+    assert manifest["stages"][-1]["dependency_run_ids"] == [
+        next(item["child_run_id"] for item in manifest["stages"] if item["stage_key"] == "threshold_calibration")
+    ]
+
+
 def test_temporal_validation_rejects_nonzero_reference_offset_and_allows_auto_promotion(tmp_path):
     with pytest.raises(ValueError, match="offset 0"):
         replace(
@@ -355,7 +518,7 @@ def test_temporal_validation_blocks_promotion_unless_comparison_passes(
     assert ProductionRepository(tmp_path).models() == []
 
 
-def test_temporal_validation_passed_promotes_reference_only(monkeypatch, tmp_path):
+def test_temporal_validation_passed_promotes_forced_revalidation_only(monkeypatch, tmp_path):
     class FakeTemporalValidationRunner:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -384,10 +547,30 @@ def test_temporal_validation_passed_promotes_reference_only(monkeypatch, tmp_pat
 
     models = ProductionRepository(tmp_path).models()
     assert len(models) == 1
-    assert (
-        repository.run_metadata(models[0].source_threshold_calibration_run).parent_run_id
-        == run_id
+    threshold_parent = repository.run_metadata(
+        models[0].source_threshold_calibration_run
+    ).parent_run_id
+    forced = next(
+        item for item in load_pipeline_manifest(repository, run_id)["stages"]
+        if item["stage_key"] == end_to_end.FORCED_CANDIDATE_VALIDATION_STAGE
     )
+    reference_xgboost = next(
+        item["child_run_id"]
+        for item in load_pipeline_manifest(repository, run_id)["stages"]
+        if item["stage_key"] == "xgboost_calibration"
+    )
+    assert threshold_parent == forced["child_run_id"]
+    assert models[0].source_xgboost_calibration_run == reference_xgboost
+    assert models[0].up_threshold == 0.62
+    assert models[0].training_metadata["validation_provenance"] == {
+        "reference_run_id": run_id,
+        "temporal_validation_run_id": next(
+            item["child_run_id"] for item in load_pipeline_manifest(repository, run_id)["stages"]
+            if item["stage_key"] == TEMPORAL_VALIDATION_STAGE
+        ),
+        "forced_candidate_validation_run_id": forced["child_run_id"],
+        "promotion_policy_version": 1,
+    }
     assert (repository.run_directory(run_id) / PROMOTION_CHECKPOINT).is_file()
 
 
@@ -740,6 +923,63 @@ def test_temporal_parent_guard_runs_before_manifest_or_children(tmp_path):
         repository.run_directory(run_id) / "orchestration" / "pipeline.json"
     ).exists()
     assert not (repository.run_directory(run_id) / "results").exists()
+
+
+def test_historical_failed_end_to_end_backfill_reserves_new_dedicated_job(
+    monkeypatch, tmp_path
+):
+    repository = RunRepository(tmp_path / "runs")
+    parent_id = _create_parent(repository, _spec(tmp_path))
+    expected_description = "Revalidation des candidats de r\u00e9f\u00e9rence"
+    repository.transition(parent_id, JobStatus.RUNNING)
+    repository.transition(parent_id, JobStatus.COMPLETED)
+    dedicated = replace(
+        _spec(tmp_path),
+        job_type=JobType.FORCED_CANDIDATE_VALIDATION,
+        forced_symbol_sets=(("AAA", "BBB"),),
+        historical_forced_validation_backfill=True,
+        auto_promote_candidates=False,
+        run_description=expected_description,
+    )
+    legacy = replace(dedicated, job_type=JobType.END_TO_END)
+    legacy_id = repository.create(legacy)
+    repository.transition(legacy_id, JobStatus.RUNNING)
+    repository.transition(legacy_id, JobStatus.FAILED, error="legacy failure")
+    (repository.run_directory(parent_id) / "orchestration").mkdir(exist_ok=True)
+    repository.write_json(
+        parent_id,
+        end_to_end.HISTORICAL_FORCED_VALIDATION_CHECKPOINT,
+        {
+            "schema_version": 1,
+            "parent_run_id": parent_id,
+            "child_run_id": legacy_id,
+            "expected_fingerprint": legacy.fingerprint,
+            "created_at": "2026-09-20T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        end_to_end,
+        "_historical_forced_validation_spec",
+        lambda *_args: (dedicated, "offset-63"),
+    )
+
+    new_id, new_spec, created = (
+        end_to_end.materialize_historical_forced_candidate_validation(
+            repository, parent_id
+        )
+    )
+
+    checkpoint = repository.read_json(
+        parent_id, end_to_end.HISTORICAL_FORCED_VALIDATION_CHECKPOINT
+    )
+    assert created is True
+    assert new_id != legacy_id
+    assert new_spec.job_type is JobType.FORCED_CANDIDATE_VALIDATION
+    assert repository.status(legacy_id)["status"] == JobStatus.FAILED.value
+    assert repository.load_spec(new_id).job_type is JobType.FORCED_CANDIDATE_VALIDATION
+    assert repository.load_spec(new_id).run_description == expected_description
+    assert checkpoint["active_child_run_id"] == new_id
+    assert checkpoint["previous_child_run_ids"] == [legacy_id]
 
 
 def test_end_to_end_restart_creates_a_new_parent_and_new_child_chain(tmp_path):

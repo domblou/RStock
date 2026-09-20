@@ -24,6 +24,7 @@ _SCIENTIFIC_RESULT_TYPES = frozenset(
         JobType.XGBOOST_CALIBRATION,
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
         JobType.THRESHOLD_CALIBRATION,
+        JobType.FIXED_CANDIDATE_EVALUATION,
     }
 )
 
@@ -31,7 +32,11 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
     RunTabDefinition(
         "summary",
         "Résumé",
-        frozenset({JobType.WALK_FORWARD, JobType.END_TO_END}),
+        frozenset({
+            JobType.WALK_FORWARD,
+            JobType.END_TO_END,
+            JobType.FORCED_CANDIDATE_VALIDATION,
+        }),
         "summary",
         "summary or pipeline manifest",
     ),
@@ -78,7 +83,7 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
     RunTabDefinition(
         "walk_forward",
         "Walk-forward",
-        frozenset({JobType.END_TO_END}),
+        frozenset({JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION}),
         "child_walk_forward",
         "walk_forward child id",
     ),
@@ -102,6 +107,13 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
         frozenset({JobType.END_TO_END}),
         "child_thresholds",
         "threshold child id",
+    ),
+    RunTabDefinition(
+        "fixed_candidate_evaluation",
+        "Évaluation fixe",
+        frozenset({JobType.FORCED_CANDIDATE_VALIDATION}),
+        "child_fixed_candidate_evaluation",
+        "fixed candidate evaluation child id",
     ),
     RunTabDefinition(
         "temporal_validation",
@@ -143,6 +155,18 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "logs",
     ),
     JobType.THRESHOLD_CALIBRATION: ("results", "configuration", "files", "logs"),
+    JobType.FIXED_CANDIDATE_EVALUATION: (
+        "results",
+        "configuration",
+        "files",
+        "logs",
+    ),
+    JobType.FORCED_CANDIDATE_VALIDATION: (
+        "summary",
+        "walk_forward",
+        "fixed_candidate_evaluation",
+        "technical",
+    ),
     JobType.END_TO_END: (
         "summary",
         "walk_forward",
@@ -195,7 +219,9 @@ PIPELINE_STAGE_LABELS = {
     "xgboost_calibration": "Calibration XGBoost",
     "threshold_parameter_calibration": "Paramètres seuils",
     "threshold_calibration": "Seuils",
+    "fixed_candidate_evaluation": "Évaluation des candidats à seuil figé",
     "temporal_validation_end_to_end": "Validation temporelle",
+    "forced_candidate_validation_end_to_end": "Revalidation candidats",
     "promotion": "Promotion",
 }
 
@@ -206,6 +232,7 @@ PIPELINE_CHILD_TABS = {
     "child_xgboost": "xgboost_calibration",
     "child_threshold_parameters": "threshold_parameter_calibration",
     "child_thresholds": "threshold_calibration",
+    "child_fixed_candidate_evaluation": "fixed_candidate_evaluation",
 }
 
 

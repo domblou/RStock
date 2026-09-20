@@ -35,7 +35,11 @@ from rstock.progress import (
 from rstock.predictor_prefilter import PREFILTER_SCORE_FORMULA, select_predictors
 from rstock.threshold_calibration import (
     EXPERIMENTAL_XGBOOST_PARAMETERS,
+    apply_frozen_thresholds_by_set,
+    evaluate_applied_thresholds,
+    generate_holdout_probabilities,
     run_controlled_threshold_calibration,
+    split_development_holdout,
     validate_threshold_calibration_config,
     write_threshold_calibration_results,
 )
@@ -58,6 +62,7 @@ from rstock.streaming_walk_forward import (
 
 from .domain import ExperimentSpec, JobStatus, JobType
 from .end_to_end import run_end_to_end
+from .forced_candidate_validation import run_forced_candidate_validation
 from .orchestration_runtime import execute_child
 from .processes import process_alive
 from .production_repository import ProductionRepository
@@ -313,7 +318,9 @@ def _require_exploitable_prefilter(univariate: object) -> None:
         )
 
 
-def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFrame | None:
+def _qualified_sets_from_walk_forward_source(
+    spec: ExperimentSpec, *, allow_empty: bool = False
+) -> pd.DataFrame | None:
     """Reuse the global qualified population from a source walk-forward.
 
     A prefiltered walk-forward run and a calibration rebuilt from the full
@@ -357,6 +364,8 @@ def _qualified_sets_from_walk_forward_source(spec: ExperimentSpec) -> pd.DataFra
         rows_by_set.setdefault(set_id, normalized)
     rows = list(rows_by_set.values())
     if not rows:
+        if allow_empty:
+            return pd.DataFrame(columns=["V0", "V1"])
         raise ValueError("Source walk-forward has no qualified combinations")
     width = max(len(row) for row in rows)
     return pd.DataFrame(
@@ -377,7 +386,22 @@ def _walk_forward(
         )
     prefilter = None
     prefilter_walk_forward_telemetry: dict[str, object] | None = None
-    if spec.config.predictor_prefilter_enabled:
+    if spec.forced_symbol_sets is not None:
+        prepared, _, _, calendars = _prepared_inputs(
+            spec, progress_callback, cancellation_check
+        )
+        width = max(len(symbol_set) for symbol_set in spec.forced_symbol_sets)
+        generated = pd.DataFrame(
+            [list(symbol_set) + [None] * (width - len(symbol_set)) for symbol_set in spec.forced_symbol_sets],
+            columns=[f"V{index}" for index in range(width)],
+        )
+        _phase(
+            progress_callback,
+            "forced_candidate_loading",
+            "completed",
+            combinations=len(generated),
+        )
+    elif spec.config.predictor_prefilter_enabled:
         prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
             spec, progress_callback, cancellation_check
         )
@@ -517,7 +541,10 @@ def _resumable_walk_forward(
 ) -> dict[str, Any]:
     """Production walk-forward path backed by versioned run checkpoints."""
 
-    if spec.config.walk_forward_max_combinations_per_batch is not None:
+    if (
+        spec.config.walk_forward_max_combinations_per_batch is not None
+        and spec.forced_symbol_sets is None
+    ):
         return _planned_walk_forward(
             spec, output, progress_callback, cancellation_check
         )
@@ -562,7 +589,27 @@ def _resumable_walk_forward(
 
     prefilter = None
     prefilter_telemetry: dict[str, object] | None = None
-    if spec.config.predictor_prefilter_enabled:
+    if spec.forced_symbol_sets is not None:
+        if not spec.forced_symbol_sets:
+            raise ValueError("Forced candidate validation has no candidate")
+        if checkpoint.artifact_exists("generated_sets"):
+            generated = checkpoint.load_artifact("generated_sets")
+        else:
+            checkpoint.phase_started("forced_candidate_loading")
+            width = max(len(symbol_set) for symbol_set in spec.forced_symbol_sets)
+            generated = pd.DataFrame(
+                [list(symbol_set) + [None] * (width - len(symbol_set)) for symbol_set in spec.forced_symbol_sets],
+                columns=[f"V{index}" for index in range(width)],
+            )
+            checkpoint.commit_artifact("generated_sets", generated)
+            checkpoint.phase_completed("forced_candidate_loading")
+            _phase(
+                progress_callback,
+                "forced_candidate_loading",
+                "completed",
+                combinations=len(generated),
+            )
+    elif spec.config.predictor_prefilter_enabled:
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:
@@ -752,8 +799,14 @@ def _prepared_calibration_population(
     spec: ExperimentSpec,
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
+    *,
+    allow_empty: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
-    source_generated = _qualified_sets_from_walk_forward_source(spec)
+    source_generated = (
+        _qualified_sets_from_walk_forward_source(spec, allow_empty=True)
+        if allow_empty
+        else _qualified_sets_from_walk_forward_source(spec)
+    )
     if source_generated is None:
         prepared, generated, _ = _prepared_experiment(
             spec, progress_callback, cancellation_check
@@ -899,6 +952,163 @@ def _threshold_calibration(
         ),
         "sampling_manifest": _json_value(
             result.run_configuration.get("sampling_manifest")
+        ),
+    }
+
+
+def _fixed_candidate_evaluation(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    """Retrain offset models with reference parameters and apply reference thresholds."""
+
+    if spec.frozen_xgboost_parameters is None:
+        raise ValueError("Reference XGBoost parameters are required")
+    if spec.frozen_threshold_calibration_parameters is None:
+        raise ValueError("Reference threshold-calibration parameters are required")
+    if spec.frozen_selected_thresholds_by_set is None:
+        raise ValueError("Reference selected thresholds are required")
+    if spec.forced_candidate_identities is None:
+        raise ValueError("Forced candidate identities are required")
+
+    prepared, generated, _ = _prepared_calibration_population(
+        spec,
+        progress_callback,
+        cancellation_check,
+        allow_empty=True,
+    )
+    effective_xgboost = _resolve_threshold_xgboost_parameters(spec)
+    effective_config, threshold_parameter_source = (
+        _resolve_threshold_calibration_config(spec)
+    )
+    development, holdout, holdout_start = split_development_holdout(
+        prepared, effective_config.final_holdout_size
+    )
+    identities = set(spec.forced_candidate_identities)
+    prediction_columns = [
+        "Set",
+        "Observation",
+        "Direction",
+        "Window",
+        "TrainEnd",
+        "Date",
+        "Probability",
+        "Target",
+        "IntradayReturn",
+        "MFE",
+        "MAE",
+    ]
+    _phase(progress_callback, "final_holdout", "started")
+    if generated.empty:
+        raw_holdout = pd.DataFrame(columns=prediction_columns)
+    else:
+        raw_holdout = generate_holdout_probabilities(
+            development,
+            holdout,
+            generated,
+            effective_config,
+            parameters_by_direction={
+                "Up": effective_xgboost.up,
+                "Down": effective_xgboost.down,
+            },
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+        )
+        raw_holdout = raw_holdout[
+            [
+                (str(set_name), str(direction)) in identities
+                for set_name, direction in raw_holdout[["Set", "Direction"]]
+                .itertuples(index=False, name=None)
+            ]
+        ].reset_index(drop=True)
+    holdout_predictions = apply_frozen_thresholds_by_set(
+        raw_holdout, spec.frozen_selected_thresholds_by_set
+    )
+    holdout_metrics = evaluate_applied_thresholds(
+        holdout_predictions, effective_config
+    )
+    _phase(
+        progress_callback,
+        "final_holdout",
+        "completed",
+        combinations=len(generated),
+        identities=len(identities),
+    )
+
+    run_configuration = {
+        "protocol": "fixed_reference_model_and_threshold_evaluation_v1",
+        "offset_sessions": effective_config.walk_forward_end_offset_sessions,
+        "holdout_used_for_selection": False,
+        "xgboost_calibration_performed": False,
+        "threshold_parameter_calibration_performed": False,
+        "threshold_selection_performed": False,
+        "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_xgboost_calibration_run": spec.source_xgboost_calibration_run,
+        "frozen_xgboost_parameters_sha256": (
+            spec.frozen_xgboost_parameters_sha256
+        ),
+        "source_threshold_parameter_calibration_run": (
+            spec.source_threshold_parameter_calibration_run
+        ),
+        "frozen_threshold_calibration_parameters_sha256": (
+            spec.frozen_threshold_calibration_parameters_sha256
+        ),
+        "source_threshold_calibration_run": spec.source_threshold_calibration_run,
+        "frozen_selected_thresholds_sha256": (
+            spec.frozen_selected_thresholds_sha256
+        ),
+        "forced_candidate_identities": [
+            list(identity) for identity in spec.forced_candidate_identities
+        ],
+        "selected_thresholds_by_set": spec.frozen_selected_thresholds_by_set,
+        "threshold_parameter_source": threshold_parameter_source,
+        "xgboost_parameter_source": effective_xgboost.source,
+        "development_end": development.index.max().isoformat(),
+        "final_holdout_start": holdout_start.isoformat(),
+        "final_holdout_size": effective_config.final_holdout_size,
+        "evaluated_combinations": len(generated),
+        "evaluated_identities": len(holdout_metrics),
+    }
+    period = _persist_walk_forward_period(
+        run_configuration, prepared, effective_config
+    )
+    traceability = _persist_prepared_traceability(
+        run_configuration, prepared, spec
+    )
+    _phase(progress_callback, "result_writing", "started")
+    output.mkdir(parents=True, exist_ok=True)
+    generated.to_csv(output / "sampled_combinations.csv", index=False)
+    holdout_predictions.to_csv(output / "holdout_predictions.csv", index=False)
+    holdout_metrics.to_csv(output / "holdout_metrics.csv", index=False)
+    (output / "selected_thresholds_by_set.json").write_text(
+        json.dumps(
+            spec.frozen_selected_thresholds_by_set,
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (output / "run_configuration.json").write_text(
+        json.dumps(run_configuration, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _phase(progress_callback, "result_writing", "completed")
+    return {
+        "job_type": spec.job_type.value,
+        "protocol": run_configuration["protocol"],
+        "holdout_metrics": _json_value(holdout_metrics.to_dict("records")),
+        "result_files": sorted(path.name for path in output.iterdir()),
+        **period,
+        "traceability": traceability,
+        "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_xgboost_calibration_run": spec.source_xgboost_calibration_run,
+        "source_threshold_calibration_run": spec.source_threshold_calibration_run,
+        "frozen_xgboost_parameters_sha256": spec.frozen_xgboost_parameters_sha256,
+        "frozen_selected_thresholds_sha256": (
+            spec.frozen_selected_thresholds_sha256
         ),
     }
 
@@ -1861,6 +2071,22 @@ def _end_to_end(
     )
 
 
+def _forced_candidate_validation(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    return run_forced_candidate_validation(
+        spec,
+        output,
+        progress_callback,
+        cancellation_check,
+        execute_reserved_child=_execute_reserved_child,
+        phase_callback=_phase,
+    )
+
+
 @dataclass(slots=True)
 class WorkflowRegistry:
     handlers: dict[JobType, WorkflowHandler]
@@ -1876,6 +2102,12 @@ class WorkflowRegistry:
                     _threshold_parameter_calibration
                 ),
                 JobType.THRESHOLD_CALIBRATION: _threshold_calibration,
+                JobType.FIXED_CANDIDATE_EVALUATION: (
+                    _fixed_candidate_evaluation
+                ),
+                JobType.FORCED_CANDIDATE_VALIDATION: (
+                    _forced_candidate_validation
+                ),
                 JobType.PRODUCTION_TRAINING: _production_training,
                 JobType.MARKET_UPDATE: _market_update,
                 JobType.DAILY_PREDICTION: _daily_prediction,

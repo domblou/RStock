@@ -5,6 +5,7 @@ import pandas as pd
 
 from rstock.application.history_ui import (
     EXPERIMENT_JOB_TYPES,
+    JOB_LABELS,
     PRODUCTION_JOB_TYPES,
     already_promoted,
     filter_runs,
@@ -166,6 +167,33 @@ def test_history_rows_display_run_id_and_direct_walk_forward_source():
         "Résumé",
     }
 
+
+
+def test_forced_validation_labels_are_utf8_and_mojibake_free():
+    expected = "Évaluation des candidats à seuil figé"
+    detail = _detail()
+    detail["configuration"].update(
+        historical_forced_validation_backfill=True,
+        run_description="Revalidation forcÃ©e des candidats de rÃ©fÃ©rence",
+    )
+    row = history_row(_run("fixed", "fixed_candidate_evaluation"), detail, {})
+
+    assert JOB_LABELS["fixed_candidate_evaluation"] == expected
+    assert row.display()["Type"] == expected
+    assert JOB_LABELS["forced_candidate_validation"] == (
+        "Revalidation forcée des candidats"
+    )
+    assert row.summary == (
+        "Évaluation des candidats à seuil figé — "
+        "Revalidation des candidats de référence"
+    )
+    assert "Ã" not in " ".join(
+        (
+            JOB_LABELS["fixed_candidate_evaluation"],
+            JOB_LABELS["forced_candidate_validation"],
+            row.display()["Type"],
+        )
+    )
 
 def test_threshold_parameter_calibration_appears_with_direct_parent_and_winner():
     detail = _detail(summary={

@@ -66,9 +66,17 @@ from rstock.application.history_analysis import (
     xgboost_calibration_selection_table,
 )
 from rstock.application.runner import running_duration
+from rstock.application.end_to_end import historical_forced_validation_state
 from rstock.application.temporal_validation_ui import (
     candidate_identity_tables,
+    forced_candidate_revalidation_table,
+    lost_candidate_display_table,
     temporal_validation_gate_table,
+    validation_promotion_lookup,
+)
+from rstock.application.temporal_validation_trace import (
+    forced_candidate_trace_lookup,
+    lost_candidate_trace_lookup,
 )
 from rstock.application.run_detail_tabs import (
     PIPELINE_CHILD_TABS,
@@ -1337,7 +1345,7 @@ def _render_walk_forward_promotion(
         selection_mode="single-row",
         key=f"qualified-combinations-{run_id}",
     )
-    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+    selected_rows = _selected_rows(selection, len(combinations))
     selected_key = f"selected-qualified-combination-{run_id}"
     if selected_rows:
         st.session_state[selected_key] = combinations.iloc[selected_rows[0]]["Combinaison"]
@@ -1517,7 +1525,7 @@ def _render_threshold_calibration_promotion(
                 "Fréquence mouvement opposé au meilleur seuil robuste": st.column_config.NumberColumn(format="percent"),
             },
         )
-    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+    selected_rows = _selected_rows(selection, len(filtered))
     selected_key = f"selected-threshold-result-{run_id}"
     if selected_rows:
         st.session_state[selected_key] = filtered.iloc[selected_rows[0]].to_dict()
@@ -1907,7 +1915,7 @@ def _selected_combination(
         hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key=f"analysis-combinations-{run_id}",
     )
-    selected_rows = _selected_rows(event)
+    selected_rows = _selected_rows(event, len(table))
     key = f"analysis-selected-combination-{run_id}"
     if selected_rows:
         st.session_state[key] = str(table.iloc[selected_rows[0]]["Combinaison"])
@@ -2247,7 +2255,7 @@ def _render_walk_forward_batches(
             )
         },
     )
-    selected_rows = _selected_rows(event)
+    selected_rows = _selected_rows(event, len(rows))
     if not selected_rows:
         st.caption("Sélectionnez un batch pour inspecter son statut et ses logs.")
         return
@@ -2421,7 +2429,11 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
     st.dataframe(diagnostic_table, hide_index=True, width="stretch")
 
 
-def _render_candidate_identity_stability(comparison: dict[str, object]) -> None:
+def _render_candidate_identity_stability(
+    comparison: dict[str, object],
+    validation_lookup: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
+    trace_lookup: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
+) -> None:
     st.subheader("Stabilité des candidats")
     st.caption(
         "Compare l\u2019identité des candidats entre la période de référence et la "
@@ -2474,7 +2486,7 @@ def _render_candidate_identity_stability(comparison: dict[str, object]) -> None:
             "restent candidats dans la période décalée."
         )
 
-    tables = candidate_identity_tables(stability)
+    tables = candidate_identity_tables(stability, validation_lookup, trace_lookup)
     common_tab, lost_tab, new_tab = st.tabs(["Communs", "Perdus", "Nouveaux"])
     percent_columns = {
         name: st.column_config.NumberColumn(format="percent")
@@ -2503,8 +2515,14 @@ def _render_candidate_identity_stability(comparison: dict[str, object]) -> None:
             st.info("Aucun candidat perdu dans la période décalée.")
         else:
             st.dataframe(
-                tables["lost"], hide_index=True, width="stretch",
-                column_config=percent_columns,
+                lost_candidate_display_table(tables["lost"]),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Critère(s) échoué(s)": st.column_config.TextColumn(
+                        width="large"
+                    )
+                },
             )
     with new_tab:
         if tables["new"].empty:
@@ -2550,7 +2568,25 @@ def _render_temporal_validation(
             "des candidats; la stabilité d\u2019identité mesure combien des mêmes "
             "candidats persistent entre les périodes."
         )
-        _render_candidate_identity_stability(comparison)
+        validation_lookup = {}
+        validation_threshold_run_id = comparison.get("validation_threshold_run_id")
+        if (
+            isinstance(comparison.get("candidate_identity_stability"), dict)
+            and isinstance(validation_threshold_run_id, str)
+        ):
+            validation_lookup = validation_promotion_lookup(
+                root / validation_threshold_run_id / "results"
+            )
+        trace_lookup = (
+            lost_candidate_trace_lookup(
+                comparison["candidate_identity_stability"], root / child_run_id
+            )
+            if isinstance(comparison.get("candidate_identity_stability"), dict)
+            else {}
+        )
+        _render_candidate_identity_stability(
+            comparison, validation_lookup, trace_lookup
+        )
         with st.expander("Comparison parameters and provenance"):
             st.json({
                 "parameters": comparison.get("parameters", {}),
@@ -2563,6 +2599,107 @@ def _render_temporal_validation(
         if isinstance(promotion, dict):
             status = "executed" if promotion.get("executed") else promotion.get("reason", "not requested")
             st.caption(f"Automatic promotion: {status}")
+        forced_stage = pipeline_stage_by_key(
+            detail.get("pipeline_stages"), "forced_candidate_validation_end_to_end"
+        )
+        st.subheader("Revalidation des candidats de référence")
+        st.caption(
+            "Réévalue les candidats trouvés dans le run de référence sur la période "
+            "décalée, indépendamment du préfiltre."
+        )
+        if forced_stage is None:
+            try:
+                backfill = historical_forced_validation_state(
+                    service.run_service.repository, parent_run_id
+                )
+            except (OSError, ValueError) as error:
+                st.error(f"Revalidation historique indisponible : {error}")
+                backfill = {"exists": False}
+            if not backfill.get("exists"):
+                st.caption(
+                    "Réentraîne uniquement les candidats de référence sur l'offset 63, "
+                    "avec leurs hyperparamètres et seuils figés."
+                )
+                if st.button(
+                    "Lancer la revalidation des candidats de référence",
+                    key=f"start-historical-forced-{parent_run_id}",
+                ):
+                    try:
+                        service.start_historical_forced_validation(parent_run_id)
+                    except ValueError as error:
+                        st.error(f"Revalidation historique impossible : {error}")
+                    else:
+                        st.rerun()
+            else:
+                forced_id = str(backfill["child_run_id"])
+                forced_stage = {"child_run_id": forced_id}
+                status = str(backfill.get("status") or "unknown")
+                st.caption(
+                    f"Run : {forced_id} · statut : {status} · "
+                    f"créé : {backfill.get('created_at') or 'n/a'}"
+                )
+                controls = st.columns(2)
+                if controls[0].button(
+                    "Open revalidation", key=f"open-historical-forced-{parent_run_id}"
+                ):
+                    st.session_state["selected-run-id"] = forced_id
+                    st.rerun()
+                if status in {"failed", "cancelled", "interrupted"} and controls[1].button(
+                    "Resume", key=f"resume-historical-forced-{parent_run_id}"
+                ):
+                    try:
+                        service.resume(forced_id)
+                    except ValueError as error:
+                        st.error(f"Reprise impossible : {error}")
+                    else:
+                        st.rerun()
+        if forced_stage is not None:
+            forced_id = str(forced_stage.get("child_run_id"))
+            st.caption(f"Run : {forced_id}")
+            forced_manifest = _read_light_json(
+                root / forced_id / "orchestration" / "pipeline.json"
+            ) or {}
+            forced_threshold_id = next(
+                (
+                    str(item.get("child_run_id"))
+                    for item in forced_manifest.get("stages", [])
+                    if isinstance(item, dict)
+                    and item.get("stage_key")
+                    in {"fixed_candidate_evaluation", "threshold_calibration"}
+                ),
+                None,
+            )
+            forced_lookup = (
+                validation_promotion_lookup(root / forced_threshold_id / "results")
+                if forced_threshold_id else {}
+            )
+            stability = comparison.get("candidate_identity_stability", {})
+            forced_trace = forced_candidate_trace_lookup(stability, root / forced_id)
+            checkpoint = _read_light_json(
+                root / parent_run_id / "orchestration" / "promotion.json"
+            ) or {}
+            promoted = {
+                str(item.get("set_name"))
+                for item in checkpoint.get("candidates", [])
+                if isinstance(item, dict) and item.get("status") == "completed"
+            }
+            table = forced_candidate_revalidation_table(
+                stability, forced_lookup, forced_trace, promoted
+            )
+            total = len(table)
+            confirmed = int((table.get("Statut") == "Candidat confirmé").sum()) if total else 0
+            non_evaluable = int((table.get("Statut") == "Non évaluable").sum()) if total else 0
+            metrics = st.columns(6)
+            for column, (label, value) in zip(metrics, (
+                ("Candidats référence", total), ("Réévalués", total - non_evaluable),
+                ("Confirmés", confirmed), ("Non confirmés", total - confirmed - non_evaluable),
+                ("Non évaluables", non_evaluable), ("Promus", len(promoted)),
+            )):
+                column.metric(label, value)
+            if table.empty:
+                st.info("Aucun candidat de référence à réévaluer.")
+            else:
+                st.dataframe(table, hide_index=True, width="stretch")
     st.dataframe(
         pd.DataFrame(pipeline_stage_rows([stage])), hide_index=True, width="stretch"
     )
@@ -2660,6 +2797,32 @@ def _render_end_to_end_tabs(
     )
 
 
+def _render_forced_candidate_validation_tabs(
+    service: ExperimentService, run_id: str, detail: dict[str, object]
+) -> None:
+    child_renderers = {
+        renderer_key: (
+            lambda renderer_key=renderer_key: _render_pipeline_child(
+                service, run_id, detail, renderer_key
+            )
+        )
+        for renderer_key in (
+            "child_walk_forward",
+            "child_fixed_candidate_evaluation",
+        )
+    }
+    render_lazy_tabs(
+        st,
+        tabs_for_job(JobType.FORCED_CANDIDATE_VALIDATION),
+        {
+            "summary": lambda: _render_pipeline_summary(run_id, detail),
+            **child_renderers,
+            "technical": lambda: _render_pipeline_technical(run_id, detail),
+        },
+        key=f"run-detail-{run_id}",
+    )
+
+
 def _render_job_detail_tabs(
     service: ExperimentService,
     run_id: str,
@@ -2678,6 +2841,8 @@ def _render_job_detail_tabs(
         job_type = JobType.XGBOOST_CALIBRATION
     if job_type is JobType.END_TO_END:
         _render_end_to_end_tabs(service, run_id, detail)
+    elif job_type is JobType.FORCED_CANDIDATE_VALIDATION:
+        _render_forced_candidate_validation_tabs(service, run_id, detail)
     elif job_type is JobType.WALK_FORWARD:
         _render_walk_forward_tabs(service, run_id, status, detail)
     else:
@@ -2711,6 +2876,12 @@ def _render_run_detail_view(
         )
     elif status["job_type"] == JobType.END_TO_END.value:
         st.subheader("Pipeline End-to-end")
+        st.caption(
+            f"{history.date_time} - {history.duration} - {status.get('status', '-')} - "
+            f"ID technique : {run_id}"
+        )
+    elif status["job_type"] == JobType.FORCED_CANDIDATE_VALIDATION.value:
+        st.subheader("Revalidation forcée des candidats")
         st.caption(
             f"{history.date_time} - {history.duration} - {status.get('status', '-')} - "
             f"ID technique : {run_id}"
@@ -2863,7 +3034,7 @@ def _history_runs_panel(
         selection_mode="multi-row",
         key=f"{key_prefix}-grid",
     )
-    selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+    selected_rows = _selected_rows(selection, len(rows))
     selected_key = f"{key_prefix}-selected-runs"
     st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]
     selected = st.session_state.get(selected_key, [])
@@ -3255,7 +3426,7 @@ def _universes_page() -> None:
         table, hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key="saved-universes-grid",
     )
-    selected = _selected_rows(event)
+    selected = _selected_rows(event, len(records))
     if selected:
         st.session_state.selected_universe_id = records[selected[0]].universe_id
     else:
@@ -3294,8 +3465,18 @@ def _submit_operational_job(
     st.success(f"{message} : {submission.run_id}")
 
 
-def _selected_rows(event: object) -> list[int]:
-    return list(getattr(getattr(event, "selection", None), "rows", []))
+def _selected_rows(event: object, row_count: int | None = None) -> list[int]:
+    """Return current selection positions, dropping stale grid positions."""
+
+    selected = list(getattr(getattr(event, "selection", None), "rows", []))
+    if row_count is None:
+        return selected
+    return [
+        index
+        for index in selected
+        if isinstance(index, int) and not isinstance(index, bool)
+        and 0 <= index < row_count
+    ]
 
 
 def _invalidate_surveillance_selection_state() -> None:
@@ -3311,7 +3492,7 @@ def _invalidate_surveillance_selection_state() -> None:
 
 
 def _technical_record(view: OperationalTableView, selected: list[int]) -> dict[str, object] | None:
-    if not selected or selected[0] >= len(view.technical):
+    if not selected or not 0 <= selected[0] < len(view.technical):
         return None
     return json.loads(view.technical.iloc[selected[0]].to_json(date_format="iso"))
 
@@ -3618,7 +3799,7 @@ def _render_signals_card(
                 },
             )
             selected_signal = _technical_record(
-                displayed.signals, _selected_rows(event)
+                displayed.signals, _selected_rows(event, len(displayed.signals.technical))
             )
 
     return displayed, selected_signal
@@ -3648,7 +3829,9 @@ def _render_signals_followup(
                 selection_mode="single-row",
                 key="surveillance-no-signals",
             )
-            no_signal_selection = _selected_rows(event)
+            no_signal_selection = _selected_rows(
+                event, len(displayed.no_signal.technical)
+            )
 
     selected_no_signal = _technical_record(
         displayed.no_signal, no_signal_selection
@@ -4008,8 +4191,8 @@ def _evaluated_predictions_panel(
             main_table, hide_index=True, width="stretch",
             on_select="rerun", selection_mode="single-row", key="surveillance-evaluated-predictions",
         )
-        selected = _selected_rows(event)
-        if selected and selected[0] < len(displayed_view.technical):
+        selected = _selected_rows(event, len(displayed_view.technical))
+        if selected:
             selected_record = json.loads(
                 displayed_view.technical.iloc[selected[0]].to_json(date_format="iso")
             )
@@ -4194,8 +4377,8 @@ def _returns_page() -> None:
         "Rendement réel", "P&L", "Rendement théorique", "Écart réel vs théorique", "Note",
     ]
     event = st.dataframe(display.loc[:, visible], hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="real-trades-grid")
-    selected = _selected_rows(event)
-    if not selected or selected[0] >= len(filtered):
+    selected = _selected_rows(event, len(filtered))
+    if not selected:
         return
     selected_trade_id = str(filtered.iloc[selected[0]]["transaction_id"])
     selected_trade = next(item for item in trades.trades() if item.trade_id == selected_trade_id)
@@ -4281,8 +4464,8 @@ def _models_page() -> None:
         selection_mode="single-row",
         key="models-grid",
     )
-    selected_rows = _selected_rows(event)
-    if selected_rows and selected_rows[0] < len(visible_models):
+    selected_rows = _selected_rows(event, len(visible_models))
+    if selected_rows:
         st.session_state[selected_key] = visible_models[selected_rows[0]].model_id
     else:
         st.session_state.pop(selected_key, None)

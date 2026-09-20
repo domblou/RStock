@@ -199,6 +199,11 @@ class ExperimentService:
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
         return self.run_service.submit(spec)
 
+    def start_historical_forced_validation(
+        self, parent_run_id: str
+    ) -> SubmissionResult:
+        return self.run_service.start_historical_forced_validation(parent_run_id)
+
     def cancel(self, run_id: str) -> dict[str, object]:
         return self.run_service.cancel(run_id)
 

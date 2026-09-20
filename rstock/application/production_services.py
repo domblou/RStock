@@ -73,6 +73,7 @@ class PromotionService:
         xgboost_calibration_run: str | None = None,
         threshold_calibration_run: str | None = None,
         selected_threshold_direction: str | None = None,
+        promotion_provenance: Mapping[str, object] | None = None,
     ) -> tuple[ProductionModel, bool]:
         if selected_threshold_direction not in {None, "Up", "Down"}:
             raise ValueError("selected_threshold_direction must be Up or Down")
@@ -119,9 +120,18 @@ class PromotionService:
         down_xgb_parameters: dict[str, int | float] | None = None
         threshold_spec: ExperimentSpec | None = None
         if threshold_calibration_run:
-            self._require_completed_run(
-                threshold_calibration_run, JobType.THRESHOLD_CALIBRATION
-            )
+            threshold_status = self.runs.status(threshold_calibration_run)
+            if threshold_status.get("job_type") not in {
+                JobType.THRESHOLD_CALIBRATION.value,
+                JobType.FIXED_CANDIDATE_EVALUATION.value,
+            }:
+                raise ValueError(
+                    f"Run {threshold_calibration_run} is not a threshold result run"
+                )
+            if threshold_status.get("status") != JobStatus.COMPLETED.value:
+                raise ValueError(
+                    f"Run {threshold_calibration_run} is not completed"
+                )
             threshold_spec = self.runs.load_spec(threshold_calibration_run)
             self._assert_methodology_compatible(
                 spec, threshold_spec, "threshold calibration"
@@ -224,6 +234,7 @@ class PromotionService:
             "walk_forward": walk_forward_run,
             "xgboost": resolved_xgboost_run,
             "thresholds": threshold_calibration_run,
+            "promotion_provenance": dict(promotion_provenance or {}),
         }
         fingerprint = hashlib.sha256(
             json.dumps(fingerprint_values, sort_keys=True).encode()
@@ -253,6 +264,7 @@ class PromotionService:
                 "promotion_fingerprint": fingerprint,
                 "selected_threshold_direction": selected_threshold_direction,
                 "calendar": spec.calendar,
+                "validation_provenance": dict(promotion_provenance or {}),
                 "calibration_source_configurations": calibration_sources,
                 "universe_roles": {
                     "primary_universe_id": spec.primary_universe_id,

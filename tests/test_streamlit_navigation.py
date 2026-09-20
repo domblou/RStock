@@ -1,4 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+from rstock.application.streamlit_app import _selected_rows
 
 
 APP = (
@@ -860,6 +863,18 @@ def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
         'if action == "comparison"', 1
     )[0]
     assert 'width="stretch"' not in actions
+
+
+def test_stale_grid_selection_is_dropped_after_row_population_shrinks():
+    event = SimpleNamespace(selection=SimpleNamespace(rows=[7]))
+
+    assert _selected_rows(event, row_count=2) == []
+
+
+def test_valid_grid_selection_is_preserved():
+    event = SimpleNamespace(selection=SimpleNamespace(rows=[1]))
+
+    assert _selected_rows(event, row_count=2) == [1]
 
 
 def test_history_grid_uses_the_run_provenance_display_columns():

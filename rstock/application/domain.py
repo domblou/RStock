@@ -20,6 +20,8 @@ class JobType(str, Enum):
     XGBOOST_CALIBRATION = "xgboost_calibration"
     THRESHOLD_PARAMETER_CALIBRATION = "threshold_parameter_calibration"
     THRESHOLD_CALIBRATION = "threshold_calibration"
+    FIXED_CANDIDATE_EVALUATION = "fixed_candidate_evaluation"
+    FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
     FULL_TRAINING = "full_training"
     DAILY_PREDICTION = "daily_prediction"
     DATA_UPDATE = "data_update"
@@ -38,6 +40,8 @@ class JobType(str, Enum):
             JobType.XGBOOST_CALIBRATION,
             JobType.THRESHOLD_PARAMETER_CALIBRATION,
             JobType.THRESHOLD_CALIBRATION,
+            JobType.FIXED_CANDIDATE_EVALUATION,
+            JobType.FORCED_CANDIDATE_VALIDATION,
             JobType.PRODUCTION_TRAINING,
             JobType.MARKET_UPDATE,
             JobType.DAILY_PREDICTION,
@@ -71,6 +75,7 @@ class RunRole(str, Enum):
     PIPELINE_PARENT = "pipeline_parent"
     PIPELINE_STAGE = "pipeline_stage"
     TECHNICAL_BATCH = "technical_batch"
+    FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
 
     @property
     def technical(self) -> bool:
@@ -81,6 +86,7 @@ class RunPurpose(str, Enum):
     STANDARD = "standard"
     REFERENCE = "reference"
     TEMPORAL_VALIDATION = "temporal_validation"
+    FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +108,7 @@ class RunMetadata:
     batch_index: int | None = None
     batch_count: int | None = None
     reference_run_id: str | None = None
+    validation_run_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version not in {1, 2}:
@@ -147,6 +154,7 @@ class RunMetadata:
             "batch_index": self.batch_index,
             "batch_count": self.batch_count,
             "reference_run_id": self.reference_run_id,
+            "validation_run_id": self.validation_run_id,
         }
 
     @classmethod
@@ -171,6 +179,7 @@ class RunMetadata:
             batch_index=_optional_int(values.get("batch_index")),
             batch_count=_optional_int(values.get("batch_count")),
             reference_run_id=_optional_string(values.get("reference_run_id")),
+            validation_run_id=_optional_string(values.get("validation_run_id")),
         )
 
 
@@ -238,7 +247,14 @@ class ExperimentSpec:
     source_threshold_calibration_run: str | None = None
     auto_promote_candidates: bool = False
     temporal_validation_enabled: bool = False
-    pipeline_version: int = 1
+    pipeline_version: int = 2
+    forced_symbol_sets: tuple[tuple[str, ...], ...] | None = None
+    forced_candidate_identities: tuple[tuple[str, str], ...] | None = None
+    historical_forced_validation_backfill: bool = False
+    frozen_selected_thresholds_by_set: dict[
+        str, dict[str, dict[str, object]]
+    ] | None = None
+    frozen_selected_thresholds_sha256: str | None = None
     calibration_sampling_policy_version: int = 2
     combination_plan_version: int | None = None
     combination_plan_sha256: str | None = None
@@ -249,6 +265,10 @@ class ExperimentSpec:
     )
 
     def __post_init__(self) -> None:
+        if self.historical_forced_validation_backfill and self.auto_promote_candidates:
+            raise ValueError(
+                "Historical forced validation backfill cannot promote candidates"
+            )
         if not self.job_type.implemented:
             raise ValueError(f"Job type is reserved but not implemented: {self.job_type.value}")
         if len(set(self.symbols)) != len(self.symbols):
@@ -278,6 +298,55 @@ class ExperimentSpec:
         object.__setattr__(self, "run_description", description or None)
         # ``symbols`` remains the backward-compatible market-data universe.
         object.__setattr__(self, "symbols", predictors)
+        forced = self.forced_symbol_sets
+        if forced is not None:
+            normalized_forced = tuple(
+                tuple(str(symbol) for symbol in symbol_set) for symbol_set in forced
+            )
+            if any(
+                len(symbol_set) < 2
+                or len(set(symbol_set)) != len(symbol_set)
+                or not set(symbol_set).issubset(self.symbols)
+                for symbol_set in normalized_forced
+            ):
+                raise ValueError("Forced symbol sets must be ordered valid subsets")
+            if len(set(normalized_forced)) != len(normalized_forced):
+                raise ValueError("Forced symbol sets must be unique")
+            object.__setattr__(self, "forced_symbol_sets", normalized_forced)
+        identities = self.forced_candidate_identities
+        if identities is not None:
+            normalized_identities = tuple(
+                (str(set_name), str(direction))
+                for set_name, direction in identities
+            )
+            if any(
+                not set_name or direction not in {"Up", "Down"}
+                for set_name, direction in normalized_identities
+            ):
+                raise ValueError("Forced candidate identities must contain Set and Direction")
+            if len(set(normalized_identities)) != len(normalized_identities):
+                raise ValueError("Forced candidate identities must be unique")
+            object.__setattr__(
+                self, "forced_candidate_identities", normalized_identities
+            )
+        frozen_selected = self.frozen_selected_thresholds_by_set
+        if frozen_selected is not None:
+            normalized_selected = json.loads(
+                json.dumps(frozen_selected, sort_keys=True, separators=(",", ":"))
+            )
+            selected_canonical = json.dumps(
+                normalized_selected, sort_keys=True, separators=(",", ":")
+            )
+            object.__setattr__(
+                self, "frozen_selected_thresholds_by_set", normalized_selected
+            )
+            object.__setattr__(
+                self,
+                "frozen_selected_thresholds_sha256",
+                hashlib.sha256(selected_canonical.encode()).hexdigest(),
+            )
+        else:
+            object.__setattr__(self, "frozen_selected_thresholds_sha256", None)
         frozen = self.frozen_xgboost_parameters
         if frozen is not None:
             normalized = {
@@ -402,6 +471,25 @@ class ExperimentSpec:
             combination_plan_sha256=self.combination_plan_sha256,
             combination_range_start=self.combination_range_start,
             combination_range_stop=self.combination_range_stop,
+            forced_symbol_sets=(
+                None
+                if self.forced_symbol_sets is None
+                else [list(symbol_set) for symbol_set in self.forced_symbol_sets]
+            ),
+            forced_candidate_identities=(
+                None
+                if self.forced_candidate_identities is None
+                else [list(identity) for identity in self.forced_candidate_identities]
+            ),
+            historical_forced_validation_backfill=(
+                self.historical_forced_validation_backfill
+            ),
+            frozen_selected_thresholds_by_set=(
+                self.frozen_selected_thresholds_by_set
+            ),
+            frozen_selected_thresholds_sha256=(
+                self.frozen_selected_thresholds_sha256
+            ),
         )
         return values
 
@@ -529,6 +617,37 @@ class ExperimentSpec:
             ),
             combination_range_stop=_optional_int(
                 values.get("combination_range_stop")
+            ),
+            forced_symbol_sets=(
+                None
+                if values.get("forced_symbol_sets") is None
+                else tuple(
+                    tuple(str(symbol) for symbol in symbol_set)
+                    for symbol_set in values["forced_symbol_sets"]
+                )
+            ),
+            forced_candidate_identities=(
+                None
+                if values.get("forced_candidate_identities") is None
+                else tuple(
+                    (str(identity[0]), str(identity[1]))
+                    for identity in values["forced_candidate_identities"]
+                )
+            ),
+            historical_forced_validation_backfill=bool(
+                values.get("historical_forced_validation_backfill", False)
+            ),
+            frozen_selected_thresholds_by_set=(
+                None
+                if not isinstance(
+                    values.get("frozen_selected_thresholds_by_set"), dict
+                )
+                else values["frozen_selected_thresholds_by_set"]
+            ),
+            frozen_selected_thresholds_sha256=(
+                None
+                if values.get("frozen_selected_thresholds_sha256") is None
+                else str(values["frozen_selected_thresholds_sha256"])
             ),
         )
         canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))

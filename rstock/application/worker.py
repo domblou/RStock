@@ -48,6 +48,18 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("walk_forward", 65), ("final_holdout", 8), ("metrics", 4),
         ("result_writing", 3), ("publishing", 2),
     ],
+    JobType.FIXED_CANDIDATE_EVALUATION: [
+        ("data_preparation", 25),
+        ("combination_generation", 5),
+        ("final_holdout", 60),
+        ("result_writing", 8),
+        ("publishing", 2),
+    ],
+    JobType.FORCED_CANDIDATE_VALIDATION: [
+        ("walk_forward", 65),
+        ("fixed_candidate_evaluation", 33),
+        ("publishing", 2),
+    ],
     JobType.PRODUCTION_TRAINING: [
         ("data_preparation", 35), ("production_training", 60), ("publishing", 5),
     ],
@@ -290,6 +302,24 @@ def execute_run(
                 or int(checkpoint.manifest.get("attempt_count", 0)) > 0
             )
         phases = WORKFLOW_PHASES[spec.job_type]
+        if spec.job_type is JobType.WALK_FORWARD and spec.forced_symbol_sets is not None:
+            phases = [
+                ("data_preparation", 8),
+                ("forced_candidate_loading", 2),
+                ("walk_forward", 62),
+                ("aggregation", 9),
+                ("qualification", 7),
+                ("final_holdout", 5),
+                ("metrics", 3),
+                ("result_writing", 2),
+                ("publishing", 2),
+            ]
+        if spec.job_type is JobType.END_TO_END and spec.forced_symbol_sets is not None:
+            phases = [
+                ("walk_forward", 55),
+                ("fixed_candidate_evaluation", 98),
+                ("publishing", 2),
+            ]
         if spec.job_type is JobType.END_TO_END and not spec.auto_promote_candidates:
             phases = [item for item in phases if item[0] != "promotion"]
         if spec.job_type is JobType.END_TO_END and spec.temporal_validation_enabled:
@@ -297,6 +327,11 @@ def execute_run(
                 *[item for item in phases if item[0] != "publishing"],
                 ("temporal_validation_end_to_end", 90),
                 ("temporal_validation_comparison", 95),
+                *(
+                    [("forced_candidate_validation_end_to_end", 100)]
+                    if spec.pipeline_version >= 2
+                    else []
+                ),
                 ("publishing", 1),
             ]
         reporter.configure_phases(phases)
