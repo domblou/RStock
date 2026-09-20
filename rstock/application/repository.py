@@ -19,7 +19,29 @@ from rstock.atomic_io import (
     ATOMIC_WRITE_BACKOFF_SECONDS,
     is_temporary_file_lock,
 )
-from .domain import ExperimentSpec, JobStatus, RunMetadata
+from .domain import (
+    ExperimentSpec,
+    JobStatus,
+    JobType,
+    RunMetadata,
+    RunPurpose,
+    RunRole,
+)
+
+
+def canonical_run_metadata(spec: ExperimentSpec) -> RunMetadata:
+    """Return the canonical metadata for a newly submitted top-level run."""
+
+    if spec.job_type is JobType.END_TO_END:
+        return RunMetadata(
+            run_role=RunRole.PIPELINE_PARENT,
+            run_purpose=(
+                RunPurpose.REFERENCE
+                if spec.temporal_validation_enabled
+                else RunPurpose.STANDARD
+            ),
+        )
+    return RunMetadata()
 
 
 STATUS_TRANSITIONS = {
@@ -90,7 +112,20 @@ class RunRepository:
     ) -> str:
         self.root.mkdir(parents=True, exist_ok=True)
         run_id = run_id or self.generate_run_id()
-        run_metadata = metadata or RunMetadata()
+        run_metadata = metadata or canonical_run_metadata(spec)
+        if (
+            spec.job_type is JobType.END_TO_END
+            and spec.temporal_validation_enabled
+            and run_metadata.parent_run_id is None
+            and (
+                run_metadata.run_role is not RunRole.PIPELINE_PARENT
+                or run_metadata.run_purpose is not RunPurpose.REFERENCE
+            )
+        ):
+            raise ValueError(
+                "Un End-to-end avec validation temporelle doit utiliser un parent "
+                "pipeline_parent/reference."
+            )
         if run_metadata.parent_run_id is None:
             expected_root_run_id = run_id
         else:

@@ -691,6 +691,57 @@ def test_run_service_marks_parent_and_exposes_live_pipeline_children(tmp_path):
     ]
 
 
+def test_end_to_end_metadata_is_canonical_for_temporal_and_standard_runs(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+
+    standard_id = repository.create(_spec(tmp_path))
+    temporal_id = repository.create(
+        _spec(tmp_path, temporal_validation_enabled=True)
+    )
+
+    standard = repository.run_metadata(standard_id)
+    temporal = repository.run_metadata(temporal_id)
+    assert standard.run_role is RunRole.PIPELINE_PARENT
+    assert standard.run_purpose is RunPurpose.STANDARD
+    assert temporal.run_role is RunRole.PIPELINE_PARENT
+    assert temporal.run_purpose is RunPurpose.REFERENCE
+
+
+def test_temporal_parent_rejects_explicit_noncanonical_metadata(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+
+    with pytest.raises(ValueError, match="pipeline_parent/reference"):
+        repository.create(
+            _spec(tmp_path, temporal_validation_enabled=True),
+            metadata=RunMetadata(),
+        )
+
+
+def test_temporal_parent_guard_runs_before_manifest_or_children(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    spec = _spec(tmp_path, temporal_validation_enabled=True)
+    run_id = repository.create(spec)
+    repository.write_json(run_id, "metadata.json", RunMetadata().to_dict())
+    child_calls = []
+
+    with pytest.raises(ValueError, match="pipeline_parent/reference"):
+        end_to_end.run_end_to_end(
+            spec,
+            repository.run_directory(run_id) / "_working",
+            None,
+            None,
+            execute_reserved_child=lambda *_: child_calls.append(True),
+            phase_callback=lambda *_args, **_kwargs: None,
+        )
+
+    assert child_calls == []
+    assert repository.list_children(run_id) == []
+    assert not (
+        repository.run_directory(run_id) / "orchestration" / "pipeline.json"
+    ).exists()
+    assert not (repository.run_directory(run_id) / "results").exists()
+
+
 def test_end_to_end_restart_creates_a_new_parent_and_new_child_chain(tmp_path):
     class FakeBackend:
         def launch(self, runs_root, run_id, max_concurrent_jobs):
@@ -715,3 +766,27 @@ def test_end_to_end_restart_creates_a_new_parent_and_new_child_chain(tmp_path):
     }.isdisjoint(
         {item["child_run_id"] for item in restarted_manifest["stages"][:-1]}
     )
+
+
+def test_temporal_end_to_end_restart_and_resume_keep_reference_metadata(tmp_path):
+    class FakeBackend:
+        def launch(self, runs_root, run_id, max_concurrent_jobs):
+            return 1234
+
+    repository = RunRepository(tmp_path / "runs")
+    source_id = repository.create(
+        _spec(tmp_path, temporal_validation_enabled=True)
+    )
+    repository.transition(source_id, JobStatus.FAILED, error="interrupted")
+    service = RunService(repository, backend=FakeBackend())
+
+    resumed = service.resume(source_id)
+    resumed_metadata = repository.run_metadata(resumed.run_id)
+    assert resumed_metadata.run_role is RunRole.PIPELINE_PARENT
+    assert resumed_metadata.run_purpose is RunPurpose.REFERENCE
+
+    repository.transition(source_id, JobStatus.FAILED, error="interrupted again")
+    restarted = service.restart(source_id)
+    restarted_metadata = repository.run_metadata(restarted.run_id)
+    assert restarted_metadata.run_role is RunRole.PIPELINE_PARENT
+    assert restarted_metadata.run_purpose is RunPurpose.REFERENCE

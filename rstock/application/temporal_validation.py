@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import random
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median, pstdev
@@ -14,7 +15,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from .auto_promotion import _promotion_guidance
-from .domain import JobType, RunPurpose
+from .domain import JobType, RunPurpose, RunRole
 from .repository import RunRepository
 
 
@@ -22,6 +23,7 @@ TEMPORAL_VALIDATION_SCHEMA_VERSION = 1
 TEMPORAL_VALIDATION_POLICY_VERSION = 1
 BOOTSTRAP_METHOD_VERSION = "moving_date_block_bootstrap_v1"
 BOOTSTRAP_REPLICATIONS = 2_000
+CANDIDATE_IDENTITY_STABILITY_POLICY_VERSION = "candidate_identity_stability_v1"
 TEMPORAL_VALIDATION_CHECKPOINT = "orchestration/temporal_validation.json"
 TEMPORAL_VALIDATION_RESULT = "results/temporal_validation_comparison.json"
 
@@ -115,6 +117,145 @@ def _candidate_sets(selected: dict[str, Any], results: Path) -> set[str]:
             guidance["Statut promotion"].astype(str) == "Candidat", "Combinaison"
         ].astype(str)
     )
+
+
+def _candidate_symbols(
+    symbol_set_id: str, target: object, predictors: object
+) -> tuple[str, list[str]]:
+    """Decode the existing persisted Set identity without changing its order."""
+
+    try:
+        symbols = json.loads(symbol_set_id)
+    except (TypeError, json.JSONDecodeError):
+        symbols = None
+    if isinstance(symbols, list) and symbols:
+        values = [str(value) for value in symbols]
+        return values[0], values[1:]
+    if "<-" in symbol_set_id:
+        legacy_target, legacy_predictors = symbol_set_id.split("<-", 1)
+        return legacy_target, [
+            value.strip()
+            for value in legacy_predictors.split("+")
+            if value.strip()
+        ]
+    predictor_values = [
+        value.strip()
+        for value in str(predictors).replace(" + ", "+").split("+")
+        if value.strip() and value.strip() != str(target)
+    ]
+    return str(target), predictor_values
+
+
+def _optional_int(value: object) -> int | None:
+    numeric = _as_float(value)
+    if numeric is None or not numeric.is_integer():
+        return None
+    return int(numeric)
+
+
+
+def _candidate_population(
+    selected: dict[str, Any], results: Path
+) -> dict[tuple[str, str], dict[str, object]]:
+    """Build the final Up population already selected by promotion guidance."""
+
+    guidance = _promotion_guidance(results, selected)
+    if (
+        guidance.empty
+        or "Statut promotion" not in guidance
+        or "Combinaison" not in guidance
+    ):
+        return {}
+    candidates = guidance[
+        guidance["Statut promotion"].astype(str) == "Candidat"
+    ]
+    population: dict[tuple[str, str], dict[str, object]] = {}
+    for _, row in candidates.iterrows():
+        set_id = str(row.get("Combinaison", ""))
+        direction = str(row.get("Direction", "Up"))
+        target, predictors = _candidate_symbols(
+            set_id, row.get("Cible", ""), row.get("Predictors", "")
+        )
+        population[(set_id, direction)] = {
+            "target": target,
+            "predictors": predictors,
+            "direction": direction,
+            "symbol_set_id": set_id,
+            "threshold": _as_float(row.get("Seuil calibré")),
+            "holdout_signal_count": _optional_int(row.get("Signaux holdout")),
+            "holdout_precision": _as_float(row.get("Précision holdout")),
+            "holdout_auc": _as_float(row.get("AUC holdout")),
+            "directional_return_mean": _as_float(
+                row.get("Rendement directionnel moyen")
+            ),
+            "opposite_move_frequency": _as_float(
+                row.get("Fréquence mouvement opposé")
+            ),
+        }
+    return population
+
+
+
+def candidate_identity_stability(
+    reference_candidates: dict[tuple[str, str], dict[str, object]],
+    validation_candidates: dict[tuple[str, str], dict[str, object]],
+) -> dict[str, object]:
+    """Describe candidate identity overlap without affecting any gate."""
+
+    reference_keys = set(reference_candidates)
+    validation_keys = set(validation_candidates)
+    common_keys = reference_keys & validation_keys
+    lost_keys = reference_keys - validation_keys
+    new_keys = validation_keys - reference_keys
+
+    def ordered(keys: set[tuple[str, str]]) -> list[tuple[str, str]]:
+        return sorted(keys, key=lambda item: (item[0], item[1]))
+
+    common = [
+        {
+            "target": reference_candidates[key]["target"],
+            "predictors": reference_candidates[key]["predictors"],
+            "direction": key[1],
+            "symbol_set_id": key[0],
+            "reference": {
+                name: value
+                for name, value in reference_candidates[key].items()
+                if name not in {
+                    "target", "predictors", "direction", "symbol_set_id"
+                }
+            },
+            "validation": {
+                name: value
+                for name, value in validation_candidates[key].items()
+                if name not in {
+                    "target", "predictors", "direction", "symbol_set_id"
+                }
+            },
+        }
+        for key in ordered(common_keys)
+    ]
+    reference_count = len(reference_keys)
+    validation_count = len(validation_keys)
+    common_count = len(common_keys)
+    union_count = len(reference_keys | validation_keys)
+    return {
+        "policy_version": CANDIDATE_IDENTITY_STABILITY_POLICY_VERSION,
+        "reference_candidate_count": reference_count,
+        "validation_candidate_count": validation_count,
+        "common_candidate_count": common_count,
+        "lost_candidate_count": len(lost_keys),
+        "new_candidate_count": len(new_keys),
+        "candidate_survival_rate": (
+            common_count / reference_count if reference_count else None
+        ),
+        "validation_overlap_rate": (
+            common_count / validation_count if validation_count else None
+        ),
+        "jaccard_index": common_count / union_count if union_count else None,
+        "common_candidates": common,
+        "lost_candidates": [reference_candidates[key] for key in ordered(lost_keys)],
+        "new_candidates": [validation_candidates[key] for key in ordered(new_keys)],
+    }
 
 
 def _single_candidate_yield(
@@ -403,11 +544,13 @@ class TemporalValidationRunner:
         root_run_id: str,
         validation_run_id: str,
         result_output: Path | None = None,
+        recover_invalid_preflight: bool = False,
     ) -> None:
         self.repository = repository
         self.root_run_id = root_run_id
         self.validation_run_id = validation_run_id
         self._result_output = result_output
+        self._recover_invalid_preflight = recover_invalid_preflight
 
     @property
     def checkpoint_path(self) -> Path:
@@ -527,6 +670,10 @@ class TemporalValidationRunner:
             if (
                 legacy.get("status") == "completed"
                 and "temporal_context" not in legacy
+                and not (
+                    self._recover_invalid_preflight
+                    and legacy.get("final_status") == "invalid"
+                )
             ):
                 return legacy
         identity, preflight_error = self._preflight()
@@ -561,6 +708,10 @@ class TemporalValidationRunner:
         validation_selected = _read_json(validation_results / "selected_thresholds_by_set.json")
         parameters = identity["parameters"]
         assert isinstance(parameters, dict)
+        identity_stability = candidate_identity_stability(
+            _candidate_population(reference_selected, reference_results),
+            _candidate_population(validation_selected, validation_results),
+        )
 
         yield_gate = _gate_yield(
             reference_selected,
@@ -662,5 +813,173 @@ class TemporalValidationRunner:
             "final_status": final_status,
             "error": None,
             "gates": gates,
+            "candidate_identity_stability": identity_stability,
             "executed_at": datetime.now(timezone.utc).isoformat(),
         })
+
+
+def recover_temporal_validation(
+    repository: RunRepository, root_run_id: str
+) -> dict[str, object]:
+    """Recover one explicitly requested comparison after an invalid preflight."""
+
+    spec = repository.load_spec(root_run_id)
+    if spec.job_type is not JobType.END_TO_END or not spec.temporal_validation_enabled:
+        raise ValueError("Le run cible doit etre un End-to-end temporel.")
+    if repository.status(root_run_id).get("status") != "completed":
+        raise ValueError("La chaine de reference doit etre completed.")
+
+    checkpoint_path = (
+        repository.run_directory(root_run_id) / TEMPORAL_VALIDATION_CHECKPOINT
+    )
+    if not checkpoint_path.is_file():
+        raise ValueError("Le checkpoint temporel invalide est absent.")
+    previous = repository.read_json(root_run_id, TEMPORAL_VALIDATION_CHECKPOINT)
+    metadata = repository.run_metadata(root_run_id)
+    if (
+        metadata.run_role is RunRole.PIPELINE_PARENT
+        and metadata.run_purpose is RunPurpose.REFERENCE
+        and previous.get("status") == "completed"
+        and "temporal_context" in previous
+    ):
+        return previous
+    if (
+        previous.get("status") != "completed"
+        or previous.get("final_status") != "invalid"
+        or "temporal_context" in previous
+    ):
+        raise ValueError(
+            "La recuperation exige un ancien preflight terminal invalid incomplet."
+        )
+    if (
+        metadata.run_role is not RunRole.STANDALONE
+        or metadata.run_purpose is not RunPurpose.STANDARD
+    ):
+        raise ValueError(
+            "Les metadonnees historiques ne correspondent pas au defaut cible."
+        )
+
+    manifest = repository.read_json(root_run_id, "orchestration/pipeline.json")
+    temporal_stages = [
+        item
+        for item in manifest.get("stages", ())
+        if isinstance(item, dict)
+        and item.get("stage_key") == "temporal_validation_end_to_end"
+    ]
+    if len(temporal_stages) != 1 or not temporal_stages[0].get("child_run_id"):
+        raise ValueError("Le child End-to-end temporel est absent du manifest.")
+    validation_run_id = str(temporal_stages[0]["child_run_id"])
+    if repository.status(validation_run_id).get("status") != "completed":
+        raise ValueError("La chaine offset 63 doit etre completed.")
+    validation_metadata = repository.run_metadata(validation_run_id)
+    if (
+        validation_metadata.run_purpose is not RunPurpose.TEMPORAL_VALIDATION
+        or validation_metadata.reference_run_id != root_run_id
+    ):
+        raise ValueError("La relation du child temporel est incompatible.")
+
+    validation_spec = repository.load_spec(validation_run_id)
+    if spec.config.walk_forward_end_offset_sessions != 0:
+        raise ValueError("Offset de reference attendu: 0.")
+    if validation_spec.config.walk_forward_end_offset_sessions != 63:
+        raise ValueError("Offset de validation attendu: 63.")
+    if _scientific_snapshot(spec) != _scientific_snapshot(validation_spec):
+        raise ValueError("The scientific configurations of both chains differ")
+
+    def threshold_run_id(run_id: str) -> str:
+        pipeline = repository.read_json(run_id, "orchestration/pipeline.json")
+        matches = [
+            item
+            for item in pipeline.get("stages", ())
+            if isinstance(item, dict)
+            and item.get("stage_key") == "threshold_calibration"
+        ]
+        if len(matches) != 1 or not matches[0].get("child_run_id"):
+            raise ValueError(
+                f"Etape threshold_calibration absente pour {run_id}."
+            )
+        threshold_id = str(matches[0]["child_run_id"])
+        if repository.status(threshold_id).get("status") != "completed":
+            raise ValueError(
+                f"La calibration des seuils {threshold_id} doit etre completed."
+            )
+        return threshold_id
+
+    reference_threshold = threshold_run_id(root_run_id)
+    validation_threshold = threshold_run_id(validation_run_id)
+    source_digests: dict[str, dict[str, str]] = {}
+    artifact_paths: dict[str, dict[str, str]] = {}
+    for label, threshold_id in (
+        ("reference", reference_threshold),
+        ("validation", validation_threshold),
+    ):
+        results = repository.run_directory(threshold_id) / "results"
+        source_digests[label] = {}
+        artifact_paths[label] = {}
+        for name in _SOURCE_FILES:
+            path = results / name
+            digest = _sha256(path)
+            if digest is None:
+                raise ValueError(
+                    f"Artefact temporel requis absent ({label}) : {name}"
+                )
+            source_digests[label][name] = digest
+            artifact_paths[label][name] = str(path)
+
+    recovery_context = {
+        "event": "temporal_validation_recovered_from_invalid_preflight",
+        "root_run_id": root_run_id,
+        "old_run_role": metadata.run_role.value,
+        "old_run_purpose": metadata.run_purpose.value,
+        "new_run_role": RunRole.PIPELINE_PARENT.value,
+        "new_run_purpose": RunPurpose.REFERENCE.value,
+        "reference_threshold_run_id": reference_threshold,
+        "validation_run_id": validation_run_id,
+        "validation_threshold_run_id": validation_threshold,
+        "artifact_paths": artifact_paths,
+        "source_artifact_digests": source_digests,
+        "previous_checkpoint_final_status": previous.get("final_status"),
+        "auto_promote_candidates": spec.auto_promote_candidates,
+    }
+    repository.append_log(
+        root_run_id,
+        "temporal_validation_recovered_from_invalid_preflight started "
+        + json.dumps(recovery_context, sort_keys=True, ensure_ascii=False),
+    )
+    repository.write_json(
+        root_run_id,
+        "metadata.json",
+        replace(
+            metadata,
+            run_role=RunRole.PIPELINE_PARENT,
+            run_purpose=RunPurpose.REFERENCE,
+        ).to_dict(),
+    )
+    repository.append_log(
+        root_run_id,
+        "temporal_validation_recovered_from_invalid_preflight "
+        "invalidated_previous_checkpoint",
+    )
+
+    result = TemporalValidationRunner(
+        repository,
+        root_run_id=root_run_id,
+        validation_run_id=validation_run_id,
+        recover_invalid_preflight=True,
+    ).execute()
+    repository.append_log(
+        root_run_id,
+        "temporal_validation_recovered_from_invalid_preflight completed "
+        + json.dumps(
+            {
+                "final_status": result.get("final_status"),
+                "gates": {
+                    name: gate.get("status")
+                    for name, gate in dict(result.get("gates", {})).items()
+                    if isinstance(gate, dict)
+                },
+            },
+            sort_keys=True,
+        ),
+    )
+    return result

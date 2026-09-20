@@ -8,12 +8,14 @@ import json
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Mapping, Sequence
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
+from rstock.application.production_domain import ProductionModel
 from rstock.application.experiment_duplication import (
     DUPLICATION_JOB_TYPES,
     JOB_TYPE_BY_LABEL,
@@ -64,6 +66,10 @@ from rstock.application.history_analysis import (
     xgboost_calibration_selection_table,
 )
 from rstock.application.runner import running_duration
+from rstock.application.temporal_validation_ui import (
+    candidate_identity_tables,
+    temporal_validation_gate_table,
+)
 from rstock.application.run_detail_tabs import (
     PIPELINE_CHILD_TABS,
     PIPELINE_STAGE_LABEL_COLUMN,
@@ -86,6 +92,7 @@ from rstock.application.surveillance import (
     filter_evaluated_predictions_view,
     filter_signal_results_view,
     prioritize_signals_view,
+    signal_priority_model_lookup,
     prediction_feature_tables,
     source_observation_tables,
 )
@@ -2414,6 +2421,101 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
     st.dataframe(diagnostic_table, hide_index=True, width="stretch")
 
 
+def _render_candidate_identity_stability(comparison: dict[str, object]) -> None:
+    st.subheader("Stabilité des candidats")
+    st.caption(
+        "Compare l\u2019identité des candidats entre la période de référence et la "
+        "période décalée. Cette analyse est descriptive et ne modifie pas la "
+        "décision de validation temporelle."
+    )
+    stability = comparison.get("candidate_identity_stability")
+    if not isinstance(stability, dict):
+        st.info("Analyse de stabilité des candidats indisponible pour ce run.")
+        return
+
+    counts = st.columns(5)
+    for column, label, key in zip(
+        counts,
+        ("Référence", "Validation", "Communs", "Perdus", "Nouveaux"),
+        (
+            "reference_candidate_count",
+            "validation_candidate_count",
+            "common_candidate_count",
+            "lost_candidate_count",
+            "new_candidate_count",
+        ),
+        strict=True,
+    ):
+        column.metric(label, stability.get(key, 0))
+
+    rates = st.columns(3)
+    rates[0].metric(
+        "Taux de survie",
+        _format_metric(stability.get("candidate_survival_rate"), percent=True),
+    )
+    rates[1].metric(
+        "Overlap validation",
+        _format_metric(stability.get("validation_overlap_rate"), percent=True),
+    )
+    rates[2].metric(
+        "Jaccard",
+        _format_metric(stability.get("jaccard_index"), percent=True),
+    )
+
+    survival = stability.get("candidate_survival_rate")
+    if survival == 0:
+        st.info(
+            "Le pipeline conserve son rendement global de candidats, mais aucun "
+            "candidat individuel n\u2019est commun aux deux périodes."
+        )
+    elif survival is not None:
+        st.info(
+            f"{_format_metric(survival, percent=True)} des candidats de référence "
+            "restent candidats dans la période décalée."
+        )
+
+    tables = candidate_identity_tables(stability)
+    common_tab, lost_tab, new_tab = st.tabs(["Communs", "Perdus", "Nouveaux"])
+    percent_columns = {
+        name: st.column_config.NumberColumn(format="percent")
+        for name in (
+            "Précision réf.",
+            "Précision val.",
+            "AUC réf.",
+            "AUC val.",
+            "Rendement réf.",
+            "Rendement val.",
+            "Précision",
+            "AUC",
+            "Rendement",
+        )
+    }
+    with common_tab:
+        if tables["common"].empty:
+            st.info("Aucun candidat commun entre les deux périodes.")
+        else:
+            st.dataframe(
+                tables["common"], hide_index=True, width="stretch",
+                column_config=percent_columns,
+            )
+    with lost_tab:
+        if tables["lost"].empty:
+            st.info("Aucun candidat perdu dans la période décalée.")
+        else:
+            st.dataframe(
+                tables["lost"], hide_index=True, width="stretch",
+                column_config=percent_columns,
+            )
+    with new_tab:
+        if tables["new"].empty:
+            st.info("Aucun nouveau candidat dans la période décalée.")
+        else:
+            st.dataframe(
+                tables["new"], hide_index=True, width="stretch",
+                column_config=percent_columns,
+            )
+
+
 def _render_temporal_validation(
     service: ExperimentService, parent_run_id: str, detail: dict[str, object]
 ) -> None:
@@ -2437,18 +2539,18 @@ def _render_temporal_validation(
         st.subheader(f"Decision: {comparison.get('final_status', 'unknown')}")
         gates = comparison.get("gates", {})
         if isinstance(gates, dict):
-            rows = [
-                {
-                    "Gate": key,
-                    "Status": value.get("status"),
-                    "Reason": value.get("reason"),
-                    "Metrics": value.get("metrics"),
-                }
-                for key, value in gates.items()
-                if isinstance(value, dict)
-            ]
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            st.dataframe(
+                temporal_validation_gate_table(gates),
+                hide_index=True,
+                width="stretch",
+            )
         st.caption(f"Compared at: {comparison.get('executed_at', 'n/a')}")
+        st.caption(
+            "candidate_yield mesure la capacité du pipeline à continuer de produire "
+            "des candidats; la stabilité d\u2019identité mesure combien des mêmes "
+            "candidats persistent entre les périodes."
+        )
+        _render_candidate_identity_stability(comparison)
         with st.expander("Comparison parameters and provenance"):
             st.json({
                 "parameters": comparison.get("parameters", {}),
@@ -3271,6 +3373,33 @@ def _surveillance_styles() -> None:
             border-color: #2563eb;
             color: #ffffff;
           }
+          .rstock-equal-height-marker { display: none; }
+          div[data-testid="stHorizontalBlock"]:has(.rstock-signals-card-marker):has(.rstock-daily-update-card-marker) {
+            align-items: stretch;
+          }
+          div[data-testid="stHorizontalBlock"]:has(.rstock-signals-card-marker):has(.rstock-daily-update-card-marker)
+          > div[data-testid="stColumn"] {
+            align-self: stretch;
+            display: flex;
+            flex-direction: column;
+          }
+          div[data-testid="stHorizontalBlock"]:has(.rstock-signals-card-marker):has(.rstock-daily-update-card-marker)
+          > div[data-testid="stColumn"]
+          > div[data-testid="stVerticalBlock"] {
+            flex: 1 1 auto;
+            height: 100%;
+          }
+          div[data-testid="stLayoutWrapper"]:has(.rstock-signals-card-marker),
+          div[data-testid="stLayoutWrapper"]:has(.rstock-daily-update-card-marker) {
+            flex: 1 1 auto;
+            height: 100%;
+          }
+          div[data-testid="stLayoutWrapper"]:has(.rstock-signals-card-marker)
+          > div[data-testid="stVerticalBlock"],
+          div[data-testid="stLayoutWrapper"]:has(.rstock-daily-update-card-marker)
+          > div[data-testid="stVerticalBlock"] {
+            height: 100%;
+          }
           .rstock-surveillance-subtitle {
             color: #64748b;
             font-size: 0.98rem;
@@ -3287,35 +3416,80 @@ def _surveillance_styles() -> None:
           }
           .rstock-status-pill { background: #dcfce7; color: #15803d; margin-right: 0.35rem; }
           .rstock-error-pill { background: #fee2e2; color: #b91c1c; margin-left: 0.35rem; }
-          .rstock-new-pill { background: #dbeafe; color: #1d4ed8; margin: 0; }
           .rstock-priority-card {
-            border: 1px solid #e2e8f0;
-            border-radius: 0.75rem;
-            padding: 0.8rem;
-            margin: 0.55rem 0;
+            border: 1px solid #e2e6ec;
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
             background: #ffffff;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
           }
-          .rstock-priority-card__top {
+          .rstock-priority-card.rstock-priority-first {
+            border-color: #8ab4f8;
+            background: #fafcff;
+          }
+          .rstock-priority-header {
             display: flex;
             align-items: center;
-            gap: 0.55rem;
+            gap: 8px;
+            white-space: nowrap;
           }
           .rstock-priority-rank {
-            display: inline-grid;
-            place-items: center;
-            width: 1.65rem;
-            height: 1.65rem;
-            border-radius: 999px;
-            background: #eff6ff;
-            color: #2563eb;
-            font-weight: 800;
+            min-width: 28px;
+            color: #4b5563;
+            font-weight: 700;
           }
-          .rstock-priority-target { color: #0f172a; font-size: 1rem; font-weight: 800; }
-          .rstock-priority-predictors { color: #64748b; font-size: 0.78rem; margin: 0.35rem 0; }
-          .rstock-priority-metrics { display: flex; gap: 1.2rem; font-size: 0.8rem; }
-          .rstock-up { color: #059669; font-weight: 800; }
-          .rstock-down { color: #dc2626; font-weight: 800; }
+          .rstock-priority-first .rstock-priority-rank {
+            color: #2563eb;
+          }
+          .rstock-priority-symbol {
+            overflow: hidden;
+            color: #111827;
+            font-size: 16px;
+            font-weight: 700;
+            text-overflow: ellipsis;
+          }
+          .rstock-priority-score {
+            margin-left: auto;
+            padding: 2px 7px;
+            border-radius: 10px;
+            background: #e7f6ea;
+            color: #28783b;
+            font-size: 12px;
+            font-weight: 600;
+          }
+          .rstock-priority-probability {
+            margin-left: 6px;
+            color: #374151;
+            font-size: 13px;
+            font-weight: 600;
+          }
+          .rstock-priority-edge {
+            margin-left: 36px;
+            margin-top: 2px;
+            color: #16803a;
+            font-size: 12px;
+            font-weight: 600;
+          }
+          .rstock-priority-metrics {
+            margin-left: 36px;
+            margin-top: 3px;
+            color: #667085;
+            font-size: 11px;
+            line-height: 1.25;
+          }
+          .rstock-priority-see-all {
+            margin-top: 4px;
+            padding: 6px 8px;
+            border-radius: 7px;
+            background: #eff6ff;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 600;
+          }
+          .rstock-priority-see-all a {
+            color: #2563eb;
+            text-decoration: none;
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -3407,12 +3581,18 @@ def _styled_signal_table(table: pd.DataFrame) -> pd.io.formats.style.Styler:
     )
 
 
-def _render_signals_section(
+def _render_signals_card(
     view: SignalResultsView,
-    models: ModelService,
-) -> None:
+    *,
+    stretch: bool = False,
+) -> tuple[SignalResultsView, dict[str, object] | None]:
     selected_signal = None
-    with st.container(border=True):
+    with st.container(border=True, height="stretch" if stretch else "content"):
+        if stretch:
+            st.markdown(
+                '<span class="rstock-equal-height-marker rstock-signals-card-marker"></span>',
+                unsafe_allow_html=True,
+            )
         st.subheader("Signaux haussiers à traiter")
         st.caption("Opportunités détectées par les modèles actifs.")
         displayed = filter_signal_results_view(view, "Aujourd’hui et demain")
@@ -3441,6 +3621,16 @@ def _render_signals_section(
                 displayed.signals, _selected_rows(event)
             )
 
+    return displayed, selected_signal
+
+
+def _render_signals_followup(
+    displayed: SignalResultsView,
+    selected_signal: dict[str, object] | None,
+    models: ModelService,
+    *,
+    active_models: Sequence[ProductionModel] | None = None,
+) -> None:
     no_signal_selection: list[int] = []
     with st.expander(
         f"Autres prédictions sans signal ({len(displayed.no_signal.table)})",
@@ -3466,10 +3656,13 @@ def _render_signals_section(
     selected = selected_signal or selected_no_signal
     if selected is not None:
         st.markdown("**Détail du signal**")
+        available_models = (
+            models.active_models() if active_models is None else active_models
+        )
         source_model = next(
             (
                 model
-                for model in models.active_models()
+                for model in available_models
                 if model.model_id == selected.get("model_id")
             ),
             None,
@@ -3484,53 +3677,85 @@ def _render_signals_section(
         )
 
 
+def _render_signals_section(
+    view: SignalResultsView,
+    models: ModelService,
+    *,
+    stretch: bool = False,
+) -> None:
+    displayed, selected_signal = _render_signals_card(view, stretch=stretch)
+    _render_signals_followup(displayed, selected_signal, models)
+
+
 def _priority_card_html(
     rank: int,
     row: pd.Series,
-    *,
-    is_new: bool,
 ) -> str:
-    badge = '<span class="rstock-new-pill">Nouveau</span>' if is_new else ""
+    def percentage(value: object, *, digits: int = 0, signed: bool = False) -> str:
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.isna(numeric):
+            return "—"
+        sign = "+" if signed else ""
+        return f"{float(numeric) * 100:{sign}.{digits}f}".replace(".", ",") + " %"
+
+    edge = percentage(row.get("signal_edge"), digits=1, signed=True)
+    edge_text = "Marge vs seuil —" if edge == "—" else f"{edge[:-2]} pts vs seuil"
+    target = html.escape(str(row.get("target", "—")))
+    score = int(row.get("priority_score", 0))
+    probability = percentage(row.get("up_probability"))
+    precision = percentage(row.get("holdout_precision"))
+    directional_return = percentage(
+        row.get("holdout_directional_return"), digits=1, signed=True
+    )
+    opposite = percentage(row.get("opposite_move_frequency"))
+    first_class = " rstock-priority-first" if rank == 1 else ""
     return f"""
-    <div class="rstock-priority-card">
-      <div class="rstock-priority-card__top">
-        <span class="rstock-priority-rank">{rank}</span>
-        <span class="rstock-priority-target">{html.escape(str(row.get('Cible', '—')))}</span>
-        {badge}
+    <div class="rstock-priority-card{first_class}">
+      <div class="rstock-priority-header">
+        <span class="rstock-priority-rank">#{rank}</span>
+        <span class="rstock-priority-symbol">{target}</span>
+        <span class="rstock-priority-score">Score {score}</span>
+        <span class="rstock-priority-probability">P(Up) {probability}</span>
       </div>
-      <div class="rstock-priority-date">Date : {html.escape(str(row.get('Date', '—')))}</div>
-      <div class="rstock-priority-predictors">{html.escape(str(row.get('Predictors', '—')))}</div>
-      <div class="rstock-priority-metrics">
-        <span>P(Up) <span class="rstock-up">{html.escape(str(row.get('P(Up)', '—')))}</span></span>
-        <span>P(Down) <span class="rstock-down">{html.escape(str(row.get('P(Down)', '—')))}</span></span>
-      </div>
+      <div class="rstock-priority-edge">{edge_text}</div>
+      <div class="rstock-priority-metrics">Précision {precision} · Rend. {directional_return} · Opposé {opposite}</div>
     </div>
     """
 
 
-def _render_priorities_panel(signals: OperationalTableView) -> None:
-    priorities = prioritize_signals_view(signals, limit=3)
-    today = pd.Timestamp(date.today()).normalize()
+def _render_priorities_panel(
+    signals: OperationalTableView,
+    model_metrics_by_id: Mapping[str, Mapping[str, object]],
+) -> None:
+    priorities = prioritize_signals_view(
+        signals,
+        model_metrics_by_id=model_metrics_by_id,
+        limit=3,
+    )
     with st.container(border=True):
-        st.subheader("Priorités du jour")
-        st.caption("Les signaux récents avec les P(Up) les plus élevées.")
+        st.subheader(
+            "Priorités du jour",
+            help=(
+                "Le classement combine la force du signal par rapport à son seuil "
+                "calibré et les performances hors échantillon du modèle. Il sert "
+                "à prioriser les signaux et ne modifie pas leur statut scientifique."
+            ),
+        )
+        st.caption("Signaux classés par pertinence opérationnelle.")
         if priorities.table.empty:
             st.info("Aucune priorité pour le moment.")
             return
-        for index, row in priorities.table.iterrows():
-            signal_date = pd.to_datetime(
-                priorities.technical.iloc[index].get("prediction_date"),
-                errors="coerce",
-                utc=True,
-            )
-            is_new = (
-                not pd.isna(signal_date)
-                and signal_date.tz_convert(None).normalize() == today
-            )
+        for index, row in priorities.technical.iterrows():
             st.markdown(
-                _priority_card_html(index + 1, row, is_new=is_new),
+                _priority_card_html(index + 1, row),
                 unsafe_allow_html=True,
             )
+        st.markdown(
+            '<div class="rstock-priority-see-all">'
+            '<a href="#signaux-haussiers-a-traiter">↗ Voir tous les signaux</a>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _render_operational_info(
@@ -3577,7 +3802,7 @@ _DAILY_UPDATE_STAGES = (
 
 
 def _render_daily_update_card(
-    runs: list[dict[str, object]], *, active_model_count: int
+    runs: list[dict[str, object]], *, active_model_count: int, stretch: bool = False
 ) -> None:
     """Submit and follow the existing full operational workflow in one place."""
 
@@ -3593,7 +3818,12 @@ def _render_daily_update_card(
         (run for run in runs if run.get("job_type") == JobType.OPERATIONAL_RUN.value),
         None,
     )
-    with st.container(border=True):
+    with st.container(border=True, height="stretch" if stretch else "content"):
+        if stretch:
+            st.markdown(
+                '<span class="rstock-equal-height-marker rstock-daily-update-card-marker"></span>',
+                unsafe_allow_html=True,
+            )
         st.subheader("Mise à jour quotidienne")
         if current is not None:
             detail = _service().run(str(current["run_id"]))
@@ -3802,7 +4032,9 @@ def _render_surveillance_page(*, polling: bool) -> None:
     _surveillance_styles()
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
-    universe = models.operational_universe()
+    active_models = models.active_models()
+    priority_model_metrics = signal_priority_model_lookup(active_models)
+    universe = models.operational_universe(active_models)
     predictions = PredictionService(project_root).active_history()
     signal_service = SignalService(project_root)
     signals = signal_service.active_history()
@@ -3842,11 +4074,23 @@ def _render_surveillance_page(*, polling: bool) -> None:
         last_market=last_market,
         freshness=freshness,
     )
+    top_main, top_sidebar = st.columns([2.25, 1], gap="large")
+    with top_main:
+        displayed_signals, selected_signal = _render_signals_card(
+            signal_view,
+            stretch=True,
+        )
+    with top_sidebar:
+        _render_daily_update_card(
+            runs, active_model_count=len(universe.model_ids), stretch=True
+        )
     main, sidebar = st.columns([2.25, 1], gap="large")
     with main:
-        _render_signals_section(
-            signal_view,
+        _render_signals_followup(
+            displayed_signals,
+            selected_signal,
             models,
+            active_models=active_models,
         )
         _evaluated_predictions_panel(evaluated_view, runs, project_root=project_root)
         with st.expander("Univers opérationnel"):
@@ -3857,9 +4101,8 @@ def _render_surveillance_page(*, polling: bool) -> None:
                     hide_index=True, width="stretch",
                 )
     with sidebar:
-        _render_daily_update_card(runs, active_model_count=len(universe.model_ids))
         priority_view = filter_signal_results_view(signal_view, "Aujourd’hui et demain")
-        _render_priorities_panel(priority_view.signals)
+        _render_priorities_panel(priority_view.signals, priority_model_metrics)
         _render_operational_info(
             freshness=freshness,
             last_prediction=last_prediction,

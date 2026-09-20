@@ -5,21 +5,33 @@ import pandas as pd
 import pytest
 
 import rstock.application.temporal_validation as temporal_validation
-from rstock.application.domain import ExperimentSpec, JobType, RunMetadata, RunPurpose, RunRole
+from rstock.application.auto_promotion import PROMOTION_CHECKPOINT
+from rstock.application.domain import (
+    ExperimentSpec,
+    JobStatus,
+    JobType,
+    RunMetadata,
+    RunPurpose,
+    RunRole,
+)
 from rstock.application.repository import RunRepository
 from rstock.application.temporal_validation import (
     BOOTSTRAP_METHOD_VERSION,
+    CANDIDATE_IDENTITY_STABILITY_POLICY_VERSION,
     TEMPORAL_VALIDATION_CHECKPOINT,
     TEMPORAL_VALIDATION_RESULT,
     TemporalValidationRunner,
     _auc_gate_status,
     _bootstrap,
     _bootstrap_seed,
+    _candidate_symbols,
     _ci_gate_status,
     _directional_returns,
     _final_status,
     _gate_yield,
     _precision_metrics,
+    candidate_identity_stability,
+    recover_temporal_validation,
     _single_candidate_yield,
     _yield_gate_status,
 )
@@ -109,6 +121,10 @@ def test_temporal_comparison_persists_four_passed_gates_and_reuses_checkpoint(tm
     assert set(first["gates"]) == {"candidate_yield", "holdout_auc", "precision_edge", "directional_return"}
     assert first["gates"]["holdout_auc"]["metrics"]["validation"]["median"] == 0.64
     assert first["gates"]["precision_edge"]["metrics"]["bootstrap"]["method_version"] == BOOTSTRAP_METHOD_VERSION
+    assert first["candidate_identity_stability"]["policy_version"] == (
+        CANDIDATE_IDENTITY_STABILITY_POLICY_VERSION
+    )
+    assert first["candidate_identity_stability"]["common_candidate_count"] == 1
     assert repository.read_json(reference_id, TEMPORAL_VALIDATION_CHECKPOINT) == first
     assert repository.read_json(reference_id, TEMPORAL_VALIDATION_RESULT) == first
 
@@ -125,6 +141,258 @@ def test_temporal_comparison_marks_invalid_relationship_without_promotion_data(t
 
     assert result["final_status"] == "invalid"
     assert "purpose reference" in result["error"]
+
+
+def _identity_candidate(set_id, *, metric=0.6):
+    target, predictors = _candidate_symbols(set_id, "ignored", "ignored")
+    return {
+        "target": target,
+        "predictors": predictors,
+        "direction": "Up",
+        "symbol_set_id": set_id,
+        "threshold": 0.5,
+        "holdout_signal_count": 20,
+        "holdout_precision": metric,
+        "holdout_auc": metric,
+        "directional_return_mean": 0.01,
+        "opposite_move_frequency": 0.2,
+    }
+
+
+def _identity_population(*set_ids):
+    return {
+        (set_id, "Up"): _identity_candidate(set_id)
+        for set_id in set_ids
+    }
+
+
+def test_candidate_identity_stability_for_identical_candidates():
+    population = _identity_population(
+        "[\"AAA\",\"BBB\"]", "[\"CCC\",\"DDD\"]"
+    )
+
+    stability = candidate_identity_stability(population, population)
+
+    assert stability["reference_candidate_count"] == 2
+    assert stability["validation_candidate_count"] == 2
+    assert stability["common_candidate_count"] == 2
+    assert stability["lost_candidate_count"] == 0
+    assert stability["new_candidate_count"] == 0
+    assert stability["candidate_survival_rate"] == 1.0
+    assert stability["validation_overlap_rate"] == 1.0
+    assert stability["jaccard_index"] == 1.0
+
+
+def test_candidate_identity_stability_for_disjoint_candidates():
+    reference = _identity_population(
+        "[\"AAA\",\"BBB\"]", "[\"CCC\",\"DDD\"]"
+    )
+    validation = _identity_population("[\"EEE\",\"FFF\"]")
+
+    stability = candidate_identity_stability(reference, validation)
+
+    assert stability["common_candidate_count"] == 0
+    assert stability["lost_candidate_count"] == 2
+    assert stability["new_candidate_count"] == 1
+    assert stability["candidate_survival_rate"] == 0.0
+    assert stability["validation_overlap_rate"] == 0.0
+    assert stability["jaccard_index"] == 0.0
+
+
+def test_candidate_identity_stability_for_partial_overlap_preserves_both_metrics():
+    shared = "[\"AAA\",\"BBB\",\"CCC\"]"
+    reference = _identity_population(shared, "[\"DDD\",\"EEE\"]")
+    validation = _identity_population(shared, "[\"FFF\",\"GGG\"]")
+    validation[(shared, "Up")] = _identity_candidate(shared, metric=0.7)
+
+    stability = candidate_identity_stability(reference, validation)
+
+    assert stability["common_candidate_count"] == 1
+    assert stability["lost_candidate_count"] == 1
+    assert stability["new_candidate_count"] == 1
+    assert stability["candidate_survival_rate"] == 0.5
+    assert stability["validation_overlap_rate"] == 0.5
+    assert stability["jaccard_index"] == pytest.approx(1 / 3)
+    common = stability["common_candidates"][0]
+    assert common["predictors"] == ["BBB", "CCC"]
+    assert common["reference"]["holdout_precision"] == 0.6
+    assert common["validation"]["holdout_precision"] == 0.7
+
+
+def test_candidate_identity_stability_handles_empty_populations():
+    populated = _identity_population("[\"AAA\",\"BBB\"]")
+
+    empty_reference = candidate_identity_stability({}, populated)
+    empty_validation = candidate_identity_stability(populated, {})
+    both_empty = candidate_identity_stability({}, {})
+
+    assert empty_reference["candidate_survival_rate"] is None
+    assert empty_reference["validation_overlap_rate"] == 0.0
+    assert empty_reference["jaccard_index"] == 0.0
+    assert empty_validation["candidate_survival_rate"] == 0.0
+    assert empty_validation["validation_overlap_rate"] is None
+    assert empty_validation["jaccard_index"] == 0.0
+    assert both_empty["candidate_survival_rate"] is None
+    assert both_empty["validation_overlap_rate"] is None
+    assert both_empty["jaccard_index"] is None
+
+
+def test_candidate_symbols_reuses_canonical_set_order_and_supports_legacy_ids():
+    assert _candidate_symbols(
+        "[\"INTC\",\"BNY\",\"GS\"]", "ignored", "ignored"
+    ) == ("INTC", ["BNY", "GS"])
+    assert _candidate_symbols("INTC<-BNY+GS", "ignored", "ignored") == (
+        "INTC", ["BNY", "GS"]
+    )
+
+
+def test_current_run_shape_with_eight_and_six_disjoint_candidates():
+    reference = _identity_population(
+        *(f"[\"R{index}\",\"P{index}\"]" for index in range(8))
+    )
+    validation = _identity_population(
+        *(f"[\"V{index}\",\"Q{index}\"]" for index in range(6))
+    )
+
+    stability = candidate_identity_stability(reference, validation)
+
+    assert stability["reference_candidate_count"] == 8
+    assert stability["validation_candidate_count"] == 6
+    assert stability["common_candidate_count"] == 0
+    assert stability["lost_candidate_count"] == 8
+    assert stability["new_candidate_count"] == 6
+    assert stability["candidate_survival_rate"] == 0.0
+    assert stability["validation_overlap_rate"] == 0.0
+    assert stability["jaccard_index"] == 0.0
+
+
+def _mark_temporal_fixture_completed(repository, reference_id, validation_id):
+    run_ids = [reference_id, validation_id]
+    for parent_id in (reference_id, validation_id):
+        manifest = repository.read_json(parent_id, "orchestration/pipeline.json")
+        run_ids.extend(
+            str(item["child_run_id"])
+            for item in manifest["stages"]
+            if item.get("stage_key") == "threshold_calibration"
+        )
+    for run_id in run_ids:
+        repository.transition(run_id, JobStatus.RUNNING)
+        repository.transition(run_id, JobStatus.COMPLETED)
+
+
+
+def _make_recoverable_invalid_fixture(tmp_path):
+    repository, reference_id, validation_id, _ = _fixture(tmp_path)
+    manifest = repository.read_json(reference_id, "orchestration/pipeline.json")
+    manifest["stages"].append(
+        {
+            "stage_key": "temporal_validation_end_to_end",
+            "child_run_id": validation_id,
+        }
+    )
+    repository.write_json(
+        reference_id, "orchestration/pipeline.json", manifest
+    )
+    _mark_temporal_fixture_completed(repository, reference_id, validation_id)
+    metadata = repository.run_metadata(reference_id).to_dict()
+    metadata["run_role"] = RunRole.STANDALONE.value
+    metadata["run_purpose"] = RunPurpose.STANDARD.value
+    repository.write_json(reference_id, "metadata.json", metadata)
+    invalid = TemporalValidationRunner(
+        repository, root_run_id=reference_id, validation_run_id=validation_id
+    ).execute()
+    assert invalid["final_status"] == "invalid"
+    return repository, reference_id, validation_id
+
+
+def test_recover_temporal_validation_repairs_metadata_and_only_recomputes_comparison(
+    tmp_path,
+):
+    repository, reference_id, validation_id = _make_recoverable_invalid_fixture(
+        tmp_path
+    )
+    run_ids_before = {
+        path.name
+        for path in repository.root.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    }
+    children_before = {
+        child_id: repository.status(child_id)
+        for child_id in repository.list_children(reference_id)
+    }
+
+    recovered = recover_temporal_validation(repository, reference_id)
+
+    metadata = repository.run_metadata(reference_id)
+    assert metadata.run_role is RunRole.PIPELINE_PARENT
+    assert metadata.run_purpose is RunPurpose.REFERENCE
+    assert recovered["parameters"]
+    assert recovered["source_artifact_digests"]
+    assert set(recovered["gates"]) == {
+        "candidate_yield",
+        "holdout_auc",
+        "precision_edge",
+        "directional_return",
+    }
+    assert recovered["final_status"] in {"passed", "failed", "inconclusive"}
+    assert {
+        path.name
+        for path in repository.root.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    } == run_ids_before
+    assert {
+        child_id: repository.status(child_id)
+        for child_id in repository.list_children(reference_id)
+    } == children_before
+    assert not (
+        repository.run_directory(reference_id) / PROMOTION_CHECKPOINT
+    ).exists()
+    assert "temporal_validation_recovered_from_invalid_preflight" in "\\n".join(
+        repository.log_tail(reference_id, lines=20)
+    )
+    assert recover_temporal_validation(repository, reference_id) == recovered
+    assert repository.run_metadata(validation_id).run_purpose is RunPurpose.TEMPORAL_VALIDATION
+
+
+def test_recover_temporal_validation_refuses_missing_artifact_without_metadata_change(
+    tmp_path,
+):
+    repository, reference_id, validation_id = _make_recoverable_invalid_fixture(
+        tmp_path
+    )
+    validation_manifest = repository.read_json(
+        validation_id, "orchestration/pipeline.json"
+    )
+    threshold_id = validation_manifest["stages"][0]["child_run_id"]
+    missing = (
+        repository.run_directory(str(threshold_id))
+        / "results"
+        / "holdout_predictions.csv"
+    )
+    missing.unlink()
+
+    with pytest.raises(ValueError, match="holdout_predictions.csv"):
+        recover_temporal_validation(repository, reference_id)
+
+    metadata = repository.run_metadata(reference_id)
+    assert metadata.run_role is RunRole.STANDALONE
+    assert metadata.run_purpose is RunPurpose.STANDARD
+
+
+def test_recover_temporal_validation_refuses_scientific_snapshot_mismatch(tmp_path):
+    repository, reference_id, validation_id = _make_recoverable_invalid_fixture(
+        tmp_path
+    )
+    validation = repository.read_json(validation_id, "config.json")
+    validation["rstock_config"]["temporal_max_auc_degradation"] = 0.123
+    repository.write_json(validation_id, "config.json", validation)
+
+    with pytest.raises(ValueError, match="scientific configurations"):
+        recover_temporal_validation(repository, reference_id)
+
+    metadata = repository.run_metadata(reference_id)
+    assert metadata.run_role is RunRole.STANDALONE
+    assert metadata.run_purpose is RunPurpose.STANDARD
 
 
 def test_temporal_comparison_rejects_changed_inputs_after_checkpoint(tmp_path):

@@ -36,6 +36,28 @@ def test_primary_native_pages_cover_the_laboratory_sections():
     assert source.count("st.Page(") == 9
 
 
+def test_temporal_validation_renders_descriptive_candidate_stability():
+    source = APP.read_text(encoding="utf-8")
+    renderer = source.split(
+        "def _render_candidate_identity_stability", 1
+    )[1].split("def _render_temporal_validation", 1)[0]
+
+    assert "Stabilité des candidats" in renderer
+    assert "candidate_identity_stability" in renderer
+    assert "Analyse de stabilité des candidats indisponible" in renderer
+    assert "reference_candidate_count" in renderer
+    assert "validation_candidate_count" in renderer
+    assert "common_candidate_count" in renderer
+    assert "lost_candidate_count" in renderer
+    assert "new_candidate_count" in renderer
+    assert "candidate_survival_rate" in renderer
+    assert "validation_overlap_rate" in renderer
+    assert "jaccard_index" in renderer
+    assert "st.tabs([\"Communs\", \"Perdus\", \"Nouveaux\"])" in renderer
+    assert "Aucun candidat commun entre les deux périodes." in renderer
+    assert "ne modifie pas la" in renderer
+
+
 def test_primary_pages_use_one_compact_logo_header_with_a_safe_fallback():
     source = APP.read_text(encoding="utf-8")
 
@@ -494,17 +516,23 @@ def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
 
     assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' not in source
     assert "_render_predictions_tab" not in source
-    assert "_render_signals_section(" in surveillance
+    assert "_render_signals_card(" in surveillance
+    assert "_render_signals_followup(" in surveillance
     assert "_evaluated_predictions_panel(evaluated_view, runs, project_root=project_root)" in surveillance
     assert "main, sidebar = st.columns([2.25, 1], gap=\"large\")" in surveillance
-    assert "_render_priorities_panel(priority_view.signals)" in surveillance
+    assert (
+        "_render_priorities_panel(priority_view.signals, priority_model_metrics)"
+        in surveillance
+    )
     assert "Autres prédictions sans signal" in source
     assert "Prédictions évaluées récemment" in source
     assert "Détails techniques" in source
     assert "Pourquoi ce signal ?" in source
-    assert surveillance.index("_render_signals_section") < surveillance.index(
-        "_evaluated_predictions_panel"
-    ) < surveillance.index('_live_job_panel(_service(), domain="production")')
+    assert surveillance.index("_render_signals_card") < surveillance.index(
+        "_render_signals_followup"
+    ) < surveillance.index("_evaluated_predictions_panel") < surveillance.index(
+        '_live_job_panel(_service(), domain="production")'
+    )
     assert 'expanded=False' in source
 
 
@@ -554,7 +582,9 @@ def test_surveillance_uses_one_daily_operational_update_card():
     assert "_DAILY_UPDATE_STAGES" in card
     assert "st.error" in card
     assert "Mise à jour quotidienne terminée." in card
-    assert "_render_daily_update_card(runs, active_model_count=len(universe.model_ids))" in surveillance
+    assert "_render_daily_update_card(" in surveillance
+    assert "active_model_count=len(universe.model_ids), stretch=True" in surveillance
+    assert 'top_main, top_sidebar = st.columns([2.25, 1], gap="large")' in surveillance
     assert surveillance.index("_render_daily_update_card") < surveillance.index(
         "_render_priorities_panel"
     )
@@ -565,10 +595,39 @@ def test_surveillance_uses_one_daily_operational_update_card():
     assert job_panel.index("if not runs:") < job_panel.index("title = job_domain_title")
 
 
+def test_surveillance_top_cards_use_an_equal_height_row():
+    source = APP.read_text(encoding="utf-8")
+    styles = source.split("def _surveillance_styles", 1)[1].split(
+        "def _render_page_header", 1
+    )[0]
+    surveillance = source.split("def _render_surveillance_page", 1)[1].split(
+        "def _surveillance_page", 1
+    )[0]
+
+    row_selector = (
+        'div[data-testid="stHorizontalBlock"]'
+        ':has(.rstock-signals-card-marker)'
+        ':has(.rstock-daily-update-card-marker)'
+    )
+    assert row_selector in styles
+    assert "align-items: stretch;" in styles
+    assert (
+        'div[data-testid="stLayoutWrapper"]'
+        ":has(.rstock-signals-card-marker)"
+    ) in styles
+    assert (
+        'div[data-testid="stLayoutWrapper"]'
+        ":has(.rstock-daily-update-card-marker)"
+    ) in styles
+    assert "height: 100%;" in styles
+    assert "stretch=True" in surveillance
+    assert "active_model_count=len(universe.model_ids), stretch=True" in surveillance
+
+
 def test_surveillance_expander_counts_match_their_displayed_grids():
     source = APP.read_text(encoding="utf-8")
-    signals = source.split("def _render_signals_section", 1)[1].split(
-        "def _evaluated_predictions_panel", 1
+    signals = source.split("def _render_signals_followup", 1)[1].split(
+        "def _render_signals_section", 1
     )[0]
     evaluated = source.split("def _evaluated_predictions_panel", 1)[1].split(
         "def _render_surveillance_page", 1
@@ -621,17 +680,28 @@ def test_surveillance_uses_four_compact_kpi_cards_and_a_header_status():
     assert 'timestamp.strftime("%Y-%m-%d %H:%M")' in source
 
 
-def test_surveillance_priorities_are_limited_and_have_an_empty_state():
+def test_surveillance_priorities_are_compact_limited_and_have_an_empty_state():
     source = APP.read_text(encoding="utf-8")
     panel = source.split("def _render_priorities_panel", 1)[1].split(
         "def _render_operational_info", 1
     )[0]
+    card = source.split("def _priority_card_html", 1)[1].split(
+        "def _render_priorities_panel", 1
+    )[0]
 
-    assert 'st.subheader("Priorités du jour")' in panel
-    assert "prioritize_signals_view(signals, limit=3)" in panel
-    assert "_priority_card_html(index + 1, row, is_new=is_new)" in panel
+    assert '"Priorités du jour",' in panel
+    assert '"Signaux classés par pertinence opérationnelle."' in panel
+    assert "model_metrics_by_id=model_metrics_by_id" in panel
+    assert "limit=3" in panel
+    assert "_priority_card_html(index + 1, row)" in panel
     assert "Aucune priorité pour le moment." in panel
-    assert "prediction_date" in panel
+    assert "Voir tous les signaux" in panel
+    assert "Score {score}" in card
+    assert "P(Up) {probability}" in card
+    assert "pts vs seuil" in card
+    assert "Précision {precision}" in card
+    assert "Rend. {directional_return}" in card
+    assert "Opposé {opposite}" in card
 
 
 def test_surveillance_css_is_scoped_to_its_page_marker():

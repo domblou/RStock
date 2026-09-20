@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -16,6 +16,7 @@ from rstock.progress import CancellationCheck, ProgressCallback
 
 from .domain import ExperimentSpec, JobType
 from .production_repository import ProductionRepository
+from .production_domain import ProductionModel
 from .production_services import (
     OperationalUniverseService,
     ProductionLifecycleService,
@@ -129,8 +130,11 @@ class ModelService:
     def retire(self, model_id: str):
         return ProductionLifecycleService(self.repository).retire(model_id)
 
-    def operational_universe(self):
-        return OperationalUniverseService(self.repository).current()
+    def operational_universe(
+        self,
+        active_models: Sequence[ProductionModel] | None = None,
+    ):
+        return OperationalUniverseService(self.repository).current(active_models)
 
 
 class PredictionService:

@@ -476,8 +476,15 @@ class OperationalUniverseService:
     def __init__(self, repository: ProductionRepository) -> None:
         self.repository = repository
 
-    def current(self) -> OperationalUniverse:
-        active = self.repository.active_models()
+    def current(
+        self,
+        active_models: Sequence[ProductionModel] | None = None,
+    ) -> OperationalUniverse:
+        active = list(
+            self.repository.active_models()
+            if active_models is None
+            else active_models
+        )
         used_by: dict[str, list[str]] = {}
         for model in active:
             for symbol in model.symbols:

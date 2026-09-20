@@ -590,6 +590,16 @@ def run_end_to_end(
 ) -> dict[str, Any]:
     repository = RunRepository(output.parent.parent)
     root_run_id = output.parent.name
+    if spec.temporal_validation_enabled:
+        metadata = repository.run_metadata(root_run_id)
+        if (
+            metadata.run_role is not RunRole.PIPELINE_PARENT
+            or metadata.run_purpose is not RunPurpose.REFERENCE
+        ):
+            raise ValueError(
+                "Un End-to-end avec validation temporelle doit utiliser un parent "
+                "pipeline_parent/reference."
+            )
     manifest = persist_or_validate_pipeline_manifest(repository, root_run_id, spec)
     stage_count = (
         len(SCIENTIFIC_STAGES)

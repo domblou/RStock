@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Mapping
+from typing import Iterable, Mapping
 
 import pandas as pd
+
+from .production_domain import ProductionModel
 
 
 EVALUATED_PREDICTIONS_DISPLAY_COLUMNS = (
@@ -53,6 +56,25 @@ SIGNAL_LABELS = {
     "no_signal": "Sans signal",
     "error": "Erreur",
 }
+
+SIGNAL_PRIORITY_POLICY_VERSION = "signal_priority_v1"
+SIGNAL_PRIORITY_WEIGHTS = {
+    "signal_edge": 0.40,
+    "holdout_precision": 0.25,
+    "holdout_directional_return": 0.20,
+    "opposite_move_frequency": 0.10,
+    "signal_sample_size": 0.05,
+}
+SIGNAL_PRIORITY_BOUNDS = {
+    "signal_edge": 0.20,
+    "holdout_precision_floor": 0.40,
+    "holdout_precision_span": 0.30,
+    "holdout_directional_return": 0.02,
+    "opposite_move_frequency": 0.30,
+    "signal_sample_size": 50.0,
+}
+SIGNAL_PRIORITY_MISSING_COMPONENT_SCORE = 0.50
+SIGNAL_PRIORITY_MISSING_EDGE_SCORE = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,13 +286,121 @@ def filter_signal_results_view(
     return SignalResultsView(filtered(view.signals), filtered(view.no_signal))
 
 
+def _finite_number(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _clamp_unit(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def compute_signal_priority_score(
+    *,
+    signal_edge: object,
+    holdout_precision: object,
+    holdout_directional_return: object,
+    opposite_move_frequency: object,
+    signal_sample_size: object,
+) -> int:
+    """Return the absolute, deterministic operational ranking score.
+
+    V1 uses fixed bounds rather than today's signal population. Missing
+    historical metrics contribute a neutral 0.5 component. A missing edge
+    contributes zero because an absent calibrated threshold must never improve
+    a signal's rank.
+    """
+
+    edge = _finite_number(signal_edge)
+    precision = _finite_number(holdout_precision)
+    directional_return = _finite_number(holdout_directional_return)
+    opposite = _finite_number(opposite_move_frequency)
+    sample_size = _finite_number(signal_sample_size)
+    components = {
+        "signal_edge": (
+            SIGNAL_PRIORITY_MISSING_EDGE_SCORE
+            if edge is None
+            else _clamp_unit(edge / SIGNAL_PRIORITY_BOUNDS["signal_edge"])
+        ),
+        "holdout_precision": (
+            SIGNAL_PRIORITY_MISSING_COMPONENT_SCORE
+            if precision is None
+            else _clamp_unit(
+                (precision - SIGNAL_PRIORITY_BOUNDS["holdout_precision_floor"])
+                / SIGNAL_PRIORITY_BOUNDS["holdout_precision_span"]
+            )
+        ),
+        "holdout_directional_return": (
+            SIGNAL_PRIORITY_MISSING_COMPONENT_SCORE
+            if directional_return is None
+            else _clamp_unit(
+                directional_return
+                / SIGNAL_PRIORITY_BOUNDS["holdout_directional_return"]
+            )
+        ),
+        "opposite_move_frequency": (
+            SIGNAL_PRIORITY_MISSING_COMPONENT_SCORE
+            if opposite is None
+            else _clamp_unit(
+                (
+                    SIGNAL_PRIORITY_BOUNDS["opposite_move_frequency"]
+                    - opposite
+                )
+                / SIGNAL_PRIORITY_BOUNDS["opposite_move_frequency"]
+            )
+        ),
+        "signal_sample_size": (
+            SIGNAL_PRIORITY_MISSING_COMPONENT_SCORE
+            if sample_size is None
+            else _clamp_unit(
+                sample_size / SIGNAL_PRIORITY_BOUNDS["signal_sample_size"]
+            )
+        ),
+    }
+    weighted = sum(
+        SIGNAL_PRIORITY_WEIGHTS[name] * value
+        for name, value in components.items()
+    )
+    return max(0, min(100, round(weighted * 100)))
+
+
+def signal_priority_model_lookup(
+    models: Iterable[ProductionModel],
+) -> dict[str, dict[str, float | None]]:
+    """Index frozen model metrics once for cheap per-signal ranking."""
+
+    lookup: dict[str, dict[str, float | None]] = {}
+    for model in models:
+        holdout = model.holdout_signal_metrics
+        lookup[model.model_id] = {
+            "calibrated_threshold": _finite_number(
+                model.calibrated_signal_threshold
+            ),
+            "holdout_precision": _finite_number(holdout.get("Precision")),
+            "holdout_directional_return": _finite_number(
+                holdout.get("DirectionalReturnMean")
+            ),
+            "opposite_move_frequency": _finite_number(
+                holdout.get("OppositeMoveFrequency")
+            ),
+            "signal_sample_size": _finite_number(holdout.get("SignalCount")),
+        }
+    return lookup
+
+
 def prioritize_signals_view(
     view: OperationalTableView,
     *,
+    model_metrics_by_id: Mapping[str, Mapping[str, object]] | None = None,
     today: date | str | pd.Timestamp | None = None,
     limit: int = 3,
 ) -> OperationalTableView:
-    """Return at most ``limit`` signals using only date and P(Up) ordering."""
+    """Return at most ``limit`` signals using operational relevance V1."""
 
     if limit < 0:
         raise ValueError("La limite des priorités doit être positive.")
@@ -280,32 +410,71 @@ def prioritize_signals_view(
             view.technical.iloc[0:0].copy(),
         )
 
-    reference = pd.Timestamp(date.today() if today is None else today).normalize()
-    if reference.tzinfo is not None:
-        reference = reference.tz_localize(None)
-    dates = pd.to_datetime(
-        _column(view.technical, "prediction_date"), errors="coerce", utc=True
-    ).dt.tz_convert(None).dt.normalize()
-    probabilities = pd.to_numeric(
-        _column(view.technical, "up_probability"), errors="coerce"
-    ).fillna(float("-inf"))
+    del today  # Kept for compatibility with existing callers and tests.
+    lookup = {} if model_metrics_by_id is None else model_metrics_by_id
+    technical = view.technical.copy()
+    priority_rows: list[dict[str, object]] = []
+    for _, row in technical.iterrows():
+        model_metrics = lookup.get(str(row.get("model_id")), {})
+        probability = _finite_number(row.get("up_probability"))
+        threshold = _finite_number(model_metrics.get("calibrated_threshold"))
+        signal_edge = (
+            None
+            if probability is None or threshold is None
+            else probability - threshold
+        )
+        precision = _finite_number(model_metrics.get("holdout_precision"))
+        directional_return = _finite_number(
+            model_metrics.get("holdout_directional_return")
+        )
+        opposite = _finite_number(model_metrics.get("opposite_move_frequency"))
+        sample_size = _finite_number(model_metrics.get("signal_sample_size"))
+        priority_rows.append(
+            {
+                "priority_policy_version": SIGNAL_PRIORITY_POLICY_VERSION,
+                "priority_score": compute_signal_priority_score(
+                    signal_edge=signal_edge,
+                    holdout_precision=precision,
+                    holdout_directional_return=directional_return,
+                    opposite_move_frequency=opposite,
+                    signal_sample_size=sample_size,
+                ),
+                "signal_edge": signal_edge,
+                "calibrated_signal_threshold": threshold,
+                "holdout_precision": precision,
+                "holdout_directional_return": directional_return,
+                "opposite_move_frequency": opposite,
+                "signal_sample_size": sample_size,
+            }
+        )
+    priority = pd.DataFrame(priority_rows, index=technical.index)
+    technical = pd.concat([technical, priority], axis=1)
     order = (
-        pd.DataFrame({
-            "_today": dates.eq(reference),
-            "_up_probability": probabilities,
-            "_source_order": range(len(view.technical)),
-        })
+        technical.assign(
+            _priority_target=_column(technical, "target")
+            .fillna("")
+            .astype(str)
+            .str.upper(),
+            _source_order=range(len(technical)),
+        )
         .sort_values(
-            ["_today", "_up_probability", "_source_order"],
-            ascending=[False, False, True],
+            [
+                "priority_score",
+                "signal_edge",
+                "holdout_precision",
+                "_priority_target",
+                "_source_order",
+            ],
+            ascending=[False, False, False, True, True],
             kind="stable",
+            na_position="last",
         )
         .head(limit)
         .index
     )
     return OperationalTableView(
         view.table.iloc[order].reset_index(drop=True),
-        view.technical.iloc[order].reset_index(drop=True),
+        technical.iloc[order].reset_index(drop=True),
     )
 
 

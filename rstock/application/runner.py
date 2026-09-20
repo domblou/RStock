@@ -18,9 +18,6 @@ from .domain import (
     ExperimentSpec,
     JobStatus,
     JobType,
-    RunMetadata,
-    RunPurpose,
-    RunRole,
 )
 from .processes import process_alive
 from .repository import RunRepository, utc_now
@@ -150,19 +147,7 @@ class RunService:
                     and status.get("configuration_fingerprint") == spec.fingerprint
                 ):
                     return SubmissionResult(str(status["run_id"]), False)
-            metadata = (
-                RunMetadata(
-                    run_role=RunRole.PIPELINE_PARENT,
-                    run_purpose=(
-                        RunPurpose.REFERENCE
-                        if spec.temporal_validation_enabled
-                        else RunPurpose.STANDARD
-                    ),
-                )
-                if spec.job_type is JobType.END_TO_END
-                else None
-            )
-            run_id = self.repository.create(spec, metadata=metadata)
+            run_id = self.repository.create(spec)
             try:
                 pid = self.backend.launch(
                     self.repository.root,
@@ -270,19 +255,7 @@ class RunService:
         if replay_values:
             spec = replace(spec, **replay_values)
         with self._submission_lock():
-            metadata = (
-                RunMetadata(
-                    run_role=RunRole.PIPELINE_PARENT,
-                    run_purpose=(
-                        RunPurpose.REFERENCE
-                        if spec.temporal_validation_enabled
-                        else RunPurpose.STANDARD
-                    ),
-                )
-                if spec.job_type is JobType.END_TO_END
-                else None
-            )
-            new_run_id = self.repository.create(spec, metadata=metadata)
+            new_run_id = self.repository.create(spec)
             pid = self.backend.launch(
                 self.repository.root, new_run_id, self.max_concurrent_heavy_jobs
             )

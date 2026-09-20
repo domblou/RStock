@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -10,6 +11,7 @@ from rstock.application.surveillance import (
     build_predictions_view,
     build_evaluated_predictions_view,
     build_signals_view,
+    compute_signal_priority_score,
     filter_evaluated_predictions_view,
     prediction_feature_tables,
     prediction_features_table,
@@ -19,6 +21,8 @@ from rstock.application.surveillance import (
     evaluation_feedback,
     filter_signal_results_view,
     prioritize_signals_view,
+    SIGNAL_PRIORITY_POLICY_VERSION,
+    signal_priority_model_lookup,
 )
 
 
@@ -340,56 +344,184 @@ def test_signal_period_filter_has_an_empty_today_state_without_hiding_other_pred
     assert len(today.no_signal.table) == 1
 
 
-def test_signal_priorities_put_today_first_then_sort_by_up_probability():
+def _priority_metrics(
+    *,
+    threshold=0.50,
+    precision=0.55,
+    directional_return=0.01,
+    opposite=0.15,
+    sample_size=25,
+):
+    return {
+        "calibrated_threshold": threshold,
+        "holdout_precision": precision,
+        "holdout_directional_return": directional_return,
+        "opposite_move_frequency": opposite,
+        "signal_sample_size": sample_size,
+    }
+
+
+def test_signal_priority_score_components_are_monotonic():
+    baseline = {
+        "signal_edge": 0.05,
+        "holdout_precision": 0.50,
+        "holdout_directional_return": 0.005,
+        "opposite_move_frequency": 0.20,
+        "signal_sample_size": 10,
+    }
+    base_score = compute_signal_priority_score(**baseline)
+
+    improvements = (
+        {"signal_edge": 0.15},
+        {"holdout_precision": 0.65},
+        {"holdout_directional_return": 0.018},
+        {"opposite_move_frequency": 0.05},
+        {"signal_sample_size": 50},
+    )
+    for improvement in improvements:
+        assert compute_signal_priority_score(
+            **{**baseline, **improvement}
+        ) > base_score
+
+
+def test_signal_priority_score_is_bounded_and_missing_metrics_are_safe():
+    assert compute_signal_priority_score(
+        signal_edge=-100,
+        holdout_precision=-100,
+        holdout_directional_return=-100,
+        opposite_move_frequency=100,
+        signal_sample_size=-100,
+    ) == 0
+    assert compute_signal_priority_score(
+        signal_edge=100,
+        holdout_precision=100,
+        holdout_directional_return=100,
+        opposite_move_frequency=-100,
+        signal_sample_size=10000,
+    ) == 100
+    assert compute_signal_priority_score(
+        signal_edge=None,
+        holdout_precision=None,
+        holdout_directional_return=float("nan"),
+        opposite_move_frequency=None,
+        signal_sample_size=None,
+    ) == 30
+
+
+def test_signal_priority_lookup_uses_frozen_threshold_and_holdout_metrics():
+    lookup = signal_priority_model_lookup(
+        [
+            SimpleNamespace(
+                model_id="model-1",
+                calibrated_signal_threshold=0.61,
+                holdout_signal_metrics={
+                    "Precision": 0.69,
+                    "DirectionalReturnMean": 0.021,
+                    "OppositeMoveFrequency": 0.15,
+                    "SignalCount": 42,
+                },
+            )
+        ]
+    )
+
+    assert lookup["model-1"] == {
+        "calibrated_threshold": 0.61,
+        "holdout_precision": 0.69,
+        "holdout_directional_return": 0.021,
+        "opposite_move_frequency": 0.15,
+        "signal_sample_size": 42.0,
+    }
+
+
+def test_signal_priorities_use_operational_score_instead_of_probability_alone():
     rows = [
         {
-            **_signal("older-strong"),
-            **_prediction("older-strong", "2026-09-14"),
-            "up_probability": 0.99,
+            **_signal("high-probability"),
+            **_prediction("high-probability", "2026-09-15"),
+            "model_id": "weak-model",
+            "target": "ZZZ",
+            "up_probability": 0.90,
         },
         {
-            **_signal("today-low"),
-            **_prediction("today-low", "2026-09-15"),
-            "up_probability": 0.61,
-        },
-        {
-            **_signal("today-high"),
-            **_prediction("today-high", "2026-09-15"),
-            "up_probability": 0.82,
-        },
-        {
-            **_signal("older-medium"),
-            **_prediction("older-medium", "2026-09-13"),
-            "up_probability": 0.75,
+            **_signal("relevant"),
+            **_prediction("relevant", "2026-09-15"),
+            "model_id": "strong-model",
+            "target": "AAA",
+            "up_probability": 0.65,
         },
     ]
     view = build_signals_view(pd.DataFrame(rows)).signals
+    lookup = {
+        "weak-model": _priority_metrics(
+            threshold=0.89,
+            precision=0.40,
+            directional_return=0.0,
+            opposite=0.30,
+            sample_size=5,
+        ),
+        "strong-model": _priority_metrics(
+            threshold=0.50,
+            precision=0.70,
+            directional_return=0.02,
+            opposite=0.0,
+            sample_size=50,
+        ),
+    }
 
-    priorities = prioritize_signals_view(view, today="2026-09-15")
+    priorities = prioritize_signals_view(view, model_metrics_by_id=lookup)
 
     assert priorities.technical["prediction_id"].tolist() == [
-        "today-high",
-        "today-low",
-        "older-strong",
+        "relevant",
+        "high-probability",
     ]
-    assert len(priorities.table) == 3
+    assert priorities.technical["priority_policy_version"].unique().tolist() == [
+        SIGNAL_PRIORITY_POLICY_VERSION
+    ]
 
 
-def test_signal_priorities_are_stable_for_equal_probabilities_and_respect_limit():
+def test_signal_priorities_are_deterministic_and_respect_limit():
     rows = [
         {
             **_signal(identifier),
             **_prediction(identifier, "2026-09-15"),
+            "model_id": f"model-{identifier}",
+            "target": target,
             "up_probability": 0.7,
         }
-        for identifier in ("first", "second", "third", "fourth")
+        for identifier, target in (
+            ("first", "CCC"),
+            ("second", "AAA"),
+            ("third", "BBB"),
+            ("fourth", "DDD"),
+        )
     ]
     view = build_signals_view(pd.DataFrame(rows)).signals
+    lookup = {
+        f"model-{identifier}": _priority_metrics()
+        for identifier in ("first", "second", "third", "fourth")
+    }
 
-    priorities = prioritize_signals_view(view, today="2026-09-15", limit=2)
-    empty = prioritize_signals_view(view, today="2026-09-15", limit=0)
+    priorities = prioritize_signals_view(
+        view, model_metrics_by_id=lookup, limit=3
+    )
+    repeated = prioritize_signals_view(
+        view, model_metrics_by_id=lookup, limit=3
+    )
+    empty = prioritize_signals_view(
+        view, model_metrics_by_id=lookup, limit=0
+    )
 
-    assert priorities.technical["prediction_id"].tolist() == ["first", "second"]
+    assert priorities.technical["prediction_id"].tolist() == [
+        "second",
+        "third",
+        "first",
+    ]
+    assert repeated.technical["prediction_id"].tolist() == [
+        "second",
+        "third",
+        "first",
+    ]
+    assert len(view.table) == 4
     assert empty.table.empty
     assert empty.technical.empty
 
