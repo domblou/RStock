@@ -38,7 +38,7 @@ from .progress import (
     check_cancellation,
     report_progress,
 )
-from .walk_forward import expanding_windows
+from .walk_forward import walk_forward_windows
 
 
 EXPERIMENTAL_XGBOOST_PARAMETERS = XGBoostParameters(
@@ -148,7 +148,13 @@ def _threshold_development_combination(
     ]
     model_data = development[[*names, *outcomes.values(), *diagnostics]].dropna()
     records: list[dict[str, object]] = []
-    for window in expanding_windows(len(model_data), min_train_size, test_size, step_size):
+    for window in walk_forward_windows(
+        len(model_data),
+        config,
+        min_train_size=min_train_size,
+        test_size=test_size,
+        step_size=step_size,
+    ):
         check_cancellation(cancellation_check)
         train = model_data.iloc[window.train_slice]
         test = model_data.iloc[window.test_slice]
@@ -1155,6 +1161,11 @@ def run_controlled_threshold_calibration(
         "minimum_window_fraction": config.threshold_calibration_min_window_fraction,
         "threshold_quantiles": list(config.threshold_calibration_quantiles),
         "threshold_grid_decimals": config.threshold_calibration_grid_decimals,
+        "walk_forward_window_mode": config.walk_forward_window_mode,
+        "walk_forward_min_train_size": min_train,
+        "walk_forward_train_size": config.walk_forward_train_size,
+        "walk_forward_test_size": test_window,
+        "walk_forward_step_size": step,
         "development_end": development.index.max().isoformat(),
         "final_holdout_start": holdout_start.isoformat(),
         "final_holdout_size": holdout_size,

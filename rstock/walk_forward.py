@@ -168,7 +168,12 @@ def _walk_forward_combination(
     set_name = symbol_set_id(row)
     predictors_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
     development_data = model_data.loc[model_data.index < holdout_start]
-    if len(development_data) <= min_train:
+    required_train = (
+        config.walk_forward_train_size
+        if config.walk_forward_window_mode == "rolling"
+        else min_train
+    )
+    if len(development_data) <= required_train:
         def date_range(frame: pd.DataFrame) -> tuple[str | None, str | None]:
             if frame.empty:
                 return None, None
@@ -191,13 +196,19 @@ def _walk_forward_combination(
                 "ModelDateMax": model_max,
                 "DevelopmentDateMin": development_min,
                 "DevelopmentDateMax": development_max,
-                "MinimumRequiredObservations": min_train + 1,
+                "MinimumRequiredObservations": required_train + 1,
                 "RowsLostToLags": rows_lost_to_lags,
             }
         )
     window_records: list[dict[str, object]] = []
     prediction_records: list[dict[str, object]] = []
-    for window in expanding_windows(len(development_data), min_train, test_window, step):
+    for window in walk_forward_windows(
+        len(development_data),
+        config,
+        min_train_size=min_train,
+        test_size=test_window,
+        step_size=step,
+    ):
         check_cancellation(cancellation_check)
         train = development_data.iloc[window.train_slice]
         test = development_data.iloc[window.test_slice]
@@ -428,6 +439,66 @@ def expanding_windows(
         number += 1
         train_end += step_size
     return windows
+
+
+def rolling_windows(
+    observation_count: int,
+    train_size: int,
+    test_size: int,
+    step_size: int,
+) -> list[TemporalWindow]:
+    """Return fixed-size train windows followed strictly by future test windows."""
+
+    if train_size < 1 or test_size < 1 or step_size < 1:
+        raise ValueError("Rolling walk-forward window sizes must be positive")
+    if observation_count <= train_size:
+        raise ValueError(
+            "Not enough observations for one rolling walk-forward test window"
+        )
+
+    windows: list[TemporalWindow] = []
+    train_start = 0
+    number = 1
+    while train_start + train_size < observation_count:
+        train_end = train_start + train_size
+        test_end = min(train_end + test_size, observation_count)
+        windows.append(
+            TemporalWindow(
+                number,
+                slice(train_start, train_end),
+                slice(train_end, test_end),
+            )
+        )
+        number += 1
+        train_start += step_size
+    return windows
+
+
+def walk_forward_windows(
+    observation_count: int,
+    config: RStockConfig,
+    *,
+    min_train_size: int | None = None,
+    test_size: int | None = None,
+    step_size: int | None = None,
+) -> list[TemporalWindow]:
+    """Select the configured geometry without duplicating evaluation logic."""
+
+    test_window = config.walk_forward_test_size if test_size is None else test_size
+    step = config.walk_forward_step_size if step_size is None else step_size
+    if config.walk_forward_window_mode == "rolling":
+        return rolling_windows(
+            observation_count,
+            config.walk_forward_train_size,
+            test_window,
+            step,
+        )
+    min_train = (
+        config.walk_forward_min_train_size
+        if min_train_size is None
+        else min_train_size
+    )
+    return expanding_windows(observation_count, min_train, test_window, step)
 
 
 def _metric_record(actual, predicted, probabilities) -> dict[str, object]:
@@ -1189,7 +1260,9 @@ def evaluate_walk_forward(
         "conditional_signal": "predicted class == 1 (probability > 0.5)",
         "lag_depth": config.lag_depth,
         "lag_features": [f"intraday_J-{lag}" for lag in range(1, config.lag_depth + 1)],
+        "walk_forward_window_mode": config.walk_forward_window_mode,
         "walk_forward_min_train_size": min_train,
+        "walk_forward_train_size": config.walk_forward_train_size,
         "walk_forward_test_size": test_window,
         "walk_forward_step_size": step,
         "combination_workers": config.combination_workers,

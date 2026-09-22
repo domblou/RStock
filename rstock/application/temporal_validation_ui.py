@@ -70,7 +70,16 @@ def validation_promotion_lookup(results: Path) -> dict[tuple[str, str], dict[str
     if not isinstance(selected, dict):
         return {}
     try:
-        guidance = _promotion_guidance(results, selected)
+        snapshot = json.loads((results.parent / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        snapshot = {}
+    rstock_config = snapshot.get("rstock_config", {}) if isinstance(snapshot, dict) else {}
+    try:
+        guidance = _promotion_guidance(
+            results,
+            selected,
+            promotion_config=(rstock_config if isinstance(rstock_config, dict) else None),
+        )
     except ValueError:
         return {}
     lookup: dict[tuple[str, str], dict[str, object]] = {}

@@ -15,6 +15,7 @@ from rstock.walk_forward import (
     evaluate_prefilter_walk_forward,
     evaluate_walk_forward,
     expanding_windows,
+    rolling_windows,
     write_walk_forward_results,
 )
 
@@ -32,6 +33,23 @@ def test_expanding_windows_are_chronological_and_include_final_partial_window():
 def test_walk_forward_rejects_insufficient_history():
     with pytest.raises(ValueError, match="Not enough observations"):
         expanding_windows(10, min_train_size=10, test_size=2, step_size=2)
+
+
+def test_rolling_windows_keep_a_fixed_train_and_shift_both_boundaries():
+    windows = rolling_windows(504, train_size=252, test_size=63, step_size=63)
+
+    assert [(window.train_slice, window.test_slice) for window in windows[:4]] == [
+        (slice(0, 252), slice(252, 315)),
+        (slice(63, 315), slice(315, 378)),
+        (slice(126, 378), slice(378, 441)),
+        (slice(189, 441), slice(441, 504)),
+    ]
+    assert {window.train_slice.stop - window.train_slice.start for window in windows} == {252}
+
+
+def test_rolling_windows_reject_configuration_without_a_test_window():
+    with pytest.raises(ValueError, match="rolling walk-forward test window"):
+        rolling_windows(252, train_size=252, test_size=63, step_size=63)
 
 
 def test_prefilter_skips_insufficient_pair_and_keeps_valid_pair(caplog, tmp_path):
@@ -307,6 +325,37 @@ def test_walk_forward_reports_windows_predictions_and_recomputed_aggregates(tmp_
     )
     pd.testing.assert_frame_equal(result.qualification, prefilter_result.qualification)
     assert prefilter_result.telemetry["qualification_rows"] == len(result.qualification)
+
+    rolling_config = replace(
+        config,
+        walk_forward_window_mode="rolling",
+        walk_forward_train_size=10,
+    )
+    rolling = evaluate_walk_forward(
+        prepared,
+        generated,
+        rolling_config,
+        market_calendars={"AAA": "XNYS", "BBB": "XNYS"},
+        test_size=5,
+        step_size=5,
+        final_holdout_size=5,
+    )
+    assert set(rolling.windows["TrainObservations"]) == {10}
+    assert rolling.windows.groupby("Set")["TrainStart"].nunique().eq(3).all()
+    assert (rolling.windows["TestEnd"] < rolling.final_holdout["FinalTestStart"].min()).all()
+    rolling_prefilter = evaluate_prefilter_walk_forward(
+        prepared,
+        generated,
+        rolling_config,
+        market_calendars={"AAA": "XNYS", "BBB": "XNYS"},
+        test_size=5,
+        step_size=5,
+        final_holdout_size=5,
+    )
+    pd.testing.assert_frame_equal(
+        rolling.qualification,
+        rolling_prefilter.qualification,
+    )
 
 
 def test_combination_process_workers_preserve_walk_forward_results_and_seed(tmp_path):

@@ -73,6 +73,10 @@ _PURGE_FILES: dict[JobType, tuple[str, ...]] = {
         "results/holdout_predictions.csv",
         "results/sampled_combinations.csv",
     ),
+    JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: (
+        "results/holdout_predictions.csv",
+        "results/sampled_combinations.csv",
+    ),
 }
 
 _ESSENTIAL_FILES: dict[JobType, tuple[str, ...]] = {
@@ -108,6 +112,12 @@ _ESSENTIAL_FILES: dict[JobType, tuple[str, ...]] = {
         "results/holdout_metrics.csv",
         "results/run_configuration.json",
     ),
+    JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: (
+        "results/diagnostic_results.csv",
+        "results/holdout_metrics.csv",
+        "results/run_configuration.json",
+        "results/diagnostic_manifest.json",
+    ),
 }
 
 _SOURCE_FIELDS = (
@@ -117,6 +127,7 @@ _SOURCE_FIELDS = (
     "source_threshold_parameter_calibration_run",
     "source_threshold_calibration_run",
     "source_end_to_end_run",
+    "source_forced_candidate_validation_run",
 )
 
 

@@ -204,6 +204,11 @@ class ExperimentService:
     ) -> SubmissionResult:
         return self.run_service.start_historical_forced_validation(parent_run_id)
 
+    def start_qualification_holdout_diagnostic(
+        self, forced_run_id: str
+    ) -> SubmissionResult:
+        return self.run_service.start_qualification_holdout_diagnostic(forced_run_id)
+
     def cancel(self, run_id: str) -> dict[str, object]:
         return self.run_service.cancel(run_id)
 

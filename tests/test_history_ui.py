@@ -139,7 +139,7 @@ def test_today_excludes_utc_timestamp_that_is_still_previous_local_day():
     assert [run["run_id"] for run in filtered] == ["current-local-day"]
 
 
-def test_history_rows_display_run_id_and_direct_walk_forward_source():
+def test_history_rows_display_run_id_and_lineage():
     normal = history_row(
         _run("opaque-guid", "market_update"),
         _detail(summary={"requested_symbols": ["AAA", "BBB", "CCC"], "updated_symbols": ["AAA", "BBB", "CCC"]}),
@@ -152,12 +152,12 @@ def test_history_rows_display_run_id_and_direct_walk_forward_source():
     assert normal.context == "3 symboles"
     assert normal.summary == "3 symboles mis à jour"
     assert normal.display()["Run ID"] == "opaque-guid"
-    assert normal.display()["Run source"] == "—"
+    assert normal.display()["Lignée"] == "—"
     assert duplicated.display()["Run ID"] == "child-run"
-    assert duplicated.display()["Run source"] == "parent-run"
+    assert duplicated.display()["Lignée"] == "Source : parent-run"
     assert set(normal.display()) == {
         "Run ID",
-        "Run source",
+        "Lignée",
         "Date / heure",
         "Type",
         "Contexte",
@@ -166,6 +166,62 @@ def test_history_rows_display_run_id_and_direct_walk_forward_source():
         "Durée",
         "Résumé",
     }
+
+
+def test_history_summary_distinguishes_expanding_and_rolling_walk_forward():
+    expanding = _detail()
+    expanding["configuration"]["rstock_config"].update({
+        "walk_forward_window_mode": "expanding",
+        "walk_forward_min_train_size": 252,
+    })
+    rolling = _detail()
+    rolling["configuration"]["rstock_config"].update({
+        "walk_forward_window_mode": "rolling",
+        "walk_forward_train_size": 504,
+    })
+
+    expanding_row = history_row(_run("expanding", "walk_forward"), expanding, {})
+    rolling_row = history_row(_run("rolling", "walk_forward"), rolling, {})
+
+    assert "WF expansive" in expanding_row.summary
+    assert "WF glissante 504" in rolling_row.summary
+
+
+def test_history_lineage_prefers_orchestration_metadata_and_removes_depth():
+    forced = _detail(symbols=("AAA",) * 34)
+    forced["metadata"] = {
+        "parent_run_id": "reference-run",
+        "root_run_id": "reference-run",
+        "reference_run_id": "reference-run",
+        "relation_key": "historical_forced_candidate_validation",
+    }
+    child = _detail(symbols=("AAA",) * 34)
+    child["metadata"] = {
+        "parent_run_id": "forced-run",
+        "root_run_id": "reference-run",
+        "relation_key": "forced_candidate_validation:walk_forward",
+    }
+    diagnostic = _detail(symbols=("AAA",) * 34)
+    diagnostic["configuration"].update(
+        source_forced_candidate_validation_run="forced-run",
+        source_walk_forward_run="forced-walk-forward",
+    )
+    diagnostic["metadata"] = {
+        "parent_run_id": "forced-run",
+        "root_run_id": "reference-run",
+        "relation_key": "qualification_holdout_diagnostic:qualification_holdout_diagnostic_v1",
+    }
+
+    forced_row = history_row(_run("forced-run", "forced_candidate_validation"), forced, {})
+    child_row = history_row(_run("forced-child", "walk_forward"), child, {})
+    diagnostic_row = history_row(
+        _run("diagnostic", "qualification_holdout_diagnostic"), diagnostic, {}
+    )
+
+    assert forced_row.display()["Lignée"] == "Référence : reference-run"
+    assert child_row.display()["Lignée"] == "Revalidation : forced-run"
+    assert diagnostic_row.display()["Lignée"] == "Référence : forced-walk-forward"
+    assert child_row.context == "34 symboles"
 
 
 
@@ -185,7 +241,7 @@ def test_forced_validation_labels_are_utf8_and_mojibake_free():
     )
     assert row.summary == (
         "Évaluation des candidats à seuil figé — "
-        "Revalidation des candidats de référence"
+        "Revalidation des candidats de référence · WF expansive"
     )
     assert "Ã" not in " ".join(
         (
@@ -208,8 +264,23 @@ def test_threshold_parameter_calibration_appears_with_direct_parent_and_winner()
 
     assert "threshold_parameter_calibration" in EXPERIMENT_JOB_TYPES
     assert row.display()["Type"] == "Calibration des paramètres de seuils"
-    assert row.display()["Run source"] == "xgb-parent"
+    assert row.display()["Lignée"] == "Source : xgb-parent"
     assert row.summary == "Configuration gagnante : candidate_03"
+
+
+def test_threshold_parameter_calibration_keeps_temporal_validation_description():
+    detail = _detail(summary={
+        "selected_configuration": {"configuration": "candidate_03"}
+    })
+    detail["configuration"]["run_description"] = "Validation temporelle offset 63"
+
+    row = history_row(
+        _run("parameter-temporal", "threshold_parameter_calibration"), detail, {}
+    )
+
+    assert row.summary == (
+        "Configuration gagnante : candidate_03 — Validation temporelle offset 63"
+    )
 
 
 def test_threshold_parameter_calibration_summary_matches_nonterminal_status():
@@ -249,7 +320,9 @@ def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallbac
         _run("legacy", "threshold_calibration"), _detail(), {}
     )
 
-    assert calibration.summary == "Calibration des seuils — profondeur 2"
+    assert calibration.summary == (
+        "Calibration des seuils — profondeur 2 · WF expansive"
+    )
     assert legacy.summary == "Calibration terminée"
 
 
@@ -265,9 +338,11 @@ def test_threshold_calibration_keeps_the_walk_forward_context_after_duplication(
         _run("threshold-calibration", "threshold_calibration"), calibration, {}
     )
 
-    assert source_row.context == "115 symboles · profondeur 2"
+    assert source_row.context == "115 symboles"
     assert calibration_row.context == source_row.context
-    assert calibration_row.summary == "Calibration des seuils — Rejeu historique"
+    assert calibration_row.summary == (
+        "Calibration des seuils — Rejeu historique · WF expansive"
+    )
 
 
 def test_legacy_calibration_without_inherited_depth_has_a_safe_context_fallback():
@@ -276,7 +351,7 @@ def test_legacy_calibration_without_inherited_depth_has_a_safe_context_fallback(
 
     row = history_row(_run("legacy-calibration", "threshold_calibration"), detail, {})
 
-    assert row.context == "2 symboles · profondeur —"
+    assert row.context == "2 symboles"
 
 
 def test_production_rows_have_human_context_and_summary():

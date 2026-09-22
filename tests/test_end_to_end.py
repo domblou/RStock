@@ -57,6 +57,27 @@ def _write_json(path, values):
     path.write_text(json.dumps(values), encoding="utf-8")
 
 
+def test_end_to_end_child_preserves_frozen_walk_forward_window_geometry(tmp_path):
+    parent = replace(
+        _spec(tmp_path),
+        config=replace(
+            DEFAULT_CONFIG,
+            project_root=tmp_path,
+            walk_forward_window_mode="rolling",
+            walk_forward_train_size=504,
+        ),
+    )
+
+    child = end_to_end._base_child_spec(
+        parent,
+        root_run_id="root-run",
+        job_type=JobType.WALK_FORWARD,
+    )
+
+    assert child.config.walk_forward_window_mode == "rolling"
+    assert child.config.walk_forward_train_size == 504
+
+
 def _fake_registry(
     repository,
     calls,
@@ -311,6 +332,7 @@ def test_end_to_end_temporal_validation_runs_a_real_child_pipeline(tmp_path):
     assert child_spec.temporal_validation_enabled is False
     assert child_spec.auto_promote_candidates is False
     assert child_metadata.run_purpose is RunPurpose.TEMPORAL_VALIDATION
+    assert child_metadata.visible_in_history is True
     assert child_metadata.reference_run_id == run_id
     assert load_pipeline_manifest(repository, child_id)["temporal_validation_enabled"] is False
 
@@ -780,6 +802,25 @@ def test_end_to_end_auto_promotes_each_unique_up_candidate_once(tmp_path):
     assert detail["pipeline_stages"][-1]["status"] == "completed"
     assert detail["pipeline_stages"][-1]["progress"] == 100.0
     assert detail["pipeline_stages"][-1]["promotion"]["created_count"] == 1
+
+
+def test_end_to_end_auto_promotion_uses_the_frozen_snapshot_policy(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    spec = _spec(tmp_path, auto_promote_candidates=True)
+    spec = replace(
+        spec,
+        config=replace(spec.config, promotion_min_holdout_auc=0.70),
+    )
+    run_id = _create_parent(repository, spec)
+    registry = _fake_registry(
+        repository, Counter(), promotion_rows=[{"Set": "AAA<-BBB", "ROCAUC": 0.65}]
+    )
+
+    execute_run(repository, run_id, 1, registry=registry)
+
+    promotion = repository.read_json(run_id, PROMOTION_CHECKPOINT)
+    assert promotion["candidate_count"] == 0
+    assert promotion["policy_parameters"]["minimum_holdout_auc"] == 0.70
 
 
 def test_end_to_end_promotion_resume_reconciles_model_created_before_checkpoint(

@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -50,12 +50,12 @@ class FakeProvider:
         ].copy()
 
 
-def _service(tmp_path, provider):
+def _service(tmp_path, provider, *, clock=None):
     store = ParquetMarketDataStore(
         tmp_path / "data" / "market",
         tmp_path / "data" / "metadata" / "market_cache.json",
     )
-    return MarketDataService(store, provider, max_workers=1), store
+    return MarketDataService(store, provider, max_workers=1, clock=clock), store
 
 
 def test_first_request_writes_one_typed_sorted_parquet_and_useful_metadata(tmp_path):
@@ -93,15 +93,41 @@ def test_same_request_reads_cache_without_network_or_parquet_rewrite(tmp_path):
     provider = FakeProvider({"AAPL": _prices(["2024-01-03", "2024-01-04"])})
     service, store = _service(tmp_path, provider)
     universe = _universe("AAPL")
-    service.get_market_data(universe, 10, as_of=date(2024, 1, 10))
+    service.get_market_data(universe, 10, as_of=date(2024, 1, 4))
     path = store.path_for("AAPL")
     modified = path.stat().st_mtime_ns
 
-    result = service.get_market_data(universe, 10, as_of=date(2024, 1, 10))
+    result = service.get_market_data(universe, 10, as_of=date(2024, 1, 4))
 
     assert len(provider.calls) == 1
     assert result.events[0].status == "cache_hit"
     assert path.stat().st_mtime_ns == modified
+
+
+def test_post_close_retry_is_not_blocked_by_a_morning_cache_attempt(tmp_path):
+    provider = FakeProvider({"AAPL": _prices(["2024-01-05"])})
+    current_time = [datetime(2024, 1, 8, 13, tzinfo=timezone.utc)]
+    service, store = _service(tmp_path, provider, clock=lambda: current_time[0])
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 10, as_of=date(2024, 1, 5))
+    provider.calls.clear()
+
+    metadata = store.read_metadata()
+    metadata["symbols"]["AAPL"]["last_request_as_of"] = "2024-01-08"
+    store.write_metadata(metadata)
+
+    morning = service.get_market_data(universe, 10, as_of=date(2024, 1, 8))
+
+    assert morning.events[0].status == "cache_hit"
+    assert provider.calls == []
+
+    provider.frames["AAPL"] = _prices(["2024-01-05", "2024-01-08"])
+    current_time[0] = datetime(2024, 1, 8, 21, 15, tzinfo=timezone.utc)
+    after_close = service.get_market_data(universe, 10, as_of=date(2024, 1, 8))
+
+    assert provider.calls == [("AAPL", date(2024, 1, 6), date(2024, 1, 9))]
+    assert after_close.events[0].status == "updated"
+    assert store.read("AAPL").index.max() == pd.Timestamp("2024-01-08")
 
 
 def test_incremental_request_fetches_after_last_date_and_merges_without_duplicates(tmp_path):

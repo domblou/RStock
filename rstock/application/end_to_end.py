@@ -687,7 +687,7 @@ def _materialize_temporal_validation(
             metadata=RunMetadata(
                 run_role=RunRole.PIPELINE_PARENT,
                 run_purpose=RunPurpose.TEMPORAL_VALIDATION,
-                visible_in_history=False,
+                visible_in_history=True,
                 parent_run_id=root_run_id,
                 relation_key=TEMPORAL_VALIDATION_STAGE,
                 relation_type="temporal_validation_end_to_end",
@@ -1431,6 +1431,16 @@ def run_end_to_end(
         "schema_version": PIPELINE_SCHEMA_VERSION,
         "pipeline_version": spec.pipeline_version,
         "root_run_id": root_run_id,
+        "walk_forward_protocol": (
+            f"WF glissante {spec.config.walk_forward_train_size} · "
+            f"test {spec.config.walk_forward_test_size} · "
+            f"step {spec.config.walk_forward_step_size}"
+            if spec.config.walk_forward_window_mode == "rolling"
+            else
+            f"WF expansive · train min {spec.config.walk_forward_min_train_size} · "
+            f"test {spec.config.walk_forward_test_size} · "
+            f"step {spec.config.walk_forward_step_size}"
+        ),
         "auto_promote_candidates": spec.auto_promote_candidates,
         "stages": completed,
         "promotion": promotion_summary,

@@ -62,10 +62,11 @@ def _predictions() -> pd.DataFrame:
 
 
 def test_new_job_type_and_threshold_lineage_round_trip(tmp_path):
-    frozen = ThresholdCalibrationParameters.from_config(_config(tmp_path)).as_dict()
+    config = _config(tmp_path, threshold_parameter_calibration_max_models=248)
+    frozen = ThresholdCalibrationParameters.from_config(config).as_dict()
     spec = ExperimentSpec(
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
-        _config(tmp_path),
+        config,
         symbols=("AAA", "BBB"),
         source_walk_forward_run="wf-parent",
         source_xgboost_calibration_run="xgb-parent",
@@ -81,6 +82,7 @@ def test_new_job_type_and_threshold_lineage_round_trip(tmp_path):
     )
     assert restored.frozen_threshold_calibration_parameters == frozen
     assert len(restored.frozen_threshold_calibration_parameters_sha256) == 64
+    assert restored.config.threshold_parameter_calibration_max_models == 248
 
 
 def test_historical_snapshot_without_threshold_parameter_lineage_stays_valid(tmp_path):
@@ -430,6 +432,13 @@ def test_application_workflow_persists_traceability_and_selected_artifacts(
 ):
     from rstock.application import workflows
 
+    captured: dict[str, object] = {}
+    original_runner = workflows.run_threshold_parameter_calibration
+
+    def capture_runner(*args, **kwargs):
+        captured.update(kwargs)
+        return original_runner(*args, **kwargs)
+
     prepared = pd.DataFrame(
         {"placeholder": np.arange(20)},
         index=pd.bdate_range("2025-01-01", periods=20),
@@ -449,9 +458,10 @@ def test_application_workflow_persists_traceability_and_selected_artifacts(
         "rstock.threshold_parameter_calibration.generate_development_probabilities",
         lambda *args, **kwargs: _predictions(),
     )
+    monkeypatch.setattr(workflows, "run_threshold_parameter_calibration", capture_runner)
     spec = ExperimentSpec(
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
-        _config(tmp_path),
+        _config(tmp_path, threshold_parameter_calibration_max_models=2),
         symbols=("AAA", "BBB"),
         combinations_per_target=1,
     )
@@ -466,4 +476,5 @@ def test_application_workflow_persists_traceability_and_selected_artifacts(
     assert summary["selected_configuration"]["configuration"]
     assert run_configuration["traceability"]["prepared_dataset_sha256"]
     assert run_configuration["holdout_used_for_selection"] is False
+    assert captured["max_directional_models"] == 2
     assert (output / "selected_threshold_calibration_configuration.json").exists()

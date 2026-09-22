@@ -15,6 +15,7 @@ EXPERIMENT_JOB_TYPES = frozenset({
     "threshold_calibration", "end_to_end",
     "fixed_candidate_evaluation",
     "forced_candidate_validation",
+    "qualification_holdout_diagnostic",
 })
 PRODUCTION_JOB_TYPES = frozenset({
     "production_training", "market_update", "daily_prediction",
@@ -28,6 +29,7 @@ JOB_LABELS = {
     "threshold_calibration": "Calibration des seuils",
     "fixed_candidate_evaluation": "Évaluation des candidats à seuil figé",
     "forced_candidate_validation": "Revalidation forcée des candidats",
+    "qualification_holdout_diagnostic": "Diagnostic holdout des rejets WF",
     "production_training": "Entraînement production",
     "market_update": "Mise à jour marché",
     "daily_prediction": "Prédictions quotidiennes",
@@ -41,7 +43,7 @@ PERIOD_DAYS = {"Aujourd’hui": 0, "7 jours": 7, "30 jours": 30}
 @dataclass(frozen=True, slots=True)
 class HistoryRow:
     run_id: str
-    source_walk_forward_run: str
+    lineage: str
     date_time: str
     job_type: str
     context: str
@@ -53,7 +55,7 @@ class HistoryRow:
     def display(self) -> dict[str, str]:
         return {
             "Run ID": self.run_id,
-            "Run source": self.source_walk_forward_run,
+            "Lignée": self.lineage,
             "Date / heure": self.date_time,
             "Type": JOB_LABELS.get(self.job_type, self.job_type),
             "Contexte": self.context,
@@ -212,9 +214,16 @@ def _summary_text(
             return "Calibration des paramètres interrompue"
         selected = summary.get("selected_configuration")
         if isinstance(selected, Mapping):
-            return f"Configuration gagnante : {selected.get('configuration', '—')}"
+            text = f"Configuration gagnante : {selected.get('configuration', '—')}"
+            description = configuration.get("run_description")
+            return (
+                f"{text} — {description.strip()}"
+                if isinstance(description, str) and description.strip()
+                else text
+            )
         return "Calibration des paramètres terminée"
     description = configuration.get("run_description")
+    wf = _walk_forward_summary(configuration)
     if (
         job_type in {"forced_candidate_validation", "fixed_candidate_evaluation"}
         and configuration.get("historical_forced_validation_backfill") is True
@@ -224,7 +233,8 @@ def _summary_text(
         # persisted meaning of this system-generated description.
         description = "Revalidation des candidats de référence"
     if isinstance(description, str) and description.strip():
-        return f"{JOB_LABELS.get(job_type, job_type)} — {description.strip()}"
+        text = f"{JOB_LABELS.get(job_type, job_type)} — {description.strip()}"
+        return f"{text} · {wf}" if job_type in EXPERIMENT_JOB_TYPES else text
     if job_type == "market_update":
         return f"{len(summary.get('updated_symbols', ())) } symboles mis à jour"
     if job_type == "daily_prediction":
@@ -245,14 +255,17 @@ def _summary_text(
             f"{int(summary.get('signals', 0))} signaux"
         )
     if job_type == "walk_forward":
-        return f"{int(summary.get('eligible_combinations', 0))} combinaisons qualifiées"
+        return (
+            f"{int(summary.get('eligible_combinations', 0))} combinaisons qualifiées"
+            f" · {wf}"
+        )
     if job_type == "end_to_end":
         if status == "running":
             return "Pipeline End-to-end en cours"
         if status in {"failed", "cancelled", "interrupted"}:
             return f"Pipeline End-to-end {status}"
         stages = summary.get("stages", ())
-        return f"Pipeline End-to-end termine - {len(stages)} etapes"
+        return f"Pipeline End-to-end termine - {len(stages)} etapes · {wf}"
     if job_type == "threshold_calibration":
         if summary.get("outcome") == "completed_partial_holdout":
             partial = _partial_holdout_text(summary)
@@ -277,6 +290,15 @@ def _summary_text(
     return "—"
 
 
+def _walk_forward_summary(configuration: Mapping[str, object]) -> str:
+    raw = configuration.get("rstock_config", {})
+    config = raw if isinstance(raw, Mapping) else {}
+    mode = str(config.get("walk_forward_window_mode", "expanding"))
+    if mode == "rolling":
+        return f"WF glissante {int(config.get('walk_forward_train_size', 252))}"
+    return "WF expansive"
+
+
 def _context_text(
     job_type: str,
     configuration: Mapping[str, object],
@@ -294,8 +316,57 @@ def _context_text(
         return f"{int(summary.get('updated_symbols', 0))} symboles opérationnels"
     symbols = _symbols(configuration)
     if job_type in EXPERIMENT_JOB_TYPES:
-        return f"{len(symbols)} symboles · profondeur {configuration.get('rstock_config', {}).get('permutation_depth', '—')}"
+        return f"{len(symbols)} symboles"
     return f"{len(symbols)} symboles" if symbols else "—"
+
+
+def _lineage_text(
+    *,
+    run_id: str,
+    job_type: str,
+    configuration: Mapping[str, object],
+    metadata: Mapping[str, object],
+) -> str:
+    """Describe the orchestration relationship without conflating it with sources."""
+
+    parent = metadata.get("parent_run_id")
+    reference = metadata.get("reference_run_id")
+    root = metadata.get("root_run_id")
+    relation = str(metadata.get("relation_key") or "")
+    forced_source = configuration.get("source_forced_candidate_validation_run")
+    walk_forward_source = configuration.get("source_walk_forward_run")
+    if job_type == "qualification_holdout_diagnostic":
+        if walk_forward_source:
+            return f"Référence : {walk_forward_source}"
+        if forced_source:
+            return f"Revalidation : {forced_source}"
+    if job_type == "forced_candidate_validation":
+        target = reference or parent or root
+        return f"Référence : {target}" if target else "—"
+    if relation.startswith("forced_candidate_validation:") and parent:
+        return f"Revalidation : {parent}"
+    if relation.startswith("pipeline_stage:") and parent:
+        return f"Pipeline : {parent}"
+    if parent:
+        return f"Parent : {parent}"
+    if root and str(root) == run_id:
+        return "Run racine"
+
+    source = configuration.get("source_experiment_run")
+    if not source and job_type == "threshold_parameter_calibration":
+        source = (
+            configuration.get("source_threshold_parameter_calibration_run")
+            or configuration.get("source_xgboost_calibration_run")
+            or walk_forward_source
+        )
+    elif not source and job_type == "threshold_calibration":
+        source = (
+            configuration.get("source_threshold_parameter_calibration_run")
+            or walk_forward_source
+        )
+    else:
+        source = source or walk_forward_source
+    return f"Source : {source}" if source else "—"
 
 
 def history_row(
@@ -305,30 +376,15 @@ def history_row(
 ) -> HistoryRow:
     configuration = detail.get("configuration", {})
     summary = detail.get("summary", {})
+    metadata = detail.get("metadata", {})
     job_type = str(status["job_type"])
-    source_run = (
-        configuration.get("source_experiment_run")
-        or configuration.get("source_walk_forward_run")
-    )
-    if job_type == "threshold_parameter_calibration":
-        source_run = (
-            configuration.get("source_experiment_run")
-            or configuration.get("source_threshold_parameter_calibration_run")
-            or configuration.get("source_xgboost_calibration_run")
-            or source_run
-        )
-    elif job_type == "threshold_calibration":
-        source_run = (
-            configuration.get("source_experiment_run")
-            or configuration.get("source_threshold_parameter_calibration_run")
-            or source_run
-        )
     return HistoryRow(
         run_id=str(status["run_id"]),
-        source_walk_forward_run=(
-            str(source_run)
-            if source_run is not None
-            else "—"
+        lineage=_lineage_text(
+            run_id=str(status["run_id"]),
+            job_type=job_type,
+            configuration=configuration if isinstance(configuration, Mapping) else {},
+            metadata=metadata if isinstance(metadata, Mapping) else {},
         ),
         date_time=short_datetime(status.get("created_at")),
         job_type=job_type,

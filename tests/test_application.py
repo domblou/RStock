@@ -31,6 +31,7 @@ from rstock.application.workflows import (
     _require_exploitable_prefilter,
     _resumable_walk_forward,
     _walk_forward,
+    _walk_forward_protocol_summary,
 )
 from rstock.config import DEFAULT_CONFIG
 from rstock.progress import ProgressEvent, check_cancellation
@@ -96,6 +97,60 @@ def test_historical_snapshot_without_forced_sets_remains_unforced(tmp_path):
     assert restored.frozen_selected_thresholds_by_set is None
     assert restored.frozen_selected_thresholds_sha256 is None
     assert restored.pipeline_version == 1
+
+
+def test_historical_snapshot_without_window_geometry_keeps_expanding(tmp_path):
+    snapshot = _spec(tmp_path).to_dict()
+    snapshot["rstock_config"].pop("walk_forward_window_mode")
+    snapshot["rstock_config"].pop("walk_forward_train_size")
+
+    restored = ExperimentSpec.from_dict(snapshot)
+
+    assert restored.config.walk_forward_window_mode == "expanding"
+    assert restored.config.walk_forward_train_size == 252
+    assert restored.to_dict()["rstock_config"]["walk_forward_window_mode"] == "expanding"
+
+
+def test_window_geometry_is_serialized_in_experiment_snapshot(tmp_path):
+    spec = _spec(
+        tmp_path,
+        walk_forward_window_mode="rolling",
+        walk_forward_train_size=504,
+    )
+
+    restored = ExperimentSpec.from_dict(spec.to_dict())
+
+    assert restored.config.walk_forward_window_mode == "rolling"
+    assert restored.config.walk_forward_train_size == 504
+
+
+def test_walk_forward_window_configuration_is_validated(tmp_path):
+    with pytest.raises(ValueError, match="walk_forward_window_mode"):
+        replace(DEFAULT_CONFIG, project_root=tmp_path, walk_forward_window_mode="other")
+    with pytest.raises(ValueError, match="walk_forward_train_size"):
+        replace(DEFAULT_CONFIG, project_root=tmp_path, walk_forward_train_size=0)
+
+
+def test_walk_forward_protocol_summary_describes_both_window_modes(tmp_path):
+    expanding = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        walk_forward_min_train_size=252,
+        walk_forward_test_size=63,
+        walk_forward_step_size=63,
+    )
+    rolling = replace(
+        expanding,
+        walk_forward_window_mode="rolling",
+        walk_forward_train_size=504,
+    )
+
+    assert _walk_forward_protocol_summary(expanding) == (
+        "WF expansive · train min 252 · test 63 · step 63"
+    )
+    assert _walk_forward_protocol_summary(rolling) == (
+        "WF glissante 504 · test 63 · step 63"
+    )
 
 
 def test_phase_five_enables_walk_forward_batch_and_end_to_end():
@@ -180,6 +235,11 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
         "temporal_min_mean_directional_return",
         "temporal_confidence_level",
         "temporal_max_ci_width",
+        "promotion_min_holdout_signals",
+        "promotion_min_holdout_auc",
+        "promotion_min_holdout_precision",
+        "promotion_min_mean_directional_return",
+        "promotion_max_opposite_movement_frequency",
     ):
         values["rstock_config"].pop(name)
     canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
@@ -203,6 +263,11 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
     assert restored.config.temporal_max_auc_degradation == 0.03
     assert restored.config.temporal_min_precision_edge == 0.00
     assert restored.config.temporal_min_mean_directional_return == 0.00
+    assert restored.config.promotion_min_holdout_signals == 20
+    assert restored.config.promotion_min_holdout_auc == 0.60
+    assert restored.config.promotion_min_holdout_precision == 0.40
+    assert restored.config.promotion_min_mean_directional_return == 0.00
+    assert restored.config.promotion_max_opposite_movement_frequency == 0.30
     assert restored.config.temporal_confidence_level == 0.95
     assert restored.config.temporal_max_ci_width == 0.20
     assert restored.fingerprint == hashlib.sha256(canonical.encode()).hexdigest()
@@ -854,6 +919,32 @@ def test_failed_walk_forward_can_resume_same_run_only_once(tmp_path):
     assert backend.launches[0][1] == run_id
     with pytest.raises(ValueError, match="déjà"):
         service.resume(run_id)
+
+
+def test_resume_keeps_the_persisted_walk_forward_window_geometry(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(
+        _spec(
+            tmp_path,
+            walk_forward_window_mode="rolling",
+            walk_forward_train_size=504,
+        )
+    )
+
+    def fail(spec, output, progress, cancellation):
+        raise RuntimeError("boom")
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.WALK_FORWARD: fail}),
+    )
+    RunService(repository, backend=FakeBackend()).resume(run_id)
+
+    restored = repository.load_spec(run_id)
+    assert restored.config.walk_forward_window_mode == "rolling"
+    assert restored.config.walk_forward_train_size == 504
 
 
 def test_resume_uses_persisted_fingerprint_for_a_historical_snapshot(tmp_path):

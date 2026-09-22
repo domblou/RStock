@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from rstock.evaluation import classification_metrics
+from rstock.config import RStockConfig
 
 
 COMBINATION_COLUMNS = (
@@ -47,6 +48,27 @@ MIN_HOLDOUT_SIGNALS = 20
 MIN_HOLDOUT_AUC = 0.60
 MIN_HOLDOUT_PRECISION = 0.40
 MAX_OPPOSITE_MOVEMENT_FREQUENCY = 0.30
+
+
+def promotion_policy(
+    config: RStockConfig | Mapping[str, object] | None = None,
+) -> dict[str, int | float]:
+    """Resolve the persisted promotion policy, with historical fallbacks."""
+
+    def value(name: str, default: int | float) -> int | float:
+        if config is None:
+            return default
+        if isinstance(config, Mapping):
+            return config.get(name, default)  # type: ignore[return-value]
+        return getattr(config, name, default)
+
+    return {
+        "promotion_min_holdout_signals": int(value("promotion_min_holdout_signals", MIN_HOLDOUT_SIGNALS)),
+        "promotion_min_holdout_auc": float(value("promotion_min_holdout_auc", MIN_HOLDOUT_AUC)),
+        "promotion_min_holdout_precision": float(value("promotion_min_holdout_precision", MIN_HOLDOUT_PRECISION)),
+        "promotion_min_mean_directional_return": float(value("promotion_min_mean_directional_return", 0.0)),
+        "promotion_max_opposite_movement_frequency": float(value("promotion_max_opposite_movement_frequency", MAX_OPPOSITE_MOVEMENT_FREQUENCY)),
+    }
 
 DEFAULT_SENSITIVITY_THRESHOLD_MIN = 0.10
 DEFAULT_SENSITIVITY_THRESHOLD_MAX = 0.60
@@ -828,8 +850,10 @@ def threshold_calibration_table(
 
 
 def _promotion_reasons(
-    row: pd.Series, selected_by_set: Mapping[str, Any]
+    row: pd.Series, selected_by_set: Mapping[str, Any],
+    promotion_config: RStockConfig | Mapping[str, object] | None = None,
 ) -> list[str]:
+    policy = promotion_policy(promotion_config)
     set_name = str(row.get("Combinaison", ""))
     direction = str(row.get("Direction", ""))
     selection = _selection_for(selected_by_set, set_name, direction)
@@ -855,24 +879,33 @@ def _promotion_reasons(
             values[column] = float(value)
 
     signals = values.get("Signaux holdout")
-    if signals is not None and signals < MIN_HOLDOUT_SIGNALS:
-        reasons.append(f"{signals:.0f} signaux < {MIN_HOLDOUT_SIGNALS}")
+    minimum_signals = policy["promotion_min_holdout_signals"]
+    if signals is not None and signals < minimum_signals:
+        reasons.append(f"{signals:.0f} signaux < {minimum_signals}")
     auc = values.get("AUC holdout")
-    if auc is not None and auc < MIN_HOLDOUT_AUC:
-        reasons.append(f"AUC {auc:.2f} < {MIN_HOLDOUT_AUC:.2f}".replace(".", ","))
+    minimum_auc = policy["promotion_min_holdout_auc"]
+    if auc is not None and auc < minimum_auc:
+        reasons.append(f"AUC {auc:.2f} < {minimum_auc:.2f}".replace(".", ","))
     precision = values.get("Précision holdout")
-    if precision is not None and precision < MIN_HOLDOUT_PRECISION:
+    minimum_precision = policy["promotion_min_holdout_precision"]
+    if precision is not None and precision < minimum_precision:
         reasons.append(
-            f"Précision {precision:.0%} < {MIN_HOLDOUT_PRECISION:.0%}".replace("%", " %")
+            f"Précision {precision:.0%} < {minimum_precision:.0%}".replace("%", " %")
         )
     directional_return = values.get("Rendement directionnel moyen")
-    if directional_return is not None and directional_return <= 0:
-        reasons.append("Rendement <= 0")
+    minimum_return = policy["promotion_min_mean_directional_return"]
+    if directional_return is not None and directional_return <= minimum_return:
+        reasons.append(
+            "Rendement <= 0"
+            if minimum_return == 0
+            else f"Rendement <= {minimum_return:.3f}".replace(".", ",")
+        )
     opposite = values.get("Fréquence mouvement opposé")
-    if opposite is not None and opposite > MAX_OPPOSITE_MOVEMENT_FREQUENCY:
+    maximum_opposite = policy["promotion_max_opposite_movement_frequency"]
+    if opposite is not None and opposite > maximum_opposite:
         reasons.append(
             "Mouvements opposés "
-            f"{opposite:.0%} > {MAX_OPPOSITE_MOVEMENT_FREQUENCY:.0%}".replace("%", " %")
+            f"{opposite:.0%} > {maximum_opposite:.0%}".replace("%", " %")
         )
     return reasons
 
@@ -880,8 +913,9 @@ def _promotion_reasons(
 def threshold_promotion_guidance(
     results: pd.DataFrame,
     selected_by_set: Mapping[str, Any] | None = None,
+    promotion_config: RStockConfig | Mapping[str, object] | None = None,
 ) -> pd.DataFrame:
-    """Add read-only candidate guidance from fixed holdout acceptance rules."""
+    """Add candidate guidance from the run's frozen holdout policy."""
 
     if results.empty:
         return results.copy()
@@ -890,7 +924,7 @@ def threshold_promotion_guidance(
     statuses: list[str] = []
     reasons: list[str] = []
     for _, row in table.iterrows():
-        blockers = _promotion_reasons(row, selected)
+        blockers = _promotion_reasons(row, selected, promotion_config)
         if blockers:
             statuses.append("Non candidat")
             reasons.append(" ; ".join(blockers))

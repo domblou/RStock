@@ -21,6 +21,13 @@ def test_sensitivity_threshold_settings_are_persisted_as_ui_settings(tmp_path):
         walk_forward_max_combinations_per_batch=12_345,
         xgboost_global_max_qualified_combinations=321,
         threshold_parameter_calibration_max_models=248,
+        walk_forward_window_mode="rolling",
+        walk_forward_train_size=504,
+        promotion_min_holdout_signals=31,
+        promotion_min_holdout_auc=0.61,
+        promotion_min_holdout_precision=0.42,
+        promotion_min_mean_directional_return=-0.01,
+        promotion_max_opposite_movement_frequency=0.29,
     )
     ui_settings = {
         **UI_SETTINGS_DEFAULTS,
@@ -40,6 +47,13 @@ def test_sensitivity_threshold_settings_are_persisted_as_ui_settings(tmp_path):
     assert loaded_config.walk_forward_max_combinations_per_batch == 12_345
     assert loaded_config.xgboost_global_max_qualified_combinations == 321
     assert loaded_config.threshold_parameter_calibration_max_models == 248
+    assert loaded_config.walk_forward_window_mode == "rolling"
+    assert loaded_config.walk_forward_train_size == 504
+    assert loaded_config.promotion_min_holdout_signals == 31
+    assert loaded_config.promotion_min_holdout_auc == 0.61
+    assert loaded_config.promotion_min_holdout_precision == 0.42
+    assert loaded_config.promotion_min_mean_directional_return == -0.01
+    assert loaded_config.promotion_max_opposite_movement_frequency == 0.29
     assert warning is None
     assert loaded_ui["sensitivity_threshold_min"] == 0.15
     assert loaded_ui["sensitivity_threshold_max"] == 0.55

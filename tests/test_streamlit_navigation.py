@@ -149,6 +149,69 @@ def test_simulation_result_distribution_matches_data_quality_panel_width():
     assert "details, quality = st.columns([3, 1])" in results
 
 
+def test_simulation_trade_symbol_filter_supports_multiple_symbols_by_default():
+    source = APP.read_text(encoding="utf-8")
+    results = source.split("def _render_simulation_results", 1)[1].split(
+        "def _simulation_model_snapshots", 1
+    )[0]
+
+    assert 'filter_columns[0].multiselect(' in results
+    assert 'default=["Tous"]' in results
+    assert 'filtered_trades["Symbole"].astype(str).isin(active_symbols)' in results
+
+
+def test_settings_sections_follow_the_experiment_pipeline_order():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split(
+        "def _render_qualification", 1
+    )[0]
+    labels = (
+        "Préparation des données et génération",
+        "Pré-filtrage des prédicteurs",
+        "Walk-forward",
+        "Qualification et exécution",
+        "Classement des modèles",
+        "XGBoost",
+        "Calibration des seuils",
+        "Validation temporelle",
+        "Promotion",
+    )
+
+    positions = [settings.index(label) for label in labels]
+    assert positions == sorted(positions)
+    assert "La promotion automatique se choisit au lancement" in settings
+
+
+def test_existing_promotion_settings_section_exposes_the_five_frozen_policy_fields():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split(
+        "def _render_qualification", 1
+    )[0]
+
+    assert settings.count('st.subheader("Promotion")') == 1
+    for name in (
+        "promotion_min_holdout_signals",
+        "promotion_min_holdout_auc",
+        "promotion_min_holdout_precision",
+        "promotion_min_mean_directional_return",
+        "promotion_max_opposite_movement_frequency",
+    ):
+        assert f"current.{name}" in settings
+        assert f"{name}=" in settings
+    assert "Le rendement doit être strictement supérieur à cette valeur." in settings
+
+
+def test_manual_promotion_of_a_non_candidate_requires_an_explicit_override():
+    source = APP.read_text(encoding="utf-8")
+    promotion = source.split("def _render_threshold_calibration_promotion", 1)[1].split(
+        "def _render_threshold_sensitivity_analysis", 1
+    )[0]
+
+    assert 'chosen.get("Statut promotion") == "Candidat"' in promotion
+    assert "Je confirme une promotion manuelle malgré ces critères." in promotion
+    assert "Promouvoir malgré les critères" in promotion
+
+
 def test_simulation_sidebar_does_not_offer_a_new_simulation_button():
     source = APP.read_text(encoding="utf-8")
     sidebar = source.split("def _simulation_sidebar", 1)[1].split(
@@ -443,6 +506,37 @@ def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary
     assert settings.count("help=") >= 7
     assert "predictor_prefilter_summary" in walk_forward_views
     assert 'st.subheader("Pré-filtrage des prédicteurs")' in walk_forward_views
+
+
+def test_settings_duplication_and_run_detail_expose_walk_forward_window_mode():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split(
+        "def _history_filters", 1
+    )[0]
+    duplication = source.split("def _render_locked_duplication_mode", 1)[1].split(
+        "def _service", 1
+    )[0]
+    summary = source.split("def _render_walk_forward_summary", 1)[1].split(
+        "def _render_walk_forward_analysis", 1
+    )[0]
+
+    assert '"Mode de fenêtre"' in settings
+    assert '["Expansive", "Glissante"]' in settings
+    assert '"Taille du train glissant"' in settings
+    assert "walk_forward_window_mode=window_mode" in settings
+    assert "walk_forward_train_size=int(rolling_train)" in settings
+    assert '"Mode de fenêtre WF"' in duplication
+    assert "DUPLICATION_WF_TRAIN_SIZE_KEY" in duplication
+    for field in (
+        "walk_forward_window_mode",
+        "walk_forward_min_train_size",
+        "walk_forward_train_size",
+        "walk_forward_test_size",
+        "walk_forward_step_size",
+        "final_holdout_size",
+        "walk_forward_end_offset_sessions",
+    ):
+        assert field in summary
 
 
 def test_settings_and_history_expose_resumable_walk_forward_controls():
@@ -885,7 +979,7 @@ def test_history_grid_uses_the_run_provenance_display_columns():
     )[0]
 
     assert '"Run ID": self.run_id' in history_ui
-    assert '"Run source": self.source_walk_forward_run' in history_ui
+    assert '"Lignée": self.lineage' in history_ui
     assert "pd.DataFrame([row.display() for row in rows])" in history
 
 

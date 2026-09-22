@@ -68,6 +68,27 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
         "results", "Résultats", _SCIENTIFIC_RESULT_TYPES, "results", "job artifacts"
     ),
     RunTabDefinition(
+        "diagnostic_results",
+        "Résultats",
+        frozenset({JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC}),
+        "diagnostic_results",
+        "diagnostic_results.csv",
+    ),
+    RunTabDefinition(
+        "worst_auc_sensitivity",
+        "Sensibilité Worst AUC",
+        frozenset({JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC}),
+        "worst_auc_sensitivity",
+        "diagnostic_results.csv",
+    ),
+    RunTabDefinition(
+        "diagnostic_candidate",
+        "Candidat",
+        frozenset({JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC}),
+        "diagnostic_candidate",
+        "diagnostic_results.csv and snapshot",
+    ),
+    RunTabDefinition(
         "configuration",
         "Configuration",
         _SCIENTIFIC_RESULT_TYPES,
@@ -166,6 +187,11 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "walk_forward",
         "fixed_candidate_evaluation",
         "technical",
+    ),
+    JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: (
+        "diagnostic_results",
+        "worst_auc_sensitivity",
+        "diagnostic_candidate",
     ),
     JobType.END_TO_END: (
         "summary",

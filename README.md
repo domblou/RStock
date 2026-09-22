@@ -64,10 +64,12 @@ Les modèles créés avant ce changement doivent être réentraînés.
 
 ## Évaluation walk-forward
 
-Le walk-forward utilise une fenêtre d'entraînement expansive et plusieurs fenêtres
-de test futures successives. Les valeurs par défaut sont 252 observations minimales
-d'entraînement, 63 observations de test et un pas de 63. Elles sont configurables
-avec `--min-train-size`, `--test-size` et `--step-size`.
+Le walk-forward utilise par défaut une fenêtre d'entraînement expansive et plusieurs
+fenêtres de test futures successives. Un mode glissant à taille fixe est aussi
+disponible. Le mode et sa taille sont configurables avec `--window-mode` et
+`--train-size`; les valeurs historiques restent 252 observations minimales
+d'entraînement, 63 observations de test et un pas de 63, configurables avec
+`--min-train-size`, `--test-size` et `--step-size`.
 
 Pour évaluer explicitement un petit univers américain :
 

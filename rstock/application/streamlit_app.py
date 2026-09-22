@@ -59,6 +59,7 @@ from rstock.application.history_analysis import (
     threshold_calibration_choice_diagnostic_table,
     threshold_calibration_selection_summary,
     threshold_parameter_calibration_table,
+    promotion_policy,
     threshold_promotion_guidance,
     threshold_sensitivity_summary,
     threshold_sensitivity_table,
@@ -67,6 +68,7 @@ from rstock.application.history_analysis import (
 )
 from rstock.application.runner import running_duration
 from rstock.application.end_to_end import historical_forced_validation_state
+from rstock.application.qualification_holdout_diagnostic import diagnostic_state
 from rstock.application.temporal_validation_ui import (
     candidate_identity_tables,
     forced_candidate_revalidation_table,
@@ -166,6 +168,8 @@ USER_GUIDE_PATH = Path(__file__).resolve().parents[1] / "docs" / "user_guide.md"
 DUPLICATION_DRAFT_KEY = "experiment-duplication-draft"
 DUPLICATION_CONFIG_CHOICE_KEY = "experiment-duplication-config-choice"
 DUPLICATION_JOB_TYPE_KEY = "experiment-duplication-job-type"
+DUPLICATION_WF_MODE_KEY = "experiment-duplication-wf-mode"
+DUPLICATION_WF_TRAIN_SIZE_KEY = "experiment-duplication-wf-train-size"
 EXPERIMENT_NAVIGATION_KEY = "requested-primary-page"
 _PRIMARY_PAGES: list[st.Page] | None = None
 WORKFLOW_PHASE_LABELS = {
@@ -240,10 +244,19 @@ def _state() -> None:
 def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> None:
     """Store a fresh editable draft, leaving the persisted run untouched."""
 
-    st.session_state[DUPLICATION_DRAFT_KEY] = walk_forward_duplication_draft(
+    duplication_draft = walk_forward_duplication_draft(
         run_id, detail, project_root=st.session_state.lab_config.project_root
     )
+    st.session_state[DUPLICATION_DRAFT_KEY] = duplication_draft
     st.session_state[DUPLICATION_CONFIG_CHOICE_KEY] = "Paramètres du run"
+    raw_config = duplication_draft.get("rstock_config", {})
+    source_config = raw_config if isinstance(raw_config, Mapping) else {}
+    st.session_state[DUPLICATION_WF_MODE_KEY] = str(
+        source_config.get("walk_forward_window_mode", "expanding")
+    )
+    st.session_state[DUPLICATION_WF_TRAIN_SIZE_KEY] = int(
+        source_config.get("walk_forward_train_size", 252)
+    )
     configuration = detail.get("configuration", {})
     source_job_type = normalize_duplication_job_type(
         configuration.get("job_type") if isinstance(configuration, dict) else None
@@ -301,6 +314,16 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             st.session_state.lab_combinations_per_target
         ),
     )["config"]
+    selected_window_mode = str(
+        st.session_state.get(
+            DUPLICATION_WF_MODE_KEY, selected_config.walk_forward_window_mode
+        )
+    )
+    selected_train_size = int(
+        st.session_state.get(
+            DUPLICATION_WF_TRAIN_SIZE_KEY, selected_config.walk_forward_train_size
+        )
+    )
     try:
         validate_duplication_job(draft, selected_job_type)
         duplication_error = None
@@ -319,6 +342,12 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             ("Contexte", len(draft["context_symbols"])),
             ("Prédicteurs uniques", len(draft["predictor_symbols"])),
             ("Profondeur", selected_config.permutation_depth),
+            (
+                "Fenêtre Walk-forward",
+                "Expansive"
+                if selected_window_mode == "expanding"
+                else f"Glissante {selected_train_size}",
+            ),
             (
                 "Combinaisons attendues",
                 expected_combinations,
@@ -355,6 +384,20 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             ["Paramètres du run", "Paramètres actuels"],
             horizontal=True,
             key=DUPLICATION_CONFIG_CHOICE_KEY,
+        )
+        st.selectbox(
+            "Mode de fenêtre WF",
+            ["expanding", "rolling"],
+            format_func=lambda value: (
+                "Expansive" if value == "expanding" else "Glissante"
+            ),
+            key=DUPLICATION_WF_MODE_KEY,
+        )
+        st.number_input(
+            "Taille du train glissant",
+            min_value=1,
+            disabled=st.session_state[DUPLICATION_WF_MODE_KEY] == "expanding",
+            key=DUPLICATION_WF_TRAIN_SIZE_KEY,
         )
         xgboost_source = draft.get("source_xgboost_calibration_run")
         if selected_job_type is JobType.XGBOOST_CALIBRATION:
@@ -399,11 +442,25 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
                     st.session_state.lab_combinations_per_target
                 ),
             )
+            spec = replace(
+                spec,
+                config=replace(
+                    spec.config,
+                    walk_forward_window_mode=str(
+                        st.session_state[DUPLICATION_WF_MODE_KEY]
+                    ),
+                    walk_forward_train_size=int(
+                        st.session_state[DUPLICATION_WF_TRAIN_SIZE_KEY]
+                    ),
+                ),
+            )
             submitted = service.submit(spec)
             if submitted.created:
                 st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
                 st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
                 st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
+                st.session_state.pop(DUPLICATION_WF_MODE_KEY, None)
+                st.session_state.pop(DUPLICATION_WF_TRAIN_SIZE_KEY, None)
                 st.session_state["duplication-submitted-run-id"] = submitted.run_id
                 st.rerun()
             else:
@@ -412,6 +469,8 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             st.session_state.pop(DUPLICATION_DRAFT_KEY, None)
             st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
             st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
+            st.session_state.pop(DUPLICATION_WF_MODE_KEY, None)
+            st.session_state.pop(DUPLICATION_WF_TRAIN_SIZE_KEY, None)
             st.rerun()
     _live_job_panel(service, domain="experiment")
     return True
@@ -587,23 +646,26 @@ def _render_experiment_submission_confirmation(
 
     maximum = getattr(preview, "max_combinations_after_prefilter", None)
     maximum_text = "—" if maximum is None else f"{maximum:,}"
+    temporal_text = ""
+    if spec.temporal_validation_enabled:
+        promotion_text = (
+            "promotion automatique uniquement si la comparaison réussit"
+            if spec.auto_promote_candidates
+            else "sans promotion automatique"
+        )
+        temporal_text = (
+            " · validation temporelle activée "
+            "(référence offset 0, validation offset 63) · "
+            f"{promotion_text}"
+        )
     st.success(
         f"Soumettre l’expérience {label} ? "
         f"{len(spec.target_symbols):,} cibles · "
         f"{len(spec.context_symbols):,} contexte · "
         f"offset {spec.config.walk_forward_end_offset_sessions} · "
         f"max {maximum_text} combinaisons après préfiltrage"
+        f"{temporal_text}"
     )
-    if spec.temporal_validation_enabled:
-        promotion_text = (
-            "promotion only if comparison passes"
-            if spec.auto_promote_candidates
-            else "no automatic promotion"
-        )
-        st.info(
-            "Temporal validation: enabled (reference offset 0, validation offset 63); "
-            f"{promotion_text}."
-        )
     confirm, cancel, _ = st.columns([0.2, 0.2, 1])
     if confirm.button(
         "Confirmer",
@@ -900,6 +962,7 @@ def _settings() -> None:
         defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
         st.json(defaults)
     with st.container():
+        st.subheader("Préparation des données et génération")
         calendar = st.text_input("Calendrier", value=st.session_state.lab_calendar)
         c1, c2, c3 = st.columns(3)
         history = c1.number_input("Historique (jours)", min_value=1, value=current.model_history_days)
@@ -909,13 +972,70 @@ def _settings() -> None:
         up_threshold = c2.number_input("Seuil intraday hausse", min_value=0.0, value=current.intraday_target_threshold, format="%.4f")
         down_threshold = c3.number_input("Seuil intraday baisse", min_value=0.0, value=current.intraday_down_threshold, format="%.4f")
 
+        st.subheader("Pré-filtrage des prédicteurs")
+        prefilter_enabled = st.checkbox(
+            "Activer le pré-filtrage",
+            value=current.predictor_prefilter_enabled,
+            help="Évalue les prédicteurs seuls avant de générer les combinaisons.",
+        )
+        p1, p2, p3 = st.columns(3)
+        prefilter_top_n = p1.number_input(
+            "Top N prédicteurs", min_value=1,
+            value=current.predictor_prefilter_top_n,
+            help="Nombre maximal de prédicteurs admissibles conservés par cible.",
+        )
+        prefilter_median_auc = p2.number_input(
+            "AUC médiane minimale", min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_min_median_auc,
+            help="Performance médiane minimale sur les fenêtres de développement.",
+        )
+        prefilter_pct_random = p3.number_input(
+            "Part minimale de fenêtres > 0,50", min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_min_pct_above_random,
+            help="Proportion minimale de fenêtres meilleures que le hasard.",
+        )
+        prefilter_worst_auc = p1.number_input(
+            "Worst AUC minimal", min_value=0.0, max_value=1.0,
+            value=current.predictor_prefilter_min_worst_auc,
+            help="AUC minimale tolérée parmi les fenêtres valides.",
+        )
+        prefilter_auc_std = p2.number_input(
+            "Dispersion AUC maximale", min_value=0.0,
+            value=current.predictor_prefilter_max_auc_std,
+            help="Écart-type maximal des AUC entre fenêtres.",
+        )
+        prefilter_correlation = p3.number_input(
+            "Seuil de corrélation", min_value=0.0,
+            value=current.predictor_prefilter_correlation_threshold,
+            help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
+        )
+
         st.subheader("Walk-forward")
-        w1, w2, w3, w4, w5 = st.columns(5)
-        min_train = w1.number_input("Train minimal", min_value=1, value=current.walk_forward_min_train_size)
-        test_size = w2.number_input("Taille test", min_value=1, value=current.walk_forward_test_size)
-        step = w3.number_input("Step", min_value=1, value=current.walk_forward_step_size)
-        holdout = w4.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
-        end_offset = w5.number_input(
+        window_mode_label = st.selectbox(
+            "Mode de fenêtre",
+            ["Expansive", "Glissante"],
+            index=0 if current.walk_forward_window_mode == "expanding" else 1,
+        )
+        window_mode = "expanding" if window_mode_label == "Expansive" else "rolling"
+        w1, w2, w3, w4, w5, w6 = st.columns(6)
+        min_train = w1.number_input(
+            "Train minimal",
+            min_value=1,
+            value=current.walk_forward_min_train_size,
+            disabled=window_mode == "rolling",
+            help="Utilisé uniquement en mode Expansive.",
+        )
+        rolling_train = w2.number_input(
+            "Taille du train glissant",
+            min_value=1,
+            value=current.walk_forward_train_size,
+            disabled=window_mode == "expanding",
+            help="Utilisée uniquement en mode Glissante.",
+        )
+        test_size = w3.number_input("Taille test", min_value=1, value=current.walk_forward_test_size)
+        step = w4.number_input("Step", min_value=1, value=current.walk_forward_step_size)
+        holdout = w5.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
+        end_offset = w6.number_input(
             "Décalage de fin (jours de marché)",
             min_value=0,
             value=current.walk_forward_end_offset_sessions,
@@ -959,6 +1079,7 @@ def _settings() -> None:
             ),
         )
 
+        if False: """
         st.subheader("Pré-filtrage des prédicteurs")
         prefilter_enabled = st.checkbox(
             "Activer le pré-filtrage",
@@ -1003,18 +1124,7 @@ def _settings() -> None:
             help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
         )
 
-        st.subheader("XGBoost")
-        x1, x2, x3 = st.columns(3)
-        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
-        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f")
-        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds)
-        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight)
-        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample)
-        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree)
-        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma)
-        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha)
-        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda)
-
+        """
         st.subheader("Qualification et exécution")
         q1, q2, q3 = st.columns(3)
         min_windows = q1.number_input("Fenêtres minimales", min_value=1, value=current.qualification_min_windows)
@@ -1064,6 +1174,18 @@ def _settings() -> None:
         max_jobs = q2.number_input("Jobs lourds concurrents", min_value=1, value=st.session_state.max_concurrent_heavy_jobs)
         evaluate_holdout = q3.checkbox("Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout)
 
+        st.subheader("XGBoost")
+        x1, x2, x3 = st.columns(3)
+        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
+        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f")
+        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds)
+        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight)
+        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample)
+        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree)
+        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma)
+        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha)
+        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda)
+
         st.subheader("Calibration des seuils")
         t1, t2, t3 = st.columns(3)
         min_signals = t1.number_input(
@@ -1086,11 +1208,38 @@ def _settings() -> None:
                 "Ce seuil est distinct du minimum de signaux requis par fenêtre."
             ),
         )
-        quantiles = st.text_input(
+        unlimited_threshold_parameter_models = st.checkbox(
+            "Sans plafond de modèles directionnels",
+            value=current.threshold_parameter_calibration_max_models is None,
+            help=(
+                "Désactive la limite du nombre de modèles directionnels évalués "
+                "lors de la calibration des paramètres de seuils."
+            ),
+        )
+        threshold_parameter_columns = st.columns(3)
+        threshold_parameter_calibration_max_models = threshold_parameter_columns[
+            0
+        ].number_input(
+            "Nombre maximal de modèles directionnels",
+            min_value=2,
+            step=2,
+            value=(
+                current.threshold_parameter_calibration_max_models
+                if current.threshold_parameter_calibration_max_models is not None
+                else DEFAULT_CONFIG.threshold_parameter_calibration_max_models
+            ),
+            disabled=unlimited_threshold_parameter_models,
+            help=(
+                "Nombre maximal de modèles directionnels évalués. Deux modèles sont "
+                "générés par combinaison : Up et Down. Exemple : 1500 = 750 "
+                "combinaisons."
+            ),
+        )
+        quantiles = threshold_parameter_columns[1].text_input(
             "Quantiles de la grille",
             value=", ".join(str(value) for value in current.threshold_calibration_quantiles),
         )
-        precision_tolerance = st.number_input(
+        precision_tolerance = threshold_parameter_columns[2].number_input(
             "Tolérance de précision — sélection Up",
             min_value=0.0,
             max_value=1.0,
@@ -1130,39 +1279,76 @@ def _settings() -> None:
             format="%.4f",
         )
 
-        st.subheader("Temporal validation")
+        st.subheader("Validation temporelle")
         st.caption(
-            "These values are frozen in the reference End-to-end snapshot. "
-            "Maximum CI width applies only to precision edge."
+            "Ces valeurs sont figées dans le snapshot End-to-end de référence. "
+            "La largeur maximale de l’IC ne s’applique qu’à l’écart de précision."
         )
         tv1, tv2, tv3 = st.columns(3)
         temporal_candidate_yield = tv1.number_input(
-            "Minimum candidate ratio", min_value=0.0,
+            "Ratio minimal de candidats", min_value=0.0,
             value=current.temporal_min_candidate_yield_ratio,
-            help="Minimum validation candidate yield divided by reference candidate yield.",
+            help=(
+                "Ratio minimal entre le nombre de candidats validés et le nombre "
+                "de candidats du run de référence."
+            ),
         )
         temporal_auc_degradation = tv2.number_input(
-            "Maximum AUC degradation", min_value=0.0,
+            "Dégradation maximale de l’AUC", min_value=0.0,
             value=current.temporal_max_auc_degradation,
-            help="Maximum permitted reduction in median holdout AUC.",
+            help="Réduction maximale autorisée de l’AUC médiane sur le holdout.",
         )
         temporal_precision_edge = tv3.number_input(
-            "Minimum precision edge", value=current.temporal_min_precision_edge,
-            help="Precision minus natural direction rate must clear this interval threshold.",
+            "Écart de précision minimal", value=current.temporal_min_precision_edge,
+            help="La précision moins le taux de direction naturelle doit dépasser ce seuil.",
         )
         temporal_directional_return = tv1.number_input(
-            "Minimum directional return", value=current.temporal_min_mean_directional_return,
-            help="Directional-return confidence interval must clear this threshold.",
+            "Rendement directionnel minimal", value=current.temporal_min_mean_directional_return,
+            help="L’intervalle de confiance du rendement directionnel doit dépasser ce seuil.",
         )
         temporal_confidence = tv2.number_input(
-            "Confidence level", min_value=0.01, max_value=0.99,
+            "Niveau de confiance", min_value=0.01, max_value=0.99,
             value=current.temporal_confidence_level,
-            help="Confidence level for deterministic date-block bootstrap.",
+            help="Niveau de confiance du bootstrap déterministe par blocs de dates.",
         )
         temporal_ci_width = tv3.number_input(
-            "Maximum CI width for precision edge", min_value=0.0,
+            "Largeur maximale de l’IC pour l’écart de précision", min_value=0.0,
             value=current.temporal_max_ci_width,
-            help="This does not apply to directional return.",
+            help="Ce paramètre ne s’applique pas au rendement directionnel.",
+        )
+
+        st.subheader("Promotion")
+        st.caption(
+            "La promotion automatique se choisit au lancement d’un run End-to-end. "
+            "Elle exige le holdout final et, si la validation temporelle est activée, "
+            "le passage de ses critères avant toute promotion."
+        )
+        promotion_top = st.columns(3)
+        promotion_min_signals = promotion_top[0].number_input(
+            "Signaux holdout minimum", min_value=1,
+            value=current.promotion_min_holdout_signals,
+            help="Nombre minimal de signaux observés sur le holdout.",
+        )
+        promotion_min_auc = promotion_top[1].number_input(
+            "AUC holdout minimum", min_value=0.0, max_value=1.0,
+            value=current.promotion_min_holdout_auc,
+            help="AUC minimale mesurée sur le holdout.",
+        )
+        promotion_min_precision = promotion_top[2].number_input(
+            "Précision holdout minimum", min_value=0.0, max_value=1.0,
+            value=current.promotion_min_holdout_precision,
+            help="Précision minimale mesurée sur le holdout.",
+        )
+        promotion_bottom = st.columns(2)
+        promotion_min_return = promotion_bottom[0].number_input(
+            "Rendement directionnel minimum",
+            value=current.promotion_min_mean_directional_return,
+            help="Le rendement doit être strictement supérieur à cette valeur.",
+        )
+        promotion_max_opposite = promotion_bottom[1].number_input(
+            "Mouvements opposés maximum", min_value=0.0, max_value=1.0,
+            value=current.promotion_max_opposite_movement_frequency,
+            help="Fréquence maximale autorisée des mouvements opposés sur le holdout.",
         )
         if st.button("Enregistrer les paramètres", type="primary"):
             parsed_quantiles = tuple(
@@ -1176,7 +1362,9 @@ def _settings() -> None:
                 lag_depth=int(lag),
                 intraday_target_threshold=float(up_threshold),
                 intraday_down_threshold=float(down_threshold),
+                walk_forward_window_mode=window_mode,
                 walk_forward_min_train_size=int(min_train),
+                walk_forward_train_size=int(rolling_train),
                 walk_forward_test_size=int(test_size),
                 walk_forward_step_size=int(step),
                 final_holdout_size=int(holdout),
@@ -1193,6 +1381,11 @@ def _settings() -> None:
                 temporal_min_mean_directional_return=float(temporal_directional_return),
                 temporal_confidence_level=float(temporal_confidence),
                 temporal_max_ci_width=float(temporal_ci_width),
+                promotion_min_holdout_signals=int(promotion_min_signals),
+                promotion_min_holdout_auc=float(promotion_min_auc),
+                promotion_min_holdout_precision=float(promotion_min_precision),
+                promotion_min_mean_directional_return=float(promotion_min_return),
+                promotion_max_opposite_movement_frequency=float(promotion_max_opposite),
                 predictor_prefilter_enabled=bool(prefilter_enabled),
                 predictor_prefilter_top_n=int(prefilter_top_n),
                 predictor_prefilter_min_median_auc=float(prefilter_median_auc),
@@ -1233,6 +1426,11 @@ def _settings() -> None:
                 threshold_calibration_min_window_fraction=float(min_window_fraction),
                 threshold_calibration_precision_tolerance=float(precision_tolerance),
                 threshold_calibration_quantiles=parsed_quantiles,
+                threshold_parameter_calibration_max_models=(
+                    None
+                    if unlimited_threshold_parameter_models
+                    else int(threshold_parameter_calibration_max_models)
+                ),
             )
             st.session_state.lab_config = new_config
             st.session_state.lab_calendar = calendar
@@ -1409,14 +1607,19 @@ def _render_threshold_calibration_promotion(
         )
     )
     holdout_predictions = load_threshold_holdout_predictions(project_root, run_id)
-    results = threshold_promotion_guidance(results, selected_by_set)
+    policy = promotion_policy(rstock_config)
+    results = threshold_promotion_guidance(
+        results, selected_by_set, promotion_config=rstock_config
+    )
     filter_defaults = {
         f"threshold-direction-{run_id}": "Up",
-        f"threshold-min-signals-{run_id}": 20,
-        f"threshold-min-precision-{run_id}": 0.40,
-        f"threshold-min-auc-{run_id}": 0.60,
-        f"threshold-max-opposite-{run_id}": 0.30,
-        f"threshold-min-directional-return-{run_id}": 0.00,
+        f"threshold-min-signals-{run_id}": policy["promotion_min_holdout_signals"],
+        f"threshold-min-precision-{run_id}": policy["promotion_min_holdout_precision"],
+        f"threshold-min-auc-{run_id}": policy["promotion_min_holdout_auc"],
+        f"threshold-max-opposite-{run_id}": policy["promotion_max_opposite_movement_frequency"],
+        f"threshold-min-directional-return-{run_id}": policy[
+            "promotion_min_mean_directional_return"
+        ],
         f"threshold-promotion-status-{run_id}": "Tous",
         f"threshold-sort-{run_id}": "Précision holdout",
     }
@@ -1463,9 +1666,9 @@ def _render_threshold_calibration_promotion(
         step=0.01, key=f"threshold-max-opposite-{run_id}",
     )
     min_return_value = quality_filters[3].number_input(
-        "Rendement directionnel moyen minimal", step=0.001,
+        "Rendement directionnel moyen minimal (filtre ; 0 désactive)", step=0.001,
         format="%.3f", key=f"threshold-min-directional-return-{run_id}",
-        help="0,00 conserve l'affichage non filtré par défaut.",
+        help="Filtre d'affichage indépendant : 0,00 le désactive.",
     )
     filtered = filter_threshold_calibration_results(
         results,
@@ -1612,7 +1815,25 @@ def _render_threshold_calibration_promotion(
         f"Sélection : {chosen.get('Cible', '—')} ← {chosen.get('Predictors', '—')} "
         f"· seuil {selected_direction} : {chosen.get('Seuil calibré', '—')}"
     )
-    if st.button("Promouvoir le modèle", type="primary", key=f"promote-threshold-{run_id}-{set_name}-{selected_direction}"):
+    candidate = chosen.get("Statut promotion") == "Candidat"
+    if not candidate:
+        st.warning(
+            "Ce modèle ne satisfait pas la politique de promotion : "
+            f"{chosen.get('Raison', 'raison indisponible')}"
+        )
+        confirmed = st.checkbox(
+            "Je confirme une promotion manuelle malgré ces critères.",
+            key=f"confirm-override-threshold-{run_id}-{set_name}-{selected_direction}",
+        )
+    else:
+        confirmed = True
+    label = "Promouvoir le modèle" if candidate else "Promouvoir malgré les critères"
+    if st.button(
+        label,
+        type="primary",
+        disabled=not confirmed,
+        key=f"promote-threshold-{run_id}-{set_name}-{selected_direction}",
+    ):
         try:
             model, created = model_service.promote(
                 str(source_run), set_name,
@@ -2058,6 +2279,26 @@ def _render_walk_forward_metrics(analytics: RunAnalytics) -> None:
 def _render_walk_forward_summary(
     run_id: str, status: dict[str, object], detail: dict[str, object]
 ) -> None:
+    configuration = detail.get("configuration", {})
+    raw_config = (
+        configuration.get("rstock_config", {})
+        if isinstance(configuration, Mapping)
+        else {}
+    )
+    config = raw_config if isinstance(raw_config, Mapping) else {}
+    mode = str(config.get("walk_forward_window_mode", "expanding"))
+    train = (
+        f"train fixe {int(config.get('walk_forward_train_size', 252))}"
+        if mode == "rolling"
+        else f"train min {int(config.get('walk_forward_min_train_size', 252))}"
+    )
+    st.caption(
+        f"WF {'glissante' if mode == 'rolling' else 'expansive'} · {train} · "
+        f"test {int(config.get('walk_forward_test_size', 63))} · "
+        f"step {int(config.get('walk_forward_step_size', 63))} · "
+        f"holdout {int(config.get('final_holdout_size', 63))} · "
+        f"end offset {int(config.get('walk_forward_end_offset_sessions', 63))}"
+    )
     analytics = _walk_forward_analytics(run_id, status, detail)
     _render_walk_forward_metrics(analytics)
     prefilter_table = predictor_prefilter_summary(detail.get("summary", {}))
@@ -2302,6 +2543,10 @@ def _render_walk_forward_tabs(
 
 
 def _render_pipeline_summary(run_id: str, detail: dict[str, object]) -> None:
+    summary = detail.get("summary", {})
+    protocol = summary.get("walk_forward_protocol") if isinstance(summary, Mapping) else None
+    if isinstance(protocol, str) and protocol:
+        st.caption(protocol)
     rows = pipeline_stage_rows(detail.get("pipeline_stages"))
     if not rows:
         st.info("Le manifest du pipeline n'est pas encore disponible.")
@@ -2700,6 +2945,41 @@ def _render_temporal_validation(
                 st.info("Aucun candidat de référence à réévaluer.")
             else:
                 st.dataframe(table, hide_index=True, width="stretch")
+            try:
+                diagnostic = diagnostic_state(
+                    service.run_service.repository, forced_id
+                )
+            except (OSError, ValueError) as error:
+                st.caption(f"Diagnostic holdout indisponible : {error}")
+                diagnostic = {"exists": False, "candidate_count": 0}
+            if diagnostic.get("exists"):
+                diagnostic_id = str(diagnostic["run_id"])
+                st.caption(
+                    f"Diagnostic holdout : {diagnostic_id} · "
+                    f"statut : {diagnostic.get('status')} · "
+                    f"candidats : {diagnostic.get('candidate_count', 0)} · "
+                    f"favorables : {diagnostic.get('favorable_count', 0)}"
+                )
+                actions = st.columns(2)
+                if actions[0].button(
+                    "Ouvrir", key=f"open-wf-reject-diagnostic-{forced_id}"
+                ):
+                    st.session_state["selected-run-id"] = diagnostic_id
+                    st.rerun()
+                if diagnostic.get("status") in {"failed", "cancelled", "interrupted"}:
+                    if actions[1].button(
+                        "Reprendre", key=f"resume-wf-reject-diagnostic-{forced_id}"
+                    ):
+                        service.resume(diagnostic_id)
+                        st.rerun()
+            elif int(diagnostic.get("candidate_count", 0)) > 0:
+                forced_status = service.run_service.repository.status(forced_id)
+                if forced_status.get("status") == "completed" and st.button(
+                    "Lancer le diagnostic holdout des rejets WF",
+                    key=f"start-wf-reject-diagnostic-{forced_id}",
+                ):
+                    service.start_qualification_holdout_diagnostic(forced_id)
+                    st.rerun()
     st.dataframe(
         pd.DataFrame(pipeline_stage_rows([stage])), hide_index=True, width="stretch"
     )
@@ -2823,6 +3103,85 @@ def _render_forced_candidate_validation_tabs(
     )
 
 
+def _render_qualification_holdout_diagnostic(
+    run_id: str, detail: dict[str, object]
+) -> None:
+    """Render one autonomous diagnostic page from artifacts loaded once."""
+
+    root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    path = root / "diagnostic_results.csv"
+    if not path.is_file():
+        st.info("Les résultats diagnostiques ne sont pas encore disponibles.")
+        return
+    results = pd.read_csv(path)
+    summary = detail.get("summary", {})
+    directional = pd.to_numeric(
+        results.get("Rendement directionnel", pd.Series(dtype=float)), errors="coerce"
+    )
+    metrics = st.columns(6)
+    values = (
+        ("Rejets analysés", int(summary.get("candidate_count", len(results)))),
+        ("Holdouts calculés", int(summary.get("holdout_count", 0))),
+        ("Non évaluables", int(summary.get("non_evaluable_count", 0))),
+        ("AUC ≥ 0,50", int((pd.to_numeric(results.get("AUC holdout diagnostic"), errors="coerce") >= 0.50).sum())),
+        ("Critères satisfaits", int(summary.get("criteria_satisfied_count", 0))),
+        ("Rendement médian", "—" if directional.dropna().empty else f"{directional.median():.2%}"),
+    )
+    for column, (label, value) in zip(metrics, values):
+        column.metric(label, value)
+
+    def render_results() -> None:
+        st.dataframe(results.drop(columns=["AUC WF par fenetre"], errors="ignore"), hide_index=True, width="stretch")
+
+    def render_sensitivity() -> None:
+        work = results.copy()
+        worst = pd.to_numeric(work["Worst AUC WF"], errors="coerce")
+        work["Bande"] = pd.cut(
+            worst,
+            [-float("inf"), 0.40, 0.42, 0.43, 0.44, 0.45],
+            labels=["< 0.40", "0.40–0.42", "0.42–0.43", "0.43–0.44", "0.44–0.45"],
+            right=False,
+        )
+        work["Favorable"] = work["Statut diagnostique"].eq("Holdout favorable")
+        table = work.groupby("Bande", observed=False).agg(
+            Candidats=("Set", "size"),
+            **{
+                "AUC holdout médiane": ("AUC holdout diagnostic", "median"),
+                "Précision médiane": ("Precision", "median"),
+                "Rendement médian": ("Rendement directionnel", "median"),
+                "% holdouts favorables": ("Favorable", "mean"),
+            },
+        ).reset_index()
+        st.dataframe(table, hide_index=True, width="stretch")
+
+    def render_candidate() -> None:
+        if results.empty:
+            st.info("Aucun candidat diagnostiqué.")
+            return
+        choice = st.selectbox("Candidat", results["Set"].astype(str).tolist(), key=f"diagnostic-candidate-{run_id}")
+        row = results[results["Set"].astype(str) == choice].iloc[0]
+        st.json({key: value for key, value in row.to_dict().items() if key != "AUC WF par fenetre"})
+        try:
+            st.caption("AUC Walk-forward par fenêtre")
+            st.write(json.loads(str(row.get("AUC WF par fenetre", "[]"))))
+        except json.JSONDecodeError:
+            st.write("—")
+        direction = str(row.get("Direction", ""))
+        st.caption("Hyperparamètres XGBoost figés")
+        st.json(detail["configuration"].get("frozen_xgboost_parameters", {}).get(direction, {}))
+
+    render_lazy_tabs(
+        st,
+        tabs_for_job(JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC),
+        {
+            "diagnostic_results": render_results,
+            "worst_auc_sensitivity": render_sensitivity,
+            "diagnostic_candidate": render_candidate,
+        },
+        key=f"run-detail-{run_id}",
+    )
+
+
 def _render_job_detail_tabs(
     service: ExperimentService,
     run_id: str,
@@ -2843,6 +3202,8 @@ def _render_job_detail_tabs(
         _render_end_to_end_tabs(service, run_id, detail)
     elif job_type is JobType.FORCED_CANDIDATE_VALIDATION:
         _render_forced_candidate_validation_tabs(service, run_id, detail)
+    elif job_type is JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC:
+        _render_qualification_holdout_diagnostic(run_id, detail)
     elif job_type is JobType.WALK_FORWARD:
         _render_walk_forward_tabs(service, run_id, status, detail)
     else:
@@ -4613,12 +4974,20 @@ def _simulation_percent(value: float | None) -> str:
 
 
 def _render_simulation_results(result: SimulationResult) -> None:
-    selected_symbol = st.session_state.get("simulation-trades-symbol-filter", "Tous")
+    selected_symbols = st.session_state.get(
+        "simulation-trades-symbol-filter", ["Tous"]
+    )
+    if isinstance(selected_symbols, str):
+        # Preserve filters saved by the former single-select control.
+        selected_symbols = [selected_symbols]
+        st.session_state["simulation-trades-symbol-filter"] = selected_symbols
+    selected_symbols = [str(symbol) for symbol in selected_symbols]
     selected_model = st.session_state.get("simulation-trades-model-filter", "Tous")
     filtered_trades = result.trades
-    if selected_symbol != "Tous":
+    active_symbols = [symbol for symbol in selected_symbols if symbol != "Tous"]
+    if active_symbols:
         filtered_trades = filtered_trades[
-            filtered_trades["Symbole"].astype(str) == selected_symbol
+            filtered_trades["Symbole"].astype(str).isin(active_symbols)
         ]
     if selected_model != "Tous":
         filtered_trades = filtered_trades[
@@ -4691,9 +5060,10 @@ def _render_simulation_results(result: SimulationResult) -> None:
     filter_columns = st.columns(2)
     symbols = ["Tous", *sorted(result.trades["Symbole"].dropna().astype(str).unique())]
     models = ["Tous", *sorted(result.trades["Modèle source"].dropna().astype(str).unique())]
-    filter_columns[0].selectbox(
+    filter_columns[0].multiselect(
         "Symbole",
         symbols,
+        default=["Tous"],
         key="simulation-trades-symbol-filter",
     )
     filter_columns[1].selectbox(
@@ -5062,7 +5432,7 @@ def _documentation_page() -> None:
                     st.image(
                         str(image_path),
                         caption="Processus général RStock",
-                        width=1000,
+                        width=1080,
                     )
 
                 st.markdown(after)

@@ -108,8 +108,10 @@ def _selected_up_pairs(selected: dict[str, Any], metrics: pd.DataFrame) -> pd.Da
     return pd.concat(rows, ignore_index=True)
 
 
-def _candidate_sets(selected: dict[str, Any], results: Path) -> set[str]:
-    guidance = _promotion_guidance(results, selected)
+def _candidate_sets(
+    selected: dict[str, Any], results: Path, promotion_config: object | None = None
+) -> set[str]:
+    guidance = _promotion_guidance(results, selected, promotion_config)
     if guidance.empty or "Statut promotion" not in guidance or "Combinaison" not in guidance:
         return set()
     return set(
@@ -155,11 +157,11 @@ def _optional_int(value: object) -> int | None:
 
 
 def _candidate_population(
-    selected: dict[str, Any], results: Path
+    selected: dict[str, Any], results: Path, promotion_config: object | None = None
 ) -> dict[tuple[str, str], dict[str, object]]:
     """Build the final Up population already selected by promotion guidance."""
 
-    guidance = _promotion_guidance(results, selected)
+    guidance = _promotion_guidance(results, selected, promotion_config)
     if (
         guidance.empty
         or "Statut promotion" not in guidance
@@ -259,7 +261,7 @@ def candidate_identity_stability(
 
 
 def _single_candidate_yield(
-    selected: dict[str, Any], results: Path
+    selected: dict[str, Any], results: Path, promotion_config: object | None = None
 ) -> dict[str, object]:
     metrics = _read_csv(results / "holdout_metrics.csv")
     eligible = _selected_up_pairs(selected, metrics)
@@ -269,7 +271,7 @@ def _single_candidate_yield(
             Direction=eligible["Direction"].astype(str),
         ).drop_duplicates(["Set", "Direction"], keep="first")
     denominator = len(eligible)
-    candidates = _candidate_sets(selected, results)
+    candidates = _candidate_sets(selected, results, promotion_config)
     numerator = len(candidates)
     if denominator == 0:
         return {
@@ -290,6 +292,7 @@ def _gate_yield(
     reference_results: Path,
     validation_selected: dict[str, Any],
     validation_results: Path,
+    promotion_config: object | None = None,
 ) -> dict[str, object]:
     """Compare the final, evaluated Up population used by promotion.
 
@@ -297,8 +300,12 @@ def _gate_yield(
     combinations, so the numerator and denominator remain comparable across
     periods with different available universes.
     """
-    reference_gate = _single_candidate_yield(reference_selected, reference_results)
-    validation_gate = _single_candidate_yield(validation_selected, validation_results)
+    reference_gate = _single_candidate_yield(
+        reference_selected, reference_results, promotion_config
+    )
+    validation_gate = _single_candidate_yield(
+        validation_selected, validation_results, promotion_config
+    )
     reference = dict(reference_gate["metrics"])
     validation = dict(validation_gate["metrics"])
     reference["candidate_yield"] = reference.pop("ratio")
@@ -341,8 +348,10 @@ def _gate_auc(reference: Path, validation: Path) -> dict[str, object]:
     return {"status": "passed", "reason": None, "metrics": metrics}
 
 
-def _candidate_predictions(selected: dict[str, Any], results: Path) -> pd.DataFrame:
-    candidates = _candidate_sets(selected, results)
+def _candidate_predictions(
+    selected: dict[str, Any], results: Path, promotion_config: object | None = None
+) -> pd.DataFrame:
+    candidates = _candidate_sets(selected, results, promotion_config)
     values = _read_csv(results / "holdout_predictions.csv")
     required = {"Set", "Direction", "Date", "Target", "IntradayReturn", "Prediction"}
     if not required.issubset(values.columns) or not candidates:
@@ -708,9 +717,10 @@ class TemporalValidationRunner:
         validation_selected = _read_json(validation_results / "selected_thresholds_by_set.json")
         parameters = identity["parameters"]
         assert isinstance(parameters, dict)
+        promotion_config = self.repository.load_spec(self.root_run_id).config
         identity_stability = candidate_identity_stability(
-            _candidate_population(reference_selected, reference_results),
-            _candidate_population(validation_selected, validation_results),
+            _candidate_population(reference_selected, reference_results, promotion_config),
+            _candidate_population(validation_selected, validation_results, promotion_config),
         )
 
         yield_gate = _gate_yield(
@@ -718,6 +728,7 @@ class TemporalValidationRunner:
             reference_results,
             validation_selected,
             validation_results,
+            promotion_config,
         )
         ratio = yield_gate["metrics"].get("ratio") if isinstance(yield_gate.get("metrics"), dict) else None
         if ratio is not None:
@@ -738,7 +749,9 @@ class TemporalValidationRunner:
             )
             auc_gate["reason"] = None if auc_gate["status"] == "passed" else "Médiane AUC validation insuffisante ou dégradée."
 
-        predictions = _candidate_predictions(validation_selected, validation_results)
+        predictions = _candidate_predictions(
+            validation_selected, validation_results, promotion_config
+        )
         source_digests = identity["source_artifact_digests"]
         assert isinstance(source_digests, dict)
         reference_digests = source_digests["reference"]

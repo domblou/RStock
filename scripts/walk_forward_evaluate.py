@@ -1,4 +1,4 @@
-"""Evaluate current RStock signals over expanding temporal windows."""
+"""Evaluate current RStock signals over configurable temporal windows."""
 
 from __future__ import annotations
 
@@ -46,6 +46,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--min-train-size", type=int, default=DEFAULT_CONFIG.walk_forward_min_train_size
+    )
+    parser.add_argument(
+        "--window-mode",
+        choices=("expanding", "rolling"),
+        default=DEFAULT_CONFIG.walk_forward_window_mode,
+    )
+    parser.add_argument(
+        "--train-size", type=int, default=DEFAULT_CONFIG.walk_forward_train_size
     )
     parser.add_argument(
         "--test-size", type=int, default=DEFAULT_CONFIG.walk_forward_test_size
@@ -114,7 +122,9 @@ def main() -> None:
         combination_workers=args.combination_workers,
         walk_forward_batch_size=args.batch_size,
         final_holdout_batch_size=args.batch_size,
+        walk_forward_window_mode=args.window_mode,
         walk_forward_min_train_size=args.min_train_size,
+        walk_forward_train_size=args.train_size,
         walk_forward_test_size=args.test_size,
         walk_forward_step_size=args.step_size,
         final_holdout_size=args.final_holdout_size,

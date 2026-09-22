@@ -60,6 +60,13 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("fixed_candidate_evaluation", 33),
         ("publishing", 2),
     ],
+    JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: [
+        ("data_preparation", 25),
+        ("combination_generation", 5),
+        ("final_holdout", 60),
+        ("result_writing", 8),
+        ("publishing", 2),
+    ],
     JobType.PRODUCTION_TRAINING: [
         ("data_preparation", 35), ("production_training", 60), ("publishing", 5),
     ],

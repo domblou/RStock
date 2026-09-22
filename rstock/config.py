@@ -62,7 +62,9 @@ class RStockConfig:
     train_fraction: float = 0.7
     xgb_seed: int = 1234
     prediction_threshold: float = 0.5
+    walk_forward_window_mode: str = "expanding"
     walk_forward_min_train_size: int = 252
+    walk_forward_train_size: int = 252
     walk_forward_test_size: int = 63
     walk_forward_step_size: int = 63
     walk_forward_max_symbols: int = 4
@@ -78,6 +80,14 @@ class RStockConfig:
     qualification_min_positive_observations: int = 20
     qualification_max_auc_std: float = 0.10
     final_confirmation_min_auc: float = 0.50
+
+    # Final promotion policy, evaluated on holdout metrics after threshold
+    # calibration. These values are persisted with every run snapshot.
+    promotion_min_holdout_signals: int = 20
+    promotion_min_holdout_auc: float = 0.60
+    promotion_min_holdout_precision: float = 0.40
+    promotion_min_mean_directional_return: float = 0.00
+    promotion_max_opposite_movement_frequency: float = 0.30
 
     # Final ranking of models that already passed development qualification.
     # Missing components (for example signal calibration) are excluded and the
@@ -132,6 +142,19 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if self.walk_forward_window_mode not in {"expanding", "rolling"}:
+            raise ValueError(
+                "walk_forward_window_mode must be 'expanding' or 'rolling'"
+            )
+        for name in (
+            "walk_forward_min_train_size",
+            "walk_forward_train_size",
+            "walk_forward_test_size",
+            "walk_forward_step_size",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be an integer >= 1")
         for name in (
             "temporal_min_candidate_yield_ratio",
             "temporal_max_auc_degradation",
@@ -154,6 +177,23 @@ class RStockConfig:
             or not 0 < confidence < 1
         ):
             raise ValueError("temporal_confidence_level must be between 0 and 1")
+        if (
+            not isinstance(self.promotion_min_holdout_signals, int)
+            or isinstance(self.promotion_min_holdout_signals, bool)
+            or self.promotion_min_holdout_signals < 1
+        ):
+            raise ValueError("promotion_min_holdout_signals must be an integer >= 1")
+        for name in (
+            "promotion_min_holdout_auc",
+            "promotion_min_holdout_precision",
+            "promotion_max_opposite_movement_frequency",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
+                raise ValueError(f"{name} must be between zero and one")
+        value = self.promotion_min_mean_directional_return
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError("promotion_min_mean_directional_return must be numeric")
         for name in (
             "walk_forward_max_combinations_per_batch",
             "xgboost_global_max_qualified_combinations",
@@ -228,6 +268,10 @@ DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    # Before configurable geometry, every walk-forward was expanding. Keep that
+    # scientific behavior when immutable historical snapshots omit these fields.
+    "walk_forward_window_mode": "expanding",
+    "walk_forward_train_size": 252,
     "walk_forward_end_offset_sessions": 63,
     "max_generated_sets": 1_000_000_000,
     # Batch execution was introduced with the fixed capacity below. Snapshots
@@ -235,6 +279,13 @@ HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
     "walk_forward_max_combinations_per_batch": 2_200_000,
     "xgboost_global_max_qualified_combinations": None,
     "threshold_parameter_calibration_max_models": None,
+    # Promotion used these fixed values before they were persisted. Keep the
+    # historical policy for snapshots that do not carry the new fields.
+    "promotion_min_holdout_signals": 20,
+    "promotion_min_holdout_auc": 0.60,
+    "promotion_min_holdout_precision": 0.40,
+    "promotion_min_mean_directional_return": 0.00,
+    "promotion_max_opposite_movement_frequency": 0.30,
     # Runs created before temporal validation could not execute its comparison;
     # these values are inert unless the explicitly persisted feature flag is on.
     "temporal_min_candidate_yield_ratio": 0.25,

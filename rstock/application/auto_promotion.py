@@ -18,10 +18,7 @@ from rstock.progress import (
 )
 
 from .history_analysis import (
-    MAX_OPPOSITE_MOVEMENT_FREQUENCY,
-    MIN_HOLDOUT_AUC,
-    MIN_HOLDOUT_PRECISION,
-    MIN_HOLDOUT_SIGNALS,
+    promotion_policy,
     threshold_calibration_table,
     threshold_promotion_guidance,
 )
@@ -73,7 +70,9 @@ def _json_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _promotion_guidance(
-    threshold_results: Path, selected_by_set: dict[str, Any]
+    threshold_results: Path,
+    selected_by_set: dict[str, Any],
+    promotion_config: object | None = None,
 ) -> pd.DataFrame:
     metrics = _read_csv(threshold_results / "threshold_metrics_by_set.csv")
     holdout = _read_csv(threshold_results / "holdout_metrics.csv")
@@ -122,7 +121,9 @@ def _promotion_guidance(
         )
     if missing_rows:
         visible = pd.concat([visible, pd.DataFrame(missing_rows)], ignore_index=True)
-    guided = threshold_promotion_guidance(visible, selected_by_set)
+    guided = threshold_promotion_guidance(
+        visible, selected_by_set, promotion_config=promotion_config
+    )
     if guided.empty:
         return guided
     return guided.sort_values(
@@ -181,21 +182,27 @@ class AutoPromotionRunner:
                 threshold_results / "threshold_metrics_by_set.csv"
             ),
         }
-        return source_digests, _promotion_guidance(threshold_results, selected)
+        config = self.repository.load_spec(self.root_run_id).config
+        return source_digests, _promotion_guidance(
+            threshold_results, selected, promotion_config=config
+        )
 
     def prepare(self) -> dict[str, Any]:
         source_digests, guidance, candidate_sets = self.source_candidates()
+        policy = promotion_policy(self.repository.load_spec(self.root_run_id).config)
         identity = {
             "schema_version": PROMOTION_SCHEMA_VERSION,
             "policy_version": PROMOTION_POLICY_VERSION,
             "policy_parameters": {
-                "minimum_holdout_signals": MIN_HOLDOUT_SIGNALS,
-                "minimum_holdout_auc": MIN_HOLDOUT_AUC,
-                "minimum_holdout_precision": MIN_HOLDOUT_PRECISION,
-                "minimum_directional_return_exclusive": 0.0,
-                "maximum_opposite_movement_frequency": (
-                    MAX_OPPOSITE_MOVEMENT_FREQUENCY
-                ),
+                "minimum_holdout_signals": policy["promotion_min_holdout_signals"],
+                "minimum_holdout_auc": policy["promotion_min_holdout_auc"],
+                "minimum_holdout_precision": policy["promotion_min_holdout_precision"],
+                "minimum_directional_return_exclusive": policy[
+                    "promotion_min_mean_directional_return"
+                ],
+                "maximum_opposite_movement_frequency": policy[
+                    "promotion_max_opposite_movement_frequency"
+                ],
                 "required_direction": "Up",
             },
             "root_run_id": self.root_run_id,

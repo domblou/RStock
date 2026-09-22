@@ -4,6 +4,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from rstock.config import DEFAULT_CONFIG
 from rstock.application import history_analysis
 from rstock.application.history_analysis import (
     altair_serializable_distribution,
@@ -30,7 +31,6 @@ from rstock.application.history_analysis import (
     xgboost_calibration_selection_display_table,
     xgboost_calibration_selection_table,
 )
-from rstock.config import DEFAULT_CONFIG
 from rstock.threshold_calibration import adaptive_threshold_grid, calibrate_thresholds
 
 
@@ -532,6 +532,41 @@ def test_threshold_promotion_guidance_reports_all_failed_criteria_and_filters_ca
     assert filter_threshold_calibration_results(
         guided, direction="Toutes", min_signals=0, promotion_status="Candidat"
     ).empty
+
+
+def test_threshold_promotion_guidance_uses_the_snapshot_policy_and_strict_return():
+    policy = replace(
+        DEFAULT_CONFIG,
+        promotion_min_holdout_auc=0.70,
+        promotion_min_holdout_precision=0.50,
+        promotion_min_mean_directional_return=0.01,
+        promotion_max_opposite_movement_frequency=0.20,
+    )
+    rejected = threshold_promotion_guidance(
+        pd.DataFrame([_promotion_row(**{
+            "AUC holdout": 0.65,
+            "Précision holdout": 0.45,
+            "Rendement directionnel moyen": 0.01,
+            "Fréquence mouvement opposé": 0.21,
+        })]),
+        _selected_threshold(), promotion_config=policy,
+    )
+    assert rejected.iloc[0]["Statut promotion"] == "Non candidat"
+    assert "AUC 0,65 < 0,70" in rejected.iloc[0]["Raison"]
+    assert "Précision 45 % < 50 %" in rejected.iloc[0]["Raison"]
+    assert "Rendement <= 0,010" in rejected.iloc[0]["Raison"]
+    assert "Mouvements opposés 21 % > 20 %" in rejected.iloc[0]["Raison"]
+
+    accepted = threshold_promotion_guidance(
+        pd.DataFrame([_promotion_row(**{
+            "AUC holdout": 0.70,
+            "Précision holdout": 0.50,
+            "Rendement directionnel moyen": 0.011,
+            "Fréquence mouvement opposé": 0.20,
+        })]),
+        _selected_threshold(), promotion_config=policy,
+    )
+    assert accepted.iloc[0]["Statut promotion"] == "Candidat"
 
 
 def test_threshold_sensitivity_reprojects_holdout_probabilities_without_mutation():

@@ -40,7 +40,7 @@ from .progress import (
     check_cancellation,
     report_progress,
 )
-from .walk_forward import expanding_windows
+from .walk_forward import walk_forward_windows
 
 
 LOGGER = logging.getLogger(__name__)
@@ -240,7 +240,13 @@ def _calibration_combination(
         raise ValueError(f"Incomplete columns for set targeting {observation}")
     model_data = development[required].dropna()
     buckets: dict[tuple[str, str, int], dict[str, object]] = {}
-    windows = expanding_windows(len(model_data), min_train_size, test_size, step_size)
+    windows = walk_forward_windows(
+        len(model_data),
+        config,
+        min_train_size=min_train_size,
+        test_size=test_size,
+        step_size=step_size,
+    )
     for window in windows:
         check_cancellation(cancellation_check)
         train = model_data.iloc[window.train_slice]
@@ -718,7 +724,9 @@ def run_controlled_calibration(
         "intraday_target_threshold": config.intraday_target_threshold,
         "intraday_down_threshold": config.intraday_down_threshold,
         "prediction_threshold": config.prediction_threshold,
+        "walk_forward_window_mode": config.walk_forward_window_mode,
         "walk_forward_min_train_size": min_train,
+        "walk_forward_train_size": config.walk_forward_train_size,
         "walk_forward_test_size": test_window,
         "walk_forward_step_size": step,
         "development_start": development.index.min().isoformat(),

@@ -234,13 +234,17 @@ def lost_candidate_trace_lookup(
     root = validation_run_directory.parent
     results = root / walk_forward_id / "results"
     promotion: dict[tuple[str, str], Mapping[str, object]] = {}
+    rstock = config.get("rstock_config", {})
+    settings = rstock if isinstance(rstock, Mapping) else {}
     threshold_id = stages.get("threshold_calibration")
     if threshold_id is not None:
         threshold_results = root / threshold_id / "results"
         selected = _read_json(threshold_results / "selected_thresholds_by_set.json")
         if selected is not None:
             try:
-                guidance = _promotion_guidance(threshold_results, selected)
+                guidance = _promotion_guidance(
+                    threshold_results, selected, promotion_config=settings
+                )
             except ValueError:
                 guidance = pd.DataFrame()
             for _, row in guidance.iterrows():
@@ -248,13 +252,12 @@ def lost_candidate_trace_lookup(
                     "promotion_status": row.get("Statut promotion"),
                     "promotion_reason": row.get("Raison"),
                 }
-    rstock = config.get("rstock_config", {})
     return resolve_lost_candidate_traces(
         stability.get("lost_candidates"),
         prefilter=_read_csv(results / "predictor_prefilter.csv"),
         qualification=_read_csv(results / "qualification.csv"),
         final_holdout=_read_csv(results / "final_holdout.csv"),
-        config=rstock if isinstance(rstock, Mapping) else {},
+        config=settings,
         promotion_lookup=promotion,
     )
 
@@ -292,20 +295,22 @@ def forced_candidate_trace_lookup(
         if holdout is not None and "Set" in holdout else {}
     )
     promotion: dict[tuple[str, str], Mapping[str, object]] = {}
+    rstock = config.get("rstock_config", {})
+    settings = rstock if isinstance(rstock, Mapping) else {}
     if threshold_id is not None:
         results = root / threshold_id / "results"
         selected = _read_json(results / "selected_thresholds_by_set.json")
         if selected is not None:
             try:
-                guidance = _promotion_guidance(results, selected)
+                guidance = _promotion_guidance(
+                    results, selected, promotion_config=settings
+                )
             except ValueError:
                 guidance = pd.DataFrame()
             for _, row in guidance.iterrows():
                 promotion[(str(row.get("Combinaison", "")), str(row.get("Direction", "Up")))] = {
                     "status": row.get("Statut promotion"), "reason": row.get("Raison")
                 }
-    rstock = config.get("rstock_config", {})
-    settings = rstock if isinstance(rstock, Mapping) else {}
     candidates = [
         item
         for name in ("common_candidates", "lost_candidates")

@@ -193,6 +193,30 @@ class RunService:
                 raise
             return SubmissionResult(run_id, True)
 
+    def start_qualification_holdout_diagnostic(
+        self, forced_run_id: str
+    ) -> SubmissionResult:
+        from .qualification_holdout_diagnostic import materialize_diagnostic
+
+        with self._submission_lock():
+            run_id, _specification, created = materialize_diagnostic(
+                self.repository, forced_run_id
+            )
+            if not created:
+                return SubmissionResult(run_id, False)
+            try:
+                pid = self.backend.launch(
+                    self.repository.root, run_id, self.max_concurrent_heavy_jobs
+                )
+                status = self.repository.status(run_id)
+                status["launcher_pid"] = pid
+                self.repository.write_json(run_id, "status.json", status)
+            except Exception as error:
+                self.repository.append_log(run_id, f"Worker launch failed: {error}")
+                self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
+                raise
+            return SubmissionResult(run_id, True)
+
     def cancel(self, run_id: str) -> dict[str, object]:
         status = self.repository.request_cancellation(run_id)
         for child_run_id in self.repository.list_children(run_id):
@@ -221,6 +245,7 @@ class RunService:
                 JobType.THRESHOLD_PARAMETER_CALIBRATION,
                 JobType.END_TO_END,
                 JobType.FORCED_CANDIDATE_VALIDATION,
+                JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC,
             }
             if spec.job_type not in resumable_types:
                 raise ValueError(

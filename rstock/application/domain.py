@@ -22,6 +22,7 @@ class JobType(str, Enum):
     THRESHOLD_CALIBRATION = "threshold_calibration"
     FIXED_CANDIDATE_EVALUATION = "fixed_candidate_evaluation"
     FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
+    QUALIFICATION_HOLDOUT_DIAGNOSTIC = "qualification_holdout_diagnostic"
     FULL_TRAINING = "full_training"
     DAILY_PREDICTION = "daily_prediction"
     DATA_UPDATE = "data_update"
@@ -42,6 +43,7 @@ class JobType(str, Enum):
             JobType.THRESHOLD_CALIBRATION,
             JobType.FIXED_CANDIDATE_EVALUATION,
             JobType.FORCED_CANDIDATE_VALIDATION,
+            JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC,
             JobType.PRODUCTION_TRAINING,
             JobType.MARKET_UPDATE,
             JobType.DAILY_PREDICTION,
@@ -76,6 +78,7 @@ class RunRole(str, Enum):
     PIPELINE_STAGE = "pipeline_stage"
     TECHNICAL_BATCH = "technical_batch"
     FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
+    QUALIFICATION_HOLDOUT_DIAGNOSTIC = "qualification_holdout_diagnostic"
 
     @property
     def technical(self) -> bool:
@@ -87,6 +90,7 @@ class RunPurpose(str, Enum):
     REFERENCE = "reference"
     TEMPORAL_VALIDATION = "temporal_validation"
     FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
+    QUALIFICATION_HOLDOUT_DIAGNOSTIC = "qualification_holdout_diagnostic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +259,14 @@ class ExperimentSpec:
         str, dict[str, dict[str, object]]
     ] | None = None
     frozen_selected_thresholds_sha256: str | None = None
+    source_forced_candidate_validation_run: str | None = None
+    diagnostic_protocol: str | None = None
+    diagnostic_only: bool | None = None
+    xgb_recalibration: bool | None = None
+    threshold_recalibration: bool | None = None
+    walk_forward_rerun: bool | None = None
+    prefilter_rerun: bool | None = None
+    promotion_enabled: bool | None = None
     calibration_sampling_policy_version: int = 2
     combination_plan_version: int | None = None
     combination_plan_sha256: str | None = None
@@ -490,6 +502,16 @@ class ExperimentSpec:
             frozen_selected_thresholds_sha256=(
                 self.frozen_selected_thresholds_sha256
             ),
+            source_forced_candidate_validation_run=(
+                self.source_forced_candidate_validation_run
+            ),
+            diagnostic_protocol=self.diagnostic_protocol,
+            diagnostic_only=self.diagnostic_only,
+            xgb_recalibration=self.xgb_recalibration,
+            threshold_recalibration=self.threshold_recalibration,
+            walk_forward_rerun=self.walk_forward_rerun,
+            prefilter_rerun=self.prefilter_rerun,
+            promotion_enabled=self.promotion_enabled,
         )
         return values
 
@@ -649,6 +671,16 @@ class ExperimentSpec:
                 if values.get("frozen_selected_thresholds_sha256") is None
                 else str(values["frozen_selected_thresholds_sha256"])
             ),
+            source_forced_candidate_validation_run=_optional_string(
+                values.get("source_forced_candidate_validation_run")
+            ),
+            diagnostic_protocol=_optional_string(values.get("diagnostic_protocol")),
+            diagnostic_only=values.get("diagnostic_only"),
+            xgb_recalibration=values.get("xgb_recalibration"),
+            threshold_recalibration=values.get("threshold_recalibration"),
+            walk_forward_rerun=values.get("walk_forward_rerun"),
+            prefilter_rerun=values.get("prefilter_rerun"),
+            promotion_enabled=values.get("promotion_enabled"),
         )
         canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
         object.__setattr__(

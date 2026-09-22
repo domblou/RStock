@@ -16,8 +16,9 @@ import pandas as pd
 from rstock.calibration import run_controlled_calibration, write_calibration_results
 from rstock.calibration_sampling import policy_name
 from rstock.calendars import offset_market_session
+from rstock.evaluation import classification_metrics
 from rstock.checkpoints import CheckpointManager
-from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets
+from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets, symbol_set_id
 from rstock.combination_planning import CombinationPlan, build_combination_plan
 from rstock.features import prepare_dataset
 from rstock.market_cache import market_data_service
@@ -27,6 +28,7 @@ from rstock.modeling import (
 )
 from rstock.progress import (
     CancellationCheck,
+    CancellationRequested,
     ProgressCallback,
     ProgressEvent,
     check_cancellation,
@@ -63,6 +65,7 @@ from rstock.streaming_walk_forward import (
 from .domain import ExperimentSpec, JobStatus, JobType
 from .end_to_end import run_end_to_end
 from .forced_candidate_validation import run_forced_candidate_validation
+from .history_analysis import MIN_HOLDOUT_SIGNALS, threshold_promotion_guidance
 from .orchestration_runtime import execute_child
 from .processes import process_alive
 from .production_repository import ProductionRepository
@@ -83,6 +86,21 @@ from .production_services import (
     RealizedResultService,
 )
 from .services import MarketDataService
+
+
+def _walk_forward_protocol_summary(config: object) -> str:
+    mode = str(getattr(config, "walk_forward_window_mode"))
+    if mode == "rolling":
+        label = f"WF glissante {int(getattr(config, 'walk_forward_train_size'))}"
+        train = None
+    else:
+        train = f"train min {int(getattr(config, 'walk_forward_min_train_size'))}"
+        label = "WF expansive"
+    train_text = "" if train is None else f" · {train}"
+    return (
+        f"{label}{train_text} · test {int(getattr(config, 'walk_forward_test_size'))} · "
+        f"step {int(getattr(config, 'walk_forward_step_size'))}"
+    )
 
 
 WorkflowHandler = Callable[
@@ -228,7 +246,11 @@ def _prepared_inputs(
     prepared.attrs["symbols_used"] = len(downloaded.symbols)
     if offset is not None and offset > 0:
         minimum_observations = (
-            spec.config.walk_forward_min_train_size
+            (
+                spec.config.walk_forward_train_size
+                if spec.config.walk_forward_window_mode == "rolling"
+                else spec.config.walk_forward_min_train_size
+            )
             + spec.config.final_holdout_size
             + 1
         )
@@ -521,6 +543,7 @@ def _walk_forward(
     _phase(progress_callback, "result_writing", "completed")
     summary = {
         "job_type": spec.job_type.value,
+        "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "metrics": _json_value(result.aggregate_global.iloc[0].to_dict()),
         "eligible_combinations": int(result.qualification["Eligible"].sum()),
         "result_files": sorted(path.name for path in output.iterdir()),
@@ -786,6 +809,7 @@ def _resumable_walk_forward(
         **period,
         "traceability": traceability,
         "execution_telemetry": _json_value(result.telemetry),
+        "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "checkpoint_manifest": "checkpoints/manifest.json",
         **(
             {"total_combinations": len(generated), "predictor_prefilter": _json_value(prefilter.diagnostics)}
@@ -973,12 +997,37 @@ def _fixed_candidate_evaluation(
     if spec.forced_candidate_identities is None:
         raise ValueError("Forced candidate identities are required")
 
-    prepared, generated, _ = _prepared_calibration_population(
-        spec,
-        progress_callback,
-        cancellation_check,
-        allow_empty=True,
-    )
+    if spec.job_type is JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC:
+        prepared, _, _, _ = _prepared_inputs(
+            spec, progress_callback, cancellation_check
+        )
+        _phase(progress_callback, "combination_generation", "started")
+        forced_sets = spec.forced_symbol_sets or ()
+        if forced_sets:
+            width = max(len(symbol_set) for symbol_set in forced_sets)
+            generated = pd.DataFrame(
+                [
+                    list(symbol_set) + [None] * (width - len(symbol_set))
+                    for symbol_set in forced_sets
+                ],
+                columns=[f"V{index}" for index in range(width)],
+            )
+        else:
+            generated = pd.DataFrame()
+        _phase(
+            progress_callback,
+            "combination_generation",
+            "completed",
+            combinations=len(generated),
+            source="forced_symbol_sets",
+        )
+    else:
+        prepared, generated, _ = _prepared_calibration_population(
+            spec,
+            progress_callback,
+            cancellation_check,
+            allow_empty=True,
+        )
     effective_xgboost = _resolve_threshold_xgboost_parameters(spec)
     effective_config, threshold_parameter_source = (
         _resolve_threshold_calibration_config(spec)
@@ -1001,8 +1050,36 @@ def _fixed_candidate_evaluation(
         "MAE",
     ]
     _phase(progress_callback, "final_holdout", "started")
+    candidate_errors: dict[str, str] = {}
     if generated.empty:
         raw_holdout = pd.DataFrame(columns=prediction_columns)
+    elif spec.job_type is JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC:
+        frames: list[pd.DataFrame] = []
+        for _, candidate in generated.iterrows():
+            candidate_frame = candidate.to_frame().T
+            set_name = symbol_set_id(candidate)
+            try:
+                frames.append(generate_holdout_probabilities(
+                    development,
+                    holdout,
+                    candidate_frame,
+                    effective_config,
+                    parameters_by_direction={
+                        "Up": effective_xgboost.up,
+                        "Down": effective_xgboost.down,
+                    },
+                    progress_callback=progress_callback,
+                    cancellation_check=cancellation_check,
+                ))
+            except CancellationRequested:
+                raise
+            except Exception as error:
+                candidate_errors[set_name] = str(error)
+        raw_holdout = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=prediction_columns)
+        )
     else:
         raw_holdout = generate_holdout_probabilities(
             development,
@@ -1016,13 +1093,13 @@ def _fixed_candidate_evaluation(
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
         )
-        raw_holdout = raw_holdout[
-            [
-                (str(set_name), str(direction)) in identities
-                for set_name, direction in raw_holdout[["Set", "Direction"]]
-                .itertuples(index=False, name=None)
-            ]
-        ].reset_index(drop=True)
+    raw_holdout = raw_holdout[
+        [
+            (str(set_name), str(direction)) in identities
+            for set_name, direction in raw_holdout[["Set", "Direction"]]
+            .itertuples(index=False, name=None)
+        ]
+    ].reset_index(drop=True)
     holdout_predictions = apply_frozen_thresholds_by_set(
         raw_holdout, spec.frozen_selected_thresholds_by_set
     )
@@ -1070,6 +1147,7 @@ def _fixed_candidate_evaluation(
         "final_holdout_size": effective_config.final_holdout_size,
         "evaluated_combinations": len(generated),
         "evaluated_identities": len(holdout_metrics),
+        "candidate_errors": candidate_errors,
     }
     period = _persist_walk_forward_period(
         run_configuration, prepared, effective_config
@@ -1098,6 +1176,7 @@ def _fixed_candidate_evaluation(
     _phase(progress_callback, "result_writing", "completed")
     return {
         "job_type": spec.job_type.value,
+        "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "protocol": run_configuration["protocol"],
         "holdout_metrics": _json_value(holdout_metrics.to_dict("records")),
         "result_files": sorted(path.name for path in output.iterdir()),
@@ -1110,6 +1189,214 @@ def _fixed_candidate_evaluation(
         "frozen_selected_thresholds_sha256": (
             spec.frozen_selected_thresholds_sha256
         ),
+    }
+
+
+def _qualification_holdout_diagnostic(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    """Evaluate persisted WF rejects on holdout without rerunning selection stages."""
+
+    if spec.diagnostic_protocol != "qualification_holdout_diagnostic_v1":
+        raise ValueError("Unsupported qualification holdout diagnostic protocol")
+    if not spec.source_walk_forward_run:
+        raise ValueError("Source forced Walk-forward run is required")
+    source_results = (
+        spec.config.project_root / "runs" / spec.source_walk_forward_run / "results"
+    )
+    qualification = pd.read_csv(source_results / "qualification.csv")
+    predictions_path = source_results / "predictions.csv"
+    predictions = (
+        pd.read_csv(predictions_path)
+        if predictions_path.is_file()
+        else pd.DataFrame()
+    )
+    selected = spec.frozen_selected_thresholds_by_set or {}
+    frozen_xgb = spec.frozen_xgboost_parameters or {}
+    invalid: dict[tuple[str, str], str] = {}
+    valid_identities: list[tuple[str, str]] = []
+    valid_sets: list[tuple[str, ...]] = []
+    set_by_name = {
+        json.dumps(list(symbols), separators=(",", ":")): symbols
+        for symbols in spec.forced_symbol_sets or ()
+    }
+    for identity in spec.forced_candidate_identities or ():
+        set_name, direction = identity
+        selection = selected.get(set_name, {}).get(direction, {})
+        if not frozen_xgb.get(direction):
+            invalid[identity] = "hyperparamètres figés absents"
+        elif selection.get("status") != "selected" or selection.get("threshold") is None:
+            invalid[identity] = "seuil de référence absent"
+        elif set_name not in set_by_name:
+            invalid[identity] = "combinaison source absente"
+        else:
+            valid_identities.append(identity)
+            valid_sets.append(set_by_name[set_name])
+    if valid_identities:
+        evaluation_spec = replace(
+            spec,
+            forced_symbol_sets=tuple(valid_sets),
+            forced_candidate_identities=tuple(valid_identities),
+        )
+        base_summary = _fixed_candidate_evaluation(
+            evaluation_spec, output, progress_callback, cancellation_check
+        )
+        holdout = pd.read_csv(output / "holdout_metrics.csv")
+        base_configuration_path = output / "run_configuration.json"
+        base_configuration = (
+            json.loads(base_configuration_path.read_text(encoding="utf-8"))
+            if base_configuration_path.is_file()
+            else {}
+        )
+        for set_name, error in base_configuration.get("candidate_errors", {}).items():
+            for direction in ("Up", "Down"):
+                invalid.setdefault((str(set_name), direction), str(error))
+    else:
+        output.mkdir(parents=True, exist_ok=True)
+        holdout = pd.DataFrame()
+        holdout.to_csv(output / "holdout_metrics.csv", index=False)
+        base_summary = {}
+
+    qualification_by_set = qualification.set_index("Set", drop=False)
+    rows: list[dict[str, object]] = []
+    for set_name, direction in spec.forced_candidate_identities or ():
+        q = qualification_by_set.loc[set_name]
+        if isinstance(q, pd.DataFrame):
+            q = q.iloc[0]
+        predictors = json.loads(str(q.get("Predictors", "[]")))
+        second_worst: float | None = None
+        window_aucs: list[float] = []
+        if not predictions.empty:
+            subset = predictions[predictions["Set"].astype(str) == set_name]
+            target_column = f"{direction}Target"
+            probability_column = f"{direction}Probability"
+            for _, window in subset.groupby("Window", sort=True):
+                metric = classification_metrics(
+                    window[target_column],
+                    np.zeros(len(window), dtype=int),
+                    window[probability_column],
+                )
+                if metric.roc_auc is not None:
+                    window_aucs.append(metric.roc_auc)
+            if len(window_aucs) >= 2:
+                second_worst = sorted(window_aucs)[1]
+        metric_rows = (
+            holdout[
+                (holdout.get("Set", pd.Series(dtype=str)).astype(str) == set_name)
+                & (holdout.get("Direction", pd.Series(dtype=str)).astype(str) == direction)
+            ]
+            if not holdout.empty
+            else pd.DataFrame()
+        )
+        reason = invalid.get((set_name, direction))
+        metric = None if metric_rows.empty else metric_rows.iloc[0]
+        if metric is None and reason is None:
+            reason = "données holdout insuffisantes"
+        if metric is None:
+            status = "Non évaluable"
+            reading = "—"
+        else:
+            auc = pd.to_numeric(pd.Series([metric.get("ROCAUC")]), errors="coerce").iloc[0]
+            signals = int(metric.get("SignalCount", 0))
+            status = (
+                "Holdout insuffisant"
+                if signals < MIN_HOLDOUT_SIGNALS or pd.isna(auc)
+                else "Holdout favorable" if float(auc) >= 0.50
+                else "Holdout défavorable"
+            )
+            threshold = selected[set_name][direction]["threshold"]
+            guidance_input = pd.DataFrame([{
+                "Combinaison": set_name,
+                "Cible": str(q.get("Observation", "")),
+                "Predictors": " + ".join(str(item) for item in predictors),
+                "Direction": direction,
+                "Seuil calibré": threshold,
+                "Signaux holdout": metric.get("SignalCount"),
+                "AUC holdout": metric.get("ROCAUC"),
+                "Précision holdout": metric.get("Precision"),
+                "Rendement directionnel moyen": metric.get("DirectionalReturnMean"),
+                "Fréquence mouvement opposé": metric.get("OppositeMoveFrequency"),
+            }])
+            guided = threshold_promotion_guidance(
+                guidance_input, selected, promotion_config=spec.config
+            ).iloc[0]
+            reading = (
+                "Aurait satisfait les critères holdout"
+                if guided["Statut promotion"] == "Candidat"
+                else "N’aurait pas satisfait les critères holdout"
+            )
+        rows.append({
+            "Cible": str(q.get("Observation", "")),
+            "Predictors": " + ".join(str(item) for item in predictors),
+            "Set": set_name,
+            "Direction": direction,
+            "Worst AUC WF": q.get("ROCAUCWorst"),
+            "2e pire AUC WF": second_worst,
+            "AUC médiane WF": q.get("ROCAUCMedian"),
+            "Ecart-type AUC WF": q.get("ROCAUCStd"),
+            "% fenêtres > 0.50": q.get("PctWindowsAboveRandom"),
+            "Raison rejet WF": str(q.get("IneligibilityReasons", "[]")),
+            "AUC holdout diagnostic": None if metric is None else metric.get("ROCAUC"),
+            "Precision": None if metric is None else metric.get("Precision"),
+            "Rendement directionnel": None if metric is None else metric.get("DirectionalReturnMean"),
+            "Mouvements opposés": None if metric is None else metric.get("OppositeMoveFrequency"),
+            "Signaux": None if metric is None else metric.get("SignalCount"),
+            "Seuil de référence": selected.get(set_name, {}).get(direction, {}).get("threshold"),
+            "AUC WF par fenetre": json.dumps(window_aucs),
+            "Statut diagnostique": status,
+            "Lecture diagnostique": reading,
+            "Raison non evaluable": reason,
+        })
+    results = pd.DataFrame(rows)
+    results.to_csv(output / "diagnostic_results.csv", index=False)
+    run_configuration = {
+        "protocol": spec.diagnostic_protocol,
+        "diagnostic_only": True,
+        "xgb_recalibration": False,
+        "threshold_recalibration": False,
+        "walk_forward_rerun": False,
+        "prefilter_rerun": False,
+        "promotion_enabled": False,
+        "source_end_to_end_run": (
+            spec.source_end_to_end_run
+            or RunRepository(output.parent.parent).run_metadata(output.parent.name).root_run_id
+        ),
+        "source_forced_candidate_validation_run": spec.source_forced_candidate_validation_run,
+        "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_threshold_calibration_run": spec.source_threshold_calibration_run,
+        "frozen_xgboost_parameters_sha256": spec.frozen_xgboost_parameters_sha256,
+        "frozen_selected_thresholds_sha256": spec.frozen_selected_thresholds_sha256,
+        "candidate_count": len(results),
+    }
+    (output / "run_configuration.json").write_text(
+        json.dumps(run_configuration, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "schema_version": 1,
+        **run_configuration,
+        "artifacts": ["diagnostic_results.csv", "holdout_metrics.csv", "run_configuration.json"],
+    }
+    (output / "diagnostic_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    favorable = int((results["Statut diagnostique"] == "Holdout favorable").sum())
+    non_evaluable = int((results["Statut diagnostique"] == "Non évaluable").sum())
+    satisfied = int((results["Lecture diagnostique"] == "Aurait satisfait les critères holdout").sum())
+    return {
+        **base_summary,
+        "job_type": spec.job_type.value,
+        "protocol": spec.diagnostic_protocol,
+        "candidate_count": len(results),
+        "holdout_count": len(results) - non_evaluable,
+        "non_evaluable_count": non_evaluable,
+        "favorable_count": favorable,
+        "unfavorable_count": len(results) - non_evaluable - favorable,
+        "criteria_satisfied_count": satisfied,
+        "result_files": sorted(path.name for path in output.iterdir()),
     }
 
 
@@ -1169,6 +1456,7 @@ def _threshold_parameter_calibration(
     _phase(progress_callback, "result_writing", "completed")
     return {
         "job_type": spec.job_type.value,
+        "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "selected_configuration": _json_value(result.selected_configuration),
         "candidate_count": len(result.development_by_configuration),
         "eligible_candidate_count": int(
@@ -1616,6 +1904,7 @@ def _planned_walk_forward(
         **period,
         "traceability": traceability,
         "execution_telemetry": _json_value(result.telemetry),
+        "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "checkpoint_manifest": "checkpoints/manifest.json",
         **(
             {"walk_forward_batch_manifest": "orchestration/walk_forward_batches.json"}
@@ -2107,6 +2396,9 @@ class WorkflowRegistry:
                 ),
                 JobType.FORCED_CANDIDATE_VALIDATION: (
                     _forced_candidate_validation
+                ),
+                JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: (
+                    _qualification_holdout_diagnostic
                 ),
                 JobType.PRODUCTION_TRAINING: _production_training,
                 JobType.MARKET_UPDATE: _market_update,

@@ -80,6 +80,25 @@ def test_walk_forward_duplication_draft_copies_all_experiment_inputs():
     assert detail["configuration"]["rstock_config"]["xgb_seed"] == 99
 
 
+def test_duplication_preserves_walk_forward_window_mode_and_train_size(tmp_path):
+    draft = walk_forward_duplication_draft(
+        "run_original",
+        _detail(snapshot={
+            "walk_forward_window_mode": "rolling",
+            "walk_forward_train_size": 504,
+        }),
+    )
+
+    duplicated = experiment_spec_from_duplication(
+        draft,
+        current_config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        use_run_config=True,
+    )
+
+    assert duplicated.config.walk_forward_window_mode == "rolling"
+    assert duplicated.config.walk_forward_train_size == 504
+
+
 def test_duplication_carries_the_source_traceability_cutoff(tmp_path):
     detail = _detail()
     detail["summary"] = {

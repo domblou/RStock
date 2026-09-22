@@ -10,9 +10,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import quote
 
+import exchange_calendars as xcals
 import pandas as pd
 
 from .config import RStockConfig
@@ -167,12 +168,30 @@ class MarketDataService:
         provider: MarketDataProvider,
         *,
         max_workers: int = 8,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be positive")
         self.store = store
         self.provider = provider
         self.max_workers = max_workers
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @staticmethod
+    def _last_completed_session(
+        calendar_name: str, as_of: date, refreshed_at: datetime
+    ) -> date:
+        """Return the latest session whose daily bar is safe to cache."""
+
+        calendar = xcals.get_calendar(calendar_name)
+        session = calendar.date_to_session(pd.Timestamp(as_of), direction="previous")
+        if session.date() != as_of:
+            return session.date()
+        if as_of != refreshed_at.date():
+            return session.date()
+        if refreshed_at < calendar.session_close(session):
+            return calendar.previous_session(session).date()
+        return session.date()
 
     def _metadata_entry(
         self,
@@ -208,7 +227,10 @@ class MarketDataService:
         symbol = str(row["Symbol"])
         provider_symbol = str(row["ProviderSymbol"])
         existing = self.store.read(symbol)
-        requested_end = as_of + timedelta(days=1)
+        available_as_of = self._last_completed_session(
+            str(row["Calendar"]), as_of, refreshed_at
+        )
+        requested_end = available_as_of + timedelta(days=1)
         previous_coverage_start = None
         if previous_metadata and previous_metadata.get("coverage_start"):
             previous_coverage_start = date.fromisoformat(
@@ -216,17 +238,17 @@ class MarketDataService:
             )
 
         if existing is not None and not existing.empty and not force:
-            refreshed_today = False
-            if previous_metadata and previous_metadata.get("last_request_as_of"):
-                refreshed_today = (
-                    date.fromisoformat(str(previous_metadata["last_request_as_of"]))
-                    == as_of
-                )
             coverage_starts_early_enough = (
                 previous_coverage_start is not None
                 and previous_coverage_start <= requested_start
             )
-            if refreshed_today and coverage_starts_early_enough:
+            cache_contains_latest_completed_session = (
+                existing.index.max().date() >= available_as_of
+            )
+            if (
+                coverage_starts_early_enough
+                and cache_contains_latest_completed_session
+            ):
                 selected = existing.loc[
                     (existing.index.date >= requested_start)
                     & (existing.index.date <= as_of)
@@ -253,7 +275,7 @@ class MarketDataService:
                 )
             ):
                 ranges.append((requested_start, first_date))
-            if last_date < as_of:
+            if last_date < available_as_of:
                 ranges.append((last_date + timedelta(days=1), requested_end))
 
         try:
@@ -341,7 +363,7 @@ class MarketDataService:
 
         manifest = self.store.read_metadata()
         symbol_metadata = dict(manifest.get("symbols", {}))
-        refreshed_at = datetime.now(timezone.utc)
+        refreshed_at = self._clock()
         results_by_symbol: dict[str, _SymbolResult] = {}
         report_progress(
             progress_callback,
