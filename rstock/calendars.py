@@ -82,3 +82,27 @@ def next_market_session(
         )
     session = pd.Timestamp(sessions[0])
     return session.tz_localize(None) if session.tz is not None else session
+
+
+def resolve_market_session_on_or_before(value: object, calendar_name: str) -> pd.Timestamp:
+    """Resolve a user date to the last valid session on or before it."""
+
+    return offset_market_session(value, calendar_name, 0)
+
+
+def forward_market_sessions(
+    cutoff: object, calendar_name: str, count: int
+) -> pd.DatetimeIndex:
+    """Return the next ``count`` exchange sessions strictly after ``cutoff``."""
+
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise ValueError("count must be a positive integer")
+    validate_calendar_name(calendar_name)
+    calendar = xcals.get_calendar(calendar_name)
+    start = pd.Timestamp(cutoff).normalize()
+    if start.tz is not None:
+        start = start.tz_localize(None)
+    session = calendar.date_to_session(start, direction="previous")
+    values = calendar.sessions_window(session, count + 1)[1:]
+    result = pd.DatetimeIndex(values)
+    return result.tz_localize(None) if result.tz is not None else result

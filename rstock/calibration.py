@@ -8,6 +8,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -29,10 +30,18 @@ from .features import (
 from .modeling import (
     XGBoostParameters,
     fit_booster,
+    fit_booster_matrix,
     historical_xgboost_parameters,
     predict_probabilities,
+    predict_probabilities_matrix,
+    xgboost_module,
 )
-from .parallel import process_cancellation_requested, run_combination_tasks
+from .checkpoints import CheckpointManager
+from .parallel import (
+    iter_indexed_combination_batches,
+    process_cancellation_requested,
+    run_combination_tasks,
+)
 from .qualification import qualification_parameters
 from .progress import (
     CancellationCheck,
@@ -68,12 +77,15 @@ class CalibrationResult:
 @dataclass(slots=True)
 class _CalibrationCombinationResult:
     buckets: dict[tuple[str, str, int], dict[str, object]]
+    matrix_preparation_seconds: float = 0.0
+    training_seconds: float = 0.0
 
 
 _CALIBRATION_TASK_CONTEXT: tuple[
     pd.DataFrame,
     RStockConfig,
     tuple[XGBoostParameters, ...],
+    Mapping[str, XGBoostParameters],
     int,
     int,
     int,
@@ -85,6 +97,7 @@ def _set_calibration_task_context(
         pd.DataFrame,
         RStockConfig,
         tuple[XGBoostParameters, ...],
+        Mapping[str, XGBoostParameters],
         int,
         int,
         int,
@@ -226,8 +239,7 @@ def _calibration_combination(
 ) -> _CalibrationCombinationResult:
     """Evaluate all windows/configurations for one combination sequentially."""
 
-    development, config, candidates, min_train_size, test_size, step_size = context
-    lookup = _configuration_lookup(candidates, config)
+    development, config, candidates, lookup, min_train_size, test_size, step_size = context
     row = pd.Series(row_values)
     observation, feature_symbols = symbols_from_set(row)
     names = predictor_columns(
@@ -240,6 +252,8 @@ def _calibration_combination(
         raise ValueError(f"Incomplete columns for set targeting {observation}")
     model_data = development[required].dropna()
     buckets: dict[tuple[str, str, int], dict[str, object]] = {}
+    matrix_preparation_seconds = 0.0
+    training_seconds = 0.0
     windows = walk_forward_windows(
         len(model_data),
         config,
@@ -253,11 +267,19 @@ def _calibration_combination(
         test = model_data.iloc[window.test_slice]
         if train.index.max() >= test.index.min():
             raise AssertionError("Calibration window leaked future test data")
-        for configuration, parameters in lookup.items():
-            for direction, outcome in (("Up", up_outcome), ("Down", down_outcome)):
-                booster = fit_booster(train, names, outcome, config, parameters=parameters)
-                probabilities = predict_probabilities(booster, test, names)
-                actual = test[outcome].astype(int).to_numpy()
+        matrix_started_at = perf_counter()
+        xgb = xgboost_module()
+        train_matrix = xgb.DMatrix(train[names], feature_names=list(names))
+        test_matrix = xgb.DMatrix(test[names], feature_names=list(names))
+        matrix_preparation_seconds += perf_counter() - matrix_started_at
+        for direction, outcome in (("Up", up_outcome), ("Down", down_outcome)):
+            actual = test[outcome].astype(int).to_numpy()
+            train_matrix.set_label(train[outcome].astype(int).to_numpy())
+            for configuration, parameters in lookup.items():
+                training_started_at = perf_counter()
+                booster = fit_booster_matrix(train_matrix, config, parameters=parameters)
+                probabilities = predict_probabilities_matrix(booster, test_matrix)
+                training_seconds += perf_counter() - training_started_at
                 predicted = binary_predictions(probabilities, config.prediction_threshold)
                 _append_prediction_bucket(
                     buckets,
@@ -268,7 +290,11 @@ def _calibration_combination(
                     train=train,
                     test=test,
                 )
-    return _CalibrationCombinationResult(buckets)
+    return _CalibrationCombinationResult(
+        buckets,
+        matrix_preparation_seconds=matrix_preparation_seconds,
+        training_seconds=training_seconds,
+    )
 
 
 def _calibration_process_task(
@@ -439,6 +465,8 @@ def calibrate_development(
     step_size: int,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
+    checkpoint_manager: CheckpointManager | None = None,
+    telemetry: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, XGBoostParameters]]:
     """Select parameters using development data only."""
 
@@ -450,30 +478,83 @@ def calibrate_development(
         development,
         config,
         tuple(candidates),
+        lookup,
         min_train_size,
         test_size,
         step_size,
     )
     task_rows = [row.to_dict() for _, row in sampled_sets.iterrows()]
-    combination_results = run_combination_tasks(
-        task_rows,
-        combination_workers=config.combination_workers,
-        worker_context=task_context,
-        context_initializer=_set_calibration_task_context,
-        process_task=_calibration_process_task,
-        serial_task=_calibration_combination,
-        item_label=lambda values: symbol_set_id(pd.Series(values)),
-        stage="xgboost_calibration",
-        progress_callback=progress_callback,
-        cancellation_check=cancellation_check,
-        details={
+    task_options = {
+        "combination_workers": config.combination_workers,
+        "worker_context": task_context,
+        "context_initializer": _set_calibration_task_context,
+        "process_task": _calibration_process_task,
+        "serial_task": _calibration_combination,
+        "item_label": lambda values: symbol_set_id(pd.Series(values)),
+        "stage": "xgboost_calibration",
+        "progress_callback": progress_callback,
+        "cancellation_check": cancellation_check,
+        "details": {
             "configurations": len(candidates),
             "directions": 2,
             "combination_workers": config.combination_workers,
         },
-    )
+    }
+    total_started_at = perf_counter()
+    batch_seconds: list[float] = []
+    reused_batches = 0
+    calculated_batches = 0
+    if checkpoint_manager is None:
+        combination_results = run_combination_tasks(task_rows, **task_options)
+    else:
+        phase = "xgboost_calibration"
+        batch_size = config.walk_forward_batch_size
+        total_batches = (len(task_rows) + batch_size - 1) // batch_size
+        checkpoint_manager.phase_started(phase)
+        checkpoint_manager.set_total_batches(phase, total_batches)
+        completed = checkpoint_manager.completed_batch_ids(phase)
+        reused_batches = len(completed)
+        for batch in iter_indexed_combination_batches(
+            task_rows,
+            batch_size=batch_size,
+            completed_batch_ids=completed,
+            **task_options,
+        ):
+            checkpoint_manager.commit_batch(
+                phase,
+                batch.batch_id,
+                batch.results,
+                first_index=batch.first_index,
+                last_index=batch.last_index,
+                combination_count=len(batch.results),
+                row_counts={},
+            )
+            calculated_batches += 1
+            batch_seconds.append(batch.elapsed_seconds)
+        combination_results = [
+            result
+            for batch_id in range(total_batches)
+            for result in checkpoint_manager.load_batch(phase, batch_id)
+        ]
+        checkpoint_manager.phase_completed(phase)
     for result in combination_results:
         _merge_prediction_buckets(buckets, result.buckets)
+
+    if telemetry is not None:
+        telemetry.update(
+            {
+                "total_seconds": perf_counter() - total_started_at,
+                "matrix_preparation_seconds": sum(
+                    result.matrix_preparation_seconds for result in combination_results
+                ),
+                "training_seconds": sum(
+                    result.training_seconds for result in combination_results
+                ),
+                "batch_seconds": batch_seconds,
+                "batches_calculated": calculated_batches,
+                "batches_reused": reused_batches,
+            }
+        )
 
     by_window = _window_metric_rows(buckets)
     by_configuration = _configuration_metric_rows(
@@ -625,6 +706,7 @@ def run_controlled_calibration(
     final_holdout_size: int | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
+    checkpoint_manager: CheckpointManager | None = None,
 ) -> CalibrationResult:
     """Calibrate on development, freeze selections, then open the holdout once."""
 
@@ -653,6 +735,7 @@ def run_controlled_calibration(
     )
 
     report_progress(progress_callback, "walk_forward", substage="started", details={"phase_event": "started", "combinations": len(sampled)})
+    calibration_telemetry: dict[str, object] = {}
     by_configuration, by_window, selected = calibrate_development(
         development,
         sampled,
@@ -663,6 +746,8 @@ def run_controlled_calibration(
         step_size=step,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
+        checkpoint_manager=checkpoint_manager,
+        telemetry=calibration_telemetry,
     )
     report_progress(progress_callback, "walk_forward", substage="completed", details={"phase_event": "completed", "windows": int(by_window["Window"].nunique())})
     selected_payload = _selected_payload(selected, by_configuration)
@@ -736,6 +821,7 @@ def run_controlled_calibration(
         "final_holdout_size": holdout_size,
         "qualification_criteria_unchanged": qualification_parameters(config),
         "selected_configurations": selected_payload,
+        "performance_telemetry": calibration_telemetry,
     }
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     return CalibrationResult(

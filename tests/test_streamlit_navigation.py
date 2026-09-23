@@ -146,7 +146,8 @@ def test_simulation_result_distribution_matches_data_quality_panel_width():
     )[0]
 
     assert "charts = st.columns([3, 1])" in results
-    assert "details, quality = st.columns([3, 1])" in results
+    assert 'st.subheader("Détail des trades")' in results
+    assert 'st.subheader("Qualité des données")' in results
 
 
 def test_simulation_trade_symbol_filter_supports_multiple_symbols_by_default():
@@ -383,7 +384,8 @@ def test_walk_forward_preview_uses_shared_lazy_combination_plan():
     assert "Maximum après préfiltrage" in preview
     assert "Batchs max après préfiltrage" in preview
     assert "Batchs requis (preview)" not in preview
-    assert "_combination_plan_preview(labels[choice])" in experiments
+    assert "selected_job_type = labels[choice]" in experiments
+    assert "_combination_plan_preview(selected_job_type)" in experiments
 
 
 def test_universe_page_exposes_persisted_type_without_weakening_system_protection():
@@ -450,11 +452,11 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
         "Activer",
         "Désactiver",
         "Retirer",
-        "Mettre à jour le marché",
+        "Mettre à jour RStock",
         "Prédictions quotidiennes",
-        "Détecter les signaux",
-        "Évaluer les prédictions",
-        "Exécution complète",
+        "Détection des signaux",
+        "Évaluation des prédictions",
+        "Lance la mise à jour quotidienne de bout en bout.",
     ):
         assert label in source
     for history_kind in (
@@ -854,7 +856,10 @@ def test_prediction_audit_ui_is_shared_by_signals_and_results():
         "def _render_signals_section", 1
     )[0]
     signals = source.split("def _render_signals_section", 1)[1].split(
-        "def _evaluated_predictions_panel", 1
+        "def _priority_card_html", 1
+    )[0]
+    followup = source.split("def _render_signals_followup", 1)[1].split(
+        "def _render_signals_section", 1
     )[0]
     realized = source.split("def _evaluated_predictions_panel", 1)[1].split(
         "def _render_surveillance_page", 1
@@ -865,7 +870,8 @@ def test_prediction_audit_ui_is_shared_by_signals_and_results():
     assert "Entrées du modèle au moment de la prédiction" in helper
     assert "Observations sources" in helper
     assert "Non disponible pour cette prédiction historique." in helper
-    assert "_render_prediction_audit_details(" in signals
+    assert "_render_signals_followup(displayed, selected_signal, models)" in signals
+    assert "_render_prediction_audit_details(" in followup
     assert "_render_prediction_audit_details(selected_record)" in realized
     assert source.count("def _render_prediction_audit_details") == 1
 
@@ -1102,7 +1108,15 @@ def test_threshold_calibration_filter_defaults_are_session_safe():
         "def _render_history_detail", 1
     )[0]
 
-    for value in ('"Up"', ": 20", ": 0.40", ": 0.60", ": 0.30", ": 0.00"):
+    assert "policy = promotion_policy(rstock_config)" in panel
+    for value in (
+        '"Up"',
+        'policy["promotion_min_holdout_signals"]',
+        'policy["promotion_min_holdout_precision"]',
+        'policy["promotion_min_holdout_auc"]',
+        'policy["promotion_max_opposite_movement_frequency"]',
+        'policy[\n            "promotion_min_mean_directional_return"\n        ]',
+    ):
         assert value in panel
     assert "st.session_state.setdefault(key, value)" in panel
     assert '"Signaux holdout minimum", min_value=0, step=1' in panel

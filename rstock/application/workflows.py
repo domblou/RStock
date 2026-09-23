@@ -65,6 +65,7 @@ from rstock.streaming_walk_forward import (
 from .domain import ExperimentSpec, JobStatus, JobType
 from .end_to_end import run_end_to_end
 from .forced_candidate_validation import run_forced_candidate_validation
+from .forward_simulation import run_forward_simulation
 from .history_analysis import MIN_HOLDOUT_SIGNALS, threshold_promotion_guidance
 from .orchestration_runtime import execute_child
 from .processes import process_alive
@@ -863,6 +864,14 @@ def _xgboost_calibration(
         spec.calibration_sampling_policy_version,
         qualified_walk_forward_source=qualified_source,
     )
+    checkpoint_root = output.parent if output.name == "_working" else output
+    checkpoint = CheckpointManager(
+        checkpoint_root,
+        run_id=checkpoint_root.name,
+        job_type=spec.job_type.value,
+        configuration_fingerprint=spec.fingerprint,
+        batch_sizes={"xgboost_calibration": spec.config.walk_forward_batch_size},
+    )
     result = run_controlled_calibration(
         prepared,
         generated,
@@ -874,6 +883,7 @@ def _xgboost_calibration(
         ),
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
+        checkpoint_manager=checkpoint,
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     traceability = _persist_prepared_traceability(
@@ -2153,6 +2163,26 @@ def _production_training(
     return {"job_type": spec.job_type.value, "model_id": model.model_id, "status": model.status.value}
 
 
+def _refresh_simulation_benchmark(
+    spec: ExperimentSpec, cancellation_check: CancellationCheck | None
+) -> None:
+    """Keep SPY current without adding it to the model feature population."""
+
+    benchmark_universe = pd.DataFrame(
+        {
+            "Symbol": ["SPY"],
+            "ProviderSymbol": ["SPY"],
+            "Exchange": [spec.calendar],
+            "Calendar": [spec.calendar],
+        }
+    )
+    market_data_service(spec.config).get_market_data(
+        benchmark_universe,
+        spec.config.model_history_days,
+        cancellation_check=cancellation_check,
+    )
+
+
 def _market_update(
     spec: ExperimentSpec, output: Path, progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
@@ -2169,6 +2199,7 @@ def _market_update(
         progress_callback=_phase_callback(progress_callback, "market_update"),
         cancellation_check=cancellation_check,
     )
+    _refresh_simulation_benchmark(spec, cancellation_check)
     _phase(progress_callback, "market_update", "completed", symbols=len(downloaded.symbols))
     summary = {
         "job_type": spec.job_type.value,
@@ -2299,6 +2330,7 @@ def _operational_run(
         preparation_config=effective_config,
         phase_name="market_update",
     )
+    _refresh_simulation_benchmark(spec, cancellation_check)
     check_cancellation(cancellation_check)
     _phase(progress_callback, "daily_prediction", "started")
     prediction_service = DailyPredictionService(repository)
@@ -2369,6 +2401,18 @@ def _end_to_end(
     )
 
 
+def _forward_simulation(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    _phase(progress_callback, "forward_simulation", "started")
+    result = run_forward_simulation(spec, output, cancellation_check=cancellation_check)
+    _phase(progress_callback, "forward_simulation", "completed", **result)
+    return result
+
+
 def _forced_candidate_validation(
     spec: ExperimentSpec,
     output: Path,
@@ -2416,6 +2460,7 @@ class WorkflowRegistry:
                 JobType.REALIZED_VALIDATION: _realized_validation,
                 JobType.OPERATIONAL_RUN: _operational_run,
                 JobType.END_TO_END: _end_to_end,
+                JobType.FORWARD_SIMULATION: _forward_simulation,
             }
         )
 

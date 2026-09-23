@@ -204,6 +204,13 @@ class ExperimentService:
     ) -> SubmissionResult:
         return self.run_service.start_historical_forced_validation(parent_run_id)
 
+    def start_forward_simulation(
+        self, source_end_to_end_run: str, *, start_date: str, end_date: str
+    ) -> SubmissionResult:
+        return self.run_service.start_forward_simulation(
+            source_end_to_end_run, start_date=start_date, end_date=end_date
+        )
+
     def start_qualification_holdout_diagnostic(
         self, forced_run_id: str
     ) -> SubmissionResult:

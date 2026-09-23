@@ -8,16 +8,20 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+import pandas as pd
+
 from rstock.modeling import selected_xgboost_parameters
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation
 
 from .auto_promotion import AutoPromotionRunner, PROMOTION_CHECKPOINT
 from .domain import ExperimentSpec, JobType, RunMetadata, RunPurpose, RunRole
+from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from .repository import RunRepository, utc_now
 from .temporal_validation import (
     TEMPORAL_VALIDATION_RESULT,
     TemporalValidationRunner,
 )
+from .forward_simulation import build_forward_model_snapshot
 
 
 PIPELINE_SCHEMA_VERSION = 1
@@ -442,7 +446,11 @@ def _base_child_spec(
         source_threshold_calibration_run=None,
         auto_promote_candidates=False,
         temporal_validation_enabled=False,
-        historical_data_cutoff=None,
+        historical_data_cutoff=(
+            parent.resolved_market_session_cutoff or parent.historical_data_cutoff
+        ),
+        requested_historical_cutoff=parent.requested_historical_cutoff,
+        resolved_market_session_cutoff=parent.resolved_market_session_cutoff,
         source_prepared_dataset_sha256=None,
         combination_plan_version=None,
         combination_plan_sha256=None,
@@ -1173,6 +1181,65 @@ def run_end_to_end(
         )
         manifest = load_pipeline_manifest(repository, root_run_id) or manifest
 
+    # A historical point-in-time run becomes reusable only after its candidates
+    # have been frozen.  This belongs to the completed scientific parent, not
+    # to any optional forward child.
+    forward_snapshot = None
+    if spec.historical_data_cutoff is not None:
+        forward_snapshot = build_forward_model_snapshot(
+            repository, root_run_id, spec, result_directory=output,
+            cancellation_check=cancellation_check,
+        )
+
+    # Forward evaluation is deliberately best-effort.  It is a separate child:
+    # an unavailable future period cannot retroactively fail the completed
+    # discovery pipeline or its immutable model snapshot.
+    forward_child: dict[str, object] | None = None
+    if (
+        spec.forward_simulation_enabled
+        and forward_snapshot is not None
+        and int(forward_snapshot.get("candidate_count", 0)) > 0
+    ):
+        cutoff = pd.Timestamp(
+            forward_snapshot["resolved_market_session_cutoff"]
+        ).normalize()
+        try:
+            if spec.forward_simulation_mode == "custom_end_date":
+                if spec.forward_simulation_end_date is None:
+                    raise ValueError("Forward custom end date is required")
+                end = resolve_market_session_on_or_before(
+                    spec.forward_simulation_end_date, spec.calendar
+                )
+                start = forward_market_sessions(cutoff, spec.calendar, 1)[0]
+            else:
+                count = 126 if spec.forward_simulation_mode == "126_sessions" else 63
+                sessions = forward_market_sessions(cutoff, spec.calendar, count)
+                start, end = sessions[0], sessions[-1]
+            if end <= cutoff:
+                raise ValueError("Forward end must follow the historical cutoff")
+            child_spec = replace(
+                spec, job_type=JobType.FORWARD_SIMULATION,
+                source_end_to_end_run=root_run_id,
+                source_forward_model_snapshot_sha256=forward_snapshot.get("snapshot_sha256"),
+                forward_simulation_start_date=start.date().isoformat(),
+                forward_simulation_end_date=end.date().isoformat(),
+                forward_simulation_enabled=False,
+                temporal_validation_enabled=False,
+                auto_promote_candidates=False,
+                run_description="Forward Simulation automatique",
+            )
+            forward_id = repository.generate_run_id()
+            repository.create(child_spec, run_id=forward_id, metadata=RunMetadata(
+                run_role=RunRole.PIPELINE_STAGE, parent_run_id=root_run_id,
+                relation_key="forward_simulation", relation_type="forward_simulation",
+                stage_key="forward_simulation", visible_in_history=True,
+            ))
+            forward_child = {"child_run_id": forward_id, "status": "pending"}
+        except Exception as error:
+            forward_child = {"status": "not_started", "error": str(error)}
+    elif spec.forward_simulation_enabled and forward_snapshot is not None:
+        forward_child = {"status": "skipped_no_models"}
+
     if spec.temporal_validation_enabled:
         check_cancellation(cancellation_check)
         child_run_id, child_spec = _materialize_temporal_validation(
@@ -1445,6 +1512,15 @@ def run_end_to_end(
         "stages": completed,
         "promotion": promotion_summary,
         "temporal_validation": temporal_comparison,
+        "forward_model_snapshot": (
+            None if forward_snapshot is None else {
+                "candidate_count": forward_snapshot.get("candidate_count", 0),
+                "resolved_market_session_cutoff": forward_snapshot.get(
+                    "resolved_market_session_cutoff"
+                ),
+            }
+        ),
+        "forward_simulation": forward_child,
     }
     if promotion_summary["executed"]:
         (output / "promotion_results.json").write_text(

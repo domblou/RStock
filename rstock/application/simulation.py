@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Callable
@@ -31,6 +31,10 @@ TRADE_COLUMNS = (
     "Profit / perte",
     "Statut",
 )
+BENCHMARK_COLUMNS = (
+    "Date",
+    "SPY Rendement",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,12 +60,43 @@ class SimulationResult:
     cumulative_results: pd.DataFrame
     result_distribution: pd.DataFrame
     model_snapshots: tuple[dict[str, object], ...] = ()
+    benchmark_results: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=BENCHMARK_COLUMNS)
+    )
 
 
 def summarize_simulation_trades(trades: pd.DataFrame) -> SimulationResult:
     """Recalculate display metrics and charts from a selected trade population."""
 
     return SimulationService._result(trades)
+
+
+def benchmark_cumulative_for_trades(
+    trades: pd.DataFrame, benchmark_results: pd.DataFrame
+) -> pd.DataFrame:
+    """Apply saved SPY returns to the daily notional of bullish signals."""
+
+    if trades.empty or benchmark_results.empty:
+        return pd.DataFrame(columns=["Date", "SPY résultat cumulé"])
+    amounts = pd.to_numeric(trades.get("Montant investi"), errors="coerce")
+    # SPY mirrors every bullish signal's intended exposure, even if the target
+    # price is unavailable and that target trade cannot itself be scored.
+    exposure = trades.loc[amounts.notna(), ["Date trade"]].copy()
+    exposure["Montant investi"] = amounts.loc[exposure.index]
+    if exposure.empty:
+        return pd.DataFrame(columns=["Date", "SPY résultat cumulé"])
+    exposure["Date"] = pd.to_datetime(exposure.pop("Date trade"), errors="coerce")
+    exposure = exposure.dropna(subset=["Date"]).groupby("Date", as_index=False)["Montant investi"].sum()
+    spy = benchmark_results.copy()
+    spy["Date"] = pd.to_datetime(spy["Date"], errors="coerce")
+    spy["SPY Rendement"] = pd.to_numeric(spy["SPY Rendement"], errors="coerce")
+    merged = exposure.merge(spy, on="Date", how="left").dropna(subset=["SPY Rendement"])
+    if merged.empty:
+        return pd.DataFrame(columns=["Date", "SPY résultat cumulé"])
+    merged["SPY résultat cumulé"] = (
+        merged["Montant investi"] * merged["SPY Rendement"]
+    ).cumsum()
+    return merged[["Date", "SPY résultat cumulé"]]
 def _date(value: date | str | pd.Timestamp, label: str) -> pd.Timestamp:
     try:
         parsed = pd.Timestamp(value)
@@ -86,14 +121,17 @@ class SimulationService:
         self,
         repository: ProductionRepository,
         price_loader: Callable[[str], pd.DataFrame | None],
+        benchmark_price_loader: Callable[[str], pd.DataFrame | None] | None = None,
     ) -> None:
         self.repository = repository
         self.price_loader = price_loader
+        self.benchmark_price_loader = benchmark_price_loader
 
     @classmethod
     def local(cls, project_root: Path, config: RStockConfig) -> "SimulationService":
         repository = ProductionRepository(project_root)
-        return cls(repository, market_data_service(config).store.read)
+        price_loader = market_data_service(config).store.read
+        return cls(repository, price_loader, benchmark_price_loader=price_loader)
 
     def run(
         self,
@@ -112,9 +150,9 @@ class SimulationService:
         evaluated_signals = self._evaluated_signal_rows(
             evaluated_predictions, signals
         )
-        return self._simulate_signals(
+        return self._with_spy_benchmark(self._simulate_signals(
             evaluated_signals, predictions, start, end, amount_per_signal
-        )
+        ))
 
     @staticmethod
     def _evaluated_signal_rows(
@@ -168,13 +206,35 @@ class SimulationService:
         signals = ProductionSignalService(self.repository).screen(
             predictions, persist=False, restrict_to_active_models=False
         )
-        return self._simulate_signals(
+        return self._with_spy_benchmark(self._simulate_signals(
             signals,
             predictions,
             start,
             end,
             amount_per_signal,
             model_snapshots=tuple(model.to_dict() for model in active_models),
+        ))
+
+    def _with_spy_benchmark(self, result: SimulationResult) -> SimulationResult:
+        """Freeze SPY returns used by this simulation when available in the cache."""
+
+        if self.benchmark_price_loader is None:
+            return result
+        prices = self.benchmark_price_loader("SPY")
+        if prices is None or prices.empty:
+            return result
+        spy = prices.copy()
+        spy.index = pd.to_datetime(spy.index, errors="coerce").normalize()
+        spy["Open"] = pd.to_numeric(spy.get("Open"), errors="coerce")
+        spy["Close"] = pd.to_numeric(spy.get("Close"), errors="coerce")
+        valid = spy[spy["Open"].ne(0) & spy["Open"].notna() & spy["Close"].notna()]
+        benchmark = pd.DataFrame({
+            "Date": valid.index,
+            "SPY Rendement": valid["Close"].to_numpy() / valid["Open"].to_numpy() - 1.0,
+        })
+        return SimulationResult(
+            result.trades, result.metrics, result.cumulative_results,
+            result.result_distribution, result.model_snapshots, benchmark,
         )
 
     @staticmethod

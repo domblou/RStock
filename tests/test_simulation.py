@@ -9,7 +9,11 @@ from rstock.application.production_domain import ProductionModel, ProductionMode
 from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_services import DailyPredictionService
 from rstock.application.repository import utc_now
-from rstock.application.simulation import SimulationService, summarize_simulation_trades
+from rstock.application.simulation import (
+    SimulationService,
+    benchmark_cumulative_for_trades,
+    summarize_simulation_trades,
+)
 from rstock.application.simulation_repository import SimulationRepository
 from rstock.config import DEFAULT_CONFIG
 
@@ -269,6 +273,41 @@ def test_evaluated_production_trade_survives_current_model_status_and_up_target(
     assert result.cumulative_results.iloc[:, 1].tolist() == pytest.approx(
         [10_000.0 * expected_return]
     )
+
+
+def test_spy_benchmark_uses_the_same_daily_notional_as_the_trades():
+    signals = pd.DataFrame([_signal("trade", "2026-04-01", "AAA")])
+    evaluated = pd.DataFrame([_evaluated("trade", "2026-04-01", "AAA", 100.0, 110.0)])
+    service = SimulationService(
+        FakeRepository(signals, evaluated_predictions=evaluated),
+        lambda _: pytest.fail("Evaluated trade must not reload its target price"),
+        benchmark_price_loader=lambda symbol: (
+            _prices("2026-04-01", 500.0, 510.0) if symbol == "SPY" else None
+        ),
+    )
+
+    result = service.run("2026-04-01", "2026-04-01", 1_000.0)
+    benchmark = benchmark_cumulative_for_trades(result.trades, result.benchmark_results)
+
+    assert result.benchmark_results["SPY Rendement"].tolist() == pytest.approx([0.02])
+    assert benchmark["SPY résultat cumulé"].tolist() == pytest.approx([20.0])
+
+
+def test_spy_benchmark_counts_every_bullish_signal_even_without_target_price():
+    trades = pd.DataFrame(
+        {
+            "Date trade": ["2026-04-01", "2026-04-01"],
+            "Montant investi": [1_000.0, 1_000.0],
+            "Rendement": [0.10, np.nan],
+        }
+    )
+    benchmark_returns = pd.DataFrame(
+        {"Date": ["2026-04-01"], "SPY Rendement": [0.02]}
+    )
+
+    benchmark = benchmark_cumulative_for_trades(trades, benchmark_returns)
+
+    assert benchmark["SPY résultat cumulé"].tolist() == pytest.approx([40.0])
 
 
 def test_evaluated_trade_requires_both_persisted_signal_and_realized_result():

@@ -155,6 +155,18 @@ def fit_booster(
     )
 
 
+def fit_booster_matrix(matrix: Any, config: RStockConfig, *, parameters: XGBoostParameters) -> Any:
+    """Train from an already-prepared DMatrix without altering parameters."""
+    return xgboost_module().train(
+        parameters.training_parameters(config), matrix,
+        num_boost_round=parameters.num_boost_round, verbose_eval=False,
+    )
+
+
+def predict_probabilities_matrix(booster: Any, matrix: Any) -> np.ndarray:
+    return np.asarray(booster.predict(matrix), dtype=float)
+
+
 def predict_probabilities(
     booster: Any,
     frame: pd.DataFrame,

@@ -75,6 +75,7 @@ class SimulationRepository:
             _atomic_text(directory / "simulation.json", json.dumps(metadata, indent=2, ensure_ascii=False, default=str) + "\n")
             _atomic_text(directory / "trades.csv", result.trades.to_csv(index=False))
             _atomic_text(directory / "cumulative_results.csv", result.cumulative_results.to_csv(index=False))
+            _atomic_text(directory / "benchmark_results.csv", result.benchmark_results.to_csv(index=False))
             _atomic_text(directory / "result_distribution.csv", result.result_distribution.to_csv(index=False))
         except Exception:
             LOGGER.exception("Unable to persist simulation %s", simulation_id)
@@ -110,6 +111,11 @@ class SimulationRepository:
             cumulative_results=pd.read_csv(directory / "cumulative_results.csv"),
             result_distribution=pd.read_csv(directory / "result_distribution.csv"),
             model_snapshots=tuple(metadata.get("models", ())),
+            benchmark_results=(
+                pd.read_csv(directory / "benchmark_results.csv")
+                if (directory / "benchmark_results.csv").exists()
+                else pd.DataFrame(columns=["Date", "SPY Rendement"])
+            ),
         )
         return metadata, result
 

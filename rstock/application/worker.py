@@ -17,7 +17,7 @@ from .domain import JobStatus, JobType
 from .orchestration_runtime import child_executor_context
 from .processes import process_alive
 from .repository import RunRepository
-from .runner import ProgressReporter
+from .runner import LocalProcessBackend, ProgressReporter
 from .workflows import WorkflowRegistry
 
 
@@ -87,6 +87,9 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("threshold_calibration", 22.5),
         ("promotion", 9),
         ("publishing", 1),
+    ],
+    JobType.FORWARD_SIMULATION: [
+        ("forward_simulation", 98), ("publishing", 2),
     ],
 }
 
@@ -294,6 +297,7 @@ def execute_run(
             JobType.WALK_FORWARD,
             JobType.WALK_FORWARD_BATCH,
             JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            JobType.XGBOOST_CALIBRATION,
         }:
             checkpoint = CheckpointManager(
                 repository.run_directory(run_id),
@@ -309,7 +313,11 @@ def execute_run(
                         "final_holdout": spec.config.final_holdout_batch_size,
                     }
                     if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH}
-                    else {}
+                    else (
+                        {"xgboost_calibration": spec.config.walk_forward_batch_size}
+                        if spec.job_type is JobType.XGBOOST_CALIBRATION
+                        else {}
+                    )
                 ),
             )
             checkpoint.start_attempt(
@@ -396,6 +404,28 @@ def execute_run(
         reporter.phase_completed("publishing")
         reporter.complete_workflow()
         _complete_owned_run(repository, run_id, run_lease)
+        # Forward is intentionally dispatched only after the End-to-end parent
+        # is terminal: its own failure/cancellation cannot alter parent status.
+        forward = (
+            summary.get("forward_simulation")
+            if spec.job_type is JobType.END_TO_END and isinstance(summary, dict)
+            else None
+        )
+        if isinstance(forward, dict) and forward.get("status") == "pending":
+            child_run_id = str(forward["child_run_id"])
+            try:
+                pid = LocalProcessBackend().launch(
+                    repository.root, child_run_id, max_concurrent_jobs
+                )
+                child_status = repository.status(child_run_id)
+                child_status["launcher_pid"] = pid
+                repository.write_json(child_run_id, "status.json", child_status)
+                forward["status"] = "launched"
+            except Exception as error:
+                repository.append_log(child_run_id, f"Worker launch failed: {error}")
+                repository.transition(child_run_id, JobStatus.FAILED, error=str(error))
+                forward.update(status="failed", error=str(error))
+            repository.write_json(run_id, "summary.json", summary)
         if checkpoint is not None:
             checkpoint.finish_attempt("completed")
         repository.append_log(run_id, "Worker completed")

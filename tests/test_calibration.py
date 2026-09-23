@@ -5,14 +5,24 @@ import pandas as pd
 import pytest
 
 from rstock.calibration import (
+    _calibration_combination,
+    _configuration_lookup,
+    _window_metric_rows,
     deterministic_combination_sample,
     run_controlled_calibration,
     write_calibration_results,
 )
-from rstock.combinations import generate_symbol_sets
+from rstock.checkpoints import CheckpointManager
+from rstock.combinations import generate_symbol_sets, symbols_from_set
 from rstock.config import DEFAULT_CONFIG
-from rstock.features import prepare_dataset
-from rstock.modeling import XGBoostParameters, fit_booster
+from rstock.features import (
+    intraday_down_target_column,
+    intraday_target_column,
+    predictor_columns,
+    prepare_dataset,
+)
+from rstock.modeling import XGBoostParameters, fit_booster, predict_probabilities
+from rstock.walk_forward import walk_forward_windows
 
 
 def _prepared_history(periods: int = 65) -> pd.DataFrame:
@@ -193,3 +203,71 @@ def test_calibration_combination_workers_preserve_development_metrics(tmp_path):
     )
     pd.testing.assert_frame_equal(serial.development_by_window, parallel.development_by_window)
     assert serial.selected_configurations == parallel.selected_configurations
+
+
+def test_calibration_development_checkpoint_reuses_completed_batches(tmp_path):
+    prepared = _prepared_history()
+    generated = generate_symbol_sets(["AAA", "BBB", "CCC"], 1)
+    config = _test_config(tmp_path)
+    arguments = dict(
+        candidates=_candidates(config), combinations_per_target=1,
+        min_train_size=20, test_size=10, step_size=10, final_holdout_size=5,
+    )
+    checkpoint = CheckpointManager(
+        tmp_path / "run",
+        run_id="run",
+        job_type="xgboost_calibration",
+        configuration_fingerprint="test-fingerprint",
+        batch_sizes={"xgboost_calibration": config.walk_forward_batch_size},
+    )
+    first = run_controlled_calibration(
+        prepared, generated, config, checkpoint_manager=checkpoint, **arguments
+    )
+    repeated = run_controlled_calibration(
+        prepared, generated, config, checkpoint_manager=checkpoint, **arguments
+    )
+
+    pd.testing.assert_frame_equal(
+        first.development_by_configuration, repeated.development_by_configuration
+    )
+    pd.testing.assert_frame_equal(first.development_by_window, repeated.development_by_window)
+    assert repeated.run_configuration["performance_telemetry"]["batches_reused"] == 1
+    assert repeated.run_configuration["performance_telemetry"]["batches_calculated"] == 0
+
+
+def test_reused_dmatrix_matches_legacy_per_configuration_training(tmp_path):
+    development = _prepared_history(50)
+    config = _test_config(tmp_path)
+    candidates = _candidates(config)
+    row = generate_symbol_sets(["AAA", "BBB", "CCC"], 1).iloc[0]
+    observation, feature_symbols = symbols_from_set(row)
+    names = predictor_columns(
+        development, feature_symbols, config.lag_depth, config.date_feature_regex
+    )
+    up, down = intraday_target_column(observation), intraday_down_target_column(observation)
+    model_data = development[[*names, up, down]].dropna()
+    legacy: dict[tuple[str, str, int], dict[str, object]] = {}
+    for window in walk_forward_windows(
+        len(model_data), config, min_train_size=20, test_size=10, step_size=10
+    ):
+        train, test = model_data.iloc[window.train_slice], model_data.iloc[window.test_slice]
+        for configuration, parameters in _configuration_lookup(candidates, config).items():
+            for direction, outcome in (("Up", up), ("Down", down)):
+                probabilities = predict_probabilities(
+                    fit_booster(train, names, outcome, config, parameters=parameters), test, names
+                )
+                legacy[(configuration, direction, window.number)] = {
+                    "actual": [test[outcome].astype(int).to_numpy()],
+                    "predicted": [(probabilities >= config.prediction_threshold).astype(int)],
+                    "probabilities": [probabilities],
+                    "train_start": train.index.min(), "train_end": train.index.max(),
+                    "test_start": test.index.min(), "test_end": test.index.max(), "sets": 1,
+                }
+    current = _calibration_combination(
+        row.to_dict(),
+        (development, config, tuple(candidates), _configuration_lookup(candidates, config), 20, 10, 10),
+        None,
+    )
+    pd.testing.assert_frame_equal(
+        _window_metric_rows(legacy), _window_metric_rows(current.buckets)
+    )

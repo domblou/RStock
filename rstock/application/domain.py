@@ -32,6 +32,7 @@ class JobType(str, Enum):
     REALIZED_VALIDATION = "realized_validation"
     OPERATIONAL_RUN = "operational_run"
     END_TO_END = "end_to_end"
+    FORWARD_SIMULATION = "forward_simulation"
 
     @property
     def implemented(self) -> bool:
@@ -51,6 +52,7 @@ class JobType(str, Enum):
             JobType.REALIZED_VALIDATION,
             JobType.OPERATIONAL_RUN,
             JobType.END_TO_END,
+            JobType.FORWARD_SIMULATION,
         }
 
 
@@ -246,7 +248,14 @@ class ExperimentSpec:
     frozen_threshold_calibration_parameters_sha256: str | None = None
     run_description: str | None = None
     historical_data_cutoff: str | None = None
+    requested_historical_cutoff: str | None = None
+    resolved_market_session_cutoff: str | None = None
     source_prepared_dataset_sha256: str | None = None
+    forward_simulation_enabled: bool = False
+    forward_simulation_mode: str | None = None
+    forward_simulation_start_date: str | None = None
+    forward_simulation_end_date: str | None = None
+    source_forward_model_snapshot_sha256: str | None = None
     source_end_to_end_run: str | None = None
     source_threshold_calibration_run: str | None = None
     auto_promote_candidates: bool = False
@@ -429,6 +438,15 @@ class ExperimentSpec:
                     "La validation temporelle exige un End-to-end de référence avec offset 0."
                 )
 
+        if self.temporal_validation_enabled and self.historical_data_cutoff is not None:
+            raise ValueError("Temporal validation cannot be combined with a historical cutoff")
+        if self.job_type is JobType.FORWARD_SIMULATION and (
+            not self.source_end_to_end_run
+            or self.forward_simulation_start_date is None
+            or self.forward_simulation_end_date is None
+        ):
+            raise ValueError("forward_simulation requires a source and resolved dates")
+
     def to_dict(self) -> dict[str, Any]:
         values: dict[str, Any] = {
             "schema_version": 1,
@@ -460,6 +478,8 @@ class ExperimentSpec:
             ),
             "run_description": self.run_description,
             "historical_data_cutoff": self.historical_data_cutoff,
+            "requested_historical_cutoff": self.requested_historical_cutoff,
+            "resolved_market_session_cutoff": self.resolved_market_session_cutoff,
             "source_prepared_dataset_sha256": self.source_prepared_dataset_sha256,
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
@@ -512,6 +532,13 @@ class ExperimentSpec:
             walk_forward_rerun=self.walk_forward_rerun,
             prefilter_rerun=self.prefilter_rerun,
             promotion_enabled=self.promotion_enabled,
+            forward_simulation_enabled=self.forward_simulation_enabled,
+            forward_simulation_mode=self.forward_simulation_mode,
+            forward_simulation_start_date=self.forward_simulation_start_date,
+            forward_simulation_end_date=self.forward_simulation_end_date,
+            source_forward_model_snapshot_sha256=(
+                self.source_forward_model_snapshot_sha256
+            ),
         )
         return values
 
@@ -609,10 +636,31 @@ class ExperimentSpec:
                 if values.get("historical_data_cutoff") is None
                 else str(values["historical_data_cutoff"])
             ),
+            requested_historical_cutoff=_optional_string(
+                values.get("requested_historical_cutoff")
+            ),
+            resolved_market_session_cutoff=_optional_string(
+                values.get("resolved_market_session_cutoff")
+            ),
             source_prepared_dataset_sha256=(
                 None
                 if values.get("source_prepared_dataset_sha256") is None
                 else str(values["source_prepared_dataset_sha256"])
+            ),
+            forward_simulation_enabled=bool(
+                values.get("forward_simulation_enabled", False)
+            ),
+            forward_simulation_mode=_optional_string(
+                values.get("forward_simulation_mode")
+            ),
+            forward_simulation_start_date=_optional_string(
+                values.get("forward_simulation_start_date")
+            ),
+            forward_simulation_end_date=_optional_string(
+                values.get("forward_simulation_end_date")
+            ),
+            source_forward_model_snapshot_sha256=_optional_string(
+                values.get("source_forward_model_snapshot_sha256")
             ),
             source_end_to_end_run=_optional_string(
                 values.get("source_end_to_end_run")

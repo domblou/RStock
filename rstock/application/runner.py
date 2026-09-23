@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -193,6 +194,63 @@ class RunService:
                 raise
             return SubmissionResult(run_id, True)
 
+    def start_forward_simulation(
+        self, source_end_to_end_run: str, *, start_date: str, end_date: str
+    ) -> SubmissionResult:
+        """Launch a manual forward evaluation from an immutable source snapshot."""
+
+        from .domain import RunMetadata, RunRole
+        from .forward_simulation import SNAPSHOT_FILENAME
+        from rstock.calendars import resolve_market_session_on_or_before
+
+        with self._submission_lock():
+            source = self.repository.load_spec(source_end_to_end_run)
+            if source.job_type is not JobType.END_TO_END:
+                raise ValueError("Forward source must be an End-to-end run")
+            if self.repository.status(source_end_to_end_run).get("status") != "completed":
+                raise ValueError("Forward source End-to-end must be completed")
+            snapshot = self.repository.run_directory(source_end_to_end_run) / "results" / SNAPSHOT_FILENAME
+            if not snapshot.is_file():
+                raise ValueError("source_model_snapshot_unavailable")
+            snapshot_values = json.loads(snapshot.read_text(encoding="utf-8"))
+            cutoff = str(snapshot_values["resolved_market_session_cutoff"])
+            start = resolve_market_session_on_or_before(start_date, source.calendar)
+            end = resolve_market_session_on_or_before(end_date, source.calendar)
+            if start <= resolve_market_session_on_or_before(cutoff, source.calendar) or end < start:
+                raise ValueError("Forward period must be strictly after the source cutoff")
+            specification = replace(
+                source, job_type=JobType.FORWARD_SIMULATION,
+                source_end_to_end_run=source_end_to_end_run,
+                forward_simulation_start_date=start.date().isoformat(),
+                forward_simulation_end_date=end.date().isoformat(),
+                forward_simulation_enabled=False,
+                temporal_validation_enabled=False,
+                auto_promote_candidates=False,
+                run_description="Forward Simulation manuelle",
+            )
+            run_id = self.repository.create(
+                specification,
+                metadata=RunMetadata(
+                    run_role=RunRole.PIPELINE_STAGE,
+                    parent_run_id=source_end_to_end_run,
+                    relation_key="forward_simulation",
+                    relation_type="forward_simulation",
+                    stage_key="forward_simulation",
+                ),
+            )
+            try:
+                pid = self.backend.launch(
+                    self.repository.root, run_id, self.max_concurrent_heavy_jobs
+                )
+                status = self.repository.status(run_id)
+                status["launcher_pid"] = pid
+                self.repository.write_json(run_id, "status.json", status)
+            except Exception as error:
+                self.repository.append_log(run_id, f"Worker launch failed: {error}")
+                self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
+                raise
+            return SubmissionResult(run_id, True)
+
     def start_qualification_holdout_diagnostic(
         self, forced_run_id: str
     ) -> SubmissionResult:
@@ -244,6 +302,7 @@ class RunService:
                 JobType.WALK_FORWARD,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION,
                 JobType.END_TO_END,
+                JobType.FORWARD_SIMULATION,
                 JobType.FORCED_CANDIDATE_VALIDATION,
                 JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC,
             }

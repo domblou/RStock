@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
+from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from rstock.application.production_domain import ProductionModel
 from rstock.application.experiment_duplication import (
     DUPLICATION_JOB_TYPES,
@@ -139,6 +140,7 @@ from rstock.application.model_ui import (
 from rstock.application.simulation import (
     SimulationResult,
     SimulationService,
+    benchmark_cumulative_for_trades,
     summarize_simulation_trades,
 )
 from rstock.application.simulation_repository import SimulationRepository
@@ -866,7 +868,34 @@ def _experiments(service: ExperimentService) -> None:
     run_config = st.session_state.lab_config
     auto_promote_candidates = False
     temporal_validation_enabled = False
+    requested_historical_cutoff = None
+    resolved_historical_cutoff = None
+    forward_simulation_enabled = False
+    forward_simulation_mode = None
+    forward_simulation_end_date = None
     if selected_job_type is JobType.END_TO_END:
+        requested_historical_cutoff = st.date_input(
+            "Cutoff historique", value=None,
+            help="Dernière séance XNYS disponible pour la découverte scientifique.",
+        )
+        if requested_historical_cutoff is not None:
+            resolved_historical_cutoff = resolve_market_session_on_or_before(
+                requested_historical_cutoff, st.session_state.lab_calendar
+            ).date().isoformat()
+            st.caption(f"Séance XNYS résolue : {resolved_historical_cutoff}")
+            forward_simulation_enabled = st.checkbox(
+                "Lancer une Forward Simulation après succès", value=False
+            )
+            if forward_simulation_enabled:
+                forward_simulation_mode = st.radio(
+                    "Durée Forward", ["63_sessions", "126_sessions", "custom_end_date"],
+                    format_func=lambda value: {
+                        "63_sessions": "63 séances", "126_sessions": "126 séances",
+                        "custom_end_date": "Date de fin personnalisée",
+                    }[value], horizontal=True,
+                )
+                if forward_simulation_mode == "custom_end_date":
+                    forward_simulation_end_date = st.date_input("Date de fin Forward")
         auto_promote_candidates = st.checkbox(
             "Promouvoir automatiquement les candidats admissibles",
             value=False,
@@ -895,6 +924,8 @@ def _experiments(service: ExperimentService) -> None:
             and st.session_state.lab_config.walk_forward_end_offset_sessions != 0
         ):
             st.error("La validation temporelle exige un End-to-end de référence avec offset 0.")
+        if temporal_validation_enabled and resolved_historical_cutoff is not None:
+            st.error("Le cutoff historique et la validation temporelle ne sont pas combinables.")
     if walk_forward_launch_controls_visible(selected_job_type):
         default_mode = st.session_state.lab_config.walk_forward_window_mode
         mode_label = st.selectbox(
@@ -926,7 +957,7 @@ def _experiments(service: ExperimentService) -> None:
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
     ) or (temporal_validation_enabled and (
         st.session_state.lab_config.walk_forward_end_offset_sessions != 0
-    ))
+    )) or (temporal_validation_enabled and resolved_historical_cutoff is not None)
     pending_spec = st.session_state.get("pending-experiment-submission")
     if pending_spec is not None:
         _render_experiment_submission_confirmation(
@@ -955,6 +986,18 @@ def _experiments(service: ExperimentService) -> None:
             predictor_symbols=tuple(st.session_state.lab_symbols),
             auto_promote_candidates=auto_promote_candidates,
             temporal_validation_enabled=temporal_validation_enabled,
+            historical_data_cutoff=resolved_historical_cutoff,
+            requested_historical_cutoff=(
+                None if requested_historical_cutoff is None
+                else requested_historical_cutoff.isoformat()
+            ),
+            resolved_market_session_cutoff=resolved_historical_cutoff,
+            forward_simulation_enabled=forward_simulation_enabled,
+            forward_simulation_mode=forward_simulation_mode,
+            forward_simulation_end_date=(
+                None if forward_simulation_end_date is None
+                else forward_simulation_end_date.isoformat()
+            ),
             run_description=(
                 f"profondeur {st.session_state.lab_config.permutation_depth}"
             ),
@@ -2232,6 +2275,13 @@ def _render_run_technical_tabs(run_id: str, detail: dict[str, object]) -> None:
 def _render_standard_results(
     run_id: str, job_type: JobType, status: dict[str, object], detail: dict[str, object]
 ) -> None:
+    if job_type is JobType.FORWARD_SIMULATION:
+        source = detail.get("configuration", {}).get("source_end_to_end_run")
+        if source:
+            st.caption(f"End-to-End source : {source}")
+            if st.button("Ouvrir l’End-to-End source", key=f"forward-source-{run_id}"):
+                st.session_state["selected-run-id"] = str(source)
+                st.rerun()
     if job_type is JobType.XGBOOST_CALIBRATION:
         _render_xgboost_calibration_selection(run_id)
     elif job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:
@@ -2559,11 +2609,54 @@ def _render_walk_forward_tabs(
     )
 
 
-def _render_pipeline_summary(run_id: str, detail: dict[str, object]) -> None:
+def _render_pipeline_summary(
+    run_id: str, detail: dict[str, object], service: ExperimentService | None = None
+) -> None:
     summary = detail.get("summary", {})
     protocol = summary.get("walk_forward_protocol") if isinstance(summary, Mapping) else None
     if isinstance(protocol, str) and protocol:
         st.caption(protocol)
+    snapshot = summary.get("forward_model_snapshot") if isinstance(summary, Mapping) else None
+    if isinstance(snapshot, Mapping):
+        st.caption(
+            "Cutoff historique demandé : "
+            f"{detail.get('configuration', {}).get('requested_historical_cutoff') or '—'} · "
+            "séance résolue : "
+            f"{snapshot.get('resolved_market_session_cutoff') or '—'}"
+        )
+        forward = summary.get("forward_simulation")
+        if isinstance(forward, Mapping):
+            st.caption(
+                "Forward Simulation : "
+                f"{forward.get('status', 'pending')} · run : {forward.get('child_run_id', '—')}"
+            )
+        if service is not None and snapshot.get("resolved_market_session_cutoff"):
+            cutoff = pd.Timestamp(snapshot["resolved_market_session_cutoff"]).date()
+            mode = st.radio(
+                "Nouvelle Forward Simulation", ["63 séances", "126 séances", "Date de fin"],
+                horizontal=True, key=f"forward-mode-{run_id}",
+            )
+            if mode == "Date de fin":
+                requested_end = st.date_input(
+                    "Date de fin Forward", value=cutoff + timedelta(days=90),
+                    key=f"forward-end-{run_id}",
+                )
+                end = resolve_market_session_on_or_before(
+                    requested_end, st.session_state.lab_calendar
+                ).date()
+            else:
+                count = 63 if mode == "63 séances" else 126
+                end = forward_market_sessions(
+                    cutoff, st.session_state.lab_calendar, count
+                )[-1].date()
+            start = forward_market_sessions(cutoff, st.session_state.lab_calendar, 1)[0].date()
+            if end <= cutoff:
+                st.error("La fin Forward doit être postérieure au cutoff historique.")
+            elif st.button("Lancer cette Forward Simulation", key=f"forward-start-{run_id}"):
+                launched = service.start_forward_simulation(
+                    run_id, start_date=start.isoformat(), end_date=end.isoformat()
+                )
+                st.success(f"Forward Simulation créée : {launched.run_id}")
     rows = pipeline_stage_rows(detail.get("pipeline_stages"))
     if not rows:
         st.info("Le manifest du pipeline n'est pas encore disponible.")
@@ -3082,7 +3175,7 @@ def _render_end_to_end_tabs(
         st,
         tabs_for_job(JobType.END_TO_END),
         {
-            "summary": lambda: _render_pipeline_summary(run_id, detail),
+            "summary": lambda: _render_pipeline_summary(run_id, detail, service),
             **child_renderers,
             "promotion": lambda: _render_pipeline_promotion(detail),
             "temporal_validation": lambda: _render_temporal_validation(
@@ -5035,7 +5128,7 @@ def _render_simulation_results(result: SimulationResult) -> None:
         if filtered_result.cumulative_results.empty:
             st.caption("Aucun trade calculé sur la période.")
         else:
-            cumulative_chart = (
+            strategy_chart = (
                 alt.Chart(filtered_result.cumulative_results)
                 .mark_line(point=True, color="#1677ff")
                 .encode(
@@ -5047,7 +5140,30 @@ def _render_simulation_results(result: SimulationResult) -> None:
                     ],
                 )
             )
+            benchmark = benchmark_cumulative_for_trades(
+                filtered_trades, result.benchmark_results
+            )
+            cumulative_chart = strategy_chart
+            if not benchmark.empty:
+                cumulative_chart = strategy_chart + (
+                    alt.Chart(benchmark).mark_line(color="#7a7f87", strokeDash=[4, 3])
+                    .encode(
+                        x="Date:T",
+                        y="SPY résultat cumulé:Q",
+                        tooltip=[
+                            alt.Tooltip("Date:T", title="Date"),
+                            alt.Tooltip("SPY résultat cumulé:Q", title="SPY", format=",.2f"),
+                        ],
+                    )
+                )
             st.altair_chart(cumulative_chart, width="stretch")
+            if benchmark.empty:
+                st.caption("Référence SPY indisponible pour cette simulation.")
+            else:
+                st.caption(
+                    "Comparaison notionnelle : SPY reçoit le même montant par signal "
+                    "haussier; les fractions de titres sont admises dans les deux cas."
+                )
     with charts[1]:
         st.subheader("Répartition des résultats")
         distribution_chart = (
