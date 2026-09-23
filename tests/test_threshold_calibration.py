@@ -209,6 +209,27 @@ def test_threshold_metrics_include_classification_returns_and_directional_risk()
     assert first_up["OppositeMoveFrequency"] == 0.5
 
 
+def test_threshold_independent_auc_and_pr_auc_are_computed_once_per_window(monkeypatch):
+    predictions = _predictions()
+    grid = pd.DataFrame({
+        "Direction": ["Up", "Up", "Up", "Down", "Down", "Down"],
+        "Threshold": [0.3, 0.5, 0.8, 0.3, 0.5, 0.8],
+        "Sources": ["test"] * 6,
+        "ReferenceThreshold": [False, True, False, False, True, False],
+    })
+    import rstock.threshold_calibration as module
+    original = module.classification_metrics
+    calls = []
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, "classification_metrics", counted)
+    result = evaluate_threshold_grid(predictions, grid, _config())
+    assert len(calls) == 4  # 2 directions × 2 windows, not 12 thresholds/windows
+    assert result.groupby(["Direction", "Window"])["ROCAUC"].nunique().eq(1).all()
+    assert result.groupby(["Direction", "Window"])["PRAUC"].nunique().eq(1).all()
+
+
 def test_selection_is_separate_reproducible_and_enforces_minimum_signals():
     predictions = _economically_viable_predictions()
     config = _config(threshold_calibration_min_signals_per_window=2)

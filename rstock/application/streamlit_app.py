@@ -37,6 +37,11 @@ from rstock.application.history_ui import (
     paginate_runs,
     qualified_combinations_table,
 )
+from rstock.application.experiment_launch import (
+    launch_walk_forward_config,
+    walk_forward_confirmation_text,
+    walk_forward_launch_controls_visible,
+)
 from rstock.application.history_analysis import (
     RunAnalytics,
     altair_serializable_distribution,
@@ -169,7 +174,7 @@ DUPLICATION_DRAFT_KEY = "experiment-duplication-draft"
 DUPLICATION_CONFIG_CHOICE_KEY = "experiment-duplication-config-choice"
 DUPLICATION_JOB_TYPE_KEY = "experiment-duplication-job-type"
 DUPLICATION_WF_MODE_KEY = "experiment-duplication-wf-mode"
-DUPLICATION_WF_TRAIN_SIZE_KEY = "experiment-duplication-wf-train-size"
+EXPERIMENT_WF_MODE_KEY = "experiment-launch-wf-mode"
 EXPERIMENT_NAVIGATION_KEY = "requested-primary-page"
 _PRIMARY_PAGES: list[st.Page] | None = None
 WORKFLOW_PHASE_LABELS = {
@@ -254,9 +259,6 @@ def _start_walk_forward_duplication(run_id: str, detail: dict[str, object]) -> N
     st.session_state[DUPLICATION_WF_MODE_KEY] = str(
         source_config.get("walk_forward_window_mode", "expanding")
     )
-    st.session_state[DUPLICATION_WF_TRAIN_SIZE_KEY] = int(
-        source_config.get("walk_forward_train_size", 252)
-    )
     configuration = detail.get("configuration", {})
     source_job_type = normalize_duplication_job_type(
         configuration.get("job_type") if isinstance(configuration, dict) else None
@@ -319,11 +321,7 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             DUPLICATION_WF_MODE_KEY, selected_config.walk_forward_window_mode
         )
     )
-    selected_train_size = int(
-        st.session_state.get(
-            DUPLICATION_WF_TRAIN_SIZE_KEY, selected_config.walk_forward_train_size
-        )
-    )
+    selected_train_size = selected_config.walk_forward_train_size
     try:
         validate_duplication_job(draft, selected_job_type)
         duplication_error = None
@@ -393,12 +391,6 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             ),
             key=DUPLICATION_WF_MODE_KEY,
         )
-        st.number_input(
-            "Taille du train glissant",
-            min_value=1,
-            disabled=st.session_state[DUPLICATION_WF_MODE_KEY] == "expanding",
-            key=DUPLICATION_WF_TRAIN_SIZE_KEY,
-        )
         xgboost_source = draft.get("source_xgboost_calibration_run")
         if selected_job_type is JobType.XGBOOST_CALIBRATION:
             st.caption(
@@ -449,9 +441,6 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
                     walk_forward_window_mode=str(
                         st.session_state[DUPLICATION_WF_MODE_KEY]
                     ),
-                    walk_forward_train_size=int(
-                        st.session_state[DUPLICATION_WF_TRAIN_SIZE_KEY]
-                    ),
                 ),
             )
             submitted = service.submit(spec)
@@ -460,7 +449,6 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
                 st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
                 st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
                 st.session_state.pop(DUPLICATION_WF_MODE_KEY, None)
-                st.session_state.pop(DUPLICATION_WF_TRAIN_SIZE_KEY, None)
                 st.session_state["duplication-submitted-run-id"] = submitted.run_id
                 st.rerun()
             else:
@@ -470,7 +458,6 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
             st.session_state.pop(DUPLICATION_CONFIG_CHOICE_KEY, None)
             st.session_state.pop(DUPLICATION_JOB_TYPE_KEY, None)
             st.session_state.pop(DUPLICATION_WF_MODE_KEY, None)
-            st.session_state.pop(DUPLICATION_WF_TRAIN_SIZE_KEY, None)
             st.rerun()
     _live_job_panel(service, domain="experiment")
     return True
@@ -658,12 +645,16 @@ def _render_experiment_submission_confirmation(
             "(référence offset 0, validation offset 63) · "
             f"{promotion_text}"
         )
+    walk_forward_text = ""
+    if walk_forward_launch_controls_visible(spec.job_type):
+        walk_forward_text = f" · {walk_forward_confirmation_text(spec.config)}"
     st.success(
         f"Soumettre l’expérience {label} ? "
         f"{len(spec.target_symbols):,} cibles · "
         f"{len(spec.context_symbols):,} contexte · "
         f"offset {spec.config.walk_forward_end_offset_sessions} · "
         f"max {maximum_text} combinaisons après préfiltrage"
+        f"{walk_forward_text}"
         f"{temporal_text}"
     )
     confirm, cancel, _ = st.columns([0.2, 0.2, 1])
@@ -674,6 +665,7 @@ def _render_experiment_submission_confirmation(
     ):
         submitted = service.submit(spec)
         st.session_state.pop("pending-experiment-submission", None)
+        st.session_state.pop(EXPERIMENT_WF_MODE_KEY, None)
         if submitted.created:
             st.success(f"Run créé : {submitted.run_id}")
         else:
@@ -870,9 +862,11 @@ def _experiments(service: ExperimentService) -> None:
         "End-to-end": JobType.END_TO_END,
     }
     choice = st.selectbox("Type de job", list(labels))
+    selected_job_type = labels[choice]
+    run_config = st.session_state.lab_config
     auto_promote_candidates = False
     temporal_validation_enabled = False
-    if labels[choice] is JobType.END_TO_END:
+    if selected_job_type is JobType.END_TO_END:
         auto_promote_candidates = st.checkbox(
             "Promouvoir automatiquement les candidats admissibles",
             value=False,
@@ -901,9 +895,32 @@ def _experiments(service: ExperimentService) -> None:
             and st.session_state.lab_config.walk_forward_end_offset_sessions != 0
         ):
             st.error("La validation temporelle exige un End-to-end de référence avec offset 0.")
+    if walk_forward_launch_controls_visible(selected_job_type):
+        default_mode = st.session_state.lab_config.walk_forward_window_mode
+        mode_label = st.selectbox(
+            "Mode de fenêtre Walk-forward",
+            ["Expansive", "Glissante"],
+            index=0 if default_mode == "expanding" else 1,
+            key=EXPERIMENT_WF_MODE_KEY,
+        )
+        window_mode = "expanding" if mode_label == "Expansive" else "rolling"
+        if window_mode == "expanding":
+            st.caption(
+                "Train minimal utilisé : "
+                f"{st.session_state.lab_config.walk_forward_min_train_size}."
+            )
+        else:
+            st.caption(
+                "Taille du train glissant utilisée : "
+                f"{st.session_state.lab_config.walk_forward_train_size}."
+            )
+        run_config = launch_walk_forward_config(
+            st.session_state.lab_config,
+            window_mode,
+        )
     valid_universe = _experiment_universe_selector()
     valid_plan = (
-        _combination_plan_preview(labels[choice]) if valid_universe else False
+        _combination_plan_preview(selected_job_type) if valid_universe else False
     )
     submit_disabled = not (valid_universe and valid_plan) or (
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
@@ -920,8 +937,8 @@ def _experiments(service: ExperimentService) -> None:
         )
     elif st.button("Soumettre l’expérience", type="primary", disabled=submit_disabled):
         spec = ExperimentSpec(
-            job_type=labels[choice],
-            config=st.session_state.lab_config,
+            job_type=selected_job_type,
+            config=run_config,
             symbols=tuple(st.session_state.lab_symbols),
             calendar=st.session_state.lab_calendar,
             combinations_per_target=st.session_state.lab_combinations_per_target,

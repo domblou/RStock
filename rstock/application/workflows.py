@@ -1423,6 +1423,14 @@ def _threshold_parameter_calibration(
         spec.calibration_sampling_policy_version,
         qualified_walk_forward_source=qualified_source,
     )
+    checkpoint_root = output.parent if output.name == "_working" else output
+    checkpoint = CheckpointManager(
+        checkpoint_root,
+        run_id=checkpoint_root.name,
+        job_type=spec.job_type.value,
+        configuration_fingerprint=spec.fingerprint,
+        batch_sizes={},
+    )
     result = run_threshold_parameter_calibration(
         prepared,
         generated,
@@ -1444,6 +1452,7 @@ def _threshold_parameter_calibration(
         frozen_xgboost_parameters_sha256=spec.frozen_xgboost_parameters_sha256,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
+        checkpoint_manager=checkpoint,
     )
     period = _persist_walk_forward_period(
         result.run_configuration, prepared, spec.config

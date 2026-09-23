@@ -73,7 +73,13 @@ def _timestamp(value: object) -> pd.Timestamp | None:
 
 def short_datetime(value: object) -> str:
     parsed = _timestamp(value)
-    return "—" if parsed is None else parsed.strftime("%Y-%m-%d %H:%M")
+    return (
+        "—"
+        if parsed is None
+        else parsed.tz_convert(datetime.now().astimezone().tzinfo).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    )
 
 
 def short_duration(value: object) -> str:

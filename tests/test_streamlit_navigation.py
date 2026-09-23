@@ -526,7 +526,7 @@ def test_settings_duplication_and_run_detail_expose_walk_forward_window_mode():
     assert "walk_forward_window_mode=window_mode" in settings
     assert "walk_forward_train_size=int(rolling_train)" in settings
     assert '"Mode de fenêtre WF"' in duplication
-    assert "DUPLICATION_WF_TRAIN_SIZE_KEY" in duplication
+    assert '"Taille du train glissant",' not in duplication
     for field in (
         "walk_forward_window_mode",
         "walk_forward_min_train_size",
@@ -537,6 +537,23 @@ def test_settings_duplication_and_run_detail_expose_walk_forward_window_mode():
         "walk_forward_end_offset_sessions",
     ):
         assert field in summary
+
+
+def test_experiment_launch_exposes_local_walk_forward_controls_for_wf_and_end_to_end():
+    source = APP.read_text(encoding="utf-8")
+    launch = source.split("def _experiments", 1)[1].split("def _settings", 1)[0]
+    confirmation = source.split(
+        "def _render_experiment_submission_confirmation", 1
+    )[1].split("def _experiment_universe_selector", 1)[0]
+
+    assert '"Mode de fenêtre Walk-forward"' in launch
+    assert '["Expansive", "Glissante"]' in launch
+    assert '"Taille du train glissant",' not in launch
+    assert "walk_forward_launch_controls_visible(selected_job_type)" in launch
+    assert "launch_walk_forward_config(" in launch
+    assert "config=run_config" in launch
+    assert "st.session_state.lab_config =" not in launch
+    assert "walk_forward_confirmation_text(spec.config)" in confirmation
 
 
 def test_settings_and_history_expose_resumable_walk_forward_controls():

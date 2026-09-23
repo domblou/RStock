@@ -99,6 +99,15 @@ class ThresholdCalibrationResult:
 
 
 @dataclass(slots=True)
+class ThresholdCalibrationInvariant:
+    """Threshold metrics which are independent of policy-selection rules."""
+
+    probability_distribution: pd.DataFrame
+    threshold_grid: pd.DataFrame
+    metrics_by_window: pd.DataFrame
+
+
+@dataclass(slots=True)
 class ControlledThresholdCalibrationResult:
     development_predictions: pd.DataFrame
     calibration: ThresholdCalibrationResult
@@ -289,11 +298,31 @@ def _threshold_window_metrics(
     direction: str,
     threshold: float,
     config: RStockConfig,
+    *,
+    threshold_independent: dict[str, float | None] | None = None,
 ) -> dict[str, object]:
     probabilities = pd.to_numeric(group["Probability"], errors="raise").to_numpy()
     actual = pd.to_numeric(group["Target"], errors="raise").astype(int).to_numpy()
     predicted = binary_predictions(probabilities, threshold)
-    metrics = classification_metrics(actual, predicted, probabilities)
+    if threshold_independent is None:
+        metric_columns = classification_metrics(actual, predicted, probabilities).as_columns()
+    else:
+        true_negative = int(((actual == 0) & (predicted == 0)).sum())
+        false_positive = int(((actual == 0) & (predicted == 1)).sum())
+        false_negative = int(((actual == 1) & (predicted == 0)).sum())
+        true_positive = int(((actual == 1) & (predicted == 1)).sum())
+        precision_denominator = true_positive + false_positive
+        recall_denominator = true_positive + false_negative
+        precision = true_positive / precision_denominator if precision_denominator else 0.0
+        recall = true_positive / recall_denominator if recall_denominator else 0.0
+        metric_columns = {
+            "TN": true_negative, "FP": false_positive, "FN": false_negative,
+            "TP": true_positive,
+            "Accuracy": float((actual == predicted).mean()) if len(actual) else 0.0,
+            "Precision": float(precision), "Recall": float(recall),
+            "F1": float(2 * precision * recall / (precision + recall)) if precision + recall else 0.0,
+            **threshold_independent,
+        }
     signals = group.loc[predicted.astype(bool)]
     returns = pd.to_numeric(signals["IntradayReturn"], errors="coerce").dropna()
     mfe = pd.to_numeric(signals["MFE"], errors="coerce").dropna()
@@ -318,7 +347,7 @@ def _threshold_window_metrics(
         "OppositeMoveFrequency": float(opposite.mean()) if len(returns) else np.nan,
         "MFEMean": float(mfe.mean()) if len(mfe) else np.nan,
         "MAEMean": float(mae.mean()) if len(mae) else np.nan,
-        **metrics.as_columns(),
+        **metric_columns,
     }
 
 
@@ -332,22 +361,35 @@ def evaluate_threshold_grid(
     _validate_predictions(predictions)
     validate_threshold_calibration_config(config)
     rows: list[dict[str, object]] = []
-    for grid_row in threshold_grid.itertuples(index=False):
-        direction = str(grid_row.Direction)
-        threshold = float(grid_row.Threshold)
-        directional = predictions[predictions["Direction"] == direction]
+    for direction, directional in predictions.groupby("Direction", sort=True):
+        directional_grid = threshold_grid[threshold_grid["Direction"] == direction]
         for window, group in directional.groupby("Window", sort=True):
-            rows.append(
-                {
-                    "Direction": direction,
-                    "Threshold": threshold,
-                    "Window": int(window),
-                    "Start": pd.to_datetime(group["Date"]).min(),
-                    "End": pd.to_datetime(group["Date"]).max(),
-                    "Observations": len(group),
-                    **_threshold_window_metrics(group, direction, threshold, config),
-                }
-            )
+            probabilities = pd.to_numeric(group["Probability"], errors="raise").to_numpy()
+            actual = pd.to_numeric(group["Target"], errors="raise").astype(int).to_numpy()
+            # AUC and prevalence only depend on observations/probabilities, never on
+            # the applied threshold.  Retain the existing implementation exactly.
+            invariant = classification_metrics(actual, np.zeros_like(actual), probabilities)
+            threshold_independent = {
+                "ROCAUC": invariant.roc_auc,
+                "PRAUC": invariant.pr_auc,
+                "Prevalence": invariant.prevalence,
+            }
+            for grid_row in directional_grid.itertuples(index=False):
+                threshold = float(grid_row.Threshold)
+                rows.append(
+                    {
+                        "Direction": direction,
+                        "Threshold": threshold,
+                        "Window": int(window),
+                        "Start": pd.to_datetime(group["Date"]).min(),
+                        "End": pd.to_datetime(group["Date"]).max(),
+                        "Observations": len(group),
+                        **_threshold_window_metrics(
+                            group, direction, threshold, config,
+                            threshold_independent=threshold_independent,
+                        ),
+                    }
+                )
     return pd.DataFrame(rows)
 
 
@@ -729,6 +771,36 @@ def calibrate_thresholds(
         probability_distribution=distribution,
         threshold_grid=grid,
         metrics_by_window=by_window,
+        metrics_by_threshold=summary,
+        selected_thresholds=selected,
+        baseline_comparison=_baseline_comparison(summary),
+    )
+
+
+def threshold_calibration_invariant(
+    development_predictions: pd.DataFrame, config: RStockConfig
+) -> ThresholdCalibrationInvariant:
+    """Calculate the reusable, quantile-grid-dependent part of calibration."""
+
+    distribution = probability_distribution(development_predictions)
+    grid = adaptive_threshold_grid(development_predictions, config)
+    return ThresholdCalibrationInvariant(
+        probability_distribution=distribution,
+        threshold_grid=grid,
+        metrics_by_window=evaluate_threshold_grid(development_predictions, grid, config),
+    )
+
+
+def select_thresholds_from_invariant(
+    invariant: ThresholdCalibrationInvariant, config: RStockConfig
+) -> ThresholdCalibrationResult:
+    """Apply one policy's selection rules to immutable raw threshold metrics."""
+
+    summary, selected = summarize_and_select_thresholds(invariant.metrics_by_window, config)
+    return ThresholdCalibrationResult(
+        probability_distribution=invariant.probability_distribution,
+        threshold_grid=invariant.threshold_grid,
+        metrics_by_window=invariant.metrics_by_window,
         metrics_by_threshold=summary,
         selected_thresholds=selected,
         baseline_comparison=_baseline_comparison(summary),

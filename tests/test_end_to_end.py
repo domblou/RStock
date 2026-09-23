@@ -77,6 +77,10 @@ def test_end_to_end_child_preserves_frozen_walk_forward_window_geometry(tmp_path
     assert child.config.walk_forward_window_mode == "rolling"
     assert child.config.walk_forward_train_size == 504
 
+    temporal = end_to_end._temporal_validation_spec(parent)
+    assert temporal.config.walk_forward_window_mode == "rolling"
+    assert temporal.config.walk_forward_train_size == 504
+
 
 def _fake_registry(
     repository,

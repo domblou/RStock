@@ -10,6 +10,7 @@ from rstock.application.runner import RunService
 from rstock.application.workflows import _resolve_threshold_calibration_config
 from rstock.combinations import generate_symbol_sets
 from rstock.calibration_sampling import GLOBAL_STRATIFIED_V2
+from rstock.checkpoints import CheckpointManager
 from rstock.config import DEFAULT_CONFIG
 from rstock.modeling import XGBoostParameters
 from rstock.threshold_parameter_calibration import (
@@ -209,6 +210,82 @@ def test_runner_reuses_probabilities_and_never_uses_holdout_for_selection(
     )
     assert len(result.development_by_configuration) == 2
     assert result.selected_configuration["parent_run"] == "wf-parent"
+
+
+def test_parameter_candidates_share_grid_cache_and_match_uncached_result(
+    monkeypatch, tmp_path
+):
+    prepared = pd.DataFrame({"x": np.arange(20)}, index=pd.bdate_range("2025-01-01", periods=20))
+    config = _config(tmp_path)
+    baseline = ThresholdCalibrationParameters.from_config(config)
+    candidates = [
+        baseline,
+        replace(baseline, min_signals_per_window=2),
+        replace(baseline, precision_tolerance=0.0),
+        replace(baseline, quantiles=(0.5, 0.8, 0.99)),
+    ]
+    monkeypatch.setattr(
+        "rstock.threshold_parameter_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: _predictions(),
+    )
+    arguments = dict(
+        xgboost_parameters_by_direction={"Up": XGBoostParameters(2, .05, 20), "Down": XGBoostParameters(2, .05, 20)},
+        xgboost_parameter_source="test", candidates=candidates,
+    )
+    uncached = run_threshold_parameter_calibration(
+        prepared, generate_symbol_sets(["AAA", "BBB"], 1), config, **arguments
+    )
+    manager = CheckpointManager(
+        tmp_path / "checkpointed", run_id="checkpointed",
+        job_type="threshold_parameter_calibration", configuration_fingerprint="test", batch_sizes={},
+    )
+    calls = []
+    from rstock.threshold_calibration import threshold_calibration_invariant as original
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr("rstock.threshold_parameter_calibration.threshold_calibration_invariant", counted)
+    cached = run_threshold_parameter_calibration(
+        prepared, generate_symbol_sets(["AAA", "BBB"], 1), config,
+        checkpoint_manager=manager, **arguments
+    )
+    assert len(calls) == 2  # standard grid plus one distinct quantile grid
+    pd.testing.assert_frame_equal(uncached.development_by_configuration, cached.development_by_configuration)
+    pd.testing.assert_frame_equal(uncached.development_by_window, cached.development_by_window)
+    assert uncached.selected_configuration["configuration"] == cached.selected_configuration["configuration"]
+
+
+def test_parameter_calibration_resume_reuses_probability_grid_and_candidates(
+    monkeypatch, tmp_path
+):
+    prepared = pd.DataFrame({"x": np.arange(20)}, index=pd.bdate_range("2025-01-01", periods=20))
+    config = _config(tmp_path)
+    baseline = ThresholdCalibrationParameters.from_config(config)
+    candidates = [baseline, replace(baseline, min_signals_per_window=2)]
+    manager = CheckpointManager(
+        tmp_path / "resumed", run_id="resumed", job_type="threshold_parameter_calibration",
+        configuration_fingerprint="test", batch_sizes={},
+    )
+    monkeypatch.setattr(
+        "rstock.threshold_parameter_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: _predictions(),
+    )
+    arguments = dict(
+        xgboost_parameters_by_direction={"Up": XGBoostParameters(2, .05, 20), "Down": XGBoostParameters(2, .05, 20)},
+        xgboost_parameter_source="test", candidates=candidates, checkpoint_manager=manager,
+    )
+    first = run_threshold_parameter_calibration(prepared, generate_symbol_sets(["AAA", "BBB"], 1), config, **arguments)
+    monkeypatch.setattr(
+        "rstock.threshold_parameter_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must reuse probabilities")),
+    )
+    monkeypatch.setattr(
+        "rstock.threshold_parameter_calibration.threshold_calibration_invariant",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must reuse grid")),
+    )
+    resumed = run_threshold_parameter_calibration(prepared, generate_symbol_sets(["AAA", "BBB"], 1), config, **arguments)
+    pd.testing.assert_frame_equal(first.development_by_configuration, resumed.development_by_configuration)
+    assert resumed.run_configuration["performance"]["candidate_checkpoints_reused"] == 2
 
 
 def test_v2_directional_model_cap_counts_complete_up_down_pairs(

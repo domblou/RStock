@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -20,13 +21,14 @@ from .calibration_sampling import (
     global_stratified_v2_sample,
     per_target_v1_sample,
 )
-from .checkpoints import _atomic_json
+from .checkpoints import CheckpointManager, _atomic_json
 from .config import RStockConfig
 from .modeling import XGBoostParameters
 from .progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from .threshold_calibration import (
-    calibrate_thresholds_by_set,
     generate_development_probabilities,
+    select_thresholds_from_invariant,
+    threshold_calibration_invariant,
     validate_threshold_calibration_config,
 )
 
@@ -105,6 +107,15 @@ class ThresholdCalibrationParameters:
             threshold_calibration_quantiles=self.quantiles,
             threshold_calibration_grid_decimals=self.grid_decimals,
         )
+
+    @property
+    def grid_key(self) -> str:
+        """Canonical identity of the raw, quantile-dependent calculation."""
+        raw = json.dumps(
+            {"quantiles": self.quantiles, "grid_decimals": self.grid_decimals},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:16]
 
     @property
     def digest(self) -> str:
@@ -219,11 +230,14 @@ def _median(rows: pd.DataFrame, column: str) -> float:
 def _evaluate_candidate(
     configuration: str,
     parameters: ThresholdCalibrationParameters,
-    predictions: pd.DataFrame,
+    predictions: Mapping[str, object],
     config: RStockConfig,
 ) -> tuple[dict[str, object], list[pd.DataFrame]]:
     effective = parameters.apply(config)
-    calibrations = calibrate_thresholds_by_set(predictions, effective)
+    calibrations = {
+        set_name: select_thresholds_from_invariant(invariant, effective)
+        for set_name, invariant in predictions.items()
+    }
     selected_rows: list[pd.Series] = []
     window_frames: list[pd.DataFrame] = []
     for set_name in sorted(calibrations):
@@ -313,9 +327,11 @@ def run_threshold_parameter_calibration(
     frozen_xgboost_parameters_sha256: str | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
+    checkpoint_manager: CheckpointManager | None = None,
 ) -> ThresholdParameterCalibrationResult:
     """Select a calibrator policy using development data and never inspect holdout."""
 
+    total_started_at = perf_counter()
     validate_threshold_calibration_config(config)
     candidate_list = list(candidates or default_threshold_parameter_candidates(config))
     if not candidate_list:
@@ -351,35 +367,92 @@ def run_threshold_parameter_calibration(
     development, _, holdout_start = split_development_holdout(
         prepared, config.final_holdout_size
     )
+    probability_started_at = perf_counter()
     report_progress(
         progress_callback, "walk_forward", substage="started",
         details={"phase_event": "started", "combinations": len(sampled)},
     )
-    predictions = generate_development_probabilities(
-        development,
-        sampled,
-        config,
-        min_train_size=config.walk_forward_min_train_size,
-        test_size=config.walk_forward_test_size,
-        step_size=config.walk_forward_step_size,
-        parameters_by_direction=xgboost_parameters_by_direction,
-        progress_callback=progress_callback,
-        cancellation_check=cancellation_check,
-    )
+    sample_ids = [str(value) for value in sample.manifest["selected_set_ids"]]
+    prediction_key = hashlib.sha256("|".join(sample_ids).encode("utf-8")).hexdigest()
+    prediction_reused = False
+    if checkpoint_manager is not None and checkpoint_manager.artifact_exists("development_probabilities"):
+        stored = checkpoint_manager.load_artifact("development_probabilities")
+        if stored.get("sample_key") != prediction_key:
+            raise ValueError("Checkpoint des probabilités incompatible avec l'échantillon")
+        predictions = stored["predictions"]
+        prediction_reused = True
+    else:
+        predictions = generate_development_probabilities(
+            development, sampled, config,
+            min_train_size=config.walk_forward_min_train_size,
+            test_size=config.walk_forward_test_size,
+            step_size=config.walk_forward_step_size,
+            parameters_by_direction=xgboost_parameters_by_direction,
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+        )
+        if checkpoint_manager is not None:
+            checkpoint_manager.commit_artifact(
+                "development_probabilities", {"sample_key": prediction_key, "predictions": predictions}
+            )
     report_progress(
         progress_callback, "walk_forward", substage="completed",
         details={"phase_event": "completed", "probability_rows": len(predictions)},
     )
+    probability_elapsed_seconds = perf_counter() - probability_started_at
+    grid_started_at = perf_counter()
+    invariants_by_grid: dict[str, Mapping[str, object]] = {}
+    grid_reused = 0
+    grid_timings: dict[str, float] = {}
+    for parameters in candidate_list:
+        if parameters.grid_key in invariants_by_grid:
+            continue
+        artifact = f"threshold_grid_{parameters.grid_key}"
+        if checkpoint_manager is not None and checkpoint_manager.artifact_exists(artifact):
+            payload = checkpoint_manager.load_artifact(artifact)
+            if payload.get("prediction_key") == prediction_key:
+                invariants_by_grid[parameters.grid_key] = payload["invariant"]
+                grid_reused += 1
+                grid_timings[parameters.grid_key] = 0.0
+                continue
+        effective = parameters.apply(config)
+        started_at = perf_counter()
+        invariant = {
+            str(set_name): threshold_calibration_invariant(group, effective)
+            for set_name, group in predictions.groupby("Set", sort=True)
+        }
+        grid_timings[parameters.grid_key] = perf_counter() - started_at
+        invariants_by_grid[parameters.grid_key] = invariant
+        if checkpoint_manager is not None:
+            checkpoint_manager.commit_artifact(
+                artifact, {"prediction_key": prediction_key, "invariant": invariant}
+            )
+    grid_elapsed_seconds = perf_counter() - grid_started_at
     rows: list[dict[str, object]] = []
     window_frames: list[pd.DataFrame] = []
+    reused_candidates = 0
+    selection_started_at = perf_counter()
+    selection_timings: dict[str, float] = {}
     report_progress(progress_callback, "metrics", substage="started", details={"phase_event": "started"})
     for number, ((_, tested_row), parameters) in enumerate(
         zip(tested.iterrows(), candidate_list, strict=True), start=1
     ):
         check_cancellation(cancellation_check)
-        row, frames = _evaluate_candidate(
-            str(tested_row["Configuration"]), parameters, predictions, config
-        )
+        artifact = f"parameter_candidate_{str(tested_row['Configuration'])}"
+        if checkpoint_manager is not None and checkpoint_manager.artifact_exists(artifact):
+            payload = checkpoint_manager.load_artifact(artifact)
+            row, frames = payload["row"], payload["frames"]
+            reused_candidates += 1
+            selection_timings[str(tested_row["Configuration"])] = 0.0
+        else:
+            started_at = perf_counter()
+            row, frames = _evaluate_candidate(
+                str(tested_row["Configuration"]), parameters,
+                invariants_by_grid[parameters.grid_key], config,
+            )
+            if checkpoint_manager is not None:
+                checkpoint_manager.commit_artifact(artifact, {"row": row, "frames": frames})
+            selection_timings[str(tested_row["Configuration"])] = perf_counter() - started_at
         rows.append(row)
         window_frames.extend(frames)
         report_progress(
@@ -387,6 +460,7 @@ def run_threshold_parameter_calibration(
             completed_units=number, total_units=len(candidate_list),
         )
     ranked = rank_threshold_parameter_configurations(pd.DataFrame(rows))
+    selection_elapsed_seconds = perf_counter() - selection_started_at
     winner = ranked.iloc[0]
     winner_index = tested.index[tested["Configuration"] == winner["Configuration"]][0]
     winner_parameters = candidate_list[int(winner_index)]
@@ -453,6 +527,17 @@ def run_threshold_parameter_calibration(
         "candidate_count": len(candidate_list),
         "eligible_candidate_count": int(ranked["EligibleConfiguration"].sum()),
         "development_probability_rows": len(predictions),
+        "performance": {
+            "development_probability_seconds": probability_elapsed_seconds,
+            "threshold_grid_seconds": grid_elapsed_seconds,
+            "selection_seconds": selection_elapsed_seconds,
+            "total_seconds": perf_counter() - total_started_at,
+            "threshold_grid_seconds_by_key": grid_timings,
+            "selection_seconds_by_configuration": selection_timings,
+            "threshold_grids_calculated": len(invariants_by_grid) - grid_reused,
+            "threshold_grids_reused": grid_reused,
+            "candidate_checkpoints_reused": reused_candidates,
+        },
     }
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     return ThresholdParameterCalibrationResult(

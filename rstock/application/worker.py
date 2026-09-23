@@ -290,7 +290,11 @@ def execute_run(
         repository.append_log(run_id, "Worker started")
         reporter = ProgressReporter(repository, run_id)
         spec = repository.load_spec(run_id)
-        if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH}:
+        if spec.job_type in {
+            JobType.WALK_FORWARD,
+            JobType.WALK_FORWARD_BATCH,
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        }:
             checkpoint = CheckpointManager(
                 repository.run_directory(run_id),
                 run_id=run_id,
@@ -298,11 +302,15 @@ def execute_run(
                 configuration_fingerprint=repository.configuration_fingerprint(
                     run_id
                 ),
-                batch_sizes={
-                    "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
-                    "walk_forward": spec.config.walk_forward_batch_size,
-                    "final_holdout": spec.config.final_holdout_batch_size,
-                },
+                batch_sizes=(
+                    {
+                        "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+                        "walk_forward": spec.config.walk_forward_batch_size,
+                        "final_holdout": spec.config.final_holdout_batch_size,
+                    }
+                    if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH}
+                    else {}
+                ),
             )
             checkpoint.start_attempt(
                 resumed=bool(status.get("resume_requested"))
