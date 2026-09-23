@@ -43,6 +43,12 @@ def rejected_identities(
     if source.job_type is not JobType.FORCED_CANDIDATE_VALIDATION:
         raise ValueError("Une revalidation forcee est requise")
     wf_id = _source_walk_forward_run(repository, forced_run_id)
+    traceability = repository.summary(wf_id).get("traceability", {})
+    source_digest = (
+        traceability.get("prepared_dataset_sha256")
+        if isinstance(traceability, dict)
+        else None
+    )
     path = repository.run_directory(wf_id) / "results" / "qualification.csv"
     if not path.is_file():
         raise ValueError("Qualification WF source absente")
@@ -110,6 +116,10 @@ def materialize_diagnostic(
         forced_symbol_sets=sets,
         forced_candidate_identities=identities,
         source_walk_forward_run=wf_id,
+        source_prepared_dataset_sha256=(
+            None if source_digest is None else str(source_digest)
+        ),
+        prepared_dataset_digest_required=source_digest is not None,
         source_end_to_end_run=(
             metadata.root_run_id or metadata.parent_run_id or forced_run_id
         ),

@@ -25,7 +25,14 @@ from .features import (
     overnight_return_column,
     predictor_columns,
 )
-from .modeling import fit_booster, predict_probabilities
+from .modeling import (
+    fit_booster,
+    fit_booster_matrix,
+    historical_xgboost_parameters,
+    predict_probabilities,
+    predict_probabilities_matrix,
+    xgboost_module,
+)
 from .model_selection import model_selection_parameters, score_qualified_models
 from .parallel import (
     iter_combination_batches,
@@ -147,6 +154,8 @@ def _walk_forward_combination(
         int,
     ],
     cancellation_check: CancellationCheck | None,
+    *,
+    include_down: bool = True,
 ) -> _WalkForwardCombinationResult:
     """Evaluate one combination; its chronological windows remain sequential."""
 
@@ -214,14 +223,20 @@ def _walk_forward_combination(
         test = development_data.iloc[window.test_slice]
         if train.index.max() >= test.index.min():
             raise AssertionError("Walk-forward window leaked future test data")
-        up_booster = fit_booster(train, names, up_outcome_name, config)
-        down_booster = fit_booster(train, names, down_outcome_name, config)
-        up_probabilities = predict_probabilities(up_booster, test, names)
-        down_probabilities = predict_probabilities(down_booster, test, names)
+        xgb = xgboost_module()
+        parameters = historical_xgboost_parameters(config)
+        train_features = train[names]
+        test_features = test[names]
+        test_matrix = xgb.DMatrix(test_features, feature_names=names)
+        up_train_matrix = xgb.DMatrix(
+            train_features, label=train[up_outcome_name], feature_names=names
+        )
+        up_booster = fit_booster_matrix(
+            up_train_matrix, config, parameters=parameters
+        )
+        up_probabilities = predict_probabilities_matrix(up_booster, test_matrix)
         up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
-        down_predicted = binary_predictions(down_probabilities, config.prediction_threshold)
         up_actual = test[up_outcome_name].astype(int).to_numpy()
-        down_actual = test[down_outcome_name].astype(int).to_numpy()
         window_record: dict[str, object] = {
             "Set": set_name,
             "Observation": observation,
@@ -236,14 +251,33 @@ def _walk_forward_combination(
             "TestObservations": len(test),
             "Predictions": len(up_predicted),
             "UpPositiveOutcomes": int(up_actual.sum()),
-            "DownPositiveOutcomes": int(down_actual.sum()),
             "RowsLostToLags": rows_lost_to_lags,
         }
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
-        window_record.update(_prefixed_metric_record("Down", down_actual, down_predicted, down_probabilities))
+        down_predicted = down_probabilities = None
+        if include_down:
+            down_train_matrix = xgb.DMatrix(
+                train_features, label=train[down_outcome_name], feature_names=names
+            )
+            down_booster = fit_booster_matrix(
+                down_train_matrix, config, parameters=parameters
+            )
+            down_probabilities = predict_probabilities_matrix(
+                down_booster, test_matrix
+            )
+            down_predicted = binary_predictions(
+                down_probabilities, config.prediction_threshold
+            )
+            down_actual = test[down_outcome_name].astype(int).to_numpy()
+            window_record["DownPositiveOutcomes"] = int(down_actual.sum())
+            window_record.update(
+                _prefixed_metric_record(
+                    "Down", down_actual, down_predicted, down_probabilities
+                )
+            )
         window_records.append(window_record)
-        prediction_records.extend(
-            {
+        for position, date in enumerate(test.index):
+            prediction = {
                 "Set": set_name,
                 "Observation": observation,
                 "Predictors": predictors_json,
@@ -251,20 +285,15 @@ def _walk_forward_combination(
                 "Window": window.number,
                 "Date": date,
                 **_return_diagnostics(ordered, observation, date),
-                "UpPrediction": int(up_prediction),
-                "UpProbability": float(up_probability),
-                "DownPrediction": int(down_prediction),
-                "DownProbability": float(down_probability),
+                "UpPrediction": int(up_predicted[position]),
+                "UpProbability": float(up_probabilities[position]),
             }
-            for date, up_prediction, up_probability, down_prediction, down_probability in zip(
-                test.index,
-                up_predicted,
-                up_probabilities,
-                down_predicted,
-                down_probabilities,
-                strict=True,
-            )
-        )
+            if include_down:
+                prediction.update(
+                    DownPrediction=int(down_predicted[position]),
+                    DownProbability=float(down_probabilities[position]),
+                )
+            prediction_records.append(prediction)
     return _WalkForwardCombinationResult(window_records, prediction_records)
 
 
@@ -296,7 +325,9 @@ def _prefilter_combination(
     """Return one exact qualification row and discard prediction-level detail."""
 
     try:
-        result = _walk_forward_combination(row_values, context, cancellation_check)
+        result = _walk_forward_combination(
+            row_values, context, cancellation_check, include_down=False
+        )
     except InsufficientWalkForwardObservations as error:
         _, _, _, market_calendars, _, _, _ = context
         row = pd.Series(row_values)

@@ -17,7 +17,7 @@ from rstock.calibration import run_controlled_calibration, write_calibration_res
 from rstock.calibration_sampling import policy_name
 from rstock.calendars import offset_market_session
 from rstock.evaluation import classification_metrics
-from rstock.checkpoints import CheckpointManager
+from rstock.checkpoints import CheckpointIncompatibleError, CheckpointManager
 from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets, symbol_set_id
 from rstock.combination_planning import CombinationPlan, build_combination_plan
 from rstock.features import prepare_dataset
@@ -51,7 +51,10 @@ from rstock.threshold_parameter_calibration import (
     run_threshold_parameter_calibration,
     write_threshold_parameter_calibration_results,
 )
-from rstock.traceability import prepared_dataset_traceability
+from rstock.traceability import (
+    prepared_dataset_traceability,
+    verify_prepared_dataset_digest,
+)
 from rstock.walk_forward import (
     evaluate_prefilter_walk_forward,
     evaluate_walk_forward,
@@ -245,6 +248,23 @@ def _prepared_inputs(
         spec.config.walk_forward_end_offset_sessions
     )
     prepared.attrs["symbols_used"] = len(downloaded.symbols)
+    source_run_id = (
+        spec.source_walk_forward_run
+        or spec.source_experiment_run
+        or spec.source_end_to_end_run
+    )
+    digest_verification = verify_prepared_dataset_digest(
+        prepared,
+        expected_digest=spec.source_prepared_dataset_sha256,
+        required=spec.prepared_dataset_digest_required,
+        run_id=spec.execution_run_id,
+        source_run_id=source_run_id,
+        cutoff=(
+            None if effective_end_date is None else effective_end_date.isoformat()
+        ),
+        stage=spec.job_type.value,
+    )
+    prepared.attrs["prepared_dataset_digest_verification"] = digest_verification
     if offset is not None and offset > 0:
         minimum_observations = (
             (
@@ -303,6 +323,9 @@ def _persist_prepared_traceability(
         project_root=spec.config.project_root,
         symbols_used=int(prepared.attrs.get("symbols_used", len(spec.symbols))),
         source_prepared_dataset_sha256=spec.source_prepared_dataset_sha256,
+        digest_verification=prepared.attrs.get(
+            "prepared_dataset_digest_verification"
+        ),
     )
     run_configuration["traceability"] = traceability
     return traceability
@@ -339,6 +362,31 @@ def _require_exploitable_prefilter(univariate: object) -> None:
             "Predictor prefilter has no exploitable pairs after insufficient "
             "walk-forward observations were excluded"
         )
+
+
+def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager) -> None:
+    """Reject only legacy prefilter work; full WF checkpoints remain compatible."""
+
+    protocol_artifact = "prefilter_execution_protocol"
+    if checkpoint.artifact_exists(protocol_artifact):
+        if checkpoint.load_artifact(protocol_artifact) != PREFILTER_POLICY_VERSION:
+            raise CheckpointIncompatibleError(
+                "Checkpoint préfiltre incompatible avec le protocole Up-only. "
+                "Relancez le Walk-forward depuis le début."
+            )
+        return
+    has_legacy_prefilter = bool(
+        checkpoint.completed_batch_ids("predictor_prefilter_walk_forward")
+    ) or any(
+        checkpoint.artifact_exists(name)
+        for name in ("prefilter_qualification", "prefilter_selection")
+    )
+    if has_legacy_prefilter:
+        raise CheckpointIncompatibleError(
+            "Checkpoint préfiltre Up+Down incompatible avec le protocole "
+            "Up-only. Relancez le Walk-forward depuis le début."
+        )
+    checkpoint.commit_artifact(protocol_artifact, PREFILTER_POLICY_VERSION)
 
 
 def _qualified_sets_from_walk_forward_source(
@@ -634,6 +682,7 @@ def _resumable_walk_forward(
                 combinations=len(generated),
             )
     elif spec.config.predictor_prefilter_enabled:
+        _ensure_prefilter_checkpoint_protocol(checkpoint)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:
@@ -1575,6 +1624,7 @@ def _planned_effective_plan(
     digest = prefilter_digest(raw_plan.predictors_by_target)
     if spec.config.predictor_prefilter_enabled:
         policy_version = PREFILTER_POLICY_VERSION
+        _ensure_prefilter_checkpoint_protocol(checkpoint)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:

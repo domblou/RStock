@@ -452,6 +452,7 @@ def _base_child_spec(
         requested_historical_cutoff=parent.requested_historical_cutoff,
         resolved_market_session_cutoff=parent.resolved_market_session_cutoff,
         source_prepared_dataset_sha256=None,
+        prepared_dataset_digest_required=False,
         combination_plan_version=None,
         combination_plan_sha256=None,
         combination_range_start=None,
@@ -481,6 +482,7 @@ def build_stage_spec(
         source_walk_forward_run=walk_forward_id,
         historical_data_cutoff=cutoff,
         source_prepared_dataset_sha256=dataset_digest,
+        prepared_dataset_digest_required=True,
     )
     if stage_key == "fixed_candidate_evaluation":
         return replace(

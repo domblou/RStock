@@ -51,12 +51,50 @@ def prepared_dataset_hash(prepared: pd.DataFrame) -> str:
     return digest.hexdigest()
 
 
+def verify_prepared_dataset_digest(
+    prepared: pd.DataFrame,
+    *,
+    expected_digest: str | None,
+    required: bool,
+    run_id: str | None,
+    source_run_id: str | None,
+    cutoff: object | None,
+    stage: str,
+) -> dict[str, object]:
+    """Compare a reconstructed dataset with its persisted source population."""
+
+    actual_digest = prepared_dataset_hash(prepared)
+    details: dict[str, object] = {
+        "source_prepared_dataset_sha256": expected_digest,
+        "actual_prepared_dataset_sha256": actual_digest,
+        "prepared_dataset_digest_verified": False,
+    }
+    if expected_digest is None:
+        if required:
+            raise ValueError(
+                "prepared_dataset_digest_missing "
+                f"run_id={run_id or 'unknown'} source_run_id={source_run_id or 'unknown'} "
+                f"cutoff={cutoff or 'unknown'} stage={stage}"
+            )
+        return details
+    if expected_digest != actual_digest:
+        raise ValueError(
+            "prepared_dataset_digest_mismatch "
+            f"run_id={run_id or 'unknown'} source_run_id={source_run_id or 'unknown'} "
+            f"cutoff={cutoff or 'unknown'} stage={stage} "
+            f"expected_digest={expected_digest} actual_digest={actual_digest}"
+        )
+    details["prepared_dataset_digest_verified"] = True
+    return details
+
+
 def prepared_dataset_traceability(
     prepared: pd.DataFrame,
     *,
     project_root: Path,
     symbols_used: int,
     source_prepared_dataset_sha256: str | None = None,
+    digest_verification: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build compact provenance metadata for one prepared dataset."""
 
@@ -73,4 +111,6 @@ def prepared_dataset_traceability(
         traceability["source_prepared_dataset_sha256"] = (
             source_prepared_dataset_sha256
         )
+    if digest_verification is not None:
+        traceability.update(digest_verification)
     return traceability

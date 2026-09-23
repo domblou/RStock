@@ -6,7 +6,8 @@ import pytest
 
 import rstock.streaming_walk_forward as streaming
 import rstock.walk_forward as walk_forward
-from rstock.checkpoints import CheckpointManager
+import rstock.application.workflows as workflows
+from rstock.checkpoints import CheckpointIncompatibleError, CheckpointManager
 from rstock.combinations import generate_symbol_sets
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import prepare_dataset
@@ -349,6 +350,25 @@ def test_prefilter_resume_reuses_completed_qualification_batch(monkeypatch, tmp_
 
     assert calls == 1
     assert len(result.qualification) == 2
+
+
+def test_prefilter_protocol_reuses_new_checkpoint_and_rejects_legacy(tmp_path):
+    fresh = _fixture(tmp_path / "fresh")[3]
+    workflows._ensure_prefilter_checkpoint_protocol(fresh)
+    workflows._ensure_prefilter_checkpoint_protocol(fresh)
+    assert fresh.load_artifact("prefilter_execution_protocol") == (
+        workflows.PREFILTER_POLICY_VERSION
+    )
+
+    legacy = _fixture(tmp_path / "legacy")[3]
+    legacy.commit_batch(
+        "predictor_prefilter_walk_forward", 0,
+        {"qualification": pd.DataFrame([{"Set": "legacy"}])},
+        first_index=0, last_index=0, combination_count=1,
+        row_counts={"qualification": 1},
+    )
+    with pytest.raises(CheckpointIncompatibleError, match="Up\\+Down"):
+        workflows._ensure_prefilter_checkpoint_protocol(legacy)
 
 
 def test_streamed_walk_forward_reports_final_batch_telemetry(tmp_path):

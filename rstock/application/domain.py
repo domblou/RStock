@@ -251,6 +251,9 @@ class ExperimentSpec:
     requested_historical_cutoff: str | None = None
     resolved_market_session_cutoff: str | None = None
     source_prepared_dataset_sha256: str | None = None
+    prepared_dataset_digest_required: bool = False
+    # Runtime-only worker context; deliberately excluded from persisted snapshots.
+    execution_run_id: str | None = None
     forward_simulation_enabled: bool = False
     forward_simulation_mode: str | None = None
     forward_simulation_start_date: str | None = None
@@ -481,6 +484,7 @@ class ExperimentSpec:
             "requested_historical_cutoff": self.requested_historical_cutoff,
             "resolved_market_session_cutoff": self.resolved_market_session_cutoff,
             "source_prepared_dataset_sha256": self.source_prepared_dataset_sha256,
+            "prepared_dataset_digest_required": self.prepared_dataset_digest_required,
             "calendar": self.calendar,
             "combinations_per_target": self.combinations_per_target,
             "evaluate_final_holdout": self.evaluate_final_holdout,
@@ -646,6 +650,9 @@ class ExperimentSpec:
                 None
                 if values.get("source_prepared_dataset_sha256") is None
                 else str(values["source_prepared_dataset_sha256"])
+            ),
+            prepared_dataset_digest_required=bool(
+                values.get("prepared_dataset_digest_required", False)
             ),
             forward_simulation_enabled=bool(
                 values.get("forward_simulation_enabled", False)

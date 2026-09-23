@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 from rstock.progress import CancellationRequested, check_cancellation
@@ -292,7 +293,7 @@ def execute_run(
         repository.transition(run_id, JobStatus.RUNNING, pid=os.getpid())
         repository.append_log(run_id, "Worker started")
         reporter = ProgressReporter(repository, run_id)
-        spec = repository.load_spec(run_id)
+        spec = replace(repository.load_spec(run_id), execution_run_id=run_id)
         if spec.job_type in {
             JobType.WALK_FORWARD,
             JobType.WALK_FORWARD_BATCH,

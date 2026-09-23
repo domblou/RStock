@@ -1,5 +1,6 @@
 import logging
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,14 @@ from rstock.combinations import generate_symbol_sets
 from rstock.checkpoints import CheckpointManager
 from rstock.config import DEFAULT_CONFIG
 from rstock.features import prepare_dataset
+from rstock.modeling import (
+    fit_booster,
+    fit_booster_matrix,
+    historical_xgboost_parameters,
+    predict_probabilities,
+    predict_probabilities_matrix,
+    xgboost_module,
+)
 from rstock.streaming_walk_forward import run_streamed_walk_forward
 import rstock.walk_forward as walk_forward
 from rstock.walk_forward import (
@@ -33,6 +42,172 @@ def test_expanding_windows_are_chronological_and_include_final_partial_window():
 def test_walk_forward_rejects_insufficient_history():
     with pytest.raises(ValueError, match="Not enough observations"):
         expanding_windows(10, min_train_size=10, test_size=2, step_size=2)
+
+
+def test_full_walk_forward_shares_test_matrix_and_keeps_train_labels_separate(
+    monkeypatch, tmp_path
+):
+    index = pd.bdate_range("2025-01-01", periods=18)
+    prepared = pd.DataFrame(
+        {
+            "BBB_intraday_J-1": np.linspace(-0.02, 0.02, len(index)),
+            "AAA.intraday_target": np.arange(len(index)) % 2,
+            "AAA.intraday_down_target": (np.arange(len(index)) + 1) % 2,
+        },
+        index=index,
+    )
+    for name in (
+        "AAA.overnight_return", "AAA.intraday_return",
+        "AAA.close_to_close_return", "AAA.mfe", "AAA.mae",
+    ):
+        prepared[name] = 0.0
+    config = replace(
+        DEFAULT_CONFIG, project_root=tmp_path, xgb_rounds=1, lag_depth=1
+    )
+    matrices = []
+    predictions = []
+
+    class Matrix:
+        def __init__(self, data, label=None, feature_names=None):
+            self.data = data
+            self.label = label
+            self.feature_names = feature_names
+            matrices.append(self)
+
+    monkeypatch.setattr(
+        walk_forward, "xgboost_module", lambda: SimpleNamespace(DMatrix=Matrix)
+    )
+    monkeypatch.setattr(
+        walk_forward, "fit_booster_matrix", lambda matrix, *_args, **_kwargs: matrix
+    )
+
+    def fake_predict(booster, matrix):
+        predictions.append((booster, matrix))
+        return np.full(len(matrix.data), 0.5)
+
+    monkeypatch.setattr(walk_forward, "predict_probabilities_matrix", fake_predict)
+    context = (prepared, config, index[-3], {}, 6, 3, 3)
+    result = walk_forward._walk_forward_combination(
+        {"V0": "AAA", "V1": "BBB"}, context, None
+    )
+    windows = len(result.window_records)
+    assert len(matrices) == windows * 3
+    for offset in range(0, len(matrices), 3):
+        test_matrix, up_train, down_train = matrices[offset : offset + 3]
+        assert up_train is not down_train
+        assert up_train.label.name == "AAA.intraday_target"
+        assert down_train.label.name == "AAA.intraday_down_target"
+        assert predictions[offset // 3 * 2][1] is test_matrix
+        assert predictions[offset // 3 * 2 + 1][1] is test_matrix
+
+
+def test_prefilter_trains_only_up_but_keeps_down_target_in_row_population(
+    monkeypatch, tmp_path
+):
+    index = pd.bdate_range("2025-01-01", periods=18)
+    missing_date = index[8]
+    prepared = pd.DataFrame(
+        {
+            "BBB_intraday_J-1": np.linspace(-0.02, 0.02, len(index)),
+            "AAA.intraday_target": np.arange(len(index)) % 2,
+            "AAA.intraday_down_target": (np.arange(len(index)) + 1) % 2,
+        },
+        index=index,
+    )
+    for name in (
+        "AAA.overnight_return", "AAA.intraday_return",
+        "AAA.close_to_close_return", "AAA.mfe", "AAA.mae",
+    ):
+        prepared[name] = 0.0
+    prepared.loc[missing_date, "AAA.intraday_down_target"] = np.nan
+    config = replace(
+        DEFAULT_CONFIG,
+        project_root=tmp_path,
+        xgb_rounds=1,
+        lag_depth=1,
+        qualification_min_windows=1,
+        qualification_min_median_auc=0.0,
+        qualification_min_pct_windows_above_random=0.0,
+        qualification_min_worst_window_auc=0.0,
+        qualification_min_positive_observations=0,
+        qualification_max_auc_std=1.0,
+    )
+    train_labels = []
+    matrix_indexes = []
+
+    class Matrix:
+        def __init__(self, data, label=None, feature_names=None):
+            self.data = data
+            self.label = label
+            matrix_indexes.extend(data.index)
+
+    monkeypatch.setattr(
+        walk_forward, "xgboost_module", lambda: SimpleNamespace(DMatrix=Matrix)
+    )
+
+    def fake_fit(matrix, *_args, **_kwargs):
+        train_labels.append(matrix.label.name)
+        return matrix
+
+    monkeypatch.setattr(walk_forward, "fit_booster_matrix", fake_fit)
+    monkeypatch.setattr(
+        walk_forward,
+        "predict_probabilities_matrix",
+        lambda _booster, matrix: np.full(len(matrix.data), 0.5),
+    )
+    context = (prepared, config, index[-3], {}, 6, 3, 3)
+    result = walk_forward._prefilter_combination(
+        {"V0": "AAA", "V1": "BBB"}, context, None
+    )
+    assert result["WindowsEvaluated"] > 0
+    assert set(train_labels) == {"AAA.intraday_target"}
+    assert missing_date not in matrix_indexes
+
+
+def test_shared_matrix_probabilities_match_legacy_fit_and_predict(tmp_path):
+    index = pd.bdate_range("2025-01-01", periods=30)
+    signal = np.arange(len(index)) % 2
+    stock = pd.DataFrame(index=index)
+    for offset, symbol in enumerate(("AAA", "BBB")):
+        shifted = np.roll(signal, offset)
+        stock[f"{symbol}.Open"] = 100.0
+        stock[f"{symbol}.Close"] = np.where(shifted, 102.0, 99.5)
+        stock[f"{symbol}.High"] = np.maximum(stock[f"{symbol}.Close"], 100.0) + 1
+        stock[f"{symbol}.Low"] = np.minimum(stock[f"{symbol}.Close"], 100.0) - 1
+    prepared = prepare_dataset(stock, ["AAA", "BBB"])
+    config = replace(
+        DEFAULT_CONFIG, project_root=tmp_path, xgb_rounds=2, xgb_nthread=1
+    )
+    names = [f"BBB_intraday_J-{lag}" for lag in range(1, 4)]
+    up_name = "AAA.intraday_target"
+    down_name = "AAA.intraday_down_target"
+    model_data = prepared[[*names, up_name, down_name]].dropna()
+    train, test = model_data.iloc[:18], model_data.iloc[18:]
+
+    legacy_up = predict_probabilities(
+        fit_booster(train, names, up_name, config), test, names
+    )
+    legacy_down = predict_probabilities(
+        fit_booster(train, names, down_name, config), test, names
+    )
+    xgb = xgboost_module()
+    parameters = historical_xgboost_parameters(config)
+    train_features = train[names]
+    test_matrix = xgb.DMatrix(test[names], feature_names=names)
+    up_matrix = xgb.DMatrix(
+        train_features, label=train[up_name], feature_names=names
+    )
+    down_matrix = xgb.DMatrix(
+        train_features, label=train[down_name], feature_names=names
+    )
+    optimized_up = predict_probabilities_matrix(
+        fit_booster_matrix(up_matrix, config, parameters=parameters), test_matrix
+    )
+    optimized_down = predict_probabilities_matrix(
+        fit_booster_matrix(down_matrix, config, parameters=parameters), test_matrix
+    )
+    np.testing.assert_allclose(optimized_up, legacy_up, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(optimized_down, legacy_down, rtol=0.0, atol=1e-12)
 
 
 def test_rolling_windows_keep_a_fixed_train_and_shift_both_boundaries():

@@ -16,7 +16,7 @@ from .repository import RunRepository
 
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_NAME = "orchestration/walk_forward_batches.json"
-PREFILTER_POLICY_VERSION = "per_target_v1"
+PREFILTER_POLICY_VERSION = "per_target_up_only_v2"
 CHILD_ID_POLICY_DETERMINISTIC = 1
 CHILD_ID_POLICY_RESERVED = 2
 
@@ -80,6 +80,7 @@ def child_spec(
         ),
         historical_data_cutoff=parent.historical_data_cutoff,
         source_prepared_dataset_sha256=parent.source_prepared_dataset_sha256,
+        prepared_dataset_digest_required=parent.prepared_dataset_digest_required,
         source_end_to_end_run=parent.source_end_to_end_run,
         pipeline_version=parent.pipeline_version,
         calibration_sampling_policy_version=(
