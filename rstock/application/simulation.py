@@ -14,7 +14,11 @@ from rstock.config import RStockConfig
 from rstock.market_cache import market_data_service
 
 from .production_repository import ProductionRepository
-from .production_services import DailyPredictionService, ProductionSignalService
+from .production_services import (
+    DailyPredictionService,
+    HistoricalReplayMode,
+    ProductionSignalService,
+)
 
 
 TRADE_COLUMNS = (
@@ -35,6 +39,10 @@ BENCHMARK_COLUMNS = (
     "Date",
     "SPY Rendement",
 )
+
+SIMULATION_MODE_EVALUATED_PREDICTIONS = "evaluated_predictions"
+SIMULATION_MODE_DAILY_RETRAIN = HistoricalReplayMode.DAILY_RETRAIN.value
+SIMULATION_MODE_FROZEN_AT_START = HistoricalReplayMode.FROZEN_AT_START.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +71,7 @@ class SimulationResult:
     benchmark_results: pd.DataFrame = field(
         default_factory=lambda: pd.DataFrame(columns=BENCHMARK_COLUMNS)
     )
+    historical_replay: dict[str, object] = field(default_factory=dict)
 
 
 def summarize_simulation_trades(trades: pd.DataFrame) -> SimulationResult:
@@ -187,6 +196,7 @@ class SimulationService:
         end_date: date | str | pd.Timestamp,
         config: RStockConfig,
         amount_per_signal: float = 10_000.0,
+        mode: HistoricalReplayMode = HistoricalReplayMode.DAILY_RETRAIN,
     ) -> SimulationResult:
         """Replay current active models, then use the common financial engine."""
 
@@ -202,17 +212,33 @@ class SimulationService:
             start_date=start,
             end_date=end,
             models=active_models,
+            mode=mode,
         )
         signals = ProductionSignalService(self.repository).screen(
             predictions, persist=False, restrict_to_active_models=False
         )
-        return self._with_spy_benchmark(self._simulate_signals(
+        result = self._simulate_signals(
             signals,
             predictions,
             start,
             end,
             amount_per_signal,
             model_snapshots=tuple(model.to_dict() for model in active_models),
+        )
+        replay = dict(predictions.attrs.get("historical_replay", {}))
+        replay.setdefault("mode", HistoricalReplayMode(mode).value)
+        replay.setdefault("version", 1)
+        replay.setdefault("model_count", len(active_models))
+        replay.setdefault("first_predicted_session", start.date().isoformat())
+        replay.setdefault("last_predicted_session", end.date().isoformat())
+        return self._with_spy_benchmark(SimulationResult(
+            result.trades,
+            result.metrics,
+            result.cumulative_results,
+            result.result_distribution,
+            result.model_snapshots,
+            result.benchmark_results,
+            replay,
         ))
 
     def _with_spy_benchmark(self, result: SimulationResult) -> SimulationResult:
@@ -235,6 +261,7 @@ class SimulationService:
         return SimulationResult(
             result.trades, result.metrics, result.cumulative_results,
             result.result_distribution, result.model_snapshots, benchmark,
+            result.historical_replay,
         )
 
     @staticmethod

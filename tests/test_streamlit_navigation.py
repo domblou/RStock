@@ -92,7 +92,7 @@ def test_surveillance_is_the_default_page_without_dashboard_navigation():
     assert "_dashboard_page" not in source
 
 
-def test_simulation_page_offers_both_modes_with_evaluated_predictions_as_default():
+def test_simulation_page_offers_three_modes_with_evaluated_predictions_as_default():
     source = APP.read_text(encoding="utf-8")
     page = source.split("def _simulation_page", 1)[1].split(
         "def _primary_pages", 1
@@ -104,11 +104,14 @@ def test_simulation_page_offers_both_modes_with_evaluated_predictions_as_default
     assert '_page_header("Simulation")' in page
     assert 'SignalService(project_root).active_history()' in page
     assert "SimulationService.local(" in page
-    assert '"simulation-mode": "Prédictions évaluées"' in page
-    assert 'st.session_state.get("simulation-mode") == "Résultats réalisés"' in page
+    assert '"simulation-mode": SIMULATION_MODE_EVALUATED_PREDICTIONS' in page
+    assert "SIMULATION_MODE_DAILY_RETRAIN" in page
+    assert "SIMULATION_MODE_FROZEN_AT_START" in page
+    assert "SIMULATION_MODE_LABELS" in page
     assert '"Mode de simulation"' in page
-    assert '["Historique", "Prédictions évaluées"]' in page
+    assert "list(SIMULATION_MODE_LABELS)" in page
     assert "service.run_historical(" in page
+    assert "mode=simulation_mode" in page
     assert "service.run(start_date, end_date" in page
     assert '"Lancer la simulation"' in page
     assert 'key="simulation-exit-mode"' in page

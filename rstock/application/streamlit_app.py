@@ -138,6 +138,9 @@ from rstock.application.model_ui import (
     model_filter_options,
 )
 from rstock.application.simulation import (
+    SIMULATION_MODE_DAILY_RETRAIN,
+    SIMULATION_MODE_EVALUATED_PREDICTIONS,
+    SIMULATION_MODE_FROZEN_AT_START,
     SimulationResult,
     SimulationService,
     benchmark_cumulative_for_trades,
@@ -5169,6 +5172,14 @@ def _simulation_percent(value: float | None) -> str:
 
 
 def _render_simulation_results(result: SimulationResult) -> None:
+    replay = result.historical_replay
+    if replay:
+        mode = _simulation_mode_label(replay.get("mode", ""))
+        cutoff = replay.get("initial_training_cutoff")
+        detail = f"Mode : {mode}"
+        if cutoff:
+            detail += f" · cutoff d'entraînement : {cutoff}"
+        st.caption(detail)
     selected_symbols = st.session_state.get(
         "simulation-trades-symbol-filter", ["Tous"]
     )
@@ -5319,12 +5330,41 @@ def _render_simulation_results(result: SimulationResult) -> None:
     else:
         st.warning("Couverture partielle : certains trades ont été exclus.")
 
+SIMULATION_MODE_LABELS = {
+    SIMULATION_MODE_EVALUATED_PREDICTIONS: "Prédictions évaluées",
+    SIMULATION_MODE_DAILY_RETRAIN: "Historique — réentraînement quotidien",
+    SIMULATION_MODE_FROZEN_AT_START: "Historique — modèles figés",
+}
+SIMULATION_MODE_HELP = {
+    SIMULATION_MODE_DAILY_RETRAIN: (
+        "Réentraîne les boosters avec les données disponibles avant chaque séance simulée."
+    ),
+    SIMULATION_MODE_FROZEN_AT_START: (
+        "Entraîne les boosters une seule fois au début de la simulation, puis les conserve pendant toute la période."
+    ),
+}
+LEGACY_SIMULATION_MODES = {
+    "Historique": SIMULATION_MODE_DAILY_RETRAIN,
+    "Prédictions évaluées": SIMULATION_MODE_EVALUATED_PREDICTIONS,
+    "Résultats réalisés": SIMULATION_MODE_EVALUATED_PREDICTIONS,
+}
+
+
+def _simulation_mode_label(value: object) -> str:
+    code = LEGACY_SIMULATION_MODES.get(str(value), str(value))
+    return SIMULATION_MODE_LABELS.get(code, str(value))
+
+
 def _simulation_model_snapshots(
     project_root: Path,
     result: SimulationResult,
     simulation_mode: str,
 ) -> list[dict[str, object]]:
-    if simulation_mode == "Historique":
+    if simulation_mode in {
+        SIMULATION_MODE_DAILY_RETRAIN,
+        SIMULATION_MODE_FROZEN_AT_START,
+        "Historique",
+    }:
         return [dict(model) for model in result.model_snapshots]
     try:
         models = ProductionRepository(project_root).models()
@@ -5335,14 +5375,20 @@ def _simulation_model_snapshots(
     return [model.to_dict() for model in selected]
 
 
-def _simulation_parameters(start_date, end_date, amount, exit_mode, simulation_mode) -> dict[str, object]:
-    return {
+def _simulation_parameters(
+    start_date, end_date, amount, exit_mode, simulation_mode,
+    historical_replay: dict[str, object] | None = None,
+) -> dict[str, object]:
+    parameters: dict[str, object] = {
         "start_date": pd.Timestamp(start_date).date().isoformat(),
         "end_date": pd.Timestamp(end_date).date().isoformat(),
         "amount_per_signal": float(amount),
         "exit_mode": str(exit_mode),
         "simulation_mode": str(simulation_mode),
     }
+    if historical_replay:
+        parameters["historical_replay"] = dict(historical_replay)
+    return parameters
 
 
 def _parse_simulation_date(value: object) -> date | None:
@@ -5378,8 +5424,11 @@ def _restore_simulation_parameters(parameters: object) -> None:
     exit_mode = parameters.get("exit_mode")
     if exit_mode in {"Clôture du jour"}:
         st.session_state["simulation-exit-mode"] = exit_mode
-    simulation_mode = parameters.get("simulation_mode")
-    if simulation_mode in {"Historique", "Prédictions évaluées"}:
+    simulation_mode = LEGACY_SIMULATION_MODES.get(
+        str(parameters.get("simulation_mode", "")),
+        str(parameters.get("simulation_mode", "")),
+    )
+    if simulation_mode in SIMULATION_MODE_LABELS:
         st.session_state["simulation-mode"] = simulation_mode
 
 
@@ -5467,7 +5516,9 @@ def _simulation_sidebar(project_root: Path) -> None:
                 help="Supprimer",
             )
             st.caption(period)
-            st.caption(f"{amount} $ | {params.get('simulation_mode', '—')}")
+            st.caption(
+                f"{amount} $ | {_simulation_mode_label(params.get('simulation_mode', '—'))}"
+            )
             footer = st.columns([1, 1], vertical_alignment="center")
             footer[0].markdown(
                 '<span style="background:#d8f3dc; color:#2b8a3e; border-radius:12px; '
@@ -5515,14 +5566,15 @@ def _render_simulation_main(project_root: Path) -> None:
         available_dates.max().date() if not available_dates.empty else pd.Timestamp.today().date()
     )
     default_start = default_end - timedelta(days=365)
-    if st.session_state.get("simulation-mode") == "Résultats réalisés":
-        st.session_state["simulation-mode"] = "Prédictions évaluées"
+    stored_mode = st.session_state.get("simulation-mode")
+    if stored_mode in LEGACY_SIMULATION_MODES:
+        st.session_state["simulation-mode"] = LEGACY_SIMULATION_MODES[stored_mode]
     defaults = {
         "simulation-start-date": default_start,
         "simulation-end-date": default_end,
         "simulation-amount": 10_000.0,
         "simulation-exit-mode": "Clôture du jour",
-        "simulation-mode": "Prédictions évaluées",
+        "simulation-mode": SIMULATION_MODE_EVALUATED_PREDICTIONS,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -5541,9 +5593,15 @@ def _render_simulation_main(project_root: Path) -> None:
         )
         simulation_mode = controls[4].selectbox(
             "Mode de simulation",
-            ["Historique", "Prédictions évaluées"],
+            list(SIMULATION_MODE_LABELS),
+            format_func=_simulation_mode_label,
             key="simulation-mode",
+            help=(
+                "Choisissez entre les prédictions déjà réalisées et deux replays historiques PIT."
+            ),
         )
+        if simulation_mode in SIMULATION_MODE_HELP:
+            controls[4].caption(SIMULATION_MODE_HELP[simulation_mode])
         # Reserve the label's height so the action lines up with the inputs.
         controls[5].markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
         launch = controls[5].button(
@@ -5559,12 +5617,16 @@ def _render_simulation_main(project_root: Path) -> None:
             service = SimulationService.local(
                 project_root, st.session_state.lab_config
             )
-            if simulation_mode == "Historique":
+            if simulation_mode in {
+                SIMULATION_MODE_DAILY_RETRAIN,
+                SIMULATION_MODE_FROZEN_AT_START,
+            }:
                 result = service.run_historical(
                     start_date,
                     end_date,
                     st.session_state.lab_config,
                     float(amount),
+                    mode=simulation_mode,
                 )
             else:
                 result = service.run(start_date, end_date, float(amount))
@@ -5573,7 +5635,12 @@ def _render_simulation_main(project_root: Path) -> None:
                 metadata = SimulationRepository(project_root).save(
                     result,
                     parameters=_simulation_parameters(
-                        start_date, end_date, amount, st.session_state["simulation-exit-mode"], simulation_mode
+                        start_date,
+                        end_date,
+                        amount,
+                        st.session_state["simulation-exit-mode"],
+                        simulation_mode,
+                        result.historical_replay,
                     ),
                     models=_simulation_model_snapshots(
                         project_root, result, simulation_mode

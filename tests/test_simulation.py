@@ -7,9 +7,13 @@ import pytest
 
 from rstock.application.production_domain import ProductionModel, ProductionModelStatus
 from rstock.application.production_repository import ProductionRepository
-from rstock.application.production_services import DailyPredictionService
+from rstock.application.production_services import (
+    DailyPredictionService,
+    HistoricalReplayMode,
+)
 from rstock.application.repository import utc_now
 from rstock.application.simulation import (
+    SIMULATION_MODE_FROZEN_AT_START,
     SimulationService,
     benchmark_cumulative_for_trades,
     summarize_simulation_trades,
@@ -427,12 +431,111 @@ def test_historical_replay_uses_only_active_models_and_never_target_day_data(
     assert set(successful["model_id"]) == {active.model_id}
     assert pd.to_datetime(successful["prediction_date"]).between(start, end).all()
     assert fits
+    assert len(fits) == 8  # 4 target sessions × Up/Down; legacy daily behavior.
     assert all(train_end < target_date for (train_end, _, _), (target_date, _) in zip(
         fits[::2], predictions_seen[::2]
     ))
     expected_previous_return = history["BBB"].loc["2026-01-05", "Close"] / 200.0 - 1
     first_current_value = predictions_seen[0][1]
     assert first_current_value == pytest.approx(expected_previous_return)
+
+
+def test_frozen_historical_replay_fits_once_at_the_session_before_start(monkeypatch, tmp_path):
+    repository = ProductionRepository(tmp_path)
+    active = _model()
+    repository.add(active)
+    directory = repository.artifact_directory(active.model_id)
+    directory.mkdir(parents=True)
+    (directory / "production.metadata.json").write_text(json.dumps({
+        "model_id": active.model_id,
+        "artifact_version": active.artifact_version,
+        "feature_version": active.feature_version,
+        "predictor_columns": ["BBB_intraday_J-1"],
+    }), encoding="utf-8")
+    fits, predictions_seen = [], []
+
+    def fake_fit(train, names, outcome, config, parameters=None):
+        fits.append((train.index.min(), train.index.max(), outcome))
+        return f"frozen-{outcome}-{len(fits)}"
+
+    def fake_predict(booster, current, names):
+        predictions_seen.append((current.index[0], booster, float(current.iloc[0][names[0]])))
+        return np.array([0.8 if "intraday_target" in booster else 0.2])
+
+    monkeypatch.setattr("rstock.application.production_services.fit_booster", fake_fit)
+    monkeypatch.setattr(
+        "rstock.application.production_services.predict_probabilities", fake_predict
+    )
+    replay = DailyPredictionService(repository).replay(
+        _history().get,
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+        start_date="2026-01-06",
+        end_date="2026-01-09",
+        mode=HistoricalReplayMode.FROZEN_AT_START,
+    )
+
+    assert len(fits) == 2
+    assert {fit[1] for fit in fits} == {pd.Timestamp("2026-01-05")}
+    assert replay["status"].eq("predicted").all()
+    assert all(
+        pd.Timestamp(row["as_of_date"]) < pd.Timestamp(row["prediction_date"])
+        for _, row in replay.iterrows()
+    )
+    assert {booster for _, booster, _ in predictions_seen} == {
+        "frozen-AAA.intraday_target-1",
+        "frozen-AAA.intraday_down_target-2",
+    }
+    assert len({value for _, _, value in predictions_seen}) > 1
+    assert replay.attrs["historical_replay"] == {
+        "mode": "frozen_at_start",
+        "version": 1,
+        "initial_training_cutoff": "2026-01-05",
+        "initial_training_cutoff_by_model": {active.model_id: "2026-01-05"},
+        "first_predicted_session": "2026-01-06",
+        "last_predicted_session": "2026-01-09",
+        "model_count": 1,
+    }
+
+
+def test_historical_simulation_persists_frozen_replay_traceability(monkeypatch, tmp_path):
+    active = _model()
+    repository = FakeRepository(pd.DataFrame(), models=(active,), active_ids=(active.model_id,))
+    predictions = pd.DataFrame([{
+        "prediction_id": "frozen", "prediction_date": "2026-01-06",
+        "as_of_date": "2026-01-05", "model_id": active.model_id,
+        "target": active.target, "predictors": json.dumps(active.predictors),
+        "status": "predicted", "up_probability": 0.8, "down_probability": 0.2,
+        "up_threshold": active.signal_threshold, "down_threshold": active.down_threshold,
+    }])
+    predictions.attrs["historical_replay"] = {
+        "mode": "frozen_at_start", "version": 1,
+        "initial_training_cutoff": "2026-01-05",
+        "first_predicted_session": "2026-01-06",
+        "last_predicted_session": "2026-01-06", "model_count": 1,
+    }
+    monkeypatch.setattr(DailyPredictionService, "replay", lambda *args, **kwargs: predictions)
+    result = SimulationService(
+        repository, lambda _: _prices("2026-01-06", 100.0, 105.0)
+    ).run_historical(
+        "2026-01-06", "2026-01-06", DEFAULT_CONFIG, 1_000.0,
+        mode=SIMULATION_MODE_FROZEN_AT_START,
+    )
+
+    assert result.historical_replay["mode"] == "frozen_at_start"
+    assert result.historical_replay["initial_training_cutoff"] == "2026-01-05"
+    assert result.metrics.total_profit_loss == pytest.approx(50.0)
+    persisted = SimulationRepository(tmp_path).save(
+        result,
+        parameters={
+            "simulation_mode": result.historical_replay["mode"],
+            "historical_replay": result.historical_replay,
+        },
+        models=list(result.model_snapshots),
+    )
+    assert persisted["parameters"]["simulation_mode"] == "frozen_at_start"
+    assert persisted["parameters"]["historical_replay"]["initial_training_cutoff"] == "2026-01-05"
+    _, reopened = SimulationRepository(tmp_path).load(persisted["simulation_id"])
+    assert reopened.historical_replay == result.historical_replay
 
 
 def test_historical_and_persisted_modes_share_identical_trade_financials(monkeypatch):
@@ -496,12 +599,13 @@ def test_historical_mode_freezes_current_active_models_and_persisted_result(
     replay_calls = []
 
     def fake_replay(
-        _service, _price_loader, _config, *, start_date, end_date, models
+        _service, _price_loader, _config, *, start_date, end_date, models, mode
     ):
         replay_calls.append({
             "model_ids": tuple(model.model_id for model in models),
             "start": pd.Timestamp(start_date),
             "end": pd.Timestamp(end_date),
+            "mode": mode,
         })
         if not models:
             return pd.DataFrame()
@@ -533,6 +637,7 @@ def test_historical_mode_freezes_current_active_models_and_persisted_result(
         "model_ids": (active.model_id,),
         "start": pd.Timestamp("2025-09-01"),
         "end": pd.Timestamp("2026-09-01"),
+        "mode": HistoricalReplayMode.DAILY_RETRAIN,
     }
     assert [model["model_id"] for model in original.model_snapshots] == [
         active.model_id

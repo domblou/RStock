@@ -105,6 +105,13 @@ class SimulationRepository:
         directory = self._directory(simulation_id)
         metadata = json.loads((directory / "simulation.json").read_text(encoding="utf-8"))
         metrics = SimulationMetrics(**metadata["metrics"])
+        parameters = metadata.get("parameters", {})
+        historical_replay = (
+            dict(parameters.get("historical_replay", {}))
+            if isinstance(parameters, dict)
+            and isinstance(parameters.get("historical_replay", {}), dict)
+            else {}
+        )
         result = SimulationResult(
             trades=pd.read_csv(directory / "trades.csv"),
             metrics=metrics,
@@ -116,6 +123,7 @@ class SimulationRepository:
                 if (directory / "benchmark_results.csv").exists()
                 else pd.DataFrame(columns=["Date", "SPY Rendement"])
             ),
+            historical_replay=historical_replay,
         )
         return metadata, result
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import replace
+from enum import Enum
 from typing import Any, Callable, Sequence
 
 import numpy as np
@@ -42,6 +43,13 @@ from .repository import RunRepository, utc_now
 
 
 SUPPORTED_FEATURE_VERSIONS = {"rstock_features_v1"}
+
+
+class HistoricalReplayMode(str, Enum):
+    """Booster lifecycle used by the historical simulation replay."""
+
+    DAILY_RETRAIN = "daily_retrain"
+    FROZEN_AT_START = "frozen_at_start"
 
 
 def _json_safe(values: dict[str, Any]) -> dict[str, Any]:
@@ -589,21 +597,29 @@ class DailyPredictionService:
         start_date: Any,
         end_date: Any,
         models: Sequence[ProductionModel] | None = None,
+        mode: HistoricalReplayMode = HistoricalReplayMode.DAILY_RETRAIN,
     ) -> pd.DataFrame:
         """Replay active models using only information preceding each target session.
 
         The persisted production boosters cannot safely be applied backwards:
         they were trained using observations that may postdate the simulated
-        session.  Each replay fit therefore uses an expanding sample ending at
-        ``as_of_date``, while preserving the model's frozen feature definition,
-        XGBoost parameters, and decision thresholds.
+        session.  Daily mode therefore fits on an expanding sample ending at
+        each ``as_of_date``.  Frozen mode fits once at the as-of date before
+        the first simulated session.  Both preserve the model's frozen feature
+        definition, XGBoost parameters, and decision thresholds.
         """
 
         start = pd.Timestamp(start_date).normalize()
         end = pd.Timestamp(end_date).normalize()
+        try:
+            replay_mode = HistoricalReplayMode(mode)
+        except ValueError as error:
+            raise ValueError(f"Unsupported historical replay mode: {mode}") from error
         rows: list[dict[str, Any]] = []
         training_config_by_model: dict[str, RStockConfig] = {}
         replay_models = self.repository.active_models() if models is None else models
+        initial_cutoffs: dict[str, str] = {}
+        first_sessions: dict[str, str] = {}
         for model in replay_models:
             try:
                 market_frames: list[pd.DataFrame] = []
@@ -654,6 +670,34 @@ class DailyPredictionService:
                 target_dates = prepared.index[
                     (prepared.index >= start) & (prepared.index <= end)
                 ]
+                frozen_boosters: dict[str, object] | None = None
+                if replay_mode is HistoricalReplayMode.FROZEN_AT_START and len(target_dates):
+                    initial_prior_dates = prepared.index[prepared.index < target_dates[0]]
+                    if initial_prior_dates.empty:
+                        raise ValueError("no prior market observation")
+                    initial_cutoff = initial_prior_dates.max()
+                    initial_training = prepared.loc[
+                        prepared.index <= initial_cutoff,
+                        [*names, *outcomes.values()],
+                    ].dropna()
+                    if initial_training.empty:
+                        raise ValueError("no complete historical training observations")
+                    frozen_boosters = {
+                        direction: fit_booster(
+                            initial_training,
+                            names,
+                            outcome,
+                            training_config,
+                            parameters=directional_parameters[direction],
+                        )
+                        for direction, outcome in outcomes.items()
+                    }
+                    initial_cutoffs[model.model_id] = pd.Timestamp(
+                        initial_cutoff
+                    ).date().isoformat()
+                    first_sessions[model.model_id] = pd.Timestamp(
+                        target_dates[0]
+                    ).date().isoformat()
                 for target_date in target_dates:
                     try:
                         prior_dates = prepared.index[prepared.index < target_date]
@@ -671,24 +715,33 @@ class DailyPredictionService:
                             for name in names
                         ):
                             raise ValueError("missing predictors")
-                        training = prepared.loc[
-                            prepared.index <= as_of,
-                            [*names, *outcomes.values()],
-                        ].dropna()
-                        if training.empty:
-                            raise ValueError("no complete historical training observations")
-                        probabilities: dict[str, float] = {}
-                        for direction, outcome in outcomes.items():
-                            booster = fit_booster(
-                                training,
-                                names,
-                                outcome,
-                                training_config,
-                                parameters=directional_parameters[direction],
-                            )
-                            probabilities[direction] = float(
+                        if replay_mode is HistoricalReplayMode.DAILY_RETRAIN:
+                            training = prepared.loc[
+                                prepared.index <= as_of,
+                                [*names, *outcomes.values()],
+                            ].dropna()
+                            if training.empty:
+                                raise ValueError("no complete historical training observations")
+                            boosters = {
+                                direction: fit_booster(
+                                    training,
+                                    names,
+                                    outcome,
+                                    training_config,
+                                    parameters=directional_parameters[direction],
+                                )
+                                for direction, outcome in outcomes.items()
+                            }
+                        else:
+                            if frozen_boosters is None:
+                                raise AssertionError("Frozen boosters were not initialized")
+                            boosters = frozen_boosters
+                        probabilities = {
+                            direction: float(
                                 predict_probabilities(booster, current, names)[0]
                             )
+                            for direction, booster in boosters.items()
+                        }
                         prediction_id = hashlib.sha256(
                             f"historical:{model.model_id}:{model.artifact_version}:"
                             f"{pd.Timestamp(target_date).date()}".encode()
@@ -721,7 +774,27 @@ class DailyPredictionService:
                         ))
             except Exception as error:
                 rows.append(self._error_row(model, f"{type(error).__name__}: {error}"))
-        return pd.DataFrame(rows)
+        result = pd.DataFrame(rows)
+        result.attrs["historical_replay"] = {
+            "mode": replay_mode.value,
+            "version": 1,
+            "initial_training_cutoff": (
+                next(iter(set(initial_cutoffs.values())))
+                if len(set(initial_cutoffs.values())) == 1
+                else None
+            ),
+            "initial_training_cutoff_by_model": initial_cutoffs,
+            "first_predicted_session": (
+                next(iter(set(first_sessions.values())))
+                if len(set(first_sessions.values())) == 1
+                else None
+            ),
+            "last_predicted_session": None if result.empty else str(
+                result.get("prediction_date", pd.Series(dtype=str)).max()
+            ),
+            "model_count": len(replay_models),
+        }
+        return result
 
     def _predict_model(
         self,
