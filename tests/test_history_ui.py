@@ -376,6 +376,18 @@ def test_forward_simulation_uses_the_same_experiment_context_summary():
     )
 
 
+def test_history_summary_formats_a_legacy_datetime_cutoff_as_a_session_date():
+    detail = _detail()
+    detail["configuration"].update({
+        "run_description": "profondeur 2",
+        "historical_data_cutoff": "2026-09-22T00:00:00",
+    })
+
+    row = history_row(_run("legacy-cutoff", "walk_forward"), detail, {})
+
+    assert row.summary == "Profondeur 2 · WF expansive · cutoff 2026-09-22"
+
+
 def test_legacy_calibration_without_inherited_depth_has_a_safe_context_fallback():
     detail = _detail(symbols=("AAA", "BBB"))
     detail["configuration"]["rstock_config"] = {}

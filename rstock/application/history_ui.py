@@ -323,7 +323,7 @@ def _temporal_context_summary(
         or configuration.get("historical_data_cutoff")
     )
     if isinstance(cutoff, str) and cutoff.strip():
-        parts.append(f"cutoff {cutoff.strip()}")
+        parts.append(f"cutoff {_session_date_label(cutoff)}")
 
     mode = (
         configuration.get("forward_simulation_mode")
@@ -339,6 +339,14 @@ def _temporal_context_summary(
         if isinstance(end, str) and end.strip():
             parts.append(f"Forward jusqu'au {end.strip()}")
     return tuple(parts)
+
+
+def _session_date_label(value: str) -> str:
+    """Format a persisted session date for display without changing its value."""
+
+    text = value.strip()
+    parsed = pd.to_datetime(text, errors="coerce")
+    return text if pd.isna(parsed) else pd.Timestamp(parsed).date().isoformat()
 
 
 def _context_text(
