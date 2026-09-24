@@ -427,6 +427,20 @@ def execute_run(
                 repository.transition(child_run_id, JobStatus.FAILED, error=str(error))
                 forward.update(status="failed", error=str(error))
             repository.write_json(run_id, "summary.json", summary)
+            pipeline_summary_path = results / "pipeline_summary.json"
+            if pipeline_summary_path.is_file():
+                pipeline_summary = repository.read_json(
+                    run_id, "results/pipeline_summary.json"
+                )
+                persisted_forward = pipeline_summary.get("forward_simulation")
+                if (
+                    isinstance(persisted_forward, dict)
+                    and persisted_forward.get("child_run_id") == child_run_id
+                ):
+                    persisted_forward.update(forward)
+                    repository.write_json(
+                        run_id, "results/pipeline_summary.json", pipeline_summary
+                    )
         if checkpoint is not None:
             checkpoint.finish_attempt("completed")
         repository.append_log(run_id, "Worker completed")

@@ -61,6 +61,24 @@ class HistoryRunSummary:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ForwardRecoveryDiagnosis:
+    state: str
+    message: str
+    recoverable: bool
+
+
+def _lock_owner_pid(repository: RunRepository, run_id: str) -> int | None:
+    path = repository.run_directory(run_id) / ".worker.lock" / "owner.json"
+    try:
+        owner = json.loads(path.read_text(encoding="utf-8"))
+        if owner.get("run_id") != run_id:
+            return None
+        return int(owner["pid"])
+    except (FileNotFoundError, OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
 class JobBackend(Protocol):
     def launch(self, runs_root: Path, run_id: str, max_concurrent_jobs: int) -> int | None: ...
 
@@ -221,7 +239,7 @@ class RunService:
         """Launch a manual forward evaluation from an immutable source snapshot."""
 
         from .domain import RunMetadata, RunRole
-        from .forward_simulation import SNAPSHOT_FILENAME
+        from .forward_simulation import SNAPSHOT_FILENAME, _sha256
         from rstock.calendars import resolve_market_session_on_or_before
 
         with self._submission_lock():
@@ -242,6 +260,7 @@ class RunService:
             specification = replace(
                 source, job_type=JobType.FORWARD_SIMULATION,
                 source_end_to_end_run=source_end_to_end_run,
+                source_forward_model_snapshot_sha256=_sha256(snapshot),
                 forward_simulation_start_date=start.date().isoformat(),
                 forward_simulation_end_date=end.date().isoformat(),
                 forward_simulation_enabled=False,
@@ -271,6 +290,86 @@ class RunService:
                 self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
                 raise
             return SubmissionResult(run_id, True)
+
+    def forward_recovery_diagnosis(self, run_id: str) -> ForwardRecoveryDiagnosis:
+        """Classify a Forward run using persisted status and live ownership."""
+
+        spec = self.repository.load_spec(run_id)
+        if spec.job_type is not JobType.FORWARD_SIMULATION:
+            raise ValueError("Le run n'est pas une Forward Simulation.")
+        status = self.repository.status(run_id)
+        current = str(status["status"])
+        launcher_pid = status.get("launcher_pid")
+        lock_pid = _lock_owner_pid(self.repository, run_id)
+        active_dispatch = _pid_alive(launcher_pid) if launcher_pid is not None else False
+        active_worker = _pid_alive(lock_pid) if lock_pid is not None else False
+        if current == JobStatus.RUNNING.value:
+            if active_dispatch or active_worker or _pid_alive(status.get("pid")):
+                return ForwardRecoveryDiagnosis("running_active", "En cours — worker actif.", False)
+            return ForwardRecoveryDiagnosis("running_stale", "En cours — worker introuvable; attendre le diagnostic d'interruption.", False)
+        if current == JobStatus.PENDING.value:
+            if active_dispatch or active_worker:
+                return ForwardRecoveryDiagnosis("pending_active", "En attente — worker ou dispatch actif.", False)
+            return ForwardRecoveryDiagnosis("pending_orphaned", "En attente — simulation non soumise; récupération disponible.", True)
+        messages = {
+            JobStatus.FAILED.value: "Échec — reprise disponible.",
+            JobStatus.CANCELLED.value: "Annulée — reprise disponible.",
+            JobStatus.INTERRUPTED.value: "Interrompue — reprise disponible.",
+            JobStatus.COMPLETED.value: "Terminée.",
+        }
+        return ForwardRecoveryDiagnosis(
+            current, messages.get(current, current),
+            current in {JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.INTERRUPTED.value},
+        )
+
+    def _validate_forward_recovery(self, run_id: str) -> None:
+        from .forward_simulation import validate_forward_checkpoint, validate_forward_snapshot
+
+        spec = self.repository.load_spec(run_id)
+        snapshot = validate_forward_snapshot(
+            self.repository, spec, require_expected_hash=True
+        )
+        validate_forward_checkpoint(
+            self.repository.run_directory(run_id) / "_working" / "forward_observations_checkpoint.csv",
+            spec, snapshot, run_id=run_id,
+        )
+
+    def recover_forward_simulation(self, run_id: str) -> SubmissionResult:
+        """Dispatch the exact historical Forward run only when it is safe."""
+
+        with self._submission_lock():
+            diagnosis = self.forward_recovery_diagnosis(run_id)
+            if diagnosis.state != "pending_orphaned":
+                if diagnosis.recoverable:
+                    # This branch is intentionally unreachable for terminals:
+                    # resume() below owns their transition under its own lock.
+                    raise RuntimeError("Utilisez la reprise terminale.")
+                raise ValueError(diagnosis.message)
+            self._validate_forward_recovery(run_id)
+            try:
+                pid = self.backend.launch(
+                    self.repository.root, run_id, self.max_concurrent_heavy_jobs
+                )
+                status = self.repository.status(run_id)
+                status["launcher_pid"] = pid
+                status["resume_requested"] = True
+                self.repository.write_json(run_id, "status.json", status)
+            except Exception as error:
+                self.repository.append_log(run_id, f"Worker recovery launch failed: {error}")
+                self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
+                raise
+            return SubmissionResult(run_id, False)
+
+    def resume_forward_simulation(self, run_id: str) -> SubmissionResult:
+        """Validate the immutable Forward inputs, then reuse generic resume."""
+
+        diagnosis = self.forward_recovery_diagnosis(run_id)
+        if diagnosis.state == "pending_orphaned":
+            return self.recover_forward_simulation(run_id)
+        if not diagnosis.recoverable:
+            raise ValueError(diagnosis.message)
+        self._validate_forward_recovery(run_id)
+        return self.resume(run_id)
 
     def start_qualification_holdout_diagnostic(
         self, forced_run_id: str

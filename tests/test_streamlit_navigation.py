@@ -1070,6 +1070,18 @@ def test_history_grid_uses_the_run_provenance_display_columns():
     assert "pd.DataFrame([row.display() for row in rows])" in history
 
 
+def test_forward_detail_offers_recovery_only_through_the_central_diagnosis():
+    source = APP.read_text(encoding="utf-8")
+    controls = source.split("def _render_resume_controls", 1)[1].split(
+        "def _render_history_detail", 1
+    )[0]
+
+    assert "JobType.FORWARD_SIMULATION.value" in controls
+    assert "forward_recovery_diagnosis(run_id)" in controls
+    assert '"Reprendre cette simulation"' in controls
+    assert "resume_forward_simulation(run_id)" in controls
+
+
 def test_normal_experiment_submission_persists_context_sampling_metadata():
     source = APP.read_text(encoding="utf-8")
     selector = source.split("def _experiment_universe_selector", 1)[1].split(

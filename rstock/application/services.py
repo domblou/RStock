@@ -222,6 +222,12 @@ class ExperimentService:
     def resume(self, run_id: str) -> SubmissionResult:
         return self.run_service.resume(run_id)
 
+    def forward_recovery_diagnosis(self, run_id: str):
+        return self.run_service.forward_recovery_diagnosis(run_id)
+
+    def resume_forward_simulation(self, run_id: str) -> SubmissionResult:
+        return self.run_service.resume_forward_simulation(run_id)
+
     def restart(self, run_id: str) -> SubmissionResult:
         return self.run_service.restart(run_id)
 

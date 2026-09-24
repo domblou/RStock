@@ -45,6 +45,69 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_forward_snapshot(
+    repository: RunRepository, spec: ExperimentSpec, *, require_expected_hash: bool = True
+) -> dict[str, Any]:
+    """Validate the immutable source snapshot required by a Forward run."""
+
+    if not spec.source_end_to_end_run:
+        raise ValueError("forward_simulation requires source_end_to_end_run")
+    expected = spec.source_forward_model_snapshot_sha256
+    if require_expected_hash and not expected:
+        raise ValueError("forward_snapshot_sha256_missing")
+    path = (
+        repository.run_directory(spec.source_end_to_end_run)
+        / "results"
+        / SNAPSHOT_FILENAME
+    )
+    if not path.is_file():
+        raise ValueError("forward_snapshot_missing")
+    actual = _sha256(path)
+    if expected and actual != expected:
+        raise ValueError("forward_snapshot_sha256_mismatch")
+    snapshot = _read_json(path)
+    if snapshot.get("source_end_to_end_run_id") != spec.source_end_to_end_run:
+        raise ValueError("forward_snapshot_source_mismatch")
+    for model in snapshot.get("models", []):
+        if not isinstance(model, dict) or not model.get("source_model_id"):
+            raise ValueError("forward_snapshot_model_invalid")
+        directory = path.parent / SNAPSHOT_DIRECTORY / str(model["source_model_id"])
+        if not all((directory / name).is_file() for name in ("up.ubj", "down.ubj", "metadata.json")):
+            raise ValueError("forward_snapshot_model_artifact_missing")
+    return snapshot
+
+
+def validate_forward_checkpoint(
+    checkpoint_path: Path, spec: ExperimentSpec, snapshot: dict[str, Any],
+    *, run_id: str,
+) -> None:
+    """Reject a partial Forward checkpoint from another run or snapshot."""
+
+    if not checkpoint_path.exists():
+        return
+    try:
+        checkpoint = pd.read_csv(checkpoint_path)
+    except Exception as error:
+        raise ValueError("forward_checkpoint_invalid") from error
+    required = {
+        "forward_simulation_run_id", "source_end_to_end_run_id",
+        "source_model_id", "resolved_source_cutoff",
+    }
+    if checkpoint.empty or not required.issubset(checkpoint.columns):
+        raise ValueError("forward_checkpoint_invalid")
+    if not checkpoint["forward_simulation_run_id"].astype(str).eq(run_id).all():
+        raise ValueError("forward_checkpoint_run_mismatch")
+    if not checkpoint["source_end_to_end_run_id"].astype(str).eq(spec.source_end_to_end_run).all():
+        raise ValueError("forward_checkpoint_source_mismatch")
+    if not checkpoint["resolved_source_cutoff"].astype(str).eq(
+        str(snapshot["resolved_market_session_cutoff"])
+    ).all():
+        raise ValueError("forward_checkpoint_cutoff_mismatch")
+    model_ids = {str(model["source_model_id"]) for model in snapshot.get("models", [])}
+    if not checkpoint["source_model_id"].astype(str).isin(model_ids).all():
+        raise ValueError("forward_checkpoint_model_mismatch")
+
+
 def _write_csv_atomic(frame: pd.DataFrame, destination: Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     frame.to_csv(temporary, index=False)
@@ -183,11 +246,12 @@ def run_forward_simulation(
 ) -> dict[str, Any]:
     """Evaluate only persisted boosters; this function never fits a model."""
 
-    if not spec.source_end_to_end_run:
-        raise ValueError("forward_simulation requires source_end_to_end_run")
     runs = RunRepository(spec.config.project_root / "runs")
+    # Historical Forward snapshots predate the persisted hash.  They remain
+    # executable with their frozen spec; manual recovery requires the stronger
+    # hash check above.
+    snapshot = validate_forward_snapshot(runs, spec, require_expected_hash=False)
     root = runs.run_directory(spec.source_end_to_end_run)
-    snapshot = _read_json(root / "results" / SNAPSHOT_FILENAME)
     if not snapshot.get("models"):
         return {"job_type": "forward_simulation", "status": "skipped_no_models", "signals": 0}
     cutoff = pd.Timestamp(snapshot["resolved_market_session_cutoff"]).normalize()
@@ -200,6 +264,9 @@ def run_forward_simulation(
     if prepared.empty or prepared.index.max() < end:
         raise ValueError("insufficient_forward_market_data")
     checkpoint_path = output / "forward_observations_checkpoint.csv"
+    validate_forward_checkpoint(
+        checkpoint_path, spec, snapshot, run_id=output.parent.name
+    )
     rows: list[dict[str, Any]] = (
         pd.read_csv(checkpoint_path).to_dict("records")
         if checkpoint_path.is_file()

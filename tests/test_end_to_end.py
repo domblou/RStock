@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import rstock.application.end_to_end as end_to_end
+import rstock.application.worker as worker_module
 from rstock.application.auto_promotion import PROMOTION_CHECKPOINT
 from rstock.application.domain import (
     ExperimentSpec,
@@ -1075,3 +1076,81 @@ def test_temporal_end_to_end_restart_and_resume_keep_reference_metadata(tmp_path
     restarted_metadata = repository.run_metadata(restarted.run_id)
     assert restarted_metadata.run_role is RunRole.PIPELINE_PARENT
     assert restarted_metadata.run_purpose is RunPurpose.REFERENCE
+
+
+def test_end_to_end_auto_forward_returns_and_dispatches_the_reserved_child(
+    tmp_path, monkeypatch
+):
+    class RecordingBackend:
+        launches = []
+
+        def launch(self, _runs_root, run_id, _max_concurrent_jobs):
+            self.launches.append(run_id)
+            return 7654
+
+    backend = RecordingBackend()
+    repository = RunRepository(tmp_path / "runs")
+    parent = _spec(
+        tmp_path,
+        historical_data_cutoff="2026-06-22",
+        requested_historical_cutoff="2026-06-22",
+        resolved_market_session_cutoff="2026-06-22",
+        forward_simulation_enabled=True,
+        forward_simulation_mode="63_sessions",
+    )
+    run_id = _create_parent(repository, parent)
+    monkeypatch.setattr(
+        end_to_end,
+        "build_forward_model_snapshot",
+        lambda *_args, **_kwargs: {
+            "candidate_count": 1,
+            "resolved_market_session_cutoff": "2026-06-22",
+            "snapshot_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(worker_module, "LocalProcessBackend", lambda: backend)
+
+    execute_run(repository, run_id, 1, registry=_fake_registry(repository, Counter()))
+
+    forward = repository.summary(run_id)["forward_simulation"]
+    child_id = forward["child_run_id"]
+    assert forward["status"] == "launched"
+    assert backend.launches == [child_id]
+    assert repository.status(child_id)["launcher_pid"] == 7654
+    forward_children = [
+        item
+        for item in repository.list_children(run_id)
+        if repository.load_spec(item).job_type is JobType.FORWARD_SIMULATION
+    ]
+    assert forward_children == [child_id]
+    persisted_forward = repository.read_json(
+        run_id, "results/pipeline_summary.json"
+    )["forward_simulation"]
+    assert persisted_forward["child_run_id"] == child_id
+    assert persisted_forward["status"] == "launched"
+
+
+def test_end_to_end_without_auto_forward_never_dispatches_a_forward_child(
+    tmp_path, monkeypatch
+):
+    class RecordingBackend:
+        launches = []
+
+        def launch(self, _runs_root, run_id, _max_concurrent_jobs):
+            self.launches.append(run_id)
+            return 7654
+
+    backend = RecordingBackend()
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+    monkeypatch.setattr(worker_module, "LocalProcessBackend", lambda: backend)
+
+    execute_run(repository, run_id, 1, registry=_fake_registry(repository, Counter()))
+
+    assert repository.summary(run_id)["forward_simulation"] is None
+    assert backend.launches == []
+    assert not [
+        item
+        for item in repository.list_children(run_id)
+        if repository.load_spec(item).job_type is JobType.FORWARD_SIMULATION
+    ]

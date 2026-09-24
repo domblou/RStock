@@ -1978,6 +1978,22 @@ def _render_resume_controls(
     status: dict[str, object],
     detail: dict[str, object],
 ) -> None:
+    if status.get("job_type") == JobType.FORWARD_SIMULATION.value:
+        diagnosis = _service().forward_recovery_diagnosis(run_id)
+        st.caption(diagnosis.message)
+        if diagnosis.recoverable and st.button(
+            "Reprendre cette simulation", key=f"resume-forward-{run_id}", width="stretch"
+        ):
+            try:
+                _service().resume_forward_simulation(run_id)
+            except (OSError, ValueError, RuntimeError) as resume_error:
+                st.error(f"Reprise impossible : {resume_error}")
+            else:
+                st.success(
+                    "Même run repris avec sa configuration et son snapshot historiques."
+                )
+                st.rerun()
+        return
     resumable_types = {
         JobType.WALK_FORWARD.value,
         JobType.THRESHOLD_PARAMETER_CALIBRATION.value,

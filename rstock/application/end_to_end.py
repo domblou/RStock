@@ -1542,6 +1542,11 @@ def run_end_to_end(
         "auto_promote_candidates": spec.auto_promote_candidates,
         "promotion": promotion_summary,
         "temporal_validation": temporal_comparison,
+        # The worker dispatches the already-reserved Forward child from this
+        # returned summary after the scientific parent is terminal.  Keep this
+        # in sync with pipeline_summary.json; omitting it leaves a pending
+        # child with no dispatcher.
+        "forward_simulation": forward_child,
         "result_files": [
             "pipeline_summary.json",
             *(["promotion_results.json"] if promotion_summary["executed"] else []),
