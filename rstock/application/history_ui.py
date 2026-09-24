@@ -209,30 +209,17 @@ def _summary_text(
     configuration: Mapping[str, object],
     status: str,
 ) -> str:
-    if job_type == "threshold_parameter_calibration":
-        if status == "pending":
-            return "Calibration des paramètres en attente"
-        if status == "running":
-            return "Calibration des paramètres en cours"
-        if status == "failed":
-            return "Calibration des paramètres échouée"
-        if status == "cancelled":
-            return "Calibration des paramètres annulée"
-        if status == "interrupted":
-            return "Calibration des paramètres interrompue"
-        selected = summary.get("selected_configuration")
-        if isinstance(selected, Mapping):
-            text = f"Configuration gagnante : {selected.get('configuration', '—')}"
-            description = configuration.get("run_description")
-            return (
-                f"{text} — {description.strip()}"
-                if isinstance(description, str) and description.strip()
-                else text
-            )
-        return "Calibration des paramètres terminée"
     description = configuration.get("run_description")
+    if job_type == "forward_simulation":
+        raw = configuration.get("rstock_config", {})
+        config = raw if isinstance(raw, Mapping) else {}
+        depth = config.get("permutation_depth")
+        if depth is not None:
+            description = f"Profondeur {depth}"
     wf = _walk_forward_summary(configuration)
-    temporal_context = _temporal_context_summary(configuration)
+    temporal_context = _temporal_context_summary(
+        configuration, include_forward=job_type == "forward_simulation"
+    )
     if (
         job_type in {"forced_candidate_validation", "fixed_candidate_evaluation"}
         and configuration.get("historical_forced_validation_backfill") is True
@@ -243,6 +230,7 @@ def _summary_text(
         description = "Revalidation des candidats de référence"
     if isinstance(description, str) and description.strip():
         text = description.strip()
+        text = text[:1].upper() + text[1:]
         if job_type in EXPERIMENT_JOB_TYPES:
             return " · ".join((text, wf, *temporal_context))
         return text
@@ -298,6 +286,18 @@ def _summary_text(
             label = "seuil gelé manquant" if missing_count == 1 else "seuils gelés manquants"
             return f"Holdout ignoré — {missing_count} {label}{suffix}"
         return "Calibration terminée"
+    if job_type == "threshold_parameter_calibration":
+        if status == "pending":
+            return "Calibration des paramètres en attente"
+        if status == "running":
+            return "Calibration des paramètres en cours"
+        if status == "failed":
+            return "Calibration des paramètres échouée"
+        if status == "cancelled":
+            return "Calibration des paramètres annulée"
+        if status == "interrupted":
+            return "Calibration des paramètres interrompue"
+        return "Calibration des paramètres terminée"
     if job_type.startswith("xgboost_"):
         return "Calibration terminée"
     return "—"
@@ -312,7 +312,9 @@ def _walk_forward_summary(configuration: Mapping[str, object]) -> str:
     return "WF expansive"
 
 
-def _temporal_context_summary(configuration: Mapping[str, object]) -> tuple[str, ...]:
+def _temporal_context_summary(
+    configuration: Mapping[str, object], *, include_forward: bool = False
+) -> tuple[str, ...]:
     """Return persisted point-in-time and Forward context for a history row."""
 
     parts: list[str] = []
@@ -325,7 +327,7 @@ def _temporal_context_summary(configuration: Mapping[str, object]) -> tuple[str,
 
     mode = (
         configuration.get("forward_simulation_mode")
-        if configuration.get("forward_simulation_enabled") is True
+        if include_forward or configuration.get("forward_simulation_enabled") is True
         else None
     )
     if mode == "63_sessions":

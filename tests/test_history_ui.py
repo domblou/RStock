@@ -266,7 +266,7 @@ def test_threshold_parameter_calibration_appears_with_direct_parent_and_winner()
     assert "threshold_parameter_calibration" in EXPERIMENT_JOB_TYPES
     assert row.display()["Type"] == "Calibration des paramètres de seuils"
     assert row.display()["Lignée"] == "Source : xgb-parent"
-    assert row.summary == "Configuration gagnante : candidate_03"
+    assert row.summary == "Calibration des paramètres terminée"
 
 
 def test_threshold_parameter_calibration_keeps_temporal_validation_description():
@@ -279,9 +279,7 @@ def test_threshold_parameter_calibration_keeps_temporal_validation_description()
         _run("parameter-temporal", "threshold_parameter_calibration"), detail, {}
     )
 
-    assert row.summary == (
-        "Configuration gagnante : candidate_03 — Validation temporelle offset 63"
-    )
+    assert row.summary == "Validation temporelle offset 63 · WF expansive"
 
 
 def test_threshold_parameter_calibration_summary_matches_nonterminal_status():
@@ -322,7 +320,7 @@ def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallbac
     )
 
     assert calibration.summary == (
-        "profondeur 2 · WF expansive"
+        "Profondeur 2 · WF expansive"
     )
     assert legacy.summary == "Calibration terminée"
 
@@ -359,6 +357,22 @@ def test_end_to_end_summary_shows_persisted_cutoff_and_forward_mode():
     assert row.summary == (
         "Pipeline terminé - 4 étapes · WF expansive · cutoff 2026-06-22 · "
         "Forward 63 séances"
+    )
+
+
+def test_forward_simulation_uses_the_same_experiment_context_summary():
+    detail = _detail()
+    detail["configuration"].update({
+        "run_description": "Forward Simulation automatique",
+        "resolved_market_session_cutoff": "2026-06-22",
+        "forward_simulation_enabled": False,
+        "forward_simulation_mode": "63_sessions",
+    })
+
+    row = history_row(_run("forward", "forward_simulation", status="pending"), detail, {})
+
+    assert row.summary == (
+        "Profondeur 2 · WF expansive · cutoff 2026-06-22 · Forward 63 séances"
     )
 
 
