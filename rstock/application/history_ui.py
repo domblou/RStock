@@ -232,6 +232,7 @@ def _summary_text(
         return "Calibration des paramètres terminée"
     description = configuration.get("run_description")
     wf = _walk_forward_summary(configuration)
+    temporal_context = _temporal_context_summary(configuration)
     if (
         job_type in {"forced_candidate_validation", "fixed_candidate_evaluation"}
         and configuration.get("historical_forced_validation_backfill") is True
@@ -241,8 +242,10 @@ def _summary_text(
         # persisted meaning of this system-generated description.
         description = "Revalidation des candidats de référence"
     if isinstance(description, str) and description.strip():
-        text = f"{JOB_LABELS.get(job_type, job_type)} — {description.strip()}"
-        return f"{text} · {wf}" if job_type in EXPERIMENT_JOB_TYPES else text
+        text = description.strip()
+        if job_type in EXPERIMENT_JOB_TYPES:
+            return " · ".join((text, wf, *temporal_context))
+        return text
     if job_type == "market_update":
         return f"{len(summary.get('updated_symbols', ())) } symboles mis à jour"
     if job_type == "daily_prediction":
@@ -269,11 +272,13 @@ def _summary_text(
         )
     if job_type == "end_to_end":
         if status == "running":
-            return "Pipeline End-to-end en cours"
+            return " · ".join(("Pipeline en cours", *temporal_context))
         if status in {"failed", "cancelled", "interrupted"}:
-            return f"Pipeline End-to-end {status}"
+            return " · ".join((f"Pipeline {status}", *temporal_context))
         stages = summary.get("stages", ())
-        return f"Pipeline End-to-end termine - {len(stages)} etapes · {wf}"
+        return " · ".join((
+            f"Pipeline terminé - {len(stages)} étapes", wf, *temporal_context
+        ))
     if job_type == "threshold_calibration":
         if summary.get("outcome") == "completed_partial_holdout":
             partial = _partial_holdout_text(summary)
@@ -305,6 +310,33 @@ def _walk_forward_summary(configuration: Mapping[str, object]) -> str:
     if mode == "rolling":
         return f"WF glissante {int(config.get('walk_forward_train_size', 252))}"
     return "WF expansive"
+
+
+def _temporal_context_summary(configuration: Mapping[str, object]) -> tuple[str, ...]:
+    """Return persisted point-in-time and Forward context for a history row."""
+
+    parts: list[str] = []
+    cutoff = (
+        configuration.get("resolved_market_session_cutoff")
+        or configuration.get("historical_data_cutoff")
+    )
+    if isinstance(cutoff, str) and cutoff.strip():
+        parts.append(f"cutoff {cutoff.strip()}")
+
+    mode = (
+        configuration.get("forward_simulation_mode")
+        if configuration.get("forward_simulation_enabled") is True
+        else None
+    )
+    if mode == "63_sessions":
+        parts.append("Forward 63 séances")
+    elif mode == "126_sessions":
+        parts.append("Forward 126 séances")
+    elif mode == "custom_end_date":
+        end = configuration.get("forward_simulation_end_date")
+        if isinstance(end, str) and end.strip():
+            parts.append(f"Forward jusqu'au {end.strip()}")
+    return tuple(parts)
 
 
 def _context_text(

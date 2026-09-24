@@ -40,6 +40,27 @@ class SubmissionResult:
     created: bool
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryRunSummary:
+    """The bounded persisted state required by the History grid only."""
+
+    status: dict[str, object]
+    configuration: dict[str, object]
+    metadata: dict[str, object]
+    storage: dict[str, object]
+    summary: dict[str, object]
+
+    def detail(self) -> dict[str, object]:
+        """Match the detail shape consumed by History presentation helpers."""
+
+        return {
+            "configuration": self.configuration,
+            "metadata": self.metadata,
+            "storage": self.storage,
+            "summary": self.summary,
+        }
+
+
 class JobBackend(Protocol):
     def launch(self, runs_root: Path, run_id: str, max_concurrent_jobs: int) -> int | None: ...
 
@@ -612,6 +633,35 @@ class RunService:
             "walk_forward_batch_manifest": walk_forward_batch_manifest,
             "pipeline_stages": pipeline_stages,
         }
+
+    def history_summaries(
+        self, *, job_types: frozenset[str] | None = None
+    ) -> list[HistoryRunSummary]:
+        """Load only the small persisted records used by the History grid.
+
+        Deliberately excludes progress, logs, checkpoints, manifests, child
+        state, and result-file inventories.  ``get`` remains the full-detail
+        API for run pages and explicit actions.
+        """
+
+        summaries: list[HistoryRunSummary] = []
+        for run_id in self.repository.list_run_ids():
+            metadata = self.repository.run_metadata(run_id)
+            if not metadata.visible_in_history:
+                continue
+            status = self._refresh_interrupted(run_id)
+            if job_types is not None and str(status.get("job_type")) not in job_types:
+                continue
+            summaries.append(
+                HistoryRunSummary(
+                    status=status,
+                    configuration=self.repository.load_spec(run_id).to_dict(),
+                    metadata=metadata.to_dict(),
+                    storage=self.repository.storage(run_id),
+                    summary=self.repository.summary(run_id),
+                )
+            )
+        return summaries
 
     def list(self) -> list[dict[str, object]]:
         return [

@@ -1535,7 +1535,7 @@ def _history_filters(
     *,
     allowed_types: frozenset[str],
     models: dict[str, str],
-    service: ExperimentService,
+    details_by_run_id: Mapping[str, Mapping[str, object]],
     key_prefix: str,
 ) -> list[dict[str, object]]:
     columns = st.columns(5)
@@ -1571,7 +1571,7 @@ def _history_filters(
         period=period,
         storage=selected_storage,
         model_id=selected_model,
-        detail_loader=service.run,
+        detail_loader=lambda run_id: details_by_run_id[run_id],
     ))
 
 
@@ -3470,16 +3470,41 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
                 st.json(detail["configuration"])
 
 
+def _history_purge_preview(
+    service: ExperimentService, run_id: str
+) -> int | None:
+    """Validate purge eligibility only after the user explicitly requests it."""
+
+    eligibility = service.purge_eligibility(run_id)
+    if not eligibility.eligible:
+        st.info(eligibility.reason or "Purge impossible pour ce run.")
+        return None
+    try:
+        plan = service.purge_preview(run_id)
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Purge impossible : {error}")
+        return None
+    return int(plan.reclaimable_bytes)
+
+
 def _history_runs_panel(
     service: ExperimentService,
     *,
     allowed_types: frozenset[str],
     key_prefix: str,
 ) -> None:
-    runs = service.runs()
+    history_runs = service.history_runs(job_types=allowed_types)
+    runs = [record.status for record in history_runs]
+    details_by_run_id = {
+        str(record.status["run_id"]): record.detail() for record in history_runs
+    }
     models = _history_model_contexts(st.session_state.lab_config.project_root)
     filtered = _history_filters(
-        runs, allowed_types=allowed_types, models=models, service=service, key_prefix=key_prefix
+        runs,
+        allowed_types=allowed_types,
+        models=models,
+        details_by_run_id=details_by_run_id,
+        key_prefix=key_prefix,
     )
     if not filtered:
         st.session_state[f"{key_prefix}-selected-runs"] = []
@@ -3496,7 +3521,10 @@ def _history_runs_panel(
     )
     visible, total_pages = paginate_runs(filtered, page=int(page) - 1, page_size=int(page_size))
     page_controls[2].caption(f"{len(filtered)} runs · page {int(page)} / {total_pages}")
-    rows = [history_row(run, service.run(str(run["run_id"])), models) for run in visible]
+    rows = [
+        history_row(run, details_by_run_id[str(run["run_id"])], models)
+        for run in visible
+    ]
     selection = st.dataframe(
         pd.DataFrame([row.display() for row in rows]),
         hide_index=True,
@@ -3538,19 +3566,17 @@ def _history_runs_panel(
             key=f"duplicate-history-{key_prefix}",
         ):
             _start_walk_forward_duplication(selected_run_id, service.run(selected_run_id))
-        eligibility = service.purge_eligibility(selected_run_id)
-        if eligibility.eligible and actions[2].button(
+        selected_storage = details_by_run_id[selected_run_id].get("storage", {})
+        can_request_purge = selected_storage.get("state") != "purged"
+        if can_request_purge and actions[2].button(
             "Purger les données lourdes",
             key=f"purge-history-{key_prefix}",
         ):
-            try:
-                plan = service.purge_preview(selected_run_id)
-            except (OSError, ValueError, RuntimeError) as error:
-                st.error(f"Purge impossible : {error}")
-            else:
+            reclaimable_bytes = _history_purge_preview(service, selected_run_id)
+            if reclaimable_bytes is not None:
                 st.session_state["pending-run-purge"] = {
                     "run_id": selected_run_id,
-                    "reclaimable_bytes": plan.reclaimable_bytes,
+                    "reclaimable_bytes": reclaimable_bytes,
                 }
                 st.rerun()
         pending_purge = st.session_state.get("pending-run-purge")
@@ -5012,19 +5038,23 @@ def _history_page() -> None:
             return
         st.session_state.pop("history-navigation", None)
     _page_header("Historique")
-    tabs = st.tabs(["Backtest / walk-forward", "Holdout", "Production réelle"])
-    with tabs[0]:
+    tabs = st.tabs(
+        ["Backtest / walk-forward", "Holdout", "Production réelle"],
+        key="history-tabs",
+        on_change="rerun",
+    )
+    if tabs[0].open:
         _history_runs_panel(
             _service(), allowed_types=EXPERIMENT_JOB_TYPES, key_prefix="experimental-history"
         )
-    with tabs[1]:
+    if tabs[1].open:
         st.caption("Les métriques holdout restent attachées aux runs expérimentaux et aux modèles promus.")
         models = ModelService(st.session_state.lab_config.project_root).models()
         st.dataframe(
             [{"model_id": model.model_id, **model.holdout_metrics} for model in models],
             hide_index=True, width="stretch",
         )
-    with tabs[2]:
+    if tabs[2].open:
         _history_runs_panel(
             _service(), allowed_types=PRODUCTION_JOB_TYPES, key_prefix="production-history"
         )

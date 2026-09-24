@@ -1,7 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from rstock.application.streamlit_app import _selected_rows
+import rstock.application.streamlit_app as streamlit_app
+from rstock.application.streamlit_app import _history_purge_preview, _selected_rows
 
 
 APP = (
@@ -972,14 +973,77 @@ def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
     assert 'if selected_rows:' not in history
     assert 'actions = st.columns([1.2, 2.4, 2.6, 4])' in history
     assert '"Purger les données lourdes"' in history
-    assert "service.purge_preview(selected_run_id)" in history
+    assert "_history_purge_preview(service, selected_run_id)" in history
     assert history.index('"Purger les données lourdes"') < history.index(
-        "service.purge_preview(selected_run_id)"
+        "_history_purge_preview(service, selected_run_id)"
     )
     actions = history.split('actions = st.columns([1.2, 2.4, 2.6, 4])', 1)[1].split(
         'if action == "comparison"', 1
     )[0]
     assert 'width="stretch"' not in actions
+
+
+def test_history_uses_lazy_native_tabs_for_expensive_content():
+    source = APP.read_text(encoding="utf-8")
+    page = source.split("def _history_page", 1)[1].split(
+        "def _history_runs_panel", 1
+    )[0]
+
+    assert 'key="history-tabs"' in page
+    assert 'on_change="rerun"' in page
+    assert "if tabs[0].open:" in page
+    assert "if tabs[1].open:" in page
+    assert "if tabs[2].open:" in page
+    assert page.index("if tabs[0].open:") < page.index("_history_runs_panel(")
+    assert page.index("if tabs[2].open:") < page.index("predictions = PredictionService")
+
+
+def test_history_grid_uses_lightweight_records_and_defers_purge_eligibility():
+    source = APP.read_text(encoding="utf-8")
+    history = source.split("def _history_runs_panel", 1)[1].split(
+        "def _experiments_page", 1
+    )[0]
+    grid_setup = history.split("selection = st.dataframe", 1)[0]
+
+    assert "service.history_runs(job_types=allowed_types)" in history
+    assert "details_by_run_id" in history
+    assert "service.run(" not in grid_setup
+    assert "service.purge_eligibility" not in history
+    assert history.index('actions[2].button(') < history.index(
+        "_history_purge_preview(service, selected_run_id)"
+    )
+
+
+def test_history_purge_is_checked_only_after_explicit_request(monkeypatch):
+    calls = []
+
+    class Service:
+        def purge_eligibility(self, run_id):
+            calls.append(("eligibility", run_id))
+            return SimpleNamespace(eligible=True, reason=None)
+
+        def purge_preview(self, run_id):
+            calls.append(("preview", run_id))
+            return SimpleNamespace(reclaimable_bytes=123)
+
+    assert _history_purge_preview(Service(), "run-1") == 123
+    assert calls == [("eligibility", "run-1"), ("preview", "run-1")]
+
+
+def test_history_purge_ineligible_request_is_blocked_with_its_reason(monkeypatch):
+    messages = []
+
+    class Service:
+        def purge_eligibility(self, run_id):
+            return SimpleNamespace(eligible=False, reason="Un enfant est actif.")
+
+        def purge_preview(self, run_id):
+            raise AssertionError("preview must not run when eligibility fails")
+
+    monkeypatch.setattr(streamlit_app.st, "info", messages.append)
+
+    assert _history_purge_preview(Service(), "run-1") is None
+    assert messages == ["Un enfant est actif."]
 
 
 def test_stale_grid_selection_is_dropped_after_row_population_shrinks():

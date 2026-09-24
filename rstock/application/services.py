@@ -24,7 +24,7 @@ from .production_services import (
 )
 from .repository import RunRepository
 from .run_storage import PurgeEligibility, PurgePlan, RunStorageService
-from .runner import RunService, SubmissionResult
+from .runner import HistoryRunSummary, RunService, SubmissionResult
 
 
 class MarketDataService:
@@ -236,6 +236,13 @@ class ExperimentService:
 
     def runs(self) -> list[dict[str, object]]:
         return self.run_service.list()
+
+    def history_runs(
+        self, *, job_types: frozenset[str] | None = None
+    ) -> list[HistoryRunSummary]:
+        """Return the bounded persisted state needed by the History grid."""
+
+        return self.run_service.history_summaries(job_types=job_types)
 
     def run(self, run_id: str) -> dict[str, object]:
         return self.run_service.get(run_id)

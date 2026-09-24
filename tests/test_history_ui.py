@@ -71,10 +71,12 @@ def test_filters_cover_type_status_period_and_model():
 def test_storage_filter_defaults_to_complete_and_can_show_summaries_only():
     runs = [
         _run("complete", "walk_forward"),
+        _run("purging", "walk_forward"),
         _run("summary-only", "walk_forward"),
     ]
     details = {
         "complete": _detail(),
+        "purging": {**_detail(), "storage": {"state": "purging"}},
         "summary-only": {**_detail(), "storage": {"state": "purged"}},
     }
 
@@ -90,7 +92,7 @@ def test_storage_filter_defaults_to_complete_and_can_show_summaries_only():
         detail_loader=lambda identifier: details[identifier],
     )
 
-    assert [run["run_id"] for run in complete] == ["complete"]
+    assert [run["run_id"] for run in complete] == ["complete", "purging"]
     assert [run["run_id"] for run in summaries] == ["summary-only"]
 
 
@@ -240,7 +242,6 @@ def test_forced_validation_labels_are_utf8_and_mojibake_free():
         "Revalidation forcée des candidats"
     )
     assert row.summary == (
-        "Évaluation des candidats à seuil figé — "
         "Revalidation des candidats de référence · WF expansive"
     )
     assert "Ã" not in " ".join(
@@ -321,7 +322,7 @@ def test_history_uses_persisted_run_description_and_keeps_legacy_summary_fallbac
     )
 
     assert calibration.summary == (
-        "Calibration des seuils — profondeur 2 · WF expansive"
+        "profondeur 2 · WF expansive"
     )
     assert legacy.summary == "Calibration terminée"
 
@@ -341,7 +342,23 @@ def test_threshold_calibration_keeps_the_walk_forward_context_after_duplication(
     assert source_row.context == "115 symboles"
     assert calibration_row.context == source_row.context
     assert calibration_row.summary == (
-        "Calibration des seuils — Rejeu historique · WF expansive"
+        "Rejeu historique · WF expansive"
+    )
+
+
+def test_end_to_end_summary_shows_persisted_cutoff_and_forward_mode():
+    detail = _detail(summary={"stages": [{}, {}, {}, {}]})
+    detail["configuration"].update({
+        "resolved_market_session_cutoff": "2026-06-22",
+        "forward_simulation_enabled": True,
+        "forward_simulation_mode": "63_sessions",
+    })
+
+    row = history_row(_run("point-in-time", "end_to_end"), detail, {})
+
+    assert row.summary == (
+        "Pipeline terminé - 4 étapes · WF expansive · cutoff 2026-06-22 · "
+        "Forward 63 séances"
     )
 
 

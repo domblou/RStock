@@ -83,6 +83,36 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     assert snapshot["calibration_sampling_policy_version"] == 2
 
 
+def test_history_summaries_use_only_lightweight_persisted_records(tmp_path, monkeypatch):
+    repository = RunRepository(tmp_path / "runs")
+    full_run = repository.create(_spec(tmp_path))
+    purged_run = repository.create(_spec(tmp_path, xgb_seed=987))
+    repository.write_storage(
+        purged_run,
+        {
+            "schema_version": 1,
+            "state": "purged",
+            "policy_version": "heavy-artifacts-v1",
+            "purged_at": "2026-09-24T00:00:00+00:00",
+            "reclaimed_bytes": 42,
+            "deleted_artifacts": [],
+        },
+    )
+
+    def unexpected_full_detail(*_args, **_kwargs):
+        raise AssertionError("History grid must not load full run details")
+
+    monkeypatch.setattr(repository, "result_files", unexpected_full_detail)
+    monkeypatch.setattr(repository, "log_tail", unexpected_full_detail)
+    service = RunService(repository, backend=FakeBackend())
+
+    summaries = {item.status["run_id"]: item for item in service.history_summaries()}
+
+    assert summaries[full_run].storage["state"] == "full"
+    assert summaries[purged_run].storage["state"] == "purged"
+    assert summaries[full_run].detail()["configuration"]["symbols"] == ["AAA", "BBB"]
+
+
 def test_historical_snapshot_without_forced_sets_remains_unforced(tmp_path):
     spec = _spec(tmp_path)
     snapshot = spec.to_dict()
