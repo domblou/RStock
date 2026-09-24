@@ -2298,6 +2298,45 @@ def _render_standard_results(
             if st.button("Ouvrir l’End-to-End source", key=f"forward-source-{run_id}"):
                 st.session_state["selected-run-id"] = str(source)
                 st.rerun()
+        summary = detail.get("summary", {})
+        has_quality_counters = "evaluated_observations" in summary
+        if not has_quality_counters:
+            st.json(detail["summary"])
+            return
+        evaluated = int(summary.get("evaluated_observations", 0) or 0)
+        skipped = int(summary.get("skipped_observations", 0) or 0)
+        quality = summary.get("evaluability_rate")
+        kpis = st.columns(4)
+        kpis[0].metric("Observations évaluées", evaluated)
+        kpis[1].metric("Observations exclues", skipped)
+        kpis[2].metric(
+            "Taux d’observations évaluables",
+            "—" if quality is None else f"{quality:.1%}",
+        )
+        kpis[3].metric(
+            "Anomalies de données uniques",
+            int(summary.get("unique_data_quality_issues", 0) or 0),
+        )
+        if skipped:
+            st.info(
+                "Certaines observations n’ont pas pu être évaluées en raison de "
+                "données de marché incomplètes. Elles sont exclues des statistiques."
+            )
+            exclusions_path = (
+                st.session_state.lab_config.project_root / "runs" / run_id / "results"
+                / "forward_exclusions.csv"
+            )
+            if exclusions_path.is_file():
+                exclusions = pd.read_csv(exclusions_path)
+                columns = [
+                    "target", "source_model_id", "Set", "direction", "session_date",
+                    "as_of_date", "exclusion_reason", "invalid_fields",
+                ]
+                st.caption(
+                    "Observations exclues — affichage limité aux 500 premières lignes."
+                    if len(exclusions) > 500 else "Observations exclues"
+                )
+                st.dataframe(exclusions.loc[:, columns].head(500), hide_index=True, width="stretch")
     if job_type is JobType.XGBOOST_CALIBRATION:
         _render_xgboost_calibration_selection(run_id)
     elif job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:

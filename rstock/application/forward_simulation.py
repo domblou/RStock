@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from rstock.features import (
-    intraday_down_target_column, intraday_target_column, mae_column, mfe_column,
+    intraday_down_target_column, intraday_return_column, intraday_target_column, mae_column, mfe_column,
     predictor_columns,
     prepare_dataset, prepare_prediction_row,
 )
@@ -28,6 +28,23 @@ from .services import MarketDataService
 
 SNAPSHOT_FILENAME = "forward_model_snapshot.json"
 SNAPSHOT_DIRECTORY = "forward_model_snapshot"
+OBSERVATION_CHECKPOINT_FILENAME = "forward_observations_checkpoint.csv"
+EXCLUSION_CHECKPOINT_FILENAME = "forward_exclusions_checkpoint.csv"
+CHECKPOINT_MANIFEST_FILENAME = "forward_checkpoint.json"
+EXCLUSIONS_FILENAME = "forward_exclusions.csv"
+
+OBSERVATION_COLUMNS = (
+    "forward_simulation_run_id", "source_end_to_end_run_id", "source_model_id",
+    "requested_historical_cutoff", "resolved_source_cutoff", "target", "Set",
+    "direction", "session_date", "as_of_date", "prediction_probability",
+    "down_probability", "decision_threshold", "signal", "outcome",
+    "directional_return", "MFE", "MAE", "correct_direction", "opposite_movement",
+)
+EXCLUSION_COLUMNS = (
+    "forward_simulation_run_id", "source_end_to_end_run_id", "source_model_id",
+    "target", "Set", "direction", "session_date", "as_of_date",
+    "exclusion_reason", "invalid_fields",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -93,8 +110,10 @@ def validate_forward_checkpoint(
         "forward_simulation_run_id", "source_end_to_end_run_id",
         "source_model_id", "resolved_source_cutoff",
     }
-    if checkpoint.empty or not required.issubset(checkpoint.columns):
+    if not required.issubset(checkpoint.columns):
         raise ValueError("forward_checkpoint_invalid")
+    if checkpoint.empty:
+        return
     if not checkpoint["forward_simulation_run_id"].astype(str).eq(run_id).all():
         raise ValueError("forward_checkpoint_run_mismatch")
     if not checkpoint["source_end_to_end_run_id"].astype(str).eq(spec.source_end_to_end_run).all():
@@ -112,6 +131,85 @@ def _write_csv_atomic(frame: pd.DataFrame, destination: Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     frame.to_csv(temporary, index=False)
     temporary.replace(destination)
+
+
+def _write_json_atomic(value: dict[str, Any], destination: Path) -> None:
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(destination)
+
+
+def _read_checkpoint_rows(path: Path, columns: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        frame = pd.read_csv(path)
+    except Exception as error:
+        raise ValueError("forward_checkpoint_invalid") from error
+    if not set(columns).issubset(frame.columns):
+        raise ValueError("forward_checkpoint_invalid")
+    return frame.loc[:, list(columns)].to_dict("records")
+
+
+def _target_evaluation_validity(
+    prices: pd.DataFrame, returns: pd.Series, target: str
+) -> tuple[str | None, list[str]]:
+    """Apply the complete-OHLC convention used by realized production results."""
+
+    fields = ("Open", "High", "Low", "Close")
+    ohlc = pd.to_numeric(
+        pd.Series({field: prices.get(f"{target}.{field}") for field in fields}),
+        errors="coerce",
+    )
+    invalid_fields = [
+        field for field, value in ohlc.items() if pd.isna(value) or not np.isfinite(value)
+    ]
+    if invalid_fields:
+        return "missing_target_ohlc", invalid_fields
+    metric_columns = (
+        intraday_return_column(target), intraday_target_column(target),
+        mfe_column(target), mae_column(target),
+    )
+    metrics = pd.to_numeric(returns.reindex(metric_columns), errors="coerce")
+    if metrics.isna().any() or not np.isfinite(metrics.to_numpy()).all():
+        return "non_finite_target_metric", [
+            name for name, value in metrics.items() if pd.isna(value) or not np.isfinite(value)
+        ]
+    return None, []
+
+
+def validate_forward_checkpoint_bundle(
+    output: Path, spec: ExperimentSpec, snapshot: dict[str, Any], *, run_id: str
+) -> None:
+    """Validate every persisted Forward checkpoint artifact before reuse."""
+
+    validate_forward_checkpoint(
+        output / OBSERVATION_CHECKPOINT_FILENAME, spec, snapshot, run_id=run_id
+    )
+    exclusions = _read_checkpoint_rows(
+        output / EXCLUSION_CHECKPOINT_FILENAME, EXCLUSION_COLUMNS
+    )
+    model_ids = {str(item["source_model_id"]) for item in snapshot.get("models", [])}
+    if any(
+        str(row["forward_simulation_run_id"]) != run_id
+        or str(row["source_end_to_end_run_id"]) != spec.source_end_to_end_run
+        or not row.get("exclusion_reason")
+        or str(row["source_model_id"]) not in model_ids
+        for row in exclusions
+    ):
+        raise ValueError("forward_checkpoint_source_mismatch")
+    manifest_path = output / CHECKPOINT_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        return
+    manifest = _read_json(manifest_path)
+    completed = {str(item) for item in manifest.get("completed_model_ids", [])}
+    if (
+        manifest.get("forward_simulation_run_id") != run_id
+        or manifest.get("source_end_to_end_run_id") != spec.source_end_to_end_run
+        or manifest.get("resolved_source_cutoff") != snapshot.get("resolved_market_session_cutoff")
+        or not completed.issubset(model_ids)
+    ):
+        raise ValueError("forward_checkpoint_manifest_mismatch")
 
 
 def _stage_ids(repository: RunRepository, root_run_id: str) -> dict[str, str]:
@@ -263,16 +361,27 @@ def run_forward_simulation(
     prepared = prepare_dataset(downloaded.prices, downloaded.symbols, spec.config.intraday_target_threshold, spec.config.lag_depth, spec.config.intraday_down_threshold)
     if prepared.empty or prepared.index.max() < end:
         raise ValueError("insufficient_forward_market_data")
-    checkpoint_path = output / "forward_observations_checkpoint.csv"
-    validate_forward_checkpoint(
-        checkpoint_path, spec, snapshot, run_id=output.parent.name
-    )
-    rows: list[dict[str, Any]] = (
-        pd.read_csv(checkpoint_path).to_dict("records")
-        if checkpoint_path.is_file()
-        else []
-    )
-    completed_models = {str(row["source_model_id"]) for row in rows}
+    checkpoint_path = output / OBSERVATION_CHECKPOINT_FILENAME
+    validate_forward_checkpoint_bundle(output, spec, snapshot, run_id=output.parent.name)
+    rows = _read_checkpoint_rows(checkpoint_path, OBSERVATION_COLUMNS)
+    exclusion_checkpoint_path = output / EXCLUSION_CHECKPOINT_FILENAME
+    exclusions = _read_checkpoint_rows(exclusion_checkpoint_path, EXCLUSION_COLUMNS)
+    completed_models = {str(row["source_model_id"]) for row in rows} | {
+        str(row["source_model_id"]) for row in exclusions
+    }
+    checkpoint_manifest_path = output / CHECKPOINT_MANIFEST_FILENAME
+    if checkpoint_manifest_path.is_file():
+        checkpoint_manifest = _read_json(checkpoint_manifest_path)
+        snapshot_model_ids = {str(item["source_model_id"]) for item in snapshot["models"]}
+        restored_models = {str(item) for item in checkpoint_manifest.get("completed_model_ids", [])}
+        if (
+            checkpoint_manifest.get("forward_simulation_run_id") != output.parent.name
+            or checkpoint_manifest.get("source_end_to_end_run_id") != spec.source_end_to_end_run
+            or checkpoint_manifest.get("resolved_source_cutoff") != cutoff.date().isoformat()
+            or not restored_models.issubset(snapshot_model_ids)
+        ):
+            raise ValueError("forward_checkpoint_manifest_mismatch")
+        completed_models = restored_models
     for model in snapshot["models"]:
         if str(model["source_model_id"]) in completed_models:
             continue
@@ -288,18 +397,47 @@ def run_forward_simulation(
             current = prepare_prediction_row(prepared, as_of_date=previous.max(), target_date=session, lag_depth=int(model["lag_depth"]))
             if any(name not in current or current[name].isna().any() for name in names):
                 continue
+            returns = prepared.loc[session]
+            exclusion_reason, invalid_fields = _target_evaluation_validity(
+                downloaded.prices.loc[session], returns, target
+            )
+            if exclusion_reason is not None:
+                exclusions.append({
+                    "forward_simulation_run_id": output.parent.name,
+                    "source_end_to_end_run_id": spec.source_end_to_end_run,
+                    "source_model_id": model["source_model_id"],
+                    "target": target, "Set": model["set"], "direction": model["direction"],
+                    "session_date": session.date().isoformat(),
+                    "as_of_date": previous.max().date().isoformat(),
+                    "exclusion_reason": exclusion_reason,
+                    "invalid_fields": ", ".join(invalid_fields),
+                })
+                continue
             up_probability = float(predict_probabilities(up, current, names)[0])
             down_probability = float(predict_probabilities(down, current, names)[0])
             signal = up_probability >= float(model["up_threshold"]) and down_probability < float(model["down_threshold"])
-            returns = prepared.loc[session]
-            value = float(returns.get(f"{target}.intraday_return", np.nan))
-            rows.append({"forward_simulation_run_id": output.parent.name, "source_end_to_end_run_id": spec.source_end_to_end_run, "source_model_id": model["source_model_id"], "requested_historical_cutoff": snapshot.get("requested_historical_cutoff"), "resolved_source_cutoff": cutoff.date().isoformat(), "target": target, "Set": model["set"], "direction": model["direction"], "session_date": session.date().isoformat(), "as_of_date": previous.max().date().isoformat(), "prediction_probability": up_probability, "down_probability": down_probability, "decision_threshold": model["up_threshold"], "signal": signal, "outcome": int(returns.get(intraday_target_column(target), 0)), "directional_return": value, "MFE": float(returns.get(mfe_column(target), np.nan)), "MAE": float(returns.get(mae_column(target), np.nan)), "correct_direction": bool(value >= spec.config.intraday_target_threshold), "opposite_movement": bool(value <= -spec.config.intraday_down_threshold)})
-        _write_csv_atomic(pd.DataFrame(rows), checkpoint_path)
-    frame = pd.DataFrame(rows)
+            value = float(returns[intraday_return_column(target)])
+            rows.append({"forward_simulation_run_id": output.parent.name, "source_end_to_end_run_id": spec.source_end_to_end_run, "source_model_id": model["source_model_id"], "requested_historical_cutoff": snapshot.get("requested_historical_cutoff"), "resolved_source_cutoff": cutoff.date().isoformat(), "target": target, "Set": model["set"], "direction": model["direction"], "session_date": session.date().isoformat(), "as_of_date": previous.max().date().isoformat(), "prediction_probability": up_probability, "down_probability": down_probability, "decision_threshold": model["up_threshold"], "signal": signal, "outcome": int(returns[intraday_target_column(target)]), "directional_return": value, "MFE": float(returns[mfe_column(target)]), "MAE": float(returns[mae_column(target)]), "correct_direction": bool(value >= spec.config.intraday_target_threshold), "opposite_movement": bool(value <= -spec.config.intraday_down_threshold)})
+        _write_csv_atomic(pd.DataFrame(rows, columns=OBSERVATION_COLUMNS), checkpoint_path)
+        _write_csv_atomic(pd.DataFrame(exclusions, columns=EXCLUSION_COLUMNS), exclusion_checkpoint_path)
+        completed_models.add(str(model["source_model_id"]))
+        _write_json_atomic({
+            "schema_version": 1, "forward_simulation_run_id": output.parent.name,
+            "source_end_to_end_run_id": spec.source_end_to_end_run,
+            "resolved_source_cutoff": cutoff.date().isoformat(),
+            "completed_model_ids": sorted(completed_models),
+        }, checkpoint_manifest_path)
+    frame = pd.DataFrame(rows, columns=OBSERVATION_COLUMNS)
+    exclusion_frame = pd.DataFrame(exclusions, columns=EXCLUSION_COLUMNS)
     output.mkdir(parents=True, exist_ok=True)
     _write_csv_atomic(frame, output / "forward_observations.csv")
+    _write_csv_atomic(exclusion_frame, output / EXCLUSIONS_FILENAME)
     signals = frame[frame.get("signal", pd.Series(dtype=bool)).astype(bool)] if not frame.empty else frame
     notional_per_signal = 10_000.0
-    summary = {"job_type": "forward_simulation", "source_end_to_end_run_id": spec.source_end_to_end_run, "source_model_count": len(snapshot["models"]), "models_with_signals": int(signals["source_model_id"].nunique()) if not signals.empty else 0, "total_signals": len(signals), "precision": float(signals["correct_direction"].mean()) if not signals.empty else None, "directional_return_mean": float(signals["directional_return"].mean()) if not signals.empty else None, "opposite_movement_frequency": float(signals["opposite_movement"].mean()) if not signals.empty else None, "notional_per_signal": notional_per_signal, "cumulative_profit_loss": float((signals["directional_return"] * notional_per_signal).sum()) if not signals.empty else 0.0, "first_session": None if frame.empty else str(frame["session_date"].min()), "last_session": None if frame.empty else str(frame["session_date"].max()), "sessions": int(frame["session_date"].nunique()) if not frame.empty else 0}
+    unique_issues = exclusion_frame.drop_duplicates(
+        ["target", "session_date", "exclusion_reason", "invalid_fields"]
+    )
+    population = len(frame) + len(exclusion_frame)
+    summary = {"job_type": "forward_simulation", "source_end_to_end_run_id": spec.source_end_to_end_run, "source_model_count": len(snapshot["models"]), "models_with_signals": int(signals["source_model_id"].nunique()) if not signals.empty else 0, "total_signals": len(signals), "evaluated_observations": len(frame), "skipped_observations": len(exclusion_frame), "evaluability_rate": None if population == 0 else len(frame) / population, "unique_data_quality_issues": len(unique_issues), "skipped_missing_target_ohlc": int(exclusion_frame["exclusion_reason"].eq("missing_target_ohlc").sum()), "precision": float(signals["correct_direction"].mean()) if not signals.empty else None, "directional_return_mean": float(signals["directional_return"].mean()) if not signals.empty else None, "opposite_movement_frequency": float(signals["opposite_movement"].mean()) if not signals.empty else None, "notional_per_signal": notional_per_signal, "cumulative_profit_loss": float((signals["directional_return"] * notional_per_signal).sum()) if not signals.empty else 0.0, "first_session": None if frame.empty else str(frame["session_date"].min()), "last_session": None if frame.empty else str(frame["session_date"].max()), "sessions": int(frame["session_date"].nunique()) if not frame.empty else 0}
     (output / "forward_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary

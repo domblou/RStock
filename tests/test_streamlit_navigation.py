@@ -1082,6 +1082,25 @@ def test_forward_detail_offers_recovery_only_through_the_central_diagnosis():
     assert "resume_forward_simulation(run_id)" in controls
 
 
+def test_forward_results_expose_persisted_data_quality_kpis_and_diagnostics():
+    source = APP.read_text(encoding="utf-8")
+    results = source.split("def _render_standard_results", 1)[1].split(
+        "def _render_standard_job_tabs", 1
+    )[0]
+
+    for label in (
+        "Observations évaluées",
+        "Observations exclues",
+        "Taux d’observations évaluables",
+        "Anomalies de données uniques",
+        "evaluability_rate",
+        "Certaines observations n’ont pas pu être évaluées",
+        "forward_exclusions.csv",
+    ):
+        assert label in results
+    assert "head(500)" in results
+
+
 def test_normal_experiment_submission_persists_context_sampling_metadata():
     source = APP.read_text(encoding="utf-8")
     selector = source.split("def _experiment_universe_selector", 1)[1].split(

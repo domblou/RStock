@@ -323,14 +323,14 @@ class RunService:
         )
 
     def _validate_forward_recovery(self, run_id: str) -> None:
-        from .forward_simulation import validate_forward_checkpoint, validate_forward_snapshot
+        from .forward_simulation import validate_forward_checkpoint_bundle, validate_forward_snapshot
 
         spec = self.repository.load_spec(run_id)
         snapshot = validate_forward_snapshot(
             self.repository, spec, require_expected_hash=True
         )
-        validate_forward_checkpoint(
-            self.repository.run_directory(run_id) / "_working" / "forward_observations_checkpoint.csv",
+        validate_forward_checkpoint_bundle(
+            self.repository.run_directory(run_id) / "_working",
             spec, snapshot, run_id=run_id,
         )
 
