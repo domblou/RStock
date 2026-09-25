@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -99,8 +100,9 @@ def test_same_request_reads_cache_without_network_or_parquet_rewrite(tmp_path):
 
     result = service.get_market_data(universe, 10, as_of=date(2024, 1, 4))
 
-    assert len(provider.calls) == 1
-    assert result.events[0].status == "cache_hit"
+    assert len(provider.calls) == 2
+    assert provider.calls[-1] == ("AAPL", date(2024, 1, 3), date(2024, 1, 5))
+    assert result.events[0].status == "unchanged"
     assert path.stat().st_mtime_ns == modified
 
 
@@ -118,14 +120,14 @@ def test_post_close_retry_is_not_blocked_by_a_morning_cache_attempt(tmp_path):
 
     morning = service.get_market_data(universe, 10, as_of=date(2024, 1, 8))
 
-    assert morning.events[0].status == "cache_hit"
-    assert provider.calls == []
+    assert morning.events[0].status == "unchanged"
+    assert provider.calls == [("AAPL", date(2024, 1, 5), date(2024, 1, 6))]
 
     provider.frames["AAPL"] = _prices(["2024-01-05", "2024-01-08"])
     current_time[0] = datetime(2024, 1, 8, 21, 15, tzinfo=timezone.utc)
     after_close = service.get_market_data(universe, 10, as_of=date(2024, 1, 8))
 
-    assert provider.calls == [("AAPL", date(2024, 1, 6), date(2024, 1, 9))]
+    assert provider.calls[-1] == ("AAPL", date(2024, 1, 5), date(2024, 1, 9))
     assert after_close.events[0].status == "updated"
     assert store.read("AAPL").index.max() == pd.Timestamp("2024-01-08")
 
@@ -141,12 +143,124 @@ def test_incremental_request_fetches_after_last_date_and_merges_without_duplicat
 
     result = service.get_market_data(universe, 10, as_of=date(2024, 1, 8))
 
-    assert provider.calls[-1] == ("AAPL", date(2024, 1, 5), date(2024, 1, 9))
+    assert provider.calls[-1] == ("AAPL", date(2024, 1, 3), date(2024, 1, 9))
     assert result.events[0].status == "updated"
     cached = store.read("AAPL")
     assert cached.index.is_unique
     assert cached.index.max() == pd.Timestamp("2024-01-08")
     assert len(cached) == 4
+
+
+def test_up_to_date_cache_revisits_the_last_fourteen_calendar_days(tmp_path):
+    provider = FakeProvider({"AAPL": _prices(["2024-01-01", "2024-01-19"])})
+    service, _ = _service(tmp_path, provider)
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    provider.calls.clear()
+
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    assert provider.calls == [("AAPL", date(2024, 1, 6), date(2024, 1, 20))]
+
+
+def test_recent_missing_close_is_repaired_by_the_recent_refresh(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="rstock.market_cache")
+    partial = _prices(["2024-01-18", "2024-01-19"])
+    partial.loc[pd.Timestamp("2024-01-19"), ["Close", "Adjusted"]] = float("nan")
+    provider = FakeProvider({"AAPL": partial})
+    service, store = _service(tmp_path, provider)
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    provider.frames["AAPL"] = _prices(["2024-01-18", "2024-01-19"], base=20.0)
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    cached = store.read("AAPL")
+    assert cached.at[pd.Timestamp("2024-01-19"), "Close"] == 21.5
+    assert "recent_rows_refreshed=" in caplog.text
+    assert "invalid_rows_detected=1" in caplog.text
+    assert "invalid_rows_repaired=1" in caplog.text
+
+
+def test_old_missing_close_is_explicitly_repaired_outside_recent_window(tmp_path):
+    partial = _prices(["2024-01-01", "2024-01-19"])
+    partial.loc[pd.Timestamp("2024-01-01"), ["Close", "Adjusted"]] = float("nan")
+    provider = FakeProvider({"AAPL": partial})
+    service, store = _service(tmp_path, provider)
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    provider.calls.clear()
+
+    provider.frames["AAPL"] = _prices(["2024-01-01", "2024-01-19"], base=20.0)
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    assert provider.calls == [
+        ("AAPL", date(2024, 1, 1), date(2024, 1, 2)),
+        ("AAPL", date(2024, 1, 6), date(2024, 1, 20)),
+    ]
+    assert store.read("AAPL").at[pd.Timestamp("2024-01-01"), "Close"] == 20.5
+
+
+def test_valid_cached_close_survives_incomplete_provider_refresh(tmp_path):
+    provider = FakeProvider({"AAPL": _prices(["2024-01-18", "2024-01-19"])})
+    service, store = _service(tmp_path, provider)
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    before = store.read("AAPL").loc[pd.Timestamp("2024-01-19")].copy()
+
+    incomplete = _prices(["2024-01-18", "2024-01-19"], base=20.0)
+    incomplete.loc[pd.Timestamp("2024-01-19"), ["Close", "Adjusted"]] = float("nan")
+    provider.frames["AAPL"] = incomplete
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    pd.testing.assert_series_equal(
+        store.read("AAPL").loc[pd.Timestamp("2024-01-19")], before
+    )
+
+
+def test_adjacent_invalid_dates_share_one_historical_repair_request(tmp_path):
+    partial = _prices(["2024-01-01", "2024-01-02", "2024-01-19"])
+    partial.loc[pd.to_datetime(["2024-01-01", "2024-01-02"]), "Close"] = float("nan")
+    provider = FakeProvider({"AAPL": partial})
+    service, store = _service(tmp_path, provider)
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    provider.calls.clear()
+
+    provider.frames["AAPL"] = _prices(["2024-01-01", "2024-01-02", "2024-01-19"], base=20.0)
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    assert provider.calls == [
+        ("AAPL", date(2024, 1, 1), date(2024, 1, 3)),
+        ("AAPL", date(2024, 1, 6), date(2024, 1, 20)),
+    ]
+    cached = store.read("AAPL")
+    assert cached.index.is_unique and cached.index.is_monotonic_increasing
+    assert cached.loc[pd.to_datetime(["2024-01-01", "2024-01-02"]), "Close"].notna().all()
+
+
+def test_unresolved_missing_close_is_retained_and_reported(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="rstock.market_cache")
+    partial = _prices(["2024-01-01", "2024-01-19"])
+    partial.loc[pd.Timestamp("2024-01-01"), ["Close", "Adjusted"]] = float("nan")
+    provider = FakeProvider({"AAPL": partial})
+    service, store = _service(tmp_path, provider)
+    universe = _universe("AAPL")
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    before = store.read("AAPL").loc[pd.Timestamp("2024-01-01")].copy()
+    provider.calls.clear()
+
+    still_partial = _prices(["2024-01-01", "2024-01-19"], base=20.0)
+    still_partial.loc[pd.Timestamp("2024-01-01"), ["Close", "Adjusted"]] = float("nan")
+    provider.frames["AAPL"] = still_partial
+
+    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+
+    pd.testing.assert_series_equal(
+        store.read("AAPL").loc[pd.Timestamp("2024-01-01")], before
+    )
+    assert "invalid_rows_detected=1" in caplog.text
+    assert "invalid_rows_still_missing=1" in caplog.text
 
 
 def test_longer_requested_history_backfills_before_cached_first_date(tmp_path):
@@ -159,8 +273,7 @@ def test_longer_requested_history_backfills_before_cached_first_date(tmp_path):
 
     result = service.get_market_data(universe, 10, as_of=date(2024, 1, 10))
 
-    assert provider.calls[-2] == ("AAPL", date(2023, 12, 31), date(2024, 1, 8))
-    assert provider.calls[-1] == ("AAPL", date(2024, 1, 9), date(2024, 1, 11))
+    assert provider.calls[-1] == ("AAPL", date(2023, 12, 31), date(2024, 1, 11))
     assert result.events[0].status == "updated"
     assert store.read("AAPL").index.min() == pd.Timestamp("2024-01-02")
 

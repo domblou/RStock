@@ -29,6 +29,7 @@ from .symbols import validate_symbol_universe
 
 LOGGER = logging.getLogger(__name__)
 CACHE_SCHEMA_VERSION = 1
+RECENT_REPAIR_WINDOW_DAYS = 14
 WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
     "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
@@ -85,6 +86,66 @@ def _frames_equal(left: pd.DataFrame, right: pd.DataFrame) -> bool:
     except AssertionError:
         return False
     return True
+
+
+def _coalesce_date_ranges(
+    ranges: list[tuple[date, date]],
+) -> list[tuple[date, date]]:
+    """Combine overlapping or adjacent half-open date ranges."""
+
+    if not ranges:
+        return []
+    coalesced: list[tuple[date, date]] = []
+    for start, end in sorted(ranges):
+        if start >= end:
+            continue
+        if coalesced and start <= coalesced[-1][1]:
+            previous_start, previous_end = coalesced[-1]
+            coalesced[-1] = (previous_start, max(previous_end, end))
+        else:
+            coalesced.append((start, end))
+    return coalesced
+
+
+def _invalid_close_dates(prices: pd.DataFrame) -> list[date]:
+    """Return persisted sessions whose Close is absent or non-numeric."""
+
+    if "Close" not in prices:
+        return []
+    close = pd.to_numeric(prices["Close"], errors="coerce")
+    return [timestamp.date() for timestamp in prices.index[close.isna()]]
+
+
+def _merge_prices(
+    existing: pd.DataFrame | None, additions: list[pd.DataFrame]
+) -> pd.DataFrame | None:
+    """Merge provider rows without allowing an incomplete refresh to erase Close."""
+
+    incoming = (
+        pd.concat(additions).pipe(_normalise_prices)
+        if additions
+        else None
+    )
+    if existing is None:
+        return incoming
+    if incoming is None or incoming.empty:
+        return existing
+
+    existing = _normalise_prices(existing)
+    result = pd.concat([existing, incoming]).pipe(_normalise_prices)
+    shared_dates = existing.index.intersection(incoming.index)
+    if shared_dates.empty:
+        return result
+
+    incoming_close = pd.to_numeric(incoming.loc[shared_dates, "Close"], errors="coerce")
+    # A response without Close is not an improvement, even when the cached row
+    # is itself incomplete. Retaining it makes a failed repair non-destructive.
+    retain_existing = incoming_close.isna()
+    if retain_existing.any():
+        result.loc[shared_dates[retain_existing], existing.columns] = existing.loc[
+            shared_dates[retain_existing], existing.columns
+        ]
+    return _normalise_prices(result)
 
 
 class ParquetMarketDataStore:
@@ -237,30 +298,6 @@ class MarketDataService:
                 str(previous_metadata["coverage_start"])
             )
 
-        if existing is not None and not existing.empty and not force:
-            coverage_starts_early_enough = (
-                previous_coverage_start is not None
-                and previous_coverage_start <= requested_start
-            )
-            cache_contains_latest_completed_session = (
-                existing.index.max().date() >= available_as_of
-            )
-            if (
-                coverage_starts_early_enough
-                and cache_contains_latest_completed_session
-            ):
-                selected = existing.loc[
-                    (existing.index.date >= requested_start)
-                    & (existing.index.date <= as_of)
-                ]
-                return _SymbolResult(
-                    symbol,
-                    selected,
-                    CacheEvent(symbol, "cache_hit", len(selected), "read from cache"),
-                    previous_metadata,
-                    False,
-                )
-
         ranges: list[tuple[date, date]] = []
         if force or existing is None or existing.empty:
             ranges.append((requested_start, requested_end))
@@ -277,6 +314,14 @@ class MarketDataService:
                 ranges.append((requested_start, first_date))
             if last_date < available_as_of:
                 ranges.append((last_date + timedelta(days=1), requested_end))
+            recent_start = max(
+                first_date,
+                available_as_of - timedelta(days=RECENT_REPAIR_WINDOW_DAYS - 1),
+            )
+            ranges.append((recent_start, requested_end))
+            for invalid_date in _invalid_close_dates(existing):
+                ranges.append((invalid_date, invalid_date + timedelta(days=1)))
+        ranges = _coalesce_date_ranges(ranges)
 
         try:
             additions = [
@@ -301,14 +346,35 @@ class MarketDataService:
             return _SymbolResult(symbol, None, event, None, True)
 
         non_empty = [_normalise_prices(frame) for frame in additions if not frame.empty]
-        if force:
-            merged = pd.concat(non_empty).pipe(_normalise_prices) if non_empty else None
-        else:
-            frames = ([existing] if existing is not None else []) + non_empty
-            merged = pd.concat(frames).pipe(_normalise_prices) if frames else None
+        invalid_rows_detected = (
+            0 if existing is None else len(_invalid_close_dates(existing))
+        )
+        recent_start = available_as_of - timedelta(days=RECENT_REPAIR_WINDOW_DAYS - 1)
+        recent_rows_refreshed = sum(
+            int((frame.index.date >= recent_start).sum()) for frame in non_empty
+        )
+        merged = _merge_prices(None if force else existing, non_empty)
         if merged is None or merged.empty:
             event = CacheEvent(symbol, "failed", 0, "no market data available")
             return _SymbolResult(symbol, existing, event, previous_metadata, True)
+
+        invalid_rows_repaired = 0
+        invalid_rows_still_missing = 0
+        if invalid_rows_detected:
+            before = set(_invalid_close_dates(existing)) if existing is not None else set()
+            after = set(_invalid_close_dates(merged))
+            invalid_rows_repaired = len(before - after)
+            invalid_rows_still_missing = len(before & after)
+        LOGGER.info(
+            "market-cache %s repair telemetry: recent_rows_refreshed=%d "
+            "invalid_rows_detected=%d invalid_rows_repaired=%d "
+            "invalid_rows_still_missing=%d",
+            symbol,
+            recent_rows_refreshed,
+            invalid_rows_detected,
+            invalid_rows_repaired,
+            invalid_rows_still_missing,
+        )
 
         changed = existing is None or not _frames_equal(existing, merged)
         if changed:
@@ -326,10 +392,20 @@ class MarketDataService:
             status, message = "refreshed", "cache fully refreshed"
         elif existing is None:
             status, message = "downloaded", "full requested history downloaded"
+        elif invalid_rows_repaired:
+            status, message = (
+                "updated",
+                f"repaired {invalid_rows_repaired} invalid Close rows; recent window refreshed",
+            )
+        elif invalid_rows_detected:
+            status, message = (
+                "updated" if changed else "unchanged",
+                f"recent window refreshed; {invalid_rows_still_missing} invalid Close rows remain",
+            )
         elif changed:
-            status, message = "updated", "missing market dates appended"
+            status, message = "updated", "recent window refreshed or missing market dates appended"
         else:
-            status, message = "unchanged", "provider returned no new market data"
+            status, message = "unchanged", "recent window refreshed; no market data changed"
         return _SymbolResult(
             symbol,
             selected,

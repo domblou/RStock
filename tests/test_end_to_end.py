@@ -1117,6 +1117,12 @@ def test_end_to_end_auto_forward_returns_and_dispatches_the_reserved_child(
     assert forward["status"] == "launched"
     assert backend.launches == [child_id]
     assert repository.status(child_id)["launcher_pid"] == 7654
+    assert repository.status(child_id)["dispatch_state"] == "launched"
+    assert repository.status(child_id)["dispatch_attempt_count"] == 1
+    child_log = "\n".join(repository.log_tail(child_id, lines=20))
+    assert "Forward created pending by End-to-End" in child_log
+    assert "Forward initial dispatch requested" in child_log
+    assert "Forward initial dispatch launched" in child_log
     forward_children = [
         item
         for item in repository.list_children(run_id)

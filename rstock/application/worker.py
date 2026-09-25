@@ -23,7 +23,7 @@ from .domain import JobStatus, JobType
 from .orchestration_runtime import child_executor_context
 from .processes import process_alive
 from .repository import RunRepository
-from .runner import LocalProcessBackend, ProgressReporter
+from .runner import LocalProcessBackend, ProgressReporter, RunService
 from .workflows import WorkflowRegistry
 
 
@@ -237,6 +237,20 @@ class SlotLease:
     def _queue_path(self) -> Path:
         return self._queue_root / f"{self.run_id}.json"
 
+    @property
+    def _queue_sequence_path(self) -> Path:
+        return self._queue_root / "_sequence.json"
+
+    def _next_queue_sequence_locked(self) -> int:
+        values, state = _read_owner(self._queue_sequence_path)
+        try:
+            current = int(values["value"]) if state == "valid" else 0
+        except (KeyError, TypeError, ValueError):
+            current = 0
+        sequence = current + 1
+        _atomic_owner_write(self._queue_sequence_path, {"value": sequence})
+        return sequence
+
     def _ensure_queue_ticket_locked(self) -> dict[str, object]:
         """Create or adopt this run's durable FIFO position under the queue mutex."""
 
@@ -244,19 +258,24 @@ class SlotLease:
         existing, state = _read_owner(self._queue_path)
         queued_at = None
         queue_id = None
+        queue_sequence = None
         if state == "valid" and existing.get("run_id") == self.run_id:
             queued_at = existing.get("queued_at")
             queue_id = existing.get("queue_id")
+            queue_sequence = existing.get("queue_sequence")
         if not queued_at:
             queued_at = datetime.now(timezone.utc).isoformat()
         if not queue_id:
             queue_id = uuid.uuid4().hex
+        if queue_sequence is None:
+            queue_sequence = self._next_queue_sequence_locked()
         if self.queue_token is None:
             self.queue_token = uuid.uuid4().hex
         ticket: dict[str, object] = {
             "run_id": self.run_id,
             "queued_at": str(queued_at),
             "queue_id": str(queue_id),
+            "queue_sequence": int(queue_sequence),
             "waiter_pid": os.getpid(),
             "waiter_token": self.queue_token,
         }
@@ -313,6 +332,8 @@ class SlotLease:
     def _ordered_waiters_locked(self) -> list[dict[str, object]]:
         waiters: list[dict[str, object]] = []
         for path in self._queue_root.glob("*.json"):
+            if path == self._queue_sequence_path:
+                continue
             ticket, state = _read_owner(path)
             if state != "valid" or not self._ticket_is_eligible_locked(path, ticket):
                 if state in {"missing", "invalid"}:
@@ -323,6 +344,7 @@ class SlotLease:
             waiters,
             key=lambda item: (
                 str(item["queued_at"]),
+                int(item.get("queue_sequence") or 0),
                 str(item.get("queue_id") or ""),
                 str(item["run_id"]),
             ),
@@ -426,7 +448,7 @@ class SlotLease:
                 )
                 with _try_file_mutex(self._queue_guard) as queue_locked:
                     if queue_locked:
-                        ticket = self._ensure_queue_ticket_locked()
+                        self._ensure_queue_ticket_locked()
                         waiters = self._ordered_waiters_locked()
                         position = next(
                             (
@@ -762,17 +784,22 @@ def execute_run(
         if isinstance(forward, dict) and forward.get("status") == "pending":
             child_run_id = str(forward["child_run_id"])
             try:
-                pid = LocalProcessBackend().launch(
-                    repository.root, child_run_id, max_concurrent_jobs
-                )
+                dispatch = RunService(
+                    repository,
+                    backend=LocalProcessBackend(),
+                    max_concurrent_heavy_jobs=max_concurrent_jobs,
+                ).dispatch_pending_forward(child_run_id)
                 child_status = repository.status(child_run_id)
-                child_status["launcher_pid"] = pid
-                repository.write_json(child_run_id, "status.json", child_status)
-                forward["status"] = "launched"
+                if dispatch.created or child_status.get("dispatch_state") == "launched":
+                    forward["status"] = "launched"
+                else:
+                    forward["status"] = "dispatch_active"
             except Exception as error:
-                repository.append_log(child_run_id, f"Worker launch failed: {error}")
-                repository.transition(child_run_id, JobStatus.FAILED, error=str(error))
-                forward.update(status="failed", error=str(error))
+                repository.append_log(
+                    child_run_id,
+                    f"Initial Forward dispatch deferred for automatic recovery: {error}",
+                )
+                forward.update(status="pending", dispatch_error=str(error))
             repository.write_json(run_id, "summary.json", summary)
             pipeline_summary_path = results / "pipeline_summary.json"
             if pipeline_summary_path.is_file():

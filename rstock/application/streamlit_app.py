@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import html
 import json
+import logging
+import time
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -13,6 +15,8 @@ from typing import Any, Mapping, Sequence
 import altair as alt
 import pandas as pd
 import streamlit as st
+
+LOGGER = logging.getLogger(__name__)
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
@@ -500,10 +504,29 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
 
 
 def _service() -> ExperimentService:
-    return ExperimentService.local(
+    service = ExperimentService.local(
         st.session_state.lab_config.project_root,
         max_concurrent_heavy_jobs=st.session_state.max_concurrent_heavy_jobs,
     )
+    project_key = str(st.session_state.lab_config.project_root)
+    recovery_key = "_forward-dispatch-recovery-scan"
+    previous = st.session_state.get(recovery_key)
+    now = time.monotonic()
+    if (
+        not isinstance(previous, tuple)
+        or len(previous) != 2
+        or previous[0] != project_key
+        or now < float(previous[1])
+        or now - float(previous[1]) >= 15.0
+    ):
+        # Persist the throttle before scanning so nested UI rendering cannot
+        # initiate a second scan in the same Streamlit rerun.
+        st.session_state[recovery_key] = (project_key, now)
+        try:
+            service.recover_pending_forward_dispatches()
+        except (OSError, TimeoutError) as error:
+            LOGGER.warning("Automatic Forward dispatch recovery scan failed: %s", error)
+    return service
 
 
 def _duration(value: float | None) -> str:

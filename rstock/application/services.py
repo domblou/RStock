@@ -239,6 +239,9 @@ class ExperimentService:
     def resume_forward_simulation(self, run_id: str) -> SubmissionResult:
         return self.run_service.resume_forward_simulation(run_id)
 
+    def recover_pending_forward_dispatches(self) -> dict[str, object]:
+        return self.run_service.recover_pending_forward_dispatches()
+
     def restart(self, run_id: str) -> SubmissionResult:
         return self.run_service.restart(run_id)
 

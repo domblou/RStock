@@ -1236,6 +1236,19 @@ def run_end_to_end(
                 relation_key="forward_simulation", relation_type="forward_simulation",
                 stage_key="forward_simulation", visible_in_history=True,
             ))
+            forward_status = repository.status(forward_id)
+            forward_status.update(
+                dispatch_state="created",
+                dispatch_requested_at=None,
+                dispatch_launched_at=None,
+                dispatch_attempt_count=0,
+                dispatch_last_error=None,
+            )
+            repository.write_json(forward_id, "status.json", forward_status)
+            repository.append_log(
+                forward_id,
+                f"Forward created pending by End-to-End {root_run_id}",
+            )
             forward_child = {"child_run_id": forward_id, "status": "pending"}
         except Exception as error:
             forward_child = {"status": "not_started", "error": str(error)}

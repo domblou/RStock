@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import errno
+import logging
+import os
 import subprocess
 import sys
 import threading
@@ -11,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from rstock.progress import ProgressEvent
 
@@ -32,6 +35,47 @@ ACTIVE_STATUSES = {JobStatus.PENDING.value, JobStatus.RUNNING.value}
 INTERRUPTION_GRACE_SECONDS = 15.0
 INTERRUPTION_HEARTBEAT_STALE_SECONDS = 30.0
 INTERRUPTION_CONFIRMATION_SECONDS = 2.0
+LOGGER = logging.getLogger(__name__)
+
+
+@contextmanager
+def _try_submission_mutex(path: Path) -> Iterator[bool]:
+    """Try a crash-safe local interprocess mutex used by dispatch operations."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+        yield acquired
+    finally:
+        if acquired:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,20 +208,16 @@ class RunService:
     @contextmanager
     def _submission_lock(self):
         self.repository.root.mkdir(parents=True, exist_ok=True)
-        lock = self.repository.root / ".submission.lock"
+        lock = self.repository.root / ".submission.guard"
         deadline = time.monotonic() + 5.0
         while True:
-            try:
-                lock.mkdir()
-                break
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Could not acquire run submission lock")
-                time.sleep(0.05)
-        try:
-            yield
-        finally:
-            lock.rmdir()
+            with _try_submission_mutex(lock) as acquired:
+                if acquired:
+                    yield
+                    return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Could not acquire run submission lock")
+            time.sleep(0.05)
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
         with self._submission_lock():
@@ -326,6 +366,13 @@ class RunService:
         from .forward_simulation import validate_forward_checkpoint_bundle, validate_forward_snapshot
 
         spec = self.repository.load_spec(run_id)
+        if spec.job_type is not JobType.FORWARD_SIMULATION:
+            raise ValueError("forward_recovery_requires_forward_simulation")
+        if (
+            self.repository.status(str(spec.source_end_to_end_run)).get("status")
+            != JobStatus.COMPLETED.value
+        ):
+            raise ValueError("forward_source_end_to_end_not_completed")
         snapshot = validate_forward_snapshot(
             self.repository, spec, require_expected_hash=True
         )
@@ -334,31 +381,164 @@ class RunService:
             spec, snapshot, run_id=run_id,
         )
 
+    def _dispatch_pending_forward_locked(
+        self,
+        run_id: str,
+        *,
+        recovery: bool,
+    ) -> SubmissionResult:
+        """Dispatch one validated pending Forward while the submission mutex is held."""
+
+        diagnosis = self.forward_recovery_diagnosis(run_id)
+        if diagnosis.state == "pending_active":
+            self.repository.append_log(
+                run_id,
+                "Forward dispatch ignored: worker, RunLease or dispatch already active",
+            )
+            return SubmissionResult(run_id, False)
+        if diagnosis.state != "pending_orphaned":
+            LOGGER.info(
+                "Forward dispatch refused run_id=%s state=%s",
+                run_id,
+                diagnosis.state,
+            )
+            raise ValueError(diagnosis.message)
+        pending_status = self.repository.status(run_id)
+        if (
+            pending_status.get("cancellation_requested")
+            or self.repository.cancellation_requested(run_id)
+        ):
+            raise ValueError("forward_dispatch_cancelled")
+        if recovery:
+            self._validate_forward_recovery(run_id)
+        status = pending_status
+        now = utc_now()
+        status.update(
+            dispatch_state="requested",
+            dispatch_requested_at=now,
+            dispatch_attempt_count=int(status.get("dispatch_attempt_count") or 0) + 1,
+            dispatch_last_error=None,
+        )
+        if recovery:
+            status["automatic_recovery_requested_at"] = now
+            status["resume_requested"] = True
+        self.repository.write_json(run_id, "status.json", status)
+        self.repository.append_log(
+            run_id,
+            "Forward automatic recovery dispatch requested"
+            if recovery
+            else "Forward initial dispatch requested",
+        )
+        try:
+            pid = self.backend.launch(
+                self.repository.root, run_id, self.max_concurrent_heavy_jobs
+            )
+        except Exception as error:
+            latest = self.repository.status(run_id)
+            if latest.get("status") == JobStatus.PENDING.value:
+                latest.update(
+                    dispatch_state="launch_failed",
+                    dispatch_last_error=str(error),
+                )
+                self.repository.write_json(run_id, "status.json", latest)
+            self.repository.append_log(run_id, f"Forward worker launch failed: {error}")
+            raise
+        latest = self.repository.status(run_id)
+        latest.update(
+            launcher_pid=pid,
+            dispatch_state="launched",
+            dispatch_launched_at=utc_now(),
+            dispatch_last_error=None,
+        )
+        self.repository.write_json(run_id, "status.json", latest)
+        self.repository.append_log(
+            run_id,
+            f"Forward {'automatic recovery' if recovery else 'initial'} dispatch launched pid={pid}",
+        )
+        return SubmissionResult(run_id, True)
+
+    def dispatch_pending_forward(self, run_id: str) -> SubmissionResult:
+        """Request the initial dispatch of a newly persisted Forward child."""
+
+        with self._submission_lock():
+            return self._dispatch_pending_forward_locked(run_id, recovery=False)
+
+    def recover_pending_forward_dispatches(self) -> dict[str, object]:
+        """Recover every valid orphaned pending Forward in persistent FIFO order."""
+
+        report: dict[str, object] = {
+            "inspected": 0,
+            "dispatched": [],
+            "active": [],
+            "invalid": {},
+            "errors": {},
+        }
+        with self._submission_lock():
+            candidates = sorted(
+                (
+                    status
+                    for status in self.repository.list_runs()
+                    if status.get("job_type") == JobType.FORWARD_SIMULATION.value
+                    and status.get("status") == JobStatus.PENDING.value
+                ),
+                key=lambda status: (
+                    str(status.get("created_at") or ""),
+                    str(status.get("run_id") or ""),
+                ),
+            )
+            for status in candidates:
+                run_id = str(status["run_id"])
+                report["inspected"] = int(report["inspected"]) + 1
+                diagnosis = self.forward_recovery_diagnosis(run_id)
+                if diagnosis.state == "pending_active":
+                    report["active"].append(run_id)
+                    LOGGER.info(
+                        "Forward automatic recovery ignored active run_id=%s",
+                        run_id,
+                    )
+                    continue
+                if diagnosis.state != "pending_orphaned":
+                    LOGGER.info(
+                        "Forward automatic recovery refused run_id=%s state=%s",
+                        run_id,
+                        diagnosis.state,
+                    )
+                    continue
+                self.repository.append_log(
+                    run_id,
+                    "Forward pending without active worker detected; automatic recovery triggered",
+                )
+                try:
+                    result = self._dispatch_pending_forward_locked(
+                        run_id, recovery=True
+                    )
+                except ValueError as error:
+                    report["invalid"][run_id] = str(error)
+                    self.repository.append_log(
+                        run_id,
+                        f"Forward automatic recovery ignored: invalid or incomplete ({error})",
+                    )
+                    continue
+                except Exception as error:
+                    report["errors"][run_id] = str(error)
+                    self.repository.append_log(
+                        run_id,
+                        f"Forward automatic recovery dispatch failed; retry remains pending ({error})",
+                    )
+                    continue
+                if result.created:
+                    report["dispatched"].append(run_id)
+        return report
+
     def recover_forward_simulation(self, run_id: str) -> SubmissionResult:
         """Dispatch the exact historical Forward run only when it is safe."""
 
         with self._submission_lock():
             diagnosis = self.forward_recovery_diagnosis(run_id)
             if diagnosis.state != "pending_orphaned":
-                if diagnosis.recoverable:
-                    # This branch is intentionally unreachable for terminals:
-                    # resume() below owns their transition under its own lock.
-                    raise RuntimeError("Utilisez la reprise terminale.")
                 raise ValueError(diagnosis.message)
-            self._validate_forward_recovery(run_id)
-            try:
-                pid = self.backend.launch(
-                    self.repository.root, run_id, self.max_concurrent_heavy_jobs
-                )
-                status = self.repository.status(run_id)
-                status["launcher_pid"] = pid
-                status["resume_requested"] = True
-                self.repository.write_json(run_id, "status.json", status)
-            except Exception as error:
-                self.repository.append_log(run_id, f"Worker recovery launch failed: {error}")
-                self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
-                raise
-            return SubmissionResult(run_id, False)
+            result = self._dispatch_pending_forward_locked(run_id, recovery=True)
+            return SubmissionResult(result.run_id, False)
 
     def resume_forward_simulation(self, run_id: str) -> SubmissionResult:
         """Validate the immutable Forward inputs, then reuse generic resume."""
