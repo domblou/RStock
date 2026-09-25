@@ -1,0 +1,49 @@
+{
+  "detail_read_seconds": 0.012257099966518581,
+  "generated_at": "2026-09-25T01:21:30.138700+00:00",
+  "master_read_seconds": 0.02627200004644692,
+  "master_rows": 35,
+  "model_recalculation_long_seconds": 0.07898929994553328,
+  "model_recalculation_small_seconds": 0.23702460003551096,
+  "notes": "Synthetic transformations only; no SLA imposed.",
+  "synthetic_rebuild_30_models": {
+    "models": 30,
+    "peak_memory_bytes": 1179243,
+    "seconds_per_model": 6.2478586866675565,
+    "total_seconds": 187.4357606000267
+  },
+  "volumes": {
+    "150": {
+      "column_selection_seconds": 0.004386699991300702,
+      "filter_search_seconds": 0.002237900043837726,
+      "matched": 33,
+      "pagination_100_seconds": 0.00025889999233186245,
+      "pagination_50_seconds": 0.00028689997270703316,
+      "peak_memory_bytes": 109705
+    },
+    "30": {
+      "column_selection_seconds": 0.004259699955582619,
+      "filter_search_seconds": 0.0024835000513121486,
+      "matched": 11,
+      "pagination_100_seconds": 0.00028769997879862785,
+      "pagination_50_seconds": 0.0003097999142482877,
+      "peak_memory_bytes": 95692
+    },
+    "500": {
+      "column_selection_seconds": 0.007065400015562773,
+      "filter_search_seconds": 0.003023300087079406,
+      "matched": 110,
+      "pagination_100_seconds": 0.0002839000662788749,
+      "pagination_50_seconds": 0.0003132999408990145,
+      "peak_memory_bytes": 201977
+    },
+    "5000": {
+      "column_selection_seconds": 0.03848220000509173,
+      "filter_search_seconds": 0.0020800000056624413,
+      "matched": 1100,
+      "pagination_100_seconds": 0.0002867999719455838,
+      "pagination_50_seconds": 0.00031919998582452536,
+      "peak_memory_bytes": 1388265
+    }
+  }
+}

@@ -951,6 +951,29 @@ def test_failed_walk_forward_can_resume_same_run_only_once(tmp_path):
         service.resume(run_id)
 
 
+def test_failed_operational_run_can_resume_under_the_same_run_id(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(tmp_path, job_type=JobType.OPERATIONAL_RUN))
+
+    def fail(spec, output, progress, cancellation):
+        raise RuntimeError("boom")
+
+    execute_run(
+        repository,
+        run_id,
+        1,
+        registry=WorkflowRegistry({JobType.OPERATIONAL_RUN: fail}),
+    )
+    backend = FakeBackend()
+
+    resumed = RunService(repository, backend=backend).resume(run_id)
+
+    assert resumed.run_id == run_id
+    assert resumed.created is False
+    assert repository.status(run_id)["status"] == "pending"
+    assert backend.launches[0][1] == run_id
+
+
 def test_resume_keeps_the_persisted_walk_forward_window_geometry(tmp_path):
     repository = RunRepository(tmp_path / "runs")
     run_id = repository.create(

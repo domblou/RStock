@@ -216,6 +216,17 @@ class ExperimentService:
     ) -> SubmissionResult:
         return self.run_service.start_qualification_holdout_diagnostic(forced_run_id)
 
+    def start_quality_rebuild(self) -> SubmissionResult:
+        """Explicit metric rebuild; it never reconciles operational CSV history."""
+        project_root = self.run_service.repository.root.parent
+        symbols = OperationalUniverseService(ProductionRepository(project_root)).current().symbols
+        return self.submit(default_experiment_spec(
+            JobType.PRODUCTION_QUALITY_REBUILD, symbols, project_root=project_root
+        ))
+
+    def resume_quality_rebuild(self, run_id: str) -> SubmissionResult:
+        return self.run_service.resume(run_id)
+
     def cancel(self, run_id: str) -> dict[str, object]:
         return self.run_service.cancel(run_id)
 

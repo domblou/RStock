@@ -216,6 +216,7 @@ Une fois une configuration choisie, RStock devrait pouvoir faire :
 ### 5. Entraînement complet
 
 Tu demandes :
+Tu demandes :
 
 **Entraîner les modèles de production**
 

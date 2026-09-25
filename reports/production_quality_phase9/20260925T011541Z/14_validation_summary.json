@@ -1,0 +1,29 @@
+{
+  "anomalies": [
+    {
+      "cause": "timezone-aware as_of rejected by exchange_calendars",
+      "rollback": "verified exact",
+      "run_id": "20260925T011324_e6666b589b",
+      "status": "failed"
+    },
+    {
+      "cause": "timezone-aware promotion timestamp rejected by exchange_calendars",
+      "rollback": "verified exact",
+      "run_id": "20260925T011457_af0ed9afbd",
+      "status": "failed"
+    }
+  ],
+  "correction": "Normalize persisted calendar dates to timezone-naive UTC dates; no scientific formula changed.",
+  "dirty_models": 0,
+  "generated_at": "2026-09-25T01:22:00+00:00",
+  "manifest_status": "ready",
+  "manual_samples": "13_manual_samples.json",
+  "master_rows": 35,
+  "operational_source_hashes_unchanged": true,
+  "tests": {
+    "git_diff_check": "passed",
+    "pytest_targeted": 281,
+    "python_compile": "passed",
+    "status": "passed"
+  }
+}

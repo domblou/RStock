@@ -1,0 +1,51 @@
+{
+  "grid_columns": [
+    "model_id",
+    "Cible",
+    "Prédicteurs",
+    "Statut",
+    "Univers",
+    "Job source",
+    "Top-N",
+    "Promotion",
+    "Signaux",
+    "Rendement / trade",
+    "Taux gagnant",
+    "P&L cumulé ($)",
+    "Drawdown ($)",
+    "Santé",
+    "Dernier signal",
+    "Tendance 63"
+  ],
+  "grid_source": "production/quality/snapshots/models.parquet",
+  "health_values": [
+    "Données insuffisantes"
+  ],
+  "kpis_126": {
+    "active_models": 30,
+    "data_insufficient": 35,
+    "mean_return": -0.0024921386965438795,
+    "pnl": -1071.6196395138682,
+    "signals": 43,
+    "win_rate": 0.3953488372093023
+  },
+  "kpis_20": {
+    "active_models": 30,
+    "data_insufficient": 35,
+    "mean_return": -0.0024921386965438795,
+    "pnl": -1071.6196395138682,
+    "signals": 43,
+    "win_rate": 0.3953488372093023
+  },
+  "kpis_63": {
+    "active_models": 30,
+    "data_insufficient": 35,
+    "mean_return": -0.0024921386965438795,
+    "pnl": -1071.6196395138682,
+    "signals": 43,
+    "win_rate": 0.3953488372093023
+  },
+  "master_rows": 35,
+  "scientific_recalculation": false,
+  "search_target_rows": 2
+}

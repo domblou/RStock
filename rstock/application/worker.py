@@ -78,8 +78,11 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
     JobType.DAILY_SCREENING: [("screening", 95), ("publishing", 5)],
     JobType.REALIZED_VALIDATION: [("realized_validation", 95), ("publishing", 5)],
     JobType.OPERATIONAL_RUN: [
-        ("market_update", 45), ("daily_prediction", 30), ("screening", 10),
-        ("realized_validation", 10), ("publishing", 5),
+        ("market_update", 40), ("daily_prediction", 28), ("screening", 10),
+        ("realized_validation", 10), ("production_quality", 7), ("publishing", 5),
+    ],
+    JobType.PRODUCTION_QUALITY_REBUILD: [
+        ("production_quality_rebuild", 98), ("publishing", 2),
     ],
     JobType.END_TO_END: [
         ("walk_forward", 22.5),

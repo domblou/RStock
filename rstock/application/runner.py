@@ -425,6 +425,7 @@ class RunService:
                 JobType.FORWARD_SIMULATION,
                 JobType.FORCED_CANDIDATE_VALIDATION,
                 JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC,
+                JobType.OPERATIONAL_RUN,
             }
             if spec.job_type not in resumable_types:
                 raise ValueError(

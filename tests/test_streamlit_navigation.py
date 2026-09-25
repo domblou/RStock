@@ -19,6 +19,11 @@ def test_laboratory_uses_native_top_navigation_without_sidebar_radio():
 
     assert "st.sidebar.radio" not in source
     assert 'st.navigation(_primary_pages(), position="top")' in source
+    assert 'div[data-testid="stMainBlockContainer"]' in source
+    assert "padding-top: 2rem !important;" in source
+    assert source.rindex("_configure_top_navigation_spacing()") < source.index(
+        'selected_page = st.navigation(_primary_pages(), position="top")'
+    )
     assert "selected_page.run()" in source
 
 
@@ -472,18 +477,80 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
     assert 'selection_mode="single-row"' in models_page
     assert 'key="models-grid"' in models_page
     assert '"Statut"' in models_page
-    assert '"Cible"' in models_page
-    assert 'filter_models' in models_page
+    assert 'load_models_master' in models_page
+    assert 'models_grid' in models_page
+    assert 'global_quality_kpis' in models_page
+    assert 'filter_quality_models' in models_page
     assert 'models-status-filter' in models_page
-    assert 'models-target-filter' in models_page
+    assert 'models-universe-filter' in models_page
+    assert 'models-source-filter' in models_page
+    assert 'models-health-filter' in models_page
     assert 'models-predictor-filter' in models_page
     assert 'st.selectbox("Modèle"' not in models_page
     assert '"selected-model-id"' in models_page
     assert "Sélectionnez un modèle dans la grille pour afficher les actions." in models_page
-    assert "selected.model_id" in models_page
-    assert "Calibration du signal haussier" in models_page
-    assert "calibrated_signal_threshold" in models_page
-    assert "Seuil de signal : seuil global de décision" in models_page
+    assert "Ouvrir le détail du modèle" in models_page
+    assert '"models-navigation"' in models_page
+    assert "Données insuffisantes" in source
+
+
+def test_models_page_uses_compact_presentation_without_changing_actions():
+    source = APP.read_text(encoding="utf-8")
+    models_page = source.split("def _models_page", 1)[1].split(
+        "def _history_page", 1
+    )[0]
+
+    assert "_render_models_kpi_card" in models_page
+    assert "_render_models_kpi_density_style()" in models_page
+    assert 'st.container(key="models-kpis")' in models_page
+    assert ".st-key-models-kpis" in source
+    assert "font-size: 0.78rem" in source
+    assert "font-size: 1.65rem" in source
+    assert "_models_grid_column_config()" in models_page
+    assert 'placeholder="Aucune valeur disponible"' in models_page
+    assert 'st.columns((0.8, 0.45, 2.75), gap="small")' in models_page
+    assert 'st.columns((1.8, 0.8, 0.75, 0.95, 0.75, 2.5), gap="small")' in models_page
+    for action in (
+        "_submit_operational_job(JobType.PRODUCTION_TRAINING",
+        "service.activate(selected_id)",
+        "service.deactivate(selected_id)",
+        "service.retire(selected_id)",
+        '"models-navigation"',
+    ):
+        assert action in models_page
+
+
+def test_model_detail_uses_compact_cards_and_existing_detail_sources():
+    source = APP.read_text(encoding="utf-8")
+    detail = source.split("def _render_model_quality_detail", 1)[1].split(
+        "def _models_page", 1
+    )[0]
+
+    for marker in (
+        "load_model_quality_detail(",
+        "status_badge.badge(",
+        "title_column.subheader(",
+        'st.markdown(" · ".join(',
+        'with st.expander("Qualification initiale")',
+        'kpis = st.columns(4, gap="small")',
+        'st.container(key="model-detail-kpis")',
+        "_render_models_kpi_card(",
+        "performance_windows_display_table(windows)",
+        "P&L cumulé",
+        "Rendement moyen roulant",
+        'st.tabs(["Baseline", "Signaux", "Technique"])',
+        "baseline_comparison_display_table",
+        "evaluated_bullish_signals_display_table",
+        "excluded_observations_display_table",
+        'st.expander("Détails techniques")',
+        'key="models-detail-back"',
+    ):
+        assert marker in detail
+    assert detail.index('st.expander("Détails techniques")') > detail.index(
+        'st.tabs(["Baseline", "Signaux", "Technique"])'
+    )
+    assert ".st-key-model-detail-kpis" in source
+    assert "RunService" not in detail
 
 
 def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary():
@@ -697,6 +764,8 @@ def test_surveillance_uses_one_daily_operational_update_card():
     assert "Mise à jour quotidienne" in card
     assert card.count('"Mettre à jour RStock"') == 1
     assert card.count("st.button(") == 1
+    assert '"Relancer la mise à jour" if retry_failed' in card
+    assert '_service().resume(str(current["run_id"]))' in card
     assert "Lance la mise à jour quotidienne de bout en bout." in card
     assert "JobType.OPERATIONAL_RUN" in card
     assert "_DAILY_UPDATE_STAGES" in card
@@ -713,6 +782,17 @@ def test_surveillance_uses_one_daily_operational_update_card():
     assert 'domain="experiment"' not in surveillance
     assert 'domain="model"' not in surveillance
     assert job_panel.index("if not runs:") < job_panel.index("title = job_domain_title")
+
+
+def test_operational_run_detail_exposes_same_run_relaunch():
+    source = APP.read_text(encoding="utf-8")
+    controls = source.split("def _render_resume_controls", 1)[1].split(
+        "def _render_history_detail", 1
+    )[0]
+
+    assert "JobType.OPERATIONAL_RUN.value" in controls
+    assert '"Relancer le run" if is_operational_run' in controls
+    assert "if not is_operational_run and actions[1].button(" in controls
 
 
 def test_surveillance_top_cards_use_an_equal_height_row():

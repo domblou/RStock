@@ -73,6 +73,8 @@ from .history_analysis import MIN_HOLDOUT_SIGNALS, threshold_promotion_guidance
 from .orchestration_runtime import execute_child
 from .processes import process_alive
 from .production_repository import ProductionRepository
+from .production_quality_runtime import synchronize_production_quality
+from .production_quality_rebuild import ProductionQualityRebuildRunner
 from .repository import RunRepository
 from .walk_forward_batches import (
     PREFILTER_POLICY_VERSION,
@@ -2408,12 +2410,12 @@ def _operational_run(
     check_cancellation(cancellation_check)
     _phase(progress_callback, "realized_validation", "started")
     market_store = market_data_service(spec.config).store
-    realized = RealizedResultService(repository).update(
+    evaluation_batch = RealizedResultService(repository).evaluate(
         market_store.read,
         cancellation_check=cancellation_check,
         additional_predictions=predictions,
-        persist=False,
     )
+    realized = evaluation_batch.results
     _phase(progress_callback, "realized_validation", "completed", results=len(realized))
     check_cancellation(cancellation_check)
     updates = {}
@@ -2425,6 +2427,20 @@ def _operational_run(
         updates["realized_results"] = (realized, "result_id")
     if updates:
         repository.append_tables(updates)
+    # Operational events are durable before this derived phase begins.  An
+    # exception below deliberately fails the run without rolling them back.
+    check_cancellation(cancellation_check)
+    _phase(progress_callback, "production_quality", "started")
+    as_of_session = pd.Timestamp(downloaded.prices.index.max()).normalize()
+    quality_summary = synchronize_production_quality(
+        spec.config.project_root,
+        candidate_predictions=predictions,
+        new_results=realized,
+        evaluations=evaluation_batch.evaluations,
+        as_of_session=as_of_session,
+        cancellation_check=cancellation_check,
+    )
+    _phase(progress_callback, "production_quality", "completed", **quality_summary)
     predictions.to_csv(output / "predictions.csv", index=False)
     signals.to_csv(output / "screening.csv", index=False)
     realized.to_csv(output / "realized_results.csv", index=False)
@@ -2432,6 +2448,7 @@ def _operational_run(
         "job_type": spec.job_type.value, "updated_symbols": len(downloaded.symbols),
         "predictions": len(predictions), "signals": int((signals.get("category") == "bullish_signal").sum()) if not signals.empty else 0,
         "realized_results": len(realized),
+        "production_quality": quality_summary,
     }
 
 
@@ -2460,6 +2477,20 @@ def _forward_simulation(
     _phase(progress_callback, "forward_simulation", "started")
     result = run_forward_simulation(spec, output, cancellation_check=cancellation_check)
     _phase(progress_callback, "forward_simulation", "completed", **result)
+    return result
+
+
+def _production_quality_rebuild(
+    spec: ExperimentSpec, output: Path, progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    run_id = output.parent.name
+    runs = RunRepository(output.parent.parent)
+    _phase(progress_callback, "production_quality_rebuild", "started")
+    result = ProductionQualityRebuildRunner(
+        runs, run_id, spec.config.project_root
+    ).execute(pd.Timestamp.utcnow().normalize(), cancellation_check=cancellation_check)
+    _phase(progress_callback, "production_quality_rebuild", "completed", **result)
     return result
 
 
@@ -2511,6 +2542,7 @@ class WorkflowRegistry:
                 JobType.OPERATIONAL_RUN: _operational_run,
                 JobType.END_TO_END: _end_to_end,
                 JobType.FORWARD_SIMULATION: _forward_simulation,
+                JobType.PRODUCTION_QUALITY_REBUILD: _production_quality_rebuild,
             }
         )
 

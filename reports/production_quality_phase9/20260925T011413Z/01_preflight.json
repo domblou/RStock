@@ -1,0 +1,114 @@
+{
+  "generated_at": "2026-09-25T01:14:13.308826+00:00",
+  "models": {
+    "by_status": {
+      "active": 30,
+      "inactive": 2,
+      "retired": 3
+    },
+    "total": 35
+  },
+  "operational_sources": {
+    "predictions": {
+      "created_at": {
+        "maximum": "2026-09-24T21:51:23.220511+00:00",
+        "minimum": "2026-09-13T02:14:08.117518+00:00"
+      },
+      "models": 35,
+      "prediction_dates": {
+        "maximum": "2026-09-25T00:00:00+00:00",
+        "minimum": "2026-08-19T00:00:00+00:00"
+      },
+      "recorded_at": {
+        "maximum": null,
+        "minimum": null
+      },
+      "rows": 835,
+      "sha256": "37ffb68b9c89b8bb6bf33f42bf4f2d5d0a71e71952d53829cdb3a8fa92ed0a56"
+    },
+    "realized_results": {
+      "created_at": {
+        "maximum": null,
+        "minimum": null
+      },
+      "models": 35,
+      "prediction_dates": {
+        "maximum": "2026-09-24T00:00:00+00:00",
+        "minimum": "2026-08-19T00:00:00+00:00"
+      },
+      "recorded_at": {
+        "maximum": "2026-09-24T21:51:23.712656+00:00",
+        "minimum": "2026-09-14T21:23:53.587222+00:00"
+      },
+      "rows": 800,
+      "sha256": "dde9d9540ba65b0d9c57bef1a1c92d94ec9fa7251e7ffcf1d639c144d34528eb"
+    },
+    "signals": {
+      "created_at": {
+        "maximum": "2026-09-24T21:51:23.246853+00:00",
+        "minimum": "2026-09-13T02:15:59.501476+00:00"
+      },
+      "models": 35,
+      "prediction_dates": {
+        "maximum": "2026-09-25T00:00:00+00:00",
+        "minimum": "2026-08-19T00:00:00+00:00"
+      },
+      "recorded_at": {
+        "maximum": null,
+        "minimum": null
+      },
+      "rows": 835,
+      "sha256": "1b236099b88725f2bbf964f770a98da839749772eb4dd86673df79bbbdeb3034"
+    }
+  },
+  "phase9_schema_version": 1,
+  "quality": {
+    "exists": false,
+    "files": [],
+    "total_bytes": 0
+  },
+  "quality_components": {
+    "baselines": {
+      "exists": false,
+      "files": [],
+      "total_bytes": 0
+    },
+    "current_generation": false,
+    "generations": {
+      "exists": false,
+      "files": [],
+      "total_bytes": 0
+    },
+    "lineage": {
+      "exists": false,
+      "files": [],
+      "total_bytes": 0
+    },
+    "observations": {
+      "exists": false,
+      "files": [],
+      "total_bytes": 0
+    },
+    "series": {
+      "exists": false,
+      "files": [],
+      "total_bytes": 0
+    },
+    "snapshots": {
+      "exists": false,
+      "files": [],
+      "total_bytes": 0
+    }
+  },
+  "versions": {
+    "baseline_comparison": 1,
+    "baseline_metrics": 1,
+    "baseline_schema": 1,
+    "drawdown_policy": 1,
+    "lineage_schema": 1,
+    "notional_policy": 1,
+    "observation_schema": 1,
+    "quality_metrics": 1,
+    "window_policy": 1
+  }
+}

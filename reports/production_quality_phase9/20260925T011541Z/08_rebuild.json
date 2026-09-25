@@ -1,0 +1,13 @@
+{
+  "completed_models": 35,
+  "elapsed_seconds": 16.86992339999415,
+  "failed_models": [],
+  "job_type": "production_quality_rebuild",
+  "quality_metrics_version": 1,
+  "result_files": [
+    "quality_rebuild_checkpoint.json"
+  ],
+  "run_id": "20260925T011622_469a9edbf5",
+  "target_generation": "generation_20260925T011622_469a9edbf5",
+  "total_models": 35
+}

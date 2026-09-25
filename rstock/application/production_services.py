@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import replace
 from enum import Enum
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -38,11 +39,18 @@ from rstock.model_selection import SCORE_COLUMNS
 
 from .domain import ExperimentSpec, JobStatus, JobType
 from .production_domain import OperationalUniverse, ProductionModel, ProductionModelStatus
+from .production_quality import (
+    EvaluationStatus,
+    PredictionOrigin,
+    RealizedEvaluationBatch,
+)
 from .production_repository import ProductionRepository
+from .production_quality_baseline import PromotionQualityService
 from .repository import RunRepository, utc_now
 
 
 SUPPORTED_FEATURE_VERSIONS = {"rstock_features_v1"}
+LOGGER = logging.getLogger(__name__)
 
 
 class HistoricalReplayMode(str, Enum):
@@ -292,7 +300,24 @@ class PromotionService:
             calibration_sample_size=calibration_sample_size,
             holdout_signal_metrics=holdout_signal_metrics,
         )
-        return self.production.add_promoted_idempotently(model, fingerprint)
+        promoted, created = self.production.add_promoted_idempotently(model, fingerprint)
+        # Quality evidence is operational metadata, never a scientific gate:
+        # the registry publication above remains successful if materialization
+        # is unavailable or a local quality write fails.
+        try:
+            PromotionQualityService(
+                spec.config.project_root, self.runs, self.production
+            ).materialize_after_promotion(promoted)
+        except Exception as error:  # deliberately non-blocking after promotion
+            LOGGER.exception("Production quality materialization failed for %s", promoted.model_id)
+            try:
+                self.runs.append_log(
+                    walk_forward_run,
+                    f"Production quality materialization failed for {promoted.model_id}: {error}",
+                )
+            except OSError:
+                LOGGER.exception("Could not append quality materialization failure to run log")
+        return promoted, created
 
     def resolve_walk_forward_source(
         self, threshold_calibration_run: str, set_name: str
@@ -535,7 +560,11 @@ class DailyPredictionService:
             except Exception as error:
                 # One stale/corrupt model must be visible as an operational
                 # error without suppressing predictions from other models.
-                rows.append(self._error_row(model, f"{type(error).__name__}: {error}"))
+                rows.append(self._error_row(
+                    model,
+                    f"{type(error).__name__}: {error}",
+                    origin=PredictionOrigin.SCHEDULED_LIVE,
+                ))
         frame = pd.DataFrame(rows)
         if persist and not frame.empty:
             self.repository.append_table("predictions", frame, key="prediction_id")
@@ -860,6 +889,7 @@ class DailyPredictionService:
             "up_threshold": model.signal_threshold,
             "down_threshold": model.down_threshold,
             "signal_status": signal_status,
+            "prediction_origin": PredictionOrigin.SCHEDULED_LIVE.value,
             "status": "predicted",
             "error": None,
             "created_at": utc_now(),
@@ -924,6 +954,7 @@ class DailyPredictionService:
             "up_threshold": model.signal_threshold,
             "down_threshold": model.down_threshold,
             "signal_status": signal_status,
+            "prediction_origin": PredictionOrigin.OPERATIONAL_BACKFILL.value,
             "status": "predicted",
             "error": None,
             "created_at": utc_now(),
@@ -935,7 +966,13 @@ class DailyPredictionService:
             f"{model.model_id}:{model.artifact_version}:{pd.Timestamp(target_date).date()}".encode()
         ).hexdigest()[:20]
     @staticmethod
-    def _error_row(model: ProductionModel, error: str, date: Any = None) -> dict[str, Any]:
+    def _error_row(
+        model: ProductionModel,
+        error: str,
+        date: Any = None,
+        *,
+        origin: PredictionOrigin | None = None,
+    ) -> dict[str, Any]:
         token = f"{model.model_id}:{date}:{error}:{utc_now()}"
         return {
             "prediction_id": hashlib.sha256(token.encode()).hexdigest()[:20],
@@ -945,7 +982,9 @@ class DailyPredictionService:
             "model_id": model.model_id, "model_version": model.artifact_version,
             "up_probability": np.nan, "down_probability": np.nan,
             "up_threshold": model.signal_threshold, "down_threshold": model.down_threshold,
-            "signal_status": "error", "status": "error", "error": error, "created_at": utc_now(),
+            "signal_status": "error",
+            "prediction_origin": None if origin is None else origin.value,
+            "status": "error", "error": error, "created_at": utc_now(),
         }
 
 
@@ -1011,55 +1050,173 @@ class RealizedResultService:
         additional_predictions: pd.DataFrame | None = None,
         persist: bool = True,
     ) -> pd.DataFrame:
+        batch = self.evaluate(
+            price_loader,
+            cancellation_check=cancellation_check,
+            additional_predictions=additional_predictions,
+        )
+        result = batch.results
+        if persist and not result.empty:
+            self.repository.append_table("realized_results", result, key="result_id")
+        return result
+
+    def evaluate(
+        self,
+        price_loader: Callable[[str], pd.DataFrame | None],
+        *,
+        cancellation_check: CancellationCheck | None = None,
+        additional_predictions: pd.DataFrame | None = None,
+    ) -> RealizedEvaluationBatch:
+        """Expose evaluated, pending and excluded states without changing returns.
+
+        ``update`` remains backward compatible and persists only complete realized
+        results.  The evaluation frame is the additive contract consumed later
+        by the Production quality reconciliation service.
+        """
+
         predictions = self.repository.read_table("predictions")
         if additional_predictions is not None and not additional_predictions.empty:
             predictions = pd.concat(
                 [predictions, additional_predictions], ignore_index=True
             ).drop_duplicates("prediction_id", keep="first")
         previous = self.repository.read_table("realized_results")
-        completed = set(previous.get("prediction_id", pd.Series(dtype=str)).astype(str))
+        previous_by_prediction = {
+            str(row["prediction_id"]): row
+            for row in previous.to_dict("records")
+            if row.get("prediction_id") is not None
+        }
         models = {model.model_id: model for model in self.repository.models()}
         rows = []
+        evaluations: list[dict[str, Any]] = []
         for item in predictions.to_dict("records"):
             check_cancellation(cancellation_check)
             prediction_id = str(item["prediction_id"])
-            if (
-                prediction_id in completed
-                or item.get("status") != "predicted"
-            ):
+            base_evaluation = {
+                "prediction_id": prediction_id,
+                "model_id": item.get("model_id"),
+                "model_version": item.get("model_version"),
+                "session_date": item.get("prediction_date"),
+                "evaluation_status": None,
+                "exclusion_reason": None,
+                "result_id": None,
+            }
+            if prediction_id in previous_by_prediction:
+                previous_result = previous_by_prediction[prediction_id]
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EVALUATED.value,
+                    "result_id": previous_result.get("result_id", prediction_id),
+                })
+                continue
+            if item.get("status") != "predicted":
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "invalid_prediction",
+                })
+                continue
+            try:
+                date = pd.Timestamp(item["prediction_date"]).normalize()
+            except (TypeError, ValueError):
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "invalid_prediction",
+                })
+                continue
+            model = models.get(str(item["model_id"]))
+            if model is None:
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "missing_model",
+                })
                 continue
             prices = price_loader(str(item["target"]))
             if prices is None or prices.empty:
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.PENDING.value,
+                    "exclusion_reason": None,
+                })
                 continue
-            date = pd.Timestamp(item["prediction_date"]).normalize()
             normalised = prices.copy()
             normalised.index = pd.to_datetime(normalised.index).normalize()
             if date not in normalised.index:
+                latest_available = normalised.index.max()
+                if pd.isna(latest_available) or latest_available < date:
+                    evaluations.append({
+                        **base_evaluation,
+                        "evaluation_status": EvaluationStatus.PENDING.value,
+                        "exclusion_reason": None,
+                    })
+                else:
+                    evaluations.append({
+                        **base_evaluation,
+                        "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                        "exclusion_reason": "missing_market_session",
+                    })
                 continue
             price = normalised.loc[date]
+            if isinstance(price, pd.DataFrame):
+                price = price.iloc[-1]
             required_prices = pd.to_numeric(
                 pd.Series({name: price.get(name) for name in ("Open", "High", "Low", "Close")}),
                 errors="coerce",
             )
-            if required_prices.isna().any() or not np.isfinite(required_prices.to_numpy()).all():
+            if required_prices.isna().any():
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "missing_target_ohlc",
+                })
+                continue
+            if not np.isfinite(required_prices.to_numpy()).all():
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "non_finite_target_metric",
+                })
                 continue
             opened, high, low, closed = (float(price[name]) for name in ("Open", "High", "Low", "Close"))
-            intraday = closed / opened - 1.0
-            model = models.get(str(item["model_id"]))
-            if model is None:
+            if opened <= 0:
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "non_finite_target_metric",
+                })
                 continue
-            rows.append({
+            intraday = closed / opened - 1.0
+            metrics = np.asarray(
+                [intraday, high / opened - 1.0, low / opened - 1.0],
+                dtype=float,
+            )
+            if not np.isfinite(metrics).all():
+                evaluations.append({
+                    **base_evaluation,
+                    "evaluation_status": EvaluationStatus.EXCLUDED.value,
+                    "exclusion_reason": "non_finite_target_metric",
+                })
+                continue
+            result_row = {
                 "result_id": prediction_id, "prediction_id": prediction_id,
                 "model_id": item["model_id"], "target": item["target"],
                 "prediction_date": item["prediction_date"],
                 "open": opened, "high": high, "low": low, "close": closed,
                 "intraday_return": intraday,
-                "mfe": high / opened - 1.0, "mae": low / opened - 1.0,
+                "mfe": metrics[1], "mae": metrics[2],
                 "up_target": int(intraday >= model.up_target_threshold),
                 "down_target": int(intraday <= -model.down_target_threshold),
                 "recorded_at": utc_now(),
+            }
+            rows.append(result_row)
+            evaluations.append({
+                **base_evaluation,
+                "evaluation_status": EvaluationStatus.EVALUATED.value,
+                "result_id": prediction_id,
             })
         result = pd.DataFrame(rows)
-        if persist and not result.empty:
-            self.repository.append_table("realized_results", result, key="result_id")
-        return result
+        return RealizedEvaluationBatch(
+            results=result,
+            evaluations=pd.DataFrame(evaluations),
+        )

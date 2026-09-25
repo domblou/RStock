@@ -80,13 +80,42 @@ class ProductionRepository:
                         pass
         raise AssertionError("Atomic production write loop exited unexpectedly")
 
-    def models(self) -> list[ProductionModel]:
+    def _registry_models(self) -> list[dict[str, Any]]:
         if not self.registry_path.exists():
             return []
         payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
         if payload.get("schema_version") != 1:
             raise ValueError("Unsupported production registry schema")
-        return [ProductionModel.from_dict(item) for item in payload["models"]]
+        models = payload.get("models")
+        if not isinstance(models, list):
+            raise ValueError("Invalid production registry models")
+        return [dict(item) for item in models]
+
+    def model_summaries(self) -> list[dict[str, Any]]:
+        """Read the registry once without materializing every ProductionModel."""
+
+        return [
+            {
+                "model_id": str(item.get("model_id") or ""),
+                "artifact_version": item.get("artifact_version"),
+                "target": item.get("target"),
+                "predictors": list(item.get("predictors") or []),
+                "status": item.get("status"),
+                "created_at": item.get("created_at"),
+                "registry_payload": item,
+            }
+            for item in self._registry_models()
+        ]
+
+    @staticmethod
+    def model_from_summary(summary: dict[str, Any]) -> ProductionModel:
+        payload = summary.get("registry_payload")
+        if not isinstance(payload, dict):
+            raise ValueError("Production model summary has no registry payload")
+        return ProductionModel.from_dict(dict(payload))
+
+    def models(self) -> list[ProductionModel]:
+        return [ProductionModel.from_dict(item) for item in self._registry_models()]
 
     def active_models(self) -> list[ProductionModel]:
         """Return the sole model population allowed in active surveillance."""
@@ -219,7 +248,11 @@ class ProductionRepository:
                         else rows.copy()
                     )
                     if key in combined:
-                        combined = combined.drop_duplicates(key, keep="first")
+                        # Stable event identities are correction keys: a later
+                        # publication replaces the prior payload atomically.
+                        # This lets derived quality detect late corrected
+                        # realized outcomes without duplicating a trade.
+                        combined = combined.drop_duplicates(key, keep="last")
                     combined.to_csv(staged_path, index=False)
                     combined_tables[name] = combined
                 if self.history_root.exists():

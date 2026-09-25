@@ -33,6 +33,7 @@ class JobType(str, Enum):
     OPERATIONAL_RUN = "operational_run"
     END_TO_END = "end_to_end"
     FORWARD_SIMULATION = "forward_simulation"
+    PRODUCTION_QUALITY_REBUILD = "production_quality_rebuild"
 
     @property
     def implemented(self) -> bool:
@@ -53,6 +54,7 @@ class JobType(str, Enum):
             JobType.OPERATIONAL_RUN,
             JobType.END_TO_END,
             JobType.FORWARD_SIMULATION,
+            JobType.PRODUCTION_QUALITY_REBUILD,
         }
 
 

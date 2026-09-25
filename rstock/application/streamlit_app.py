@@ -8,7 +8,7 @@ import json
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import altair as alt
 import pandas as pd
@@ -124,6 +124,21 @@ from rstock.application.services import (
     SignalService,
 )
 from rstock.application.production_repository import ProductionRepository
+from rstock.application.production_quality_ui import (
+    baseline_comparison_display_table,
+    baseline_comparison_rows,
+    evaluated_bullish_signals_display_table,
+    evaluated_bullish_signals,
+    excluded_observations_display_table,
+    excluded_observations as quality_excluded_observations,
+    filter_quality_models,
+    global_quality_kpis,
+    health_label,
+    load_model_quality_detail,
+    load_models_master,
+    models_grid,
+    performance_windows_display_table,
+)
 from rstock.application.real_trades import (
     RealTradeService,
     filter_performance,
@@ -195,6 +210,8 @@ WORKFLOW_PHASE_LABELS = {
     "metrics": "Métriques",
     "result_writing": "Écriture",
     "publishing": "Publication",
+    "production_quality": "Qualité des modèles Production",
+    "production_quality_rebuild": "Rebuild qualité Production",
 }
 
 # Historical visual order retained by the shared registry:
@@ -217,6 +234,20 @@ def _page_header(title: str) -> None:
           <h1 style="margin: 0; padding: 0; font-size: 2rem; line-height: 1.12; transform: translateY(4px);">
             {html.escape(title)}</h1>
         </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _configure_top_navigation_spacing() -> None:
+    """Use the same compact top offset on every page with native top navigation."""
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stMainBlockContainer"] {
+            padding-top: 2rem !important;
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
@@ -2001,6 +2032,7 @@ def _render_resume_controls(
         JobType.WALK_FORWARD.value,
         JobType.THRESHOLD_PARAMETER_CALIBRATION.value,
         JobType.END_TO_END.value,
+        JobType.OPERATIONAL_RUN.value,
     }
     if status.get("job_type") not in resumable_types or status.get("status") not in {
         "failed", "cancelled", "interrupted"
@@ -2029,9 +2061,10 @@ def _render_resume_controls(
         )
     if checkpointed_resume and error:
         st.warning(str(error))
+    is_operational_run = status.get("job_type") == JobType.OPERATIONAL_RUN.value
     actions = st.columns(2)
     if actions[0].button(
-        "Reprendre le run",
+        "Relancer le run" if is_operational_run else "Reprendre le run",
         key=f"resume-run-{run_id}",
         disabled=checkpointed_resume and bool(error),
         width="stretch",
@@ -2043,7 +2076,7 @@ def _render_resume_controls(
         else:
             st.success("Reprise soumise au worker.")
             st.rerun()
-    if actions[1].button(
+    if not is_operational_run and actions[1].button(
         "Relancer depuis le début",
         key=f"restart-run-{run_id}",
         width="stretch",
@@ -4536,6 +4569,7 @@ _DAILY_UPDATE_STAGES = (
     ("daily_prediction", "Prédictions quotidiennes"),
     ("screening", "Détection des signaux"),
     ("realized_validation", "Évaluation des prédictions"),
+    ("production_quality", "Qualité des modèles Production"),
 )
 
 
@@ -4575,7 +4609,7 @@ def _render_daily_update_card(
                 ),
                 (1, "Mise à jour du marché"),
             )
-            st.caption(f"Étape {stage_index}/4 — {stage_label}")
+            st.caption(f"Étape {stage_index}/5 — {stage_label}")
             workflow_percent = progress.get("workflow_percent")
             if workflow_percent is not None:
                 st.progress(float(workflow_percent) / 100.0)
@@ -4585,10 +4619,26 @@ def _render_daily_update_card(
                 st.info("Mise à jour quotidienne en cours…")
             else:
                 st.info("Mise à jour quotidienne en attente…")
+            quality = detail.get("summary", {}).get("production_quality", {})
+            if stage == "production_quality" and isinstance(quality, dict):
+                st.caption(
+                    f"{quality.get('dirty_detected', 0)} modèle(s) à recalculer · "
+                    f"{len(quality.get('models_processed', []))} traité(s) · "
+                    f"{quality.get('models_remaining', 0)} restant(s)"
+                )
         elif latest is not None and latest.get("status") == "completed":
             st.success("Mise à jour quotidienne terminée.")
+            quality = _service().run(str(latest["run_id"])).get("summary", {}).get("production_quality", {})
+            if isinstance(quality, dict):
+                st.caption(
+                    f"Qualité Production : {quality.get('dirty_detected', 0)} détecté(s) · "
+                    f"{len(quality.get('models_processed', []))} traité(s) · "
+                    f"{quality.get('models_remaining', 0)} restant(s) · "
+                    f"{float(quality.get('elapsed_seconds', 0.0)):.2f} s"
+                )
+        retry_failed = current is not None and current.get("status") == "failed"
         if st.button(
-            "Mettre à jour RStock",
+            "Relancer la mise à jour" if retry_failed else "Mettre à jour RStock",
             type="primary",
             width="stretch",
             disabled=active_model_count == 0 or (
@@ -4596,7 +4646,10 @@ def _render_daily_update_card(
             ),
             key="daily-operational-update",
         ):
-            _submit_operational_job(JobType.OPERATIONAL_RUN)
+            if retry_failed:
+                _service().resume(str(current["run_id"]))
+            else:
+                _submit_operational_job(JobType.OPERATIONAL_RUN)
             st.rerun()
         st.caption("Lance la mise à jour quotidienne de bout en bout.")
 
@@ -4957,7 +5010,7 @@ def _returns_page() -> None:
             st.rerun()
 
 
-def _models_page() -> None:
+def _legacy_models_page() -> None:
     _page_header("Modèles")
     service = ModelService(st.session_state.lab_config.project_root)
     models = service.models()
@@ -5078,6 +5131,439 @@ def _models_page() -> None:
         st.rerun()
     with st.expander("Voir détails"):
         st.json(selected.to_dict())
+    _live_job_panel(_service(), domain="model")
+
+
+def _quality_percent(value: object) -> str:
+    return "—" if value is None or pd.isna(value) else f"{float(value):.2%}"
+
+
+def _quality_currency(value: object) -> str:
+    return "—" if value is None or pd.isna(value) else f"{float(value):+,.2f} $".replace(",", " ")
+
+
+def _models_percent(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value) * 100:.2f}".replace(".", ",") + " %"
+
+
+def _models_currency(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):,.2f}".replace(",", " ").replace(".", ",") + " $"
+
+
+def _render_models_kpi_density_style() -> None:
+    """Keep Models-page and model-detail KPI strips legible at normal zoom."""
+    st.markdown(
+        """
+        <style>
+        .st-key-models-kpis [data-testid="stMetricLabel"],
+        .st-key-models-kpis [data-testid="stMetricLabel"] p,
+        .st-key-model-detail-kpis [data-testid="stMetricLabel"],
+        .st-key-model-detail-kpis [data-testid="stMetricLabel"] p {
+            font-size: 0.78rem !important;
+            line-height: 1.15 !important;
+        }
+        .st-key-models-kpis [data-testid="stMetricLabel"] > div,
+        .st-key-model-detail-kpis [data-testid="stMetricLabel"] > div {
+            overflow: visible !important;
+            white-space: normal !important;
+        }
+        .st-key-models-kpis [data-testid="stMetricValue"],
+        .st-key-models-kpis [data-testid="stMetricValue"] > div,
+        .st-key-models-kpis [data-testid="stMetricValue"] p,
+        .st-key-model-detail-kpis [data-testid="stMetricValue"],
+        .st-key-model-detail-kpis [data-testid="stMetricValue"] > div,
+        .st-key-model-detail-kpis [data-testid="stMetricValue"] p {
+            font-size: 1.65rem !important;
+            line-height: 1.15 !important;
+            white-space: nowrap !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_models_kpi_card(
+    column: Any, label: str, value: object, icon: str, *, help: str | None = None
+) -> None:
+    with column:
+        with st.container(border=True):
+            st.metric(f":material/{icon}: {label}", value, help=help)
+
+
+def _models_grid_column_config() -> dict[str, Any]:
+    return {
+        "model_id": None,
+        "Cible": st.column_config.TextColumn(width="small"),
+        "Prédicteurs": st.column_config.TextColumn(width="medium"),
+        "Statut": st.column_config.TextColumn(width="small"),
+        "Univers": st.column_config.TextColumn(width="medium"),
+        "Source": st.column_config.TextColumn(width="medium"),
+        "Top-N": st.column_config.TextColumn(width="small"),
+        "Promotion": st.column_config.TextColumn(width="small"),
+        "Signaux": st.column_config.TextColumn(width="small"),
+        "Rendement moyen": st.column_config.TextColumn(width="small"),
+        "Trades gagnants": st.column_config.TextColumn(width="small"),
+        "P&L cumulé": st.column_config.TextColumn(width="small"),
+        "Drawdown": st.column_config.TextColumn(width="small"),
+        "Santé": st.column_config.TextColumn(width="medium"),
+        "Dernier signal": st.column_config.TextColumn(width="small"),
+        "Tendance 63": st.column_config.LineChartColumn("Tendance 63", width="medium"),
+    }
+
+
+def _model_detail_date(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    return str(value) if pd.isna(parsed) else parsed.strftime("%Y-%m-%d")
+
+
+def _model_detail_short_id(value: object, *, limit: int = 16) -> str:
+    text = "—" if value is None or pd.isna(value) else str(value)
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def _model_detail_auc(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    try:
+        return f"{float(value):.4f}".rstrip("0").rstrip(".").replace(".", ",")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _model_detail_integer(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _model_detail_currency(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):+,.2f}".replace(",", " ").replace(".", ",") + " $"
+
+
+def _render_model_quality_detail(model_id: str) -> None:
+    project_root = st.session_state.lab_config.project_root
+    try:
+        model = ProductionRepository(project_root).get(model_id)
+    except KeyError:
+        st.session_state.pop("models-navigation", None)
+        st.warning("Ce modèle n’existe plus dans le registre Production.")
+        return
+    detail = load_model_quality_detail(
+        project_root, model_id, model_version=model.artifact_version
+    )
+    snapshot = dict(detail.snapshot or {})
+    lineage = dict(detail.lineage or snapshot.get("identity") or {})
+    st.caption("Modèles > Détail du modèle")
+    target, predictors = model.target, model.predictors
+    source_configuration = model.source_configuration or {}
+    source_end_to_end = (
+        source_configuration.get("source_end_to_end_run")
+        or source_configuration.get("source_experiment_run")
+    )
+    quality_status = (
+        "Non calculé — version différente"
+        if detail.quality_state == "version_mismatch"
+        else "Non calculé"
+        if detail.quality_state == "missing"
+        else health_label(snapshot.get("health_status"))
+    )
+    header_back, header_content = st.columns((0.8, 4.2), gap="small")
+    with header_back:
+        if st.button("← Retour à la liste", key="models-detail-back"):
+            st.session_state.pop("models-navigation", None)
+            st.rerun()
+    with header_content:
+        title_column, status_badge, quality_badge = st.columns((3.0, 0.65, 1.35), gap="small")
+        title_column.subheader(f"{target} ← {', '.join(str(item) for item in predictors)}")
+        status_badge.badge(
+            model.status.value,
+            color="green" if model.status.value == "active" else "gray",
+        )
+        quality_badge.badge(quality_status, color="gray")
+        st.caption(
+            "Dernière mise à jour qualité : "
+            f"{_model_detail_date(snapshot.get('generated_at'))}"
+            " | Dernière observation évaluée : "
+            f"{_model_detail_date(snapshot.get('last_evaluated_date'))}"
+        )
+    if detail.quality_state == "missing":
+        st.caption("Qualité non calculée pour ce modèle.")
+    elif detail.quality_state == "version_mismatch":
+        st.caption("Qualité non calculée pour la version Production courante.")
+
+    prefilter_enabled = lineage.get("predictor_prefilter_enabled")
+    prefilter_top_n = lineage.get("predictor_prefilter_top_n")
+    prefilter_label = (
+        f"Top {_model_detail_integer(prefilter_top_n)}"
+        if prefilter_enabled and prefilter_top_n is not None and not pd.isna(prefilter_top_n)
+        else "Désactivé" if prefilter_enabled is False else "Non disponible"
+    )
+    source_wf = lineage.get("source_walk_forward_run_id") or model.source_walk_forward_run
+    source_e2e = lineage.get("source_end_to_end_run_id") or source_end_to_end
+    lineage_items = (
+        ("Univers", lineage.get("primary_universe_name_at_promotion") or "Non disponible"),
+        ("End-to-End source", _model_detail_short_id(source_e2e)),
+        ("Préfiltre / Top-N", prefilter_label),
+        ("Cutoff", _model_detail_date(lineage.get("cutoff_date"))),
+        ("Date de promotion", _model_detail_date(lineage.get("promotion_date") or model.created_at)),
+        ("Validation temporelle", lineage.get("temporal_validation_status") or "Non applicable"),
+        ("Version", f"v{model.artifact_version}" if model.artifact_version is not None else "Non disponible"),
+        ("Run WF", _model_detail_short_id(source_wf)),
+    )
+    st.markdown(" · ".join(
+        f"**{label}:** {value}" for label, value in lineage_items
+    ))
+    with st.expander("Qualification initiale"):
+        qualification = st.columns(3, gap="small")
+        qualification[0].metric("AUC WF médiane", _model_detail_auc(
+            lineage.get("wf_median_auc") or model.development_metrics.get("ROCAUCMedian")
+        ))
+        qualification[1].metric("AUC Holdout", _model_detail_auc(
+            lineage.get("holdout_auc") or model.holdout_metrics.get("FinalUpROCAUC")
+        ))
+        qualification[2].metric("Run WF", _model_detail_short_id(source_wf))
+    windows = {
+        width: snapshot.get(f"window_{width}", {}) for width in (20, 63, 126)
+    }
+    since, comparison = snapshot.get("since_promotion", {}), snapshot.get("baseline_comparison", {})
+    _render_models_kpi_density_style()
+    with st.container(key="model-detail-kpis"):
+        kpis = st.columns(4, gap="small")
+        _render_models_kpi_card(
+            kpis[0], "Rendement moyen 63 séances",
+            _models_percent(windows[63].get("mean_intraday_return")), "trending_up",
+        )
+        _render_models_kpi_card(
+            kpis[1], "Trades gagnants", _models_percent(since.get("win_rate")), "target",
+        )
+        _render_models_kpi_card(
+            kpis[2], "P&L cumulé", _model_detail_currency(since.get("pnl")), "payments",
+        )
+        _render_models_kpi_card(
+            kpis[3], "Drawdown max",
+            _model_detail_currency(since.get("max_drawdown_dollars")), "trending_down",
+        )
+    st.dataframe(
+        performance_windows_display_table(windows), hide_index=True, width="stretch",
+        height=145,
+        column_config={
+            "Fenêtre": st.column_config.TextColumn(width="small"),
+            "Rendement moyen": st.column_config.TextColumn(width="small"),
+            "Trades gagnants": st.column_config.TextColumn(width="small"),
+            "Signaux": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+    charts = st.columns(2, gap="small")
+    series = detail.series.copy()
+    with charts[0]:
+        st.markdown("#### P&L cumulé")
+        if series.empty:
+            st.info("Aucune série Production disponible.")
+        else:
+            pnl_columns = ["session_date", "cumulative_pnl"]
+            if "baseline_expected_cumulative_pnl" in series:
+                pnl_columns.append("baseline_expected_cumulative_pnl")
+            else:
+                st.caption("Courbe baseline indisponible")
+            pnl = series[pnl_columns].rename(columns={
+                "cumulative_pnl": "Production",
+                "baseline_expected_cumulative_pnl": "Baseline attendue",
+            }).melt("session_date", var_name="Série", value_name="P&L ($)")
+            st.altair_chart(
+                alt.Chart(pnl).mark_line().encode(
+                    x=alt.X("session_date:T", title=None, axis=alt.Axis(format="%Y-%m-%d")),
+                    y=alt.Y("P&L ($):Q", title="P&L ($)"), color="Série:N",
+                ).properties(height=240),
+                width="stretch",
+            )
+    with charts[1]:
+        st.markdown("#### Rendement moyen roulant")
+        if series.empty:
+            st.info("Aucune série roulante disponible.")
+        else:
+            rolling = series[[
+                "session_date", "rolling_mean_return_20", "rolling_mean_return_63",
+            ]].rename(columns={
+                "rolling_mean_return_20": "20 séances",
+                "rolling_mean_return_63": "63 séances",
+            }).melt("session_date", var_name="Fenêtre", value_name="Rendement")
+            st.altair_chart(
+                alt.Chart(rolling).mark_line().encode(
+                    x=alt.X("session_date:T", title=None, axis=alt.Axis(format="%Y-%m-%d")),
+                    y=alt.Y("Rendement:Q", title="Rendement", axis=alt.Axis(format=".2%")),
+                    color="Fenêtre:N",
+                ).properties(height=240),
+                width="stretch",
+            )
+
+    baseline_tab, signals_tab, technical_tab = st.tabs(["Baseline", "Signaux", "Technique"])
+    with baseline_tab:
+        st.caption("Baseline de promotion vs réel")
+        comparison_table = baseline_comparison_display_table(
+            baseline_comparison_rows(snapshot, detail.baseline)
+        )
+        if comparison_table.empty:
+            st.info("Baseline indisponible")
+        else:
+            st.dataframe(
+                comparison_table, hide_index=True, width="stretch",
+                column_config={
+                    "Métrique": st.column_config.TextColumn(width="medium"),
+                    "À la promotion": st.column_config.TextColumn(width="small"),
+                    "Actuel": st.column_config.TextColumn(width="small"),
+                    "Écart": st.column_config.TextColumn(width="small"),
+                },
+            )
+    with signals_tab:
+        st.caption("Derniers signaux évalués")
+        signals = evaluated_bullish_signals(detail.observations)
+        if signals.empty:
+            st.info("Aucun signal haussier live évalué.")
+        else:
+            signal_table = evaluated_bullish_signals_display_table(signals).head(10)
+            st.dataframe(
+                signal_table[["Date", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
+                hide_index=True, width="stretch",
+            )
+        excluded = quality_excluded_observations(detail.observations)
+        if not excluded.empty:
+            with st.expander(f"Observations exclues ({len(excluded)})"):
+                st.dataframe(
+                    excluded_observations_display_table(excluded), hide_index=True,
+                    width="stretch",
+                )
+    with technical_tab:
+        st.json({
+            "model_id": model.model_id,
+            "artifact_version": model.artifact_version,
+            "source_end_to_end_run_id": source_e2e,
+            "source_walk_forward_run_id": source_wf,
+            "up_threshold": model.up_threshold,
+            "down_threshold": model.down_threshold,
+            "cutoff_date": lineage.get("cutoff_date"),
+            "source_configuration": model.source_configuration,
+            "training_metadata": model.training_metadata,
+            "temporal_validation_reason": lineage.get("temporal_validation_reason"),
+        })
+    if detail.quality_state == "current":
+        st.info("Données insuffisantes pour établir un statut de santé.")
+        st.caption("Les seuils Stable / À surveiller / Dégradé ne sont pas encore définis.")
+    else:
+        st.info("Qualité non calculée pour la version Production courante.")
+        st.caption("Les métriques sont affichées à titre de suivi.")
+    with st.expander("Détails techniques"):
+        st.json({
+            "model_id": model.model_id,
+            "source_end_to_end_run_id": source_e2e,
+            "source_walk_forward_run_id": source_wf,
+            "artifact_version": model.artifact_version,
+            "temporal_validation_reason": lineage.get("temporal_validation_reason"),
+        })
+
+
+def _models_page() -> None:
+    navigation = st.session_state.get("models-navigation")
+    if isinstance(navigation, dict) and navigation.get("mode") == "detail":
+        model_id = str(navigation.get("model_id") or "")
+        if model_id:
+            _page_header("Modèles")
+            _render_model_quality_detail(model_id)
+            return
+        st.session_state.pop("models-navigation", None)
+    _page_header("Modèles")
+    project_root = st.session_state.lab_config.project_root
+    master = load_models_master(project_root)
+    if not master.attrs.get("quality_snapshot_available", False):
+        st.warning("Qualité non calculée — un rebuild qualité est requis.")
+    orphan_count = int(master.attrs.get("orphan_quality_count", 0))
+    if orphan_count:
+        st.caption(
+            f"{orphan_count} entrée(s) qualité orpheline(s) ignorée(s) : "
+            "le registre Production reste la source d’autorité."
+        )
+    if master.empty:
+        st.info("Aucun modèle dans le registre Production.")
+        _live_job_panel(_service(), domain="model")
+        return
+    window = st.selectbox("Fenêtre d’analyse", (20, 63, 126), index=1, format_func=lambda value: f"{value} séances", key="models-quality-window")
+    values = global_quality_kpis(master, window=window)
+    _render_models_kpi_density_style()
+    with st.container(key="models-kpis"):
+        kpis = st.columns(6, gap="small")
+        _render_models_kpi_card(kpis[0], "Modèles actifs", int(values["active_models"]), "model_training")
+        _render_models_kpi_card(kpis[1], "Données insuffisantes", int(values["data_insufficient"]), "info")
+        _render_models_kpi_card(kpis[2], f"Rendement moyen {window} séances", _models_percent(values["mean_return"]), "trending_up")
+        _render_models_kpi_card(kpis[3], "P&L cumulé", _models_currency(values["pnl"]), "payments", help="P&L théorique basé sur un notionnel de 10 000 $ par signal et par modèle.")
+        _render_models_kpi_card(kpis[4], "Trades gagnants", _models_percent(values["win_rate"]), "target")
+        _render_models_kpi_card(kpis[5], f"Signaux {window} séances", int(values["signals"]), "notifications")
+
+    filters = st.columns((1, 1, 1.35, 1, 1.35), gap="small")
+    statuses = filters[0].multiselect("Statut", sorted(master["status"].dropna().astype(str).unique()), key="models-status-filter")
+    universe_options = sorted(master["universe_name"].dropna().astype(str).unique())
+    universes = filters[1].multiselect(
+        "Univers", universe_options, key="models-universe-filter",
+        placeholder="Aucune valeur disponible", disabled=not universe_options,
+    )
+    sources = filters[2].multiselect("Source End-to-End", sorted(master["source_end_to_end_run_id"].dropna().astype(str).unique()), key="models-source-filter")
+    health = filters[3].multiselect("Santé", sorted(master["health_label"].dropna().astype(str).unique()), key="models-health-filter")
+    query = filters[4].text_input("Recherche", placeholder="Cible ou prédicteur", key="models-predictor-filter")
+    visible = filter_quality_models(master, statuses=statuses, universes=universes, sources=sources, health=health, query=query)
+    updated = pd.to_datetime(master["quality_updated_at"], errors="coerce", utc=True).max()
+    st.caption("Qualité non calculée" if pd.isna(updated) else f"Dernière mise à jour qualité modèles : {updated.tz_convert('America/Toronto').strftime('%Y-%m-%d %H:%M')}")
+    pagination = st.columns((0.8, 0.45, 2.75), gap="small")
+    page_size = pagination[0].selectbox("Modèles par page", (50, 100), key="models-page-size")
+    page_count = max(1, (len(visible) + page_size - 1) // page_size)
+    if int(st.session_state.get("models-page", 1)) > page_count:
+        st.session_state["models-page"] = 1
+    page = pagination[1].number_input("Page", min_value=1, max_value=page_count, value=1, step=1, key="models-page")
+    pagination[2].caption(f"Page {int(page)} / {page_count}")
+    displayed = visible.iloc[(int(page) - 1) * page_size:int(page) * page_size]
+    st.caption(f"{len(visible)} modèles affichés sur {len(master)} · page {int(page)} / {page_count}")
+    table = models_grid(displayed, window=window)
+    event = st.dataframe(table, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="models-grid", column_config=_models_grid_column_config())
+    selected_rows = _selected_rows(event, len(displayed))
+    selected_key = "selected-model-id"
+    if selected_rows:
+        st.session_state[selected_key] = str(table.iloc[selected_rows[0]]["model_id"])
+    selected_id = st.session_state.get(selected_key)
+    if selected_id not in set(displayed["model_id"].astype(str)):
+        st.session_state.pop(selected_key, None)
+        st.caption("Sélectionnez un modèle dans la grille pour afficher les actions.")
+        _live_job_panel(_service(), domain="model")
+        return
+    st.markdown("**1 modèle sélectionné**")
+    controls = st.columns((1.8, 0.8, 0.75, 0.95, 0.75, 2.5), gap="small")
+    if controls[0].button("Ouvrir le détail du modèle", type="primary"):
+        st.session_state["models-navigation"] = {"mode": "detail", "model_id": selected_id}
+        st.rerun()
+    service = ModelService(project_root)
+    selected_row = displayed.loc[
+        displayed["model_id"].astype(str).eq(str(selected_id))
+    ].iloc[0]
+    selected = service.repository.model_from_summary(
+        {"registry_payload": selected_row["registry_payload"]}
+    )
+    if controls[1].button("Entraîner", disabled=selected.status.value in {"active", "retired"}):
+        _submit_operational_job(JobType.PRODUCTION_TRAINING, model_id=selected_id)
+    if controls[2].button("Activer", disabled=selected.status.value not in {"trained", "inactive"}):
+        service.activate(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
+    if controls[3].button("Désactiver", disabled=selected.status.value != "active"):
+        service.deactivate(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
+    if controls[4].button("Retirer", disabled=selected.status.value == "active"):
+        service.retire(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
     _live_job_panel(_service(), domain="model")
 
 
@@ -5745,6 +6231,7 @@ def _primary_pages() -> list[st.Page]:
     return _PRIMARY_PAGES
 
 
+_configure_top_navigation_spacing()
 _state()
 selected_page = st.navigation(_primary_pages(), position="top")
 requested_page = st.session_state.pop(EXPERIMENT_NAVIGATION_KEY, None)

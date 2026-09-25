@@ -1,0 +1,10 @@
+{
+  "backup": "C:\\Dev\\RStock\\phase9_backups\\production_quality_20260925T011541Z",
+  "created_at": "2026-09-25T01:15:43.075256+00:00",
+  "inventory": {
+    "exists": false,
+    "files": [],
+    "total_bytes": 0
+  },
+  "source": "C:\\Dev\\RStock\\production\\quality"
+}

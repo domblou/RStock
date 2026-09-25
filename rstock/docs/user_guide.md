@@ -1306,3 +1306,64 @@ La version V1 du rattrapage peut recréer les prédictions quotidiennes, les sig
 Les variables d’une prédiction restent calculées uniquement à partir des observations disponibles avant sa date cible (`D-X`). Les résultats ne sont évalués que lorsque les données `Open`, `High`, `Low` et `Close` requises sont présentes et valides.
 
 Cette V1 ne reconstitue donc pas nécessairement le modèle qui était actif à la date historique de chaque prédiction. Une V2 devra conserver et utiliser l’historique des modèles actifs à chaque date.
+
+---
+
+# 27. Qualité des modèles Production
+
+La couche `production/quality/` suit la performance opérationnelle observée
+des modèles sans modifier les historiques sources `predictions`, `signals` et
+`realized_results`. Ces sources restent la vérité opérationnelle; les
+observations, séries et snapshots qualité sont des données dérivées et
+reconstructibles.
+
+## Origine des prédictions
+
+- `scheduled_live` : prédiction produite par le traitement quotidien normal;
+- `operational_backfill` : prédiction reconstruite après sa séance cible;
+- `legacy_inferred_live` : historique ancien dont le caractère live est prouvé
+  par les informations temporelles conservées;
+- `legacy_unknown` : provenance historique ambiguë.
+
+Seules `scheduled_live` et `legacy_inferred_live` participent aux KPI live.
+Un backfill permet de réparer un historique opérationnel, mais **backfill ne
+signifie pas performance live**. Une observation ambiguë n’est jamais promue
+silencieusement en observation live.
+
+## Contrats des métriques
+
+- les fenêtres 20, 63 et 126 sont des séances de marché XNYS;
+- un trade est gagnant uniquement si `IntradayReturn > 0`;
+- le P&L théorique utilise 10 000 $ par signal et par modèle;
+- deux modèles signalant le même titre le même jour sont deux expositions;
+- le drawdown est exprimé en dollars ou en points de rendement cumulé, jamais
+  comme pourcentage d’un portefeuille;
+- la baseline provient exclusivement des prédictions holdout détaillées de la
+  calibration de seuils associée et de la règle combinée Up/Down de Production.
+
+Les statuts Stable, À surveiller et Dégradé ne sont pas encore définis par
+une politique scientifique versionnée. L’interface affiche donc « Données
+insuffisantes »; ce libellé ne signifie ni que le modèle est bon, ni qu’il est
+mauvais.
+
+## Réconciliation et rebuild
+
+La réconciliation construit ou met à jour les observations canoniques depuis
+les trois historiques opérationnels. Elle utilise l’identité stable
+`model_id + model_version + prediction_id`, conserve les résultats tardifs et
+marque les modèles modifiés comme dirty.
+
+Le job `PRODUCTION_QUALITY_REBUILD` ne relit pas les historiques opérationnels.
+Il reconstruit uniquement les séries, snapshots individuels et snapshot maître
+à partir des observations canoniques, puis publie une génération atomique. Une
+génération incomplète n’est jamais rendue active.
+
+La migration finale peut être exécutée explicitement avec :
+
+```powershell
+python -m rstock.application.production_quality_phase9 --project-root C:\Dev\RStock
+```
+
+Elle produit un inventaire, un dry-run de provenance, une sauvegarde, les
+rapports de migration et les benchmarks sous `reports/production_quality_phase9/`.
+La commande de rollback exacte est enregistrée dans le rapport final.

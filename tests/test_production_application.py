@@ -11,6 +11,7 @@ import pytest
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.production_domain import ProductionModel, ProductionModelStatus
 from rstock.application.production_repository import ProductionRepository
+import rstock.application.production_services as production_services_module
 import rstock.application.production_repository as production_repository_module
 from rstock.application.production_services import (
     DailyPredictionService,
@@ -130,6 +131,10 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
         "Set": "AAA<-BBB", "Observation": "AAA", "Direction": "Up",
         "Threshold": 0.63, "IntradayReturnMean": 0.009,
     }]).to_csv(threshold_results / "holdout_metrics.csv", index=False)
+    pd.DataFrame([
+        {"Set": "AAA<-BBB", "Direction": "Up", "Window": 0, "Date": "2026-06-01", "Probability": 0.70, "IntradayReturn": 0.02, "MFE": 0.03, "MAE": -0.01},
+        {"Set": "AAA<-BBB", "Direction": "Down", "Window": 0, "Date": "2026-06-01", "Probability": 0.20, "IntradayReturn": 0.02, "MFE": 0.03, "MAE": -0.01},
+    ]).to_csv(threshold_results / "holdout_predictions.csv", index=False)
     runs.transition(threshold_run, JobStatus.RUNNING)
     runs.transition(threshold_run, JobStatus.COMPLETED)
     repository = ProductionRepository(tmp_path)
@@ -176,6 +181,28 @@ def test_promotion_is_idempotent_and_preserves_run_traceability(tmp_path):
     assert first.development_metrics["model_selection_rank"] == 1
     assert first.development_metrics["stability_score"] == 82.0
     assert first.holdout_metrics["FinalUpROCAUC"] == 0.57
+    baseline_path = tmp_path / "production" / "quality" / "baselines" / f"{first.model_id}.json"
+    assert json.loads(baseline_path.read_text(encoding="utf-8"))["availability_status"] == "available"
+
+
+def test_quality_materialization_failure_cannot_reject_a_promotion(monkeypatch, tmp_path):
+    runs, run_id = _promotion_run(tmp_path)
+
+    def fail_materialization(self, model):
+        raise OSError("simulated quality disk failure")
+
+    monkeypatch.setattr(
+        production_services_module.PromotionQualityService,
+        "materialize_after_promotion",
+        fail_materialization,
+    )
+    model, created = PromotionService(runs, ProductionRepository(tmp_path)).promote(
+        run_id, "AAA<-BBB"
+    )
+
+    assert created is True
+    assert ProductionRepository(tmp_path).get(model.model_id).model_id == model.model_id
+    assert any("quality materialization failed" in entry.lower() for entry in runs.log_tail(run_id))
 
 
 def test_promotion_inherits_frozen_xgboost_provenance_from_derived_run(tmp_path):
@@ -495,6 +522,7 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
     signals = ProductionSignalService(repository).screen(predictions)
     assert len(predictions) == 1
     assert predictions.iloc[0]["up_probability"] == 0.8
+    assert predictions.iloc[0]["prediction_origin"] == "scheduled_live"
     assert predictions.iloc[0]["signal_status"] == "no_signal"
     assert predictions.iloc[0]["up_threshold"] == 0.85
     snapshot_fields = {
@@ -833,10 +861,11 @@ def test_all_operational_workflows_are_registered():
         JobType.DAILY_SCREENING,
         JobType.REALIZED_VALIDATION,
         JobType.OPERATIONAL_RUN,
+        JobType.PRODUCTION_QUALITY_REBUILD,
     } <= set(handlers)
 
 
-def test_operational_run_keeps_the_four_daily_stages_in_order():
+def test_operational_run_keeps_quality_after_the_four_daily_stages():
     phases = [name for name, _weight in WORKFLOW_PHASES[JobType.OPERATIONAL_RUN]]
 
     assert phases[:4] == [
@@ -845,6 +874,7 @@ def test_operational_run_keeps_the_four_daily_stages_in_order():
         "screening",
         "realized_validation",
     ]
+    assert phases[4] == "production_quality"
 
 
 def test_cli_derives_production_training_symbols_from_candidate(
@@ -934,6 +964,7 @@ def test_daily_prediction_backfill_uses_prior_session_and_is_idempotent(monkeypa
     assert created["as_of_date"].tolist() == [
         value.date().isoformat() for value in index[:-1]
     ]
+    assert set(created["prediction_origin"]) == {"operational_backfill"}
     assert len(repository.read_table("predictions")) == 3
     assert DailyPredictionService(repository).backfill(
         prepared, market_data=market_data, persist=True

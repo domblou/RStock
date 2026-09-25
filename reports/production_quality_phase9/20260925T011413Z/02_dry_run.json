@@ -1,0 +1,445 @@
+{
+  "automatic_validation": "passed",
+  "by_date": {
+    "2026-08-19": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 8
+    },
+    "2026-08-20": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-21": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-24": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-25": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-26": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-27": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-28": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-08-31": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-01": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-02": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-03": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-04": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-08": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-09": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-10": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-11": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 0,
+      "operational_backfill": 32
+    },
+    "2026-09-14": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 30
+    },
+    "2026-09-15": {
+      "legacy_inferred_live": 2,
+      "legacy_unknown": 2,
+      "operational_backfill": 28
+    },
+    "2026-09-16": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 4,
+      "operational_backfill": 28
+    },
+    "2026-09-17": {
+      "legacy_inferred_live": 0,
+      "legacy_unknown": 4,
+      "operational_backfill": 28
+    },
+    "2026-09-18": {
+      "legacy_inferred_live": 8,
+      "legacy_unknown": 0,
+      "operational_backfill": 24
+    },
+    "2026-09-21": {
+      "legacy_inferred_live": 24,
+      "legacy_unknown": 8,
+      "operational_backfill": 0
+    },
+    "2026-09-22": {
+      "legacy_inferred_live": 30,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    },
+    "2026-09-23": {
+      "legacy_inferred_live": 30,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    },
+    "2026-09-24": {
+      "legacy_inferred_live": 30,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    },
+    "2026-09-25": {
+      "legacy_inferred_live": 30,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    }
+  },
+  "by_model": {
+    "model_2464cc46f354": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_2b29de565c0f": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_36b550890055": {
+      "legacy_inferred_live": 3,
+      "legacy_unknown": 3,
+      "operational_backfill": 17
+    },
+    "model_39a8c9623ab1": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_3b24fcde562c": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_4aaf20a55e19": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 2,
+      "operational_backfill": 17
+    },
+    "model_4fd1a866c6f4": {
+      "legacy_inferred_live": 1,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    },
+    "model_521acffc5f96": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_5a13695db90d": {
+      "legacy_inferred_live": 6,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_5d171394ad2f": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_72b823a259a3": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_7900e39408d8": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_8996b9727376": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_8ac716bcacda": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_90a35a2a9228": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_9630517a616d": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_9e0df8356f55": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_ac893c31d783": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_ad04504f520b": {
+      "legacy_inferred_live": 6,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_b11651b2125c": {
+      "legacy_inferred_live": 1,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    },
+    "model_b5512a4be5dc": {
+      "legacy_inferred_live": 1,
+      "legacy_unknown": 0,
+      "operational_backfill": 0
+    },
+    "model_b7a6153fb3cb": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_b7afb7c03ea2": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_bb6ac93bf560": {
+      "legacy_inferred_live": 6,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_c67cfe7d52a4": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_cde3471bf4d1": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_d32c9d239d66": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_d4148c5e661a": {
+      "legacy_inferred_live": 6,
+      "legacy_unknown": 3,
+      "operational_backfill": 18
+    },
+    "model_e939b0bb2f2d": {
+      "legacy_inferred_live": 6,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_f5237b843379": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_f5348882a246": {
+      "legacy_inferred_live": 4,
+      "legacy_unknown": 1,
+      "operational_backfill": 21
+    },
+    "model_f5c5bc3de32d": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_f770768ab169": {
+      "legacy_inferred_live": 6,
+      "legacy_unknown": 3,
+      "operational_backfill": 18
+    },
+    "model_f8f948d764ce": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    },
+    "model_fea2b232b3de": {
+      "legacy_inferred_live": 5,
+      "legacy_unknown": 0,
+      "operational_backfill": 21
+    }
+  },
+  "counts": {
+    "legacy_inferred_live": 158,
+    "legacy_unknown": 19,
+    "operational_backfill": 658,
+    "scheduled_live": 0
+  },
+  "examples": {
+    "legacy_inferred_live": [
+      {
+        "model_id": "model_b11651b2125c",
+        "origin": "legacy_inferred_live",
+        "prediction_date": "2026-09-14",
+        "prediction_id": "6f05061a84be48f446e4",
+        "reason": "created_before_target_with_strictly_prior_training_and_as_of"
+      },
+      {
+        "model_id": "model_b5512a4be5dc",
+        "origin": "legacy_inferred_live",
+        "prediction_date": "2026-09-14",
+        "prediction_id": "3842c8532eaf11b67312",
+        "reason": "created_before_target_with_strictly_prior_training_and_as_of"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "legacy_inferred_live",
+        "prediction_date": "2026-09-14",
+        "prediction_id": "f24baf56317d9578156a",
+        "reason": "created_before_target_with_strictly_prior_training_and_as_of"
+      },
+      {
+        "model_id": "model_4fd1a866c6f4",
+        "origin": "legacy_inferred_live",
+        "prediction_date": "2026-09-14",
+        "prediction_id": "f121894c7e6beb188ea2",
+        "reason": "created_before_target_with_strictly_prior_training_and_as_of"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "legacy_inferred_live",
+        "prediction_date": "2026-09-15",
+        "prediction_id": "524b8e5ed4b31f215ec9",
+        "reason": "created_before_target_with_strictly_prior_training_and_as_of"
+      }
+    ],
+    "legacy_unknown": [
+      {
+        "model_id": "model_36b550890055",
+        "origin": "legacy_unknown",
+        "prediction_date": "2026-09-14",
+        "prediction_id": "8308b994edcf1d56c163",
+        "reason": "temporal_evidence_is_ambiguous"
+      },
+      {
+        "model_id": "model_d4148c5e661a",
+        "origin": "legacy_unknown",
+        "prediction_date": "2026-09-15",
+        "prediction_id": "97c0ba0275d65fc53c58",
+        "reason": "temporal_evidence_is_ambiguous"
+      },
+      {
+        "model_id": "model_f770768ab169",
+        "origin": "legacy_unknown",
+        "prediction_date": "2026-09-15",
+        "prediction_id": "9aee834aa155fe580a6d",
+        "reason": "temporal_evidence_is_ambiguous"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "legacy_unknown",
+        "prediction_date": "2026-09-16",
+        "prediction_id": "23d2ecb941fc8599b042",
+        "reason": "temporal_evidence_is_ambiguous"
+      },
+      {
+        "model_id": "model_36b550890055",
+        "origin": "legacy_unknown",
+        "prediction_date": "2026-09-16",
+        "prediction_id": "f1361648b046e4c9faeb",
+        "reason": "temporal_evidence_is_ambiguous"
+      }
+    ],
+    "operational_backfill": [
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "operational_backfill",
+        "prediction_date": "2026-08-19",
+        "prediction_id": "87849e7125337c57e277",
+        "reason": "artifact_training_reaches_target_session"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "operational_backfill",
+        "prediction_date": "2026-08-20",
+        "prediction_id": "b7a90957bb9d866fd982",
+        "reason": "artifact_training_reaches_target_session"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "operational_backfill",
+        "prediction_date": "2026-08-21",
+        "prediction_id": "79d41e925100a48f82c7",
+        "reason": "artifact_training_reaches_target_session"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "operational_backfill",
+        "prediction_date": "2026-08-24",
+        "prediction_id": "199f2dd6b53ecd42978b",
+        "reason": "artifact_training_reaches_target_session"
+      },
+      {
+        "model_id": "model_4aaf20a55e19",
+        "origin": "operational_backfill",
+        "prediction_date": "2026-08-25",
+        "prediction_id": "50c19315e8cae23df3dd",
+        "reason": "artifact_training_reaches_target_session"
+      }
+    ],
+    "scheduled_live": []
+  },
+  "generated_at": "2026-09-25T01:14:14.505427+00:00",
+  "issues": [],
+  "reasons": {
+    "artifact_training_reaches_target_session": 658,
+    "created_before_target_with_strictly_prior_training_and_as_of": 158,
+    "temporal_evidence_is_ambiguous": 19
+  },
+  "total": 835
+}
