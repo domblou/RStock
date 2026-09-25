@@ -349,6 +349,73 @@ def _session_date_label(value: str) -> str:
     return text if pd.isna(parsed) else pd.Timestamp(parsed).date().isoformat()
 
 
+def _primary_universe_id(configuration: Mapping[str, object]) -> str | None:
+    """Read the immutable primary-universe identifier from current or legacy config."""
+
+    direct = configuration.get("primary_universe_id")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    selection = configuration.get("universe_selection")
+    if isinstance(selection, Mapping):
+        legacy = selection.get("universe")
+        if isinstance(legacy, str) and legacy.strip():
+            return legacy.strip()
+    return None
+
+
+def _history_universe_id(
+    configuration: Mapping[str, object],
+    metadata: Mapping[str, object],
+    related_details: Mapping[str, Mapping[str, object]],
+) -> str | None:
+    """Resolve a child run's frozen universe from its own or an ancestor config."""
+
+    seen: set[str] = set()
+    pending: list[tuple[Mapping[str, object], Mapping[str, object]]] = [
+        (configuration, metadata)
+    ]
+    while pending:
+        candidate, candidate_metadata = pending.pop(0)
+        if universe_id := _primary_universe_id(candidate):
+            return universe_id
+        related = (
+            candidate_metadata.get("parent_run_id"),
+            candidate_metadata.get("reference_run_id"),
+            candidate_metadata.get("root_run_id"),
+            candidate.get("source_end_to_end_run"),
+            candidate.get("source_experiment_run"),
+            candidate.get("source_walk_forward_run"),
+            candidate.get("source_xgboost_calibration_run"),
+            candidate.get("source_threshold_parameter_calibration_run"),
+        )
+        for run_id in related:
+            key = str(run_id or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            detail = related_details.get(key)
+            if not isinstance(detail, Mapping):
+                continue
+            parent_configuration = detail.get("configuration")
+            parent_metadata = detail.get("metadata")
+            if isinstance(parent_configuration, Mapping):
+                pending.append((
+                    parent_configuration,
+                    parent_metadata if isinstance(parent_metadata, Mapping) else {},
+                ))
+    return None
+
+
+def _history_universe_label(
+    configuration: Mapping[str, object],
+    metadata: Mapping[str, object],
+    universe_labels: Mapping[str, str],
+    related_details: Mapping[str, Mapping[str, object]],
+) -> str | None:
+    universe_id = _history_universe_id(configuration, metadata, related_details)
+    return None if universe_id is None else universe_labels.get(universe_id, universe_id)
+
+
 def _context_text(
     job_type: str,
     configuration: Mapping[str, object],
@@ -423,18 +490,28 @@ def history_row(
     status: Mapping[str, object],
     detail: Mapping[str, object],
     models: Mapping[str, str],
+    *,
+    universe_labels: Mapping[str, str] | None = None,
+    related_details: Mapping[str, Mapping[str, object]] | None = None,
 ) -> HistoryRow:
     configuration = detail.get("configuration", {})
     summary = detail.get("summary", {})
     metadata = detail.get("metadata", {})
     job_type = str(status["job_type"])
+    configuration = configuration if isinstance(configuration, Mapping) else {}
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    summary = summary if isinstance(summary, Mapping) else {}
+    universe = _history_universe_label(
+        configuration, metadata, universe_labels or {}, related_details or {},
+    )
+    summary_text = _summary_text(job_type, summary, configuration, str(status["status"]))
     return HistoryRow(
         run_id=str(status["run_id"]),
         lineage=_lineage_text(
             run_id=str(status["run_id"]),
             job_type=job_type,
-            configuration=configuration if isinstance(configuration, Mapping) else {},
-            metadata=metadata if isinstance(metadata, Mapping) else {},
+            configuration=configuration,
+            metadata=metadata,
         ),
         date_time=short_datetime(status.get("created_at")),
         job_type=job_type,
@@ -446,7 +523,7 @@ def history_row(
             else "Complet"
         ),
         duration=short_duration(status.get("duration_seconds")),
-        summary=_summary_text(job_type, summary, configuration, str(status["status"])),
+        summary=" · ".join((universe, summary_text)) if universe else summary_text,
     )
 
 

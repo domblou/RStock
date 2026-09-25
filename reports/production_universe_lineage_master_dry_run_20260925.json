@@ -1,0 +1,334 @@
+{
+  "operation": "backfill_primary_universe_name_at_promotion",
+  "mode": "dry_run",
+  "models_inspected": 35,
+  "models_corrected": [],
+  "models_already_populated": [
+    {
+      "model_id": "model_36b550890055",
+      "value": "US Tech Growth (35)"
+    },
+    {
+      "model_id": "model_d4148c5e661a",
+      "value": "US Diversified"
+    },
+    {
+      "model_id": "model_f770768ab169",
+      "value": "US Diversified"
+    },
+    {
+      "model_id": "model_bb6ac93bf560",
+      "value": "US Diversified (150)"
+    },
+    {
+      "model_id": "model_5a13695db90d",
+      "value": "S&P 500 Dividend Aristocrats"
+    },
+    {
+      "model_id": "model_ad04504f520b",
+      "value": "S&P 500 Dividend Aristocrats"
+    },
+    {
+      "model_id": "model_e939b0bb2f2d",
+      "value": "S&P 500 Dividend Aristocrats"
+    },
+    {
+      "model_id": "model_ac893c31d783",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_b7a6153fb3cb",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_3b24fcde562c",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_8ac716bcacda",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_72b823a259a3",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_521acffc5f96",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_c67cfe7d52a4",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_d32c9d239d66",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_fea2b232b3de",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_2464cc46f354",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_f8f948d764ce",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_90a35a2a9228",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_f5c5bc3de32d",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_8996b9727376",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_f5237b843379",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_9630517a616d",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_9e0df8356f55",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_cde3471bf4d1",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_7900e39408d8",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_f5348882a246",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_2b29de565c0f",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_39a8c9623ab1",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_b7afb7c03ea2",
+      "value": "US Diversified 150"
+    },
+    {
+      "model_id": "model_5d171394ad2f",
+      "value": "US Diversified 150"
+    }
+  ],
+  "models_unresolved": [
+    {
+      "model_id": "model_b11651b2125c",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    },
+    {
+      "model_id": "model_b5512a4be5dc",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    },
+    {
+      "model_id": "model_4aaf20a55e19",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    },
+    {
+      "model_id": "model_4fd1a866c6f4",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    }
+  ],
+  "errors": [],
+  "master_snapshot": {
+    "artifact_path": "C:\\Dev\\RStock\\production\\quality\\generations\\generation_20260925T011622_469a9edbf5\\snapshots\\models.parquet",
+    "models_found": 35,
+    "names_updated": [
+      {
+        "model_id": "model_2464cc46f354",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_2b29de565c0f",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_36b550890055",
+        "old_value": null,
+        "new_value": "US Tech Growth (35)"
+      },
+      {
+        "model_id": "model_39a8c9623ab1",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_3b24fcde562c",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_521acffc5f96",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_5a13695db90d",
+        "old_value": null,
+        "new_value": "S&P 500 Dividend Aristocrats"
+      },
+      {
+        "model_id": "model_5d171394ad2f",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_72b823a259a3",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_7900e39408d8",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_8996b9727376",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_8ac716bcacda",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_90a35a2a9228",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_9630517a616d",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_9e0df8356f55",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_ac893c31d783",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_ad04504f520b",
+        "old_value": null,
+        "new_value": "S&P 500 Dividend Aristocrats"
+      },
+      {
+        "model_id": "model_b7a6153fb3cb",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_b7afb7c03ea2",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_bb6ac93bf560",
+        "old_value": null,
+        "new_value": "US Diversified (150)"
+      },
+      {
+        "model_id": "model_c67cfe7d52a4",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_cde3471bf4d1",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_d32c9d239d66",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_d4148c5e661a",
+        "old_value": null,
+        "new_value": "US Diversified"
+      },
+      {
+        "model_id": "model_e939b0bb2f2d",
+        "old_value": null,
+        "new_value": "S&P 500 Dividend Aristocrats"
+      },
+      {
+        "model_id": "model_f5237b843379",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_f5348882a246",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_f5c5bc3de32d",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_f770768ab169",
+        "old_value": null,
+        "new_value": "US Diversified"
+      },
+      {
+        "model_id": "model_f8f948d764ce",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      },
+      {
+        "model_id": "model_fea2b232b3de",
+        "old_value": null,
+        "new_value": "US Diversified 150"
+      }
+    ],
+    "models_absent": [],
+    "models_already_coherent": [],
+    "discrepancies": [],
+    "errors": []
+  },
+  "counts": {
+    "corrected": 0,
+    "already_populated": 31,
+    "unresolved": 4,
+    "errors": 0
+  }
+}

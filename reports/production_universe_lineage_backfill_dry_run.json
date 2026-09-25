@@ -1,0 +1,324 @@
+{
+  "operation": "backfill_primary_universe_name_at_promotion",
+  "mode": "dry_run",
+  "models_inspected": 35,
+  "models_corrected": [
+    {
+      "model_id": "model_36b550890055",
+      "old_value": null,
+      "new_value": "US Tech Growth (35)",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-14T00:41:09.225875+00:00",
+      "universe_id": "US_TECH_GROWTH_35",
+      "universe_updated_at": "2026-09-13T16:23:23.435593+00:00"
+    },
+    {
+      "model_id": "model_d4148c5e661a",
+      "old_value": null,
+      "new_value": "US Diversified",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-14T23:01:20.820759+00:00",
+      "universe_id": "US_DIVERSIFIED",
+      "universe_updated_at": "2026-09-14T00:46:34.631589+00:00"
+    },
+    {
+      "model_id": "model_f770768ab169",
+      "old_value": null,
+      "new_value": "US Diversified",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-14T23:01:32.744507+00:00",
+      "universe_id": "US_DIVERSIFIED",
+      "universe_updated_at": "2026-09-14T00:46:34.631589+00:00"
+    },
+    {
+      "model_id": "model_bb6ac93bf560",
+      "old_value": null,
+      "new_value": "US Diversified (150)",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-15T02:51:56.190109+00:00",
+      "universe_id": "US_DIVERSIFIED_150",
+      "universe_updated_at": "2026-09-14T22:53:18.166737+00:00"
+    },
+    {
+      "model_id": "model_5a13695db90d",
+      "old_value": null,
+      "new_value": "S&P 500 Dividend Aristocrats",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-17T20:50:20.277318+00:00",
+      "universe_id": "S_P_500_DIVIDEND_ARISTOCRATS",
+      "universe_updated_at": "2026-09-16T00:10:47.071502+00:00"
+    },
+    {
+      "model_id": "model_ad04504f520b",
+      "old_value": null,
+      "new_value": "S&P 500 Dividend Aristocrats",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-17T20:50:31.162770+00:00",
+      "universe_id": "S_P_500_DIVIDEND_ARISTOCRATS",
+      "universe_updated_at": "2026-09-16T00:10:47.071502+00:00"
+    },
+    {
+      "model_id": "model_e939b0bb2f2d",
+      "old_value": null,
+      "new_value": "S&P 500 Dividend Aristocrats",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-17T20:50:40.765216+00:00",
+      "universe_id": "S_P_500_DIVIDEND_ARISTOCRATS",
+      "universe_updated_at": "2026-09-16T00:10:47.071502+00:00"
+    },
+    {
+      "model_id": "model_ac893c31d783",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:40.232713+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_b7a6153fb3cb",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:40.770462+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_3b24fcde562c",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:41.306894+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_8ac716bcacda",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:41.804701+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_72b823a259a3",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:42.312272+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_521acffc5f96",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:42.817232+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_c67cfe7d52a4",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:43.380437+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_d32c9d239d66",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:43.886456+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_fea2b232b3de",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:44.396984+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_2464cc46f354",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:44.900853+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_f8f948d764ce",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:45.449052+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_90a35a2a9228",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:45.984528+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_f5c5bc3de32d",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:46.499761+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_8996b9727376",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:47.000373+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_f5237b843379",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:47.532468+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_9630517a616d",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-19T19:55:48.049852+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_9e0df8356f55",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:56:25.551805+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_cde3471bf4d1",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:56:48.211806+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_7900e39408d8",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:57:12.615561+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_f5348882a246",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:57:38.222731+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_2b29de565c0f",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:58:10.036168+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_39a8c9623ab1",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:58:29.203333+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_b7afb7c03ea2",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:58:50.539177+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    },
+    {
+      "model_id": "model_5d171394ad2f",
+      "old_value": null,
+      "new_value": "US Diversified 150",
+      "source": "persisted_universe_registry_preceding_promotion",
+      "promotion_date": "2026-09-21T11:59:18.224871+00:00",
+      "universe_id": "US_DIVERSIFIED_150_2",
+      "universe_updated_at": "2026-09-19T02:01:24.525733+00:00"
+    }
+  ],
+  "models_already_populated": [],
+  "models_unresolved": [
+    {
+      "model_id": "model_b11651b2125c",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    },
+    {
+      "model_id": "model_b5512a4be5dc",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    },
+    {
+      "model_id": "model_4aaf20a55e19",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    },
+    {
+      "model_id": "model_4fd1a866c6f4",
+      "old_value": null,
+      "reason": "primary_universe_id_missing",
+      "universe_id": null,
+      "universe_updated_at": null
+    }
+  ],
+  "errors": [],
+  "counts": {
+    "corrected": 31,
+    "already_populated": 0,
+    "unresolved": 4,
+    "errors": 0
+  }
+}

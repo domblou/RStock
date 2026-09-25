@@ -170,6 +170,40 @@ def test_history_rows_display_run_id_and_lineage():
     }
 
 
+def test_history_summary_prepends_the_current_or_legacy_frozen_universe():
+    modern = _detail(summary={"eligible_combinations": 3})
+    modern["configuration"]["primary_universe_id"] = "PRIMARY"
+    legacy = _detail(summary={"eligible_combinations": 3})
+    legacy["configuration"]["universe_selection"] = {"universe": "LEGACY"}
+
+    modern_row = history_row(
+        _run("modern", "walk_forward"), modern, {},
+        universe_labels={"PRIMARY": "Univers principal"},
+    )
+    legacy_row = history_row(
+        _run("legacy", "walk_forward"), legacy, {},
+        universe_labels={},
+    )
+
+    assert modern_row.summary == "Univers principal · 3 combinaisons qualifiées · WF expansive"
+    assert legacy_row.summary == "LEGACY · 3 combinaisons qualifiées · WF expansive"
+
+
+def test_history_summary_inherits_the_universe_of_a_parent_when_child_is_legacy():
+    parent = _detail()
+    parent["configuration"]["primary_universe_id"] = "PRIMARY"
+    child = _detail(summary={"eligible_combinations": 3})
+    child["metadata"] = {"parent_run_id": "parent"}
+
+    row = history_row(
+        _run("child", "walk_forward"), child, {},
+        universe_labels={"PRIMARY": "Univers principal"},
+        related_details={"parent": parent},
+    )
+
+    assert row.summary == "Univers principal · 3 combinaisons qualifiées · WF expansive"
+
+
 def test_history_summary_distinguishes_expanding_and_rolling_walk_forward():
     expanding = _detail()
     expanding["configuration"]["rstock_config"].update({

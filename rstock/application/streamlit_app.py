@@ -3590,6 +3590,9 @@ def _history_runs_panel(
         str(record.status["run_id"]): record.detail() for record in history_runs
     }
     models = _history_model_contexts(st.session_state.lab_config.project_root)
+    universe_labels = {
+        record.universe_id: record.name for record in _universe_service().records()
+    }
     filtered = _history_filters(
         runs,
         allowed_types=allowed_types,
@@ -3613,7 +3616,10 @@ def _history_runs_panel(
     visible, total_pages = paginate_runs(filtered, page=int(page) - 1, page_size=int(page_size))
     page_controls[2].caption(f"{len(filtered)} runs · page {int(page)} / {total_pages}")
     rows = [
-        history_row(run, details_by_run_id[str(run["run_id"])], models)
+        history_row(
+            run, details_by_run_id[str(run["run_id"])], models,
+            universe_labels=universe_labels, related_details=details_by_run_id,
+        )
         for run in visible
     ]
     selection = st.dataframe(

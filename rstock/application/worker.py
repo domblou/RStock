@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
 import os
 import time
 import traceback
+import uuid
+from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 from rstock.progress import CancellationRequested, check_cancellation
 from rstock.checkpoints import CheckpointManager
@@ -20,6 +25,12 @@ from .processes import process_alive
 from .repository import RunRepository
 from .runner import LocalProcessBackend, ProgressReporter
 from .workflows import WorkflowRegistry
+
+
+LOGGER = logging.getLogger(__name__)
+SLOT_INITIALIZATION_GRACE_SECONDS = 30.0
+HEAVY_QUEUE_DIRECTORY = "queue"
+HEAVY_QUEUE_GUARD = "queue.guard"
 
 
 WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
@@ -102,8 +113,96 @@ def _process_alive(pid: int) -> bool:
     return process_alive(pid)
 
 
+@contextmanager
+def _try_file_mutex(path: Path) -> Iterator[bool]:
+    """Try an OS-backed, cross-process exclusive lock on one stable byte."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+        yield acquired
+    finally:
+        if acquired:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@contextmanager
+def _file_mutex(path: Path) -> Iterator[None]:
+    """Wait for the short metadata critical section used during release."""
+
+    while True:
+        with _try_file_mutex(path) as locked:
+            if locked:
+                yield
+                return
+        time.sleep(0.01)
+
+
+def _atomic_owner_write(path: Path, owner: dict[str, object]) -> None:
+    """Publish complete lease metadata with one atomic filesystem replace."""
+
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(owner, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _path_age_seconds(path: Path) -> float | None:
+    try:
+        return max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def _read_owner(path: Path) -> tuple[dict[str, object] | None, str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return None, "invalid"
+        return value, "valid"
+    except FileNotFoundError:
+        return None, "missing"
+    except PermissionError:
+        return None, "initializing"
+    except (OSError, json.JSONDecodeError):
+        return None, "invalid"
+
+
 class SlotLease:
-    """Cross-process local concurrency limit using atomic slot directories."""
+    """Cross-process concurrency limit using per-slot OS file mutexes."""
 
     def __init__(
         self,
@@ -118,56 +217,275 @@ class SlotLease:
         self.max_slots = max_slots
         self.poll_seconds = poll_seconds
         self.path: Path | None = None
+        self.token: str | None = None
+        self.queue_token: str | None = None
+        self._logged_states: dict[str, str] = {}
 
-    def _clear_stale(self, slot: Path) -> None:
-        owner_path = slot / "owner.json"
+    @property
+    def _slots_root(self) -> Path:
+        return self.repository.root / ".slots"
+
+    @property
+    def _queue_root(self) -> Path:
+        return self._slots_root / HEAVY_QUEUE_DIRECTORY
+
+    @property
+    def _queue_guard(self) -> Path:
+        return self._slots_root / HEAVY_QUEUE_GUARD
+
+    @property
+    def _queue_path(self) -> Path:
+        return self._queue_root / f"{self.run_id}.json"
+
+    def _ensure_queue_ticket_locked(self) -> dict[str, object]:
+        """Create or adopt this run's durable FIFO position under the queue mutex."""
+
+        self._queue_root.mkdir(parents=True, exist_ok=True)
+        existing, state = _read_owner(self._queue_path)
+        queued_at = None
+        queue_id = None
+        if state == "valid" and existing.get("run_id") == self.run_id:
+            queued_at = existing.get("queued_at")
+            queue_id = existing.get("queue_id")
+        if not queued_at:
+            queued_at = datetime.now(timezone.utc).isoformat()
+        if not queue_id:
+            queue_id = uuid.uuid4().hex
+        if self.queue_token is None:
+            self.queue_token = uuid.uuid4().hex
+        ticket: dict[str, object] = {
+            "run_id": self.run_id,
+            "queued_at": str(queued_at),
+            "queue_id": str(queue_id),
+            "waiter_pid": os.getpid(),
+            "waiter_token": self.queue_token,
+        }
+        if state != "valid" or any(existing.get(key) != value for key, value in ticket.items()):
+            _atomic_owner_write(self._queue_path, ticket)
+            LOGGER.info(
+                "Heavy queue entered run_id=%s queued_at=%s",
+                self.run_id,
+                ticket["queued_at"],
+            )
+        return ticket
+
+    def _ticket_is_eligible_locked(
+        self, path: Path, ticket: dict[str, object]
+    ) -> bool:
+        run_id = ticket.get("run_id")
+        queued_at = ticket.get("queued_at")
         try:
-            owner = json.loads(owner_path.read_text(encoding="utf-8"))
-            alive = _process_alive(int(owner["pid"]))
-        except PermissionError:
-            # A concurrent releaser or antivirus can briefly lock owner.json
-            # on Windows. Treat the slot as active and retry on the next poll.
-            return
-        except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
-            alive = False
-        if not alive:
-            if owner_path.exists():
-                owner_path.unlink()
+            waiter_pid = int(ticket["waiter_pid"])
+        except (KeyError, TypeError, ValueError):
+            waiter_pid = 0
+        if not isinstance(run_id, str) or not run_id or not queued_at:
+            path.unlink(missing_ok=True)
+            LOGGER.warning("Heavy queue invalid ticket removed path=%s", path.name)
+            return False
+        status_path = self.repository.run_directory(run_id) / "status.json"
+        if status_path.is_file():
             try:
-                slot.rmdir()
-            except OSError:
-                pass
+                status = self.repository.status(run_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                LOGGER.warning("Heavy queue unreadable job skipped run_id=%s", run_id)
+                return False
+            if (
+                status.get("status") not in {
+                    JobStatus.PENDING.value,
+                    JobStatus.RUNNING.value,
+                }
+                or status.get("cancellation_requested")
+                or self.repository.cancellation_requested(run_id)
+            ):
+                path.unlink(missing_ok=True)
+                LOGGER.info("Heavy queue cancelled or terminal job removed run_id=%s", run_id)
+                return False
+        current_waiter = (
+            run_id == self.run_id
+            and ticket.get("waiter_token") == self.queue_token
+            and waiter_pid == os.getpid()
+        )
+        if not current_waiter and not _process_alive(waiter_pid):
+            LOGGER.info("Heavy queue inactive waiter skipped run_id=%s", run_id)
+            return False
+        return True
+
+    def _ordered_waiters_locked(self) -> list[dict[str, object]]:
+        waiters: list[dict[str, object]] = []
+        for path in self._queue_root.glob("*.json"):
+            ticket, state = _read_owner(path)
+            if state != "valid" or not self._ticket_is_eligible_locked(path, ticket):
+                if state in {"missing", "invalid"}:
+                    path.unlink(missing_ok=True)
+                continue
+            waiters.append(ticket)
+        return sorted(
+            waiters,
+            key=lambda item: (
+                str(item["queued_at"]),
+                str(item.get("queue_id") or ""),
+                str(item["run_id"]),
+            ),
+        )
+
+    def _remove_queue_ticket_locked(self) -> None:
+        ticket, state = _read_owner(self._queue_path)
+        if (
+            state == "valid"
+            and ticket.get("run_id") == self.run_id
+            and ticket.get("waiter_token") == self.queue_token
+        ):
+            self._queue_path.unlink(missing_ok=True)
+
+    def _leave_queue(self) -> None:
+        if self.queue_token is None:
+            return
+        with _file_mutex(self._queue_guard):
+            self._remove_queue_ticket_locked()
+        self.queue_token = None
+
+    def _log_state(self, slot: Path, state: str, message: str) -> None:
+        key = str(slot)
+        if self._logged_states.get(key) == state:
+            return
+        self._logged_states[key] = state
+        LOGGER.info("Heavy slot %s run_id=%s slot=%s", message, self.run_id, slot.name)
+
+    def _slot_guard_busy(self, slot: Path) -> None:
+        self._log_state(slot, "initializing", "in initialization or metadata transition")
+
+    def _queue_guard_busy(self) -> None:
+        self._log_state(
+            self._slots_root,
+            "queue-transition",
+            "waiting for FIFO queue metadata transition",
+        )
+
+    def _after_slot_directory_created(self, slot: Path) -> None:
+        """Test synchronization seam; production acquisition does not override it."""
+
+    def _claim(self, slot: Path) -> bool:
+        guard = slot.parent / f"{slot.name}.guard"
+        with _try_file_mutex(guard) as locked:
+            if not locked:
+                self._slot_guard_busy(slot)
+                return False
+            owner_path = slot / "owner.json"
+            if not slot.exists():
+                slot.mkdir()
+                self._log_state(slot, "initializing", "initialization started")
+                self._after_slot_directory_created(slot)
+            else:
+                owner, state = _read_owner(owner_path)
+                if state == "valid":
+                    try:
+                        alive = _process_alive(int(owner["pid"]))
+                    except (TypeError, ValueError, KeyError):
+                        alive = False
+                    if alive:
+                        self._log_state(slot, "occupied", "occupied")
+                        return False
+                    self._log_state(slot, "stale", "stale owner detected")
+                elif state == "initializing":
+                    self._log_state(slot, "initializing", "owner metadata initializing")
+                    return False
+                else:
+                    age = _path_age_seconds(owner_path if owner_path.exists() else slot)
+                    if age is None or age < SLOT_INITIALIZATION_GRACE_SECONDS:
+                        self._log_state(slot, "initializing", "owner metadata initializing")
+                        return False
+                    self._log_state(slot, "stale", "abandoned initialization detected")
+                self._log_state(slot, "recovered", "stale owner recovered")
+            claim_token = uuid.uuid4().hex
+            _atomic_owner_write(
+                owner_path,
+                {
+                    "pid": os.getpid(),
+                    "run_id": self.run_id,
+                    "token": claim_token,
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            self.token = claim_token
+            self.path = slot
+            self._log_state(slot, "acquired", "acquired")
+            return True
 
     def acquire(self) -> None:
-        slots = self.repository.root / ".slots"
+        slots = self._slots_root
         slots.mkdir(parents=True, exist_ok=True)
-        while self.path is None:
-            check_cancellation(lambda: self.repository.cancellation_requested(self.run_id))
-            for number in range(self.max_slots):
-                slot = slots / f"slot-{number}"
-                try:
-                    slot.mkdir()
-                except FileExistsError:
-                    self._clear_stale(slot)
-                    continue
-                (slot / "owner.json").write_text(
-                    json.dumps({"pid": os.getpid(), "run_id": self.run_id}),
-                    encoding="utf-8",
+        LOGGER.info(
+            "Heavy slot acquisition attempt run_id=%s max_slots=%s",
+            self.run_id,
+            self.max_slots,
+        )
+        try:
+            while self.path is None:
+                check_cancellation(
+                    lambda: self.repository.cancellation_requested(self.run_id)
                 )
-                self.path = slot
-                return
-            time.sleep(self.poll_seconds)
+                with _try_file_mutex(self._queue_guard) as queue_locked:
+                    if queue_locked:
+                        ticket = self._ensure_queue_ticket_locked()
+                        waiters = self._ordered_waiters_locked()
+                        position = next(
+                            (
+                                index
+                                for index, waiter in enumerate(waiters)
+                                if waiter.get("run_id") == self.run_id
+                                and waiter.get("waiter_token") == self.queue_token
+                            ),
+                            None,
+                        )
+                        if position == 0:
+                            for number in range(self.max_slots):
+                                slot = slots / f"slot-{number}"
+                                if self._claim(slot):
+                                    self._remove_queue_ticket_locked()
+                                    self.queue_token = None
+                                    return
+                        elif position is not None:
+                            self._log_state(
+                                slots,
+                                f"queued-{position}",
+                                f"waiting in FIFO position {position + 1}",
+                            )
+                    else:
+                        self._queue_guard_busy()
+                time.sleep(self.poll_seconds)
+        finally:
+            if self.path is None:
+                self._leave_queue()
 
     def release(self) -> None:
         if self.path is None:
             return
-        owner = self.path / "owner.json"
-        if owner.exists():
-            owner.unlink()
+        slot = self.path
+        guard = slot.parent / f"{slot.name}.guard"
         try:
-            self.path.rmdir()
+            with _file_mutex(guard):
+                owner_path = slot / "owner.json"
+                owner, state = _read_owner(owner_path)
+                if (
+                    state != "valid"
+                    or owner.get("run_id") != self.run_id
+                    or owner.get("token") != self.token
+                ):
+                    LOGGER.warning(
+                        "Heavy slot release skipped: ownership changed run_id=%s slot=%s",
+                        self.run_id,
+                        slot.name,
+                    )
+                    return
+                owner_path.unlink()
+                try:
+                    slot.rmdir()
+                except OSError:
+                    pass
+                LOGGER.info("Heavy slot released run_id=%s slot=%s", self.run_id, slot.name)
         finally:
             self.path = None
+            self.token = None
 
 
 class RunLease:
@@ -178,51 +496,77 @@ class RunLease:
         self.run_id = run_id
         self.path = repository.run_directory(run_id) / ".worker.lock"
         self.acquired = False
+        self.token: str | None = None
 
-    def _clear_stale(self) -> None:
-        owner_path = self.path / "owner.json"
-        try:
-            owner = json.loads(owner_path.read_text(encoding="utf-8"))
-            alive = _process_alive(int(owner["pid"]))
-        except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
-            alive = False
-        if not alive:
-            owner_path.unlink(missing_ok=True)
-            try:
-                self.path.rmdir()
-            except OSError:
-                pass
+    @property
+    def _guard(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.guard")
 
     def acquire(self) -> None:
         for _ in range(2):
-            try:
-                self.path.mkdir()
-            except FileExistsError:
-                self._clear_stale()
-                continue
-            (self.path / "owner.json").write_text(
-                json.dumps({"pid": os.getpid(), "run_id": self.run_id}),
-                encoding="utf-8",
-            )
-            self.acquired = True
-            return
+            with _try_file_mutex(self._guard) as locked:
+                if not locked:
+                    continue
+                owner_path = self.path / "owner.json"
+                if self.path.exists():
+                    owner, state = _read_owner(owner_path)
+                    if state == "valid":
+                        try:
+                            if _process_alive(int(owner["pid"])):
+                                continue
+                        except (TypeError, ValueError, KeyError):
+                            pass
+                    elif state == "initializing":
+                        continue
+                    else:
+                        age = _path_age_seconds(owner_path if owner_path.exists() else self.path)
+                        if age is None or age < SLOT_INITIALIZATION_GRACE_SECONDS:
+                            continue
+                else:
+                    self.path.mkdir()
+                claim_token = uuid.uuid4().hex
+                _atomic_owner_write(owner_path, {
+                    "pid": os.getpid(), "run_id": self.run_id,
+                    "token": claim_token,
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self.token = claim_token
+                self.acquired = True
+                return
         raise RuntimeError("Une autre exécution détient déjà le verrou de ce run.")
 
     def release(self) -> None:
         if not self.acquired:
             return
-        (self.path / "owner.json").unlink(missing_ok=True)
         try:
-            self.path.rmdir()
+            with _file_mutex(self._guard):
+                owner_path = self.path / "owner.json"
+                owner, state = _read_owner(owner_path)
+                if (
+                    state != "valid"
+                    or owner.get("run_id") != self.run_id
+                    or owner.get("token") != self.token
+                ):
+                    return
+                owner_path.unlink()
+                try:
+                    self.path.rmdir()
+                except OSError:
+                    pass
         finally:
             self.acquired = False
+            self.token = None
 
     def owned_by_current_process(self) -> bool:
         if not self.acquired:
             return False
         try:
             owner = json.loads((self.path / "owner.json").read_text(encoding="utf-8"))
-            return owner.get("run_id") == self.run_id and int(owner["pid"]) == os.getpid()
+            return (
+                owner.get("run_id") == self.run_id
+                and owner.get("token") == self.token
+                and int(owner["pid"]) == os.getpid()
+            )
         except (FileNotFoundError, OSError, ValueError, KeyError, json.JSONDecodeError):
             return False
 
