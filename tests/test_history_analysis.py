@@ -199,12 +199,31 @@ def test_configuration_comparison_exposes_only_differences():
     assert differences["Run B"].tolist() == [3, "AAA, CCC"]
 
 
-def test_selection_routes_one_run_to_detail_and_two_to_four_to_comparison():
+def test_comparison_includes_cutoffs_raw_plan_and_population_settings():
+    first = replace(_analysis("run-a", 120.0), raw_count=1000, requested_cutoff="2025-03-30", resolved_cutoff="2025-03-28")
+    second = replace(_analysis("run-b", 60.0), raw_count=2000, requested_cutoff="2025-09-30", resolved_cutoff="2025-09-30")
+    matrix = comparison_table([first, second], {"run-a": "A", "run-b": "B"})
+    assert matrix.loc[matrix["Indicateur"] == "Combinaisons brutes planifiées", "B"].iloc[0] == 2000
+    assert matrix.loc[matrix["Indicateur"] == "Cutoff résolu", "A"].iloc[0] == "2025-03-28"
+    five_runs = [replace(first, run_id=f"run-{index}") for index in range(5)]
+    five = comparison_table(five_runs, {item.run_id: item.run_id for item in five_runs})
+    assert five.shape == (matrix.shape[0], 6)
+    differences = configuration_differences(
+        [
+            {"requested_historical_cutoff": "2025-03-30", "rstock_config": {"predictor_prefilter_enabled": False}},
+            {"requested_historical_cutoff": "2025-09-30", "rstock_config": {"predictor_prefilter_enabled": True}},
+        ], ["A", "B"],
+    )
+    assert {"requested_historical_cutoff", "predictor_prefilter_enabled"} <= set(differences["Paramètre"])
+
+
+def test_selection_routes_one_run_to_detail_and_two_to_five_to_comparison():
     assert selected_run_action(["run-1"]) == "detail"
     assert selected_run_action(["run-1", "run-2"]) == "comparison"
     assert selected_run_action(["a", "b", "c", "d"]) == "comparison"
     assert selected_run_action([]) is None
-    assert selected_run_action(["a", "b", "c", "d", "e"]) is None
+    assert selected_run_action(["a", "b", "c", "d", "e"]) == "comparison"
+    assert selected_run_action(["a", "b", "c", "d", "e", "f"]) is None
 
 
 def test_comparison_charts_keep_quality_and_duration_on_separate_human_axes():

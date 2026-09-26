@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -216,6 +217,11 @@ def build_pipeline_manifest(
     )
     return {
         "schema_version": PIPELINE_SCHEMA_VERSION,
+        "prepared_dataset_as_of": str(
+            spec.resolved_market_session_cutoff
+            or spec.historical_data_cutoff
+            or date.today().isoformat()
+        ),
         "child_id_policy_version": child_id_policy_version,
         "pipeline_version": spec.pipeline_version,
         "root_run_id": root_run_id,
@@ -359,6 +365,15 @@ def persist_or_validate_pipeline_manifest(
         child_id_policy_version=policy_version,
         reserved_child_ids=reserved_child_ids,
     )
+    explicit_as_of = (
+        spec.resolved_market_session_cutoff or spec.historical_data_cutoff
+    )
+    if (
+        explicit_as_of is not None
+        and persisted.get("prepared_dataset_as_of") is not None
+        and persisted["prepared_dataset_as_of"] != str(explicit_as_of)
+    ):
+        raise ValueError("Ancrage du dataset End-to-end incompatible")
     immutable_keys = (
         "schema_version",
         "child_id_policy_version",
@@ -471,6 +486,19 @@ def build_stage_spec(
     job_type = JobType(str(stage["expected_job_type"]))
     child = _base_child_spec(parent, root_run_id=root_run_id, job_type=job_type)
     if stage_key == "walk_forward":
+        # A completed child keeps its persisted specification on resume. New
+        # pipelines freeze the request date before the first market load.
+        existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
+        if existing.is_file():
+            return repository.load_spec(str(stage["child_run_id"]))
+        if (
+            child.historical_data_cutoff is None
+            and child.config.walk_forward_end_offset_sessions == 0
+            and manifest.get("prepared_dataset_as_of")
+        ):
+            return replace(
+                child, historical_data_cutoff=str(manifest["prepared_dataset_as_of"])
+            )
         return child
 
     walk_forward_id = str(_stage(manifest, "walk_forward")["child_run_id"])
@@ -480,7 +508,15 @@ def build_stage_spec(
     child = replace(
         child,
         source_walk_forward_run=walk_forward_id,
-        historical_data_cutoff=cutoff,
+        historical_data_cutoff=(
+            str(manifest["prepared_dataset_as_of"])
+            if manifest.get("prepared_dataset_as_of")
+            and not (
+                parent.historical_data_cutoff is None
+                and parent.config.walk_forward_end_offset_sessions > 0
+            )
+            else cutoff
+        ),
         source_prepared_dataset_sha256=dataset_digest,
         prepared_dataset_digest_required=True,
     )
@@ -1200,7 +1236,6 @@ def run_end_to_end(
     if (
         spec.forward_simulation_enabled
         and forward_snapshot is not None
-        and int(forward_snapshot.get("candidate_count", 0)) > 0
     ):
         cutoff = pd.Timestamp(
             forward_snapshot["resolved_market_session_cutoff"]
@@ -1252,8 +1287,6 @@ def run_end_to_end(
             forward_child = {"child_run_id": forward_id, "status": "pending"}
         except Exception as error:
             forward_child = {"status": "not_started", "error": str(error)}
-    elif spec.forward_simulation_enabled and forward_snapshot is not None:
-        forward_child = {"status": "skipped_no_models"}
 
     if spec.temporal_validation_enabled:
         check_cancellation(cancellation_check)

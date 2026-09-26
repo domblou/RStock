@@ -351,7 +351,26 @@ def run_forward_simulation(
     snapshot = validate_forward_snapshot(runs, spec, require_expected_hash=False)
     root = runs.run_directory(spec.source_end_to_end_run)
     if not snapshot.get("models"):
-        return {"job_type": "forward_simulation", "status": "skipped_no_models", "signals": 0}
+        summary = {
+            "job_type": "forward_simulation",
+            "source_end_to_end_run_id": spec.source_end_to_end_run,
+            "result": "skipped_no_models",
+            "candidate_count": 0,
+            "source_model_count": 0,
+            "simulation_executed": False,
+            "reason": "no_eligible_models",
+            "total_signals": 0,
+            "evaluated_observations": 0,
+            "precision": None,
+            "directional_return_mean": None,
+            "sessions": 0,
+            "first_session": None,
+            "last_session": None,
+        }
+        (output / "forward_summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return summary
     cutoff = pd.Timestamp(snapshot["resolved_market_session_cutoff"]).normalize()
     start = pd.Timestamp(spec.forward_simulation_start_date).normalize()
     end = pd.Timestamp(spec.forward_simulation_end_date).normalize()

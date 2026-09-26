@@ -11,6 +11,8 @@ from typing import Iterable, Mapping
 
 import pandas as pd
 
+from rstock.calendars import US_EQUITIES_CALENDAR, next_market_session
+
 from .production_domain import ProductionModel
 
 
@@ -45,6 +47,14 @@ PREDICTION_MAIN_COLUMNS = (
 )
 SIGNAL_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "P(Up)", "P(Down)", "Catégorie",
+)
+NEXT_SESSION_SIGNAL_COLUMNS = (
+    "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
+    "Rendement", "Trades gagnants", "Dernier signal",
+)
+LAST_SESSION_RESULT_COLUMNS = (
+    "Date", "Cible", "Prédicteurs", "P(Up)", "Rendement",
+    "P&L cumulé", "Dernier signal",
 )
 EVALUATED_PREDICTIONS_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "Statut initial", "P(Up)", "P(Down)", "Open", "Close",
@@ -142,6 +152,187 @@ def _short_datetime(value: object) -> str:
 def _percentage(value: object) -> str:
     numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     return "—" if pd.isna(numeric) else f"{float(numeric):.2%}"
+
+
+def _display_percentage(value: object) -> str:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return "—"
+    return f"{float(numeric):.2%}".replace(".", ",").replace("%", " %")
+
+
+def _display_currency(value: object) -> str:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return "—"
+    return f"{float(numeric):,.2f}".replace(",", " ").replace(".", ",") + " $"
+
+
+def next_surveillance_session(
+    reference: date | str | pd.Timestamp,
+    calendar_name: str = US_EQUITIES_CALENDAR,
+) -> pd.Timestamp:
+    """Return the first exchange session strictly after ``reference``."""
+
+    return next_market_session(reference, calendar_name)
+
+
+def surveillance_session_label(value: object) -> str:
+    """Format one market session with its French weekday name."""
+
+    session = pd.Timestamp(value).normalize()
+    weekdays = (
+        "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"
+    )
+    return f"{weekdays[session.weekday()]} {session:%Y-%m-%d}"
+
+
+def session_crosses_weekend(reference: object, session: object) -> bool:
+    """Report whether the next session crosses at least one weekend day."""
+
+    start = pd.Timestamp(reference).normalize()
+    end = pd.Timestamp(session).normalize()
+    return start.weekday() >= 5 or any(
+        (start + pd.Timedelta(days=offset)).weekday() >= 5
+        for offset in range(1, max(0, (end - start).days))
+    )
+
+
+def _quality_by_model(quality: pd.DataFrame) -> pd.DataFrame:
+    if quality.empty or "model_id" not in quality:
+        return pd.DataFrame()
+    result = quality.drop_duplicates("model_id", keep="last").set_index("model_id")
+    result.index = result.index.astype(str)
+    return result
+
+
+def _quality_value(
+    lookup: pd.DataFrame, model_id: object, column: str
+) -> object:
+    if lookup.empty or column not in lookup or str(model_id) not in lookup.index:
+        return pd.NA
+    return lookup.at[str(model_id), column]
+
+
+def next_session_signals_view(
+    view: SignalResultsView,
+    quality: pd.DataFrame,
+    session: object,
+) -> OperationalTableView:
+    """Build the decision-oriented bullish-signal grid for one exact session."""
+
+    technical = view.signals.technical.copy()
+    if technical.empty or "prediction_date" not in technical:
+        return OperationalTableView(
+            pd.DataFrame(columns=NEXT_SESSION_SIGNAL_COLUMNS), technical.iloc[0:0]
+        )
+    expected = pd.Timestamp(session).normalize()
+    dates = pd.to_datetime(
+        technical["prediction_date"], errors="coerce", utc=True
+    ).dt.tz_convert(None).dt.normalize()
+    technical = technical.loc[dates.eq(expected)].reset_index(drop=True)
+    lookup = _quality_by_model(quality)
+    technical["quality_mean_return"] = [
+        _quality_value(lookup, model_id, "mean_return_63")
+        for model_id in _column(technical, "model_id")
+    ]
+    technical["quality_win_rate"] = [
+        _quality_value(lookup, model_id, "win_rate_63")
+        for model_id in _column(technical, "model_id")
+    ]
+    technical["quality_last_signal"] = [
+        _quality_value(lookup, model_id, "last_signal_date")
+        for model_id in _column(technical, "model_id")
+    ]
+    table = pd.DataFrame({
+        "Date": _column(technical, "prediction_date").map(_short_date),
+        "Cible": _column(technical, "target"),
+        "Prédicteurs": _column(technical, "predictors").map(_predictors),
+        "P(Up)": _column(technical, "up_probability").map(_display_percentage),
+        "Catégorie": _column(technical, "category").map(
+            lambda value: SIGNAL_LABELS.get(str(value), str(value))
+        ),
+        "Rendement": technical["quality_mean_return"].map(_display_percentage),
+        "Trades gagnants": technical["quality_win_rate"].map(_display_percentage),
+        "Dernier signal": technical["quality_last_signal"].map(_short_date),
+    })
+    return OperationalTableView(table.loc[:, NEXT_SESSION_SIGNAL_COLUMNS], technical)
+
+
+def latest_session_results_view(
+    view: EvaluatedPredictionsView,
+    quality: pd.DataFrame,
+    *,
+    notional: float = 10_000.0,
+) -> OperationalTableView:
+    """Build the bullish results grid for the latest actually evaluated session."""
+
+    technical = view.technical.copy()
+    if technical.empty or "prediction_date" not in technical:
+        return OperationalTableView(
+            pd.DataFrame(columns=LAST_SESSION_RESULT_COLUMNS), technical.iloc[0:0]
+        )
+    if "category" in technical:
+        technical = technical.loc[
+            technical["category"].astype(str).eq("bullish_signal")
+        ].copy()
+    dates = pd.to_datetime(
+        technical["prediction_date"], errors="coerce", utc=True
+    ).dt.tz_convert(None).dt.normalize()
+    latest = dates.max()
+    if pd.isna(latest):
+        technical = technical.iloc[0:0].copy()
+    else:
+        technical = technical.loc[dates.eq(latest)].reset_index(drop=True)
+    lookup = _quality_by_model(quality)
+    technical["quality_last_signal"] = [
+        _quality_value(lookup, model_id, "last_signal_date")
+        for model_id in _column(technical, "model_id")
+    ]
+    returns = pd.to_numeric(_column(technical, "intraday_return"), errors="coerce")
+    technical["display_pnl"] = returns * float(notional)
+    table = pd.DataFrame({
+        "Date": _column(technical, "prediction_date").map(_short_date),
+        "Cible": _column(technical, "target"),
+        "Prédicteurs": _column(technical, "predictors").map(_predictors),
+        "P(Up)": _column(technical, "up_probability").map(_display_percentage),
+        "Rendement": returns.map(_display_percentage),
+        "P&L cumulé": technical["display_pnl"].map(_display_currency),
+        "Dernier signal": technical["quality_last_signal"].map(_short_date),
+    })
+    return OperationalTableView(table.loc[:, LAST_SESSION_RESULT_COLUMNS], technical)
+
+
+def surveillance_kpi_values(
+    next_signals: OperationalTableView,
+    latest_results: OperationalTableView,
+) -> dict[str, float | int | None]:
+    """Aggregate the two displayed populations for the Surveillance KPI row."""
+
+    up_probabilities = pd.to_numeric(
+        _column(next_signals.technical, "up_probability"), errors="coerce"
+    ).dropna()
+    expected_returns = pd.to_numeric(
+        _column(next_signals.technical, "quality_mean_return"), errors="coerce"
+    ).dropna()
+    realized_returns = pd.to_numeric(
+        _column(latest_results.technical, "intraday_return"), errors="coerce"
+    ).dropna()
+    pnl = pd.to_numeric(
+        _column(latest_results.technical, "display_pnl"), errors="coerce"
+    ).dropna()
+    return {
+        "next_signal_count": len(next_signals.table),
+        "mean_up_probability": (
+            None if up_probabilities.empty else float(up_probabilities.mean())
+        ),
+        "mean_expected_return": (
+            None if expected_returns.empty else float(expected_returns.mean())
+        ),
+        "evaluated_signal_count": len(realized_returns),
+        "winning_signal_count": int(realized_returns.gt(0).sum()),
+        "latest_session_pnl": None if pnl.empty else float(pnl.sum()),
+    }
 
 
 def _yes_no(value: object) -> str:

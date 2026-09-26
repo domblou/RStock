@@ -10,6 +10,7 @@ from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_quality_ui import (
     baseline_comparison_display_table,
     baseline_comparison_rows,
+    directional_display_style,
     evaluated_bullish_signals_display_table,
     evaluated_bullish_signals,
     excluded_observations_display_table,
@@ -19,6 +20,8 @@ from rstock.application.production_quality_ui import (
     load_models_master,
     models_grid,
     performance_windows_display_table,
+    sort_quality_models,
+    style_directional_columns,
 )
 
 
@@ -118,6 +121,20 @@ def test_models_grid_normalizes_mixed_enriched_columns_for_arrow():
     assert arrow.num_rows == 5
 
 
+def test_directional_display_styles_are_positive_negative_or_neutral():
+    assert "#198754" in directional_display_style("2,81 %")
+    assert "#dc3545" in directional_display_style("-258,42 $")
+    assert directional_display_style("0,00 %") == ""
+    assert directional_display_style("—") == ""
+
+    styled = style_directional_columns(
+        pd.DataFrame({"Rendement": ["2,81 %", "-2,58 %", "0,00 %"]}),
+        ("Rendement",),
+    ).to_html()
+    assert "#198754" in styled
+    assert "#dc3545" in styled
+
+
 def test_registry_population_survives_missing_quality_and_keeps_status_filters(tmp_path):
     production = ProductionRepository(tmp_path)
     production.add(_production_model("active", predictors=("BBB",)))
@@ -139,6 +156,31 @@ def test_registry_population_survives_missing_quality_and_keeps_status_filters(t
     assert models_grid(frame, window=63)["Santé"].tolist() == ["Non calculé"] * 3
     assert filter_quality_models(frame, statuses=["inactive"])["model_id"].tolist() == [
         "inactive"
+    ]
+
+
+def test_models_grid_default_order_is_status_then_promotion_then_signals():
+    rows = []
+    for model_id, status, promotion, signals in (
+        ("active_older_more", "active", "2026-01-01", 9),
+        ("active_older_less", "active", "2026-01-01", 3),
+        ("active_newer", "active", "2026-01-02", 99),
+        ("inactive", "inactive", "2025-01-01", 99),
+        ("retired", "retired", "2024-01-01", 99),
+    ):
+        row = _master_row(model_id)
+        row.update(model_id=model_id, status=status, promotion_date=promotion, signal_count_63=signals)
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+
+    ordered = sort_quality_models(frame, window=63)
+
+    assert ordered["model_id"].tolist() == [
+        "active_older_more",
+        "active_older_less",
+        "active_newer",
+        "inactive",
+        "retired",
     ]
 
 

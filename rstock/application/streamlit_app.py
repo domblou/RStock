@@ -6,6 +6,7 @@ import base64
 import html
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
@@ -76,6 +77,10 @@ from rstock.application.history_analysis import (
     xgboost_calibration_selection_display_table,
     xgboost_calibration_selection_table,
 )
+from rstock.application.run_comparison import (
+    comparison_types,
+    load_end_to_end_comparison,
+)
 from rstock.application.runner import running_duration
 from rstock.application.end_to_end import historical_forced_validation_state
 from rstock.application.qualification_holdout_diagnostic import diagnostic_state
@@ -111,10 +116,15 @@ from rstock.application.surveillance import (
     evaluation_feedback,
     filter_evaluated_predictions_view,
     filter_signal_results_view,
+    latest_session_results_view,
+    next_session_signals_view,
+    next_surveillance_session,
     prioritize_signals_view,
     signal_priority_model_lookup,
     prediction_feature_tables,
+    session_crosses_weekend,
     source_observation_tables,
+    surveillance_kpi_values,
 )
 from rstock.application.surveillance_refresh import (
     OPERATIONAL_JOB_TYPES,
@@ -131,6 +141,7 @@ from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_quality_ui import (
     baseline_comparison_display_table,
     baseline_comparison_rows,
+    directional_display_style,
     evaluated_bullish_signals_display_table,
     evaluated_bullish_signals,
     excluded_observations_display_table,
@@ -142,6 +153,8 @@ from rstock.application.production_quality_ui import (
     load_models_master,
     models_grid,
     performance_windows_display_table,
+    sort_quality_models,
+    style_directional_columns,
 )
 from rstock.application.real_trades import (
     RealTradeService,
@@ -1659,6 +1672,7 @@ def _render_walk_forward_promotion(
         on_select="rerun",
         selection_mode="single-row",
         key=f"qualified-combinations-{run_id}",
+        column_config=_grid_column_help_config(combinations.columns, _WF_COMBINATION_COLUMN_HELP),
     )
     selected_rows = _selected_rows(selection, len(combinations))
     selected_key = f"selected-qualified-combination-{run_id}"
@@ -1805,6 +1819,7 @@ def _render_threshold_calibration_promotion(
     selection = st.dataframe(
         filtered, hide_index=True, width="stretch", on_select="rerun",
         selection_mode="single-row", key=f"threshold-results-{run_id}",
+        column_config=_grid_column_help_config(filtered.columns, _THRESHOLD_RESULT_COLUMN_HELP),
     )
     st.subheader("Synthèse de sensibilité des seuils")
     sensitivity_summary = threshold_sensitivity_summary(
@@ -1831,7 +1846,7 @@ def _render_threshold_calibration_promotion(
             sensitivity_summary,
             hide_index=True,
             width="stretch",
-            column_config={
+            column_config=_grid_column_help_config(sensitivity_summary.columns, _THRESHOLD_SUMMARY_COLUMN_HELP, {
                 "Seuil calibré": st.column_config.NumberColumn(format="%.4f"),
                 "Meilleur seuil robuste": st.column_config.NumberColumn(format="%.4f"),
                 "Delta seuil": st.column_config.NumberColumn(format="%+.4f"),
@@ -1843,7 +1858,7 @@ def _render_threshold_calibration_promotion(
                 "Delta rendement": st.column_config.NumberColumn(format="%+.2%"),
                 "Fréquence mouvement opposé au seuil calibré": st.column_config.NumberColumn(format="percent"),
                 "Fréquence mouvement opposé au meilleur seuil robuste": st.column_config.NumberColumn(format="percent"),
-            },
+            }),
         )
     selected_rows = _selected_rows(selection, len(filtered))
     selected_key = f"selected-threshold-result-{run_id}"
@@ -1880,7 +1895,7 @@ def _render_threshold_calibration_promotion(
             choice_diagnostics,
             hide_index=True,
             width="stretch",
-            column_config={
+            column_config=_grid_column_help_config(choice_diagnostics.columns, _THRESHOLD_CHOICE_COLUMN_HELP, {
                 "Seuil": st.column_config.NumberColumn(format="%.4f"),
                 "Fraction de fenêtres admissibles": st.column_config.NumberColumn(format="percent"),
                 "Précision calibration": st.column_config.NumberColumn(format="percent"),
@@ -1889,7 +1904,7 @@ def _render_threshold_calibration_promotion(
                 "Stabilité rendement": st.column_config.NumberColumn(format="percent"),
                 "Fréquence mouvement opposé": st.column_config.NumberColumn(format="percent"),
                 "F1": st.column_config.NumberColumn(format="%.3f"),
-            },
+            }),
         )
     frozen = selected_by_set.get(set_name, {})
     directional_selection = frozen.get(selected_direction, {})
@@ -2016,7 +2031,10 @@ def _render_threshold_sensitivity_analysis(
         sensitivity,
         hide_index=True,
         width="stretch",
-        column_config={
+        column_config=_grid_column_help_config(sensitivity.columns, {
+            **_THRESHOLD_SENSITIVITY_COLUMN_HELP,
+            sensitivity.columns[-1]: "Marque le seuil de meilleure précision parmi ceux qui respectent le minimum de signaux affiché. Cible : un choix robuste, pas un maximum sur un faible échantillon.",
+        }, {
             "Seuil": st.column_config.NumberColumn(format="%.4f"),
             "Précision": st.column_config.NumberColumn(format="percent"),
             "Recall": st.column_config.NumberColumn(format="percent"),
@@ -2026,7 +2044,7 @@ def _render_threshold_sensitivity_analysis(
             "Fréquence mouvement opposé": st.column_config.NumberColumn(format="percent"),
             "MFE moyen": st.column_config.NumberColumn(format="percent"),
             "MAE moyen": st.column_config.NumberColumn(format="percent"),
-        },
+        }),
     )
 
 
@@ -2169,6 +2187,7 @@ def _render_xgboost_calibration_selection(run_id: str) -> None:
         xgboost_calibration_selection_display_table(table),
         hide_index=True,
         width="stretch",
+        column_config=_grid_column_help_config(table.columns, _XGBOOST_SELECTION_COLUMN_HELP),
     )
     with st.expander("Paramètres XGBoost complets"):
         st.json({
@@ -2212,7 +2231,7 @@ def _render_threshold_parameter_calibration_selection(run_id: str) -> None:
         table,
         hide_index=True,
         width="stretch",
-        column_config={
+        column_config=_grid_column_help_config(table.columns, _THRESHOLD_PARAMETER_COLUMN_HELP, {
             "% modèles admissibles (critère principal)": (
                 st.column_config.NumberColumn(format="percent")
             ),
@@ -2223,7 +2242,7 @@ def _render_threshold_parameter_calibration_selection(run_id: str) -> None:
             "Rendement directionnel moyen": st.column_config.NumberColumn(format="percent"),
             "Stabilité rendement": st.column_config.NumberColumn(format="%.4f"),
             "Mouvement opposé": st.column_config.NumberColumn(format="percent"),
-        },
+        }),
     )
     with st.expander("Paramètres gagnants complets"):
         st.json(selected.get("parameters", {}))
@@ -2270,6 +2289,10 @@ def _selected_combination(
         table.drop(columns=["Eligible", "Holdout confirmé", *detail_only], errors="ignore"),
         hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key=f"analysis-combinations-{run_id}",
+        column_config=_grid_column_help_config(
+            table.drop(columns=["Eligible", "Holdout confirmé", *detail_only], errors="ignore").columns,
+            _WF_COMBINATION_COLUMN_HELP,
+        ),
     )
     selected_rows = _selected_rows(event, len(table))
     key = f"analysis-selected-combination-{run_id}"
@@ -2358,6 +2381,10 @@ def _render_standard_results(
                 st.session_state["selected-run-id"] = str(source)
                 st.rerun()
         summary = detail.get("summary", {})
+        if summary.get("result") == "skipped_no_models":
+            st.info("Aucun modèle admissible — Forward Simulation non exécutée.")
+            st.json(summary)
+            return
         has_quality_counters = "evaluated_observations" in summary
         if not has_quality_counters:
             st.json(detail["summary"])
@@ -2485,7 +2512,10 @@ def _render_walk_forward_summary(
     prefilter_table = predictor_prefilter_summary(detail.get("summary", {}))
     if not prefilter_table.empty:
         st.subheader("Pré-filtrage des prédicteurs")
-        st.dataframe(prefilter_table, hide_index=True, width="stretch")
+        st.dataframe(
+            prefilter_table, hide_index=True, width="stretch",
+            column_config=_grid_column_help_config(prefilter_table.columns, _PREFILTER_COLUMN_HELP),
+        )
     rates = st.columns(2)
     rates[0].metric(
         "Taux de qualification",
@@ -2612,7 +2642,10 @@ def _render_walk_forward_validation(
             },
         ]
     )
-    st.dataframe(validation, hide_index=True, width="stretch")
+    st.dataframe(
+        validation, hide_index=True, width="stretch",
+        column_config=_grid_column_help_config(validation.columns, _WF_VALIDATION_COLUMN_HELP),
+    )
 
 
 def _render_walk_forward_batches(
@@ -2671,11 +2704,11 @@ def _render_walk_forward_batches(
         on_select="rerun",
         selection_mode="single-row",
         key=f"wf-batches-{run_id}",
-        column_config={
+        column_config=_grid_column_help_config(table.columns, _WF_BATCH_COLUMN_HELP, {
             "Progression": st.column_config.ProgressColumn(
                 min_value=0.0, max_value=100.0, format="%.1f%%"
             )
-        },
+        }),
     )
     selected_rows = _selected_rows(event, len(rows))
     if not selected_rows:
@@ -2740,9 +2773,17 @@ def _render_pipeline_summary(
         )
         forward = summary.get("forward_simulation")
         if isinstance(forward, Mapping):
+            forward_status = forward.get("status", "pending")
+            forward_result = None
+            child_id = forward.get("child_run_id")
+            if child_id and service is not None:
+                repository = service.run_service.repository
+                forward_status = repository.status(str(child_id)).get("status", forward_status)
+                forward_result = repository.summary(str(child_id)).get("result")
             st.caption(
                 "Forward Simulation : "
-                f"{forward.get('status', 'pending')} · run : {forward.get('child_run_id', '—')}"
+                f"{forward_status} · run : {child_id or '—'}"
+                + (f" · résultat : {forward_result}" if forward_result else "")
             )
         if service is not None and snapshot.get("resolved_market_session_cutoff"):
             cutoff = pd.Timestamp(snapshot["resolved_market_session_cutoff"]).date()
@@ -3477,7 +3518,107 @@ def _render_run_detail_view(
     _render_resume_controls(run_id, status, detail)
     _render_job_detail_tabs(service, run_id, status=status, detail=detail)
     return
+def _render_end_to_end_comparison(run_ids: list[str]) -> None:
+    analyses = [
+        load_end_to_end_comparison(st.session_state.lab_config.project_root, run_id)
+        for run_id in run_ids
+    ]
+
+    def value(item: object) -> str:
+        return "—" if item is None or pd.isna(item) else str(item)
+
+    def percent(item: float | None, *, digits: int = 1) -> str:
+        return "—" if item is None else f"{item:.{digits}%}"
+
+    columns = {
+        "A · Run": [item.run_id for item in analyses],
+        "A · Cutoff résolu": [value(item.cutoff) for item in analyses],
+        "A · Statut": [item.status for item in analyses],
+        "B · Brutes planifiées": [value(item.raw) for item in analyses],
+        "B · Évaluées WF": [value(item.evaluated) for item in analyses],
+        "B · Qualifiées WF": [value(item.qualified) for item in analyses],
+        "B · Taux qualifiées": [percent(item.qualification_rate) for item in analyses],
+        "B · Confirmées holdout WF": [value(item.confirmed) for item in analyses],
+        "B · Taux confirmées": [percent(item.confirmation_rate) for item in analyses],
+        "C · Up évaluables": [value(item.up_evaluable) for item in analyses],
+        "C · Candidats finaux": [value(item.candidates) for item in analyses],
+        "C · Candidate yield": [
+            "—" if item.candidate_yield is None else
+            f"{item.candidates} / {item.evaluated} ({percent(item.candidate_yield, digits=3)})"
+            for item in analyses
+        ],
+        "C · Cibles distinctes": [value(item.targets) for item in analyses],
+        "D · AUC holdout médiane / modèle": [value(round(item.holdout_auc, 3)) if item.holdout_auc is not None else "—" for item in analyses],
+        "D · Précision holdout médiane / modèle": [percent(item.holdout_precision) for item in analyses],
+        "D · Rendement holdout médian / modèle": [percent(item.holdout_return, digits=2) for item in analyses],
+        "D · Signaux holdout (somme)": [value(item.holdout_signals) for item in analyses],
+        "E · Statut Forward": [item.forward_status for item in analyses],
+        "E · Modèles entrants": [value(item.forward_models) for item in analyses],
+        "E · Signaux Forward": [value(item.forward_signals) for item in analyses],
+        "E · Précision Forward / signal": [percent(item.forward_precision) for item in analyses],
+        "E · Rendement Forward / signal": [percent(item.forward_return, digits=2) for item in analyses],
+        "E · Période Forward": [
+            f"{item.forward_first} → {item.forward_last} ({item.forward_sessions} séances)"
+            if item.forward_first and item.forward_last and item.forward_sessions else "—"
+            for item in analyses
+        ],
+    }
+    helps = {
+        "A · Run": "Identifiant du run End-to-End comparé; sert à la traçabilité. Aucune cible idéale.",
+        "A · Cutoff résolu": "Date utilisée pour figer l’information disponible au moment de l’expérience. Elle permet de comparer la redécouverte de modèles à différents moments historiques.",
+        "A · Statut": "État d'exécution du run. Cible : completed pour considérer ses résultats comme complets.",
+        "B · Brutes planifiées": "Combinaisons prévues avant le préfiltrage et l'évaluation Walk-forward; mesure la taille brute de la recherche. Aucune cible idéale.",
+        "B · Évaluées WF": "Combinaisons effectivement évaluées en Walk-forward; mesure la couverture réelle après les étapes précédentes. Elles ne doivent pas nécessairement égaler les brutes planifiées.",
+        "B · Qualifiées WF": "Combinaisons ayant franchi les critères Walk-forward. Aucune cible absolue : la qualité prime sur le volume.",
+        "B · Taux qualifiées": "Part des combinaisons évaluées qui sont qualifiées Walk-forward; compare la sélectivité entre runs. Aucune cible universelle.",
+        "B · Confirmées holdout WF": "Diagnostic de robustesse du Walk-forward. Les calibrations End-to-End repartent des combinaisons qualifiées WF, pas des confirmées holdout. Les colonnes suivantes ne sont pas une simple soustraction des confirmées.",
+        "B · Taux confirmées": "Part des combinaisons qualifiées ensuite confirmées sur le holdout WF. Cible : plus élevée, avec assez de candidats conservés.",
+        "C · Up évaluables": "Combinaisons Up avec seuil sélectionné et évaluation holdout. Distingue une perte pendant la calibration d’un rejet par les règles finales d’admissibilité.",
+        "C · Candidats finaux": "Modèles (combinaison, Up) du snapshot final ayant franchi les règles d’admissibilité du run : signaux, AUC, précision, rendement, mouvements opposés et seuil sélectionné.",
+        "C · Candidate yield": "Candidats finaux divisés par les combinaisons réellement évaluées au Walk-forward, et non par les qualifiées ou les Up évaluables.",
+        "C · Cibles distinctes": "Titres cibles distincts parmi les candidats finaux. Plusieurs candidats peuvent viser la même cible.",
+        "D · AUC holdout médiane / modèle": "Médiane entre modèles candidats finaux de leur AUC holdout. Mesure de discrimination avant Forward.",
+        "D · Précision holdout médiane / modèle": "Médiane entre modèles candidats finaux de leur précision holdout. Voir aussi le nombre de signaux : un faible effectif limite l’interprétation.",
+        "D · Rendement holdout médian / modèle": "Médiane entre modèles candidats finaux du rendement directionnel moyen de chacun. Mesure avant Forward, distincte d’un rendement de portefeuille.",
+        "D · Signaux holdout (somme)": "Somme des signaux holdout des modèles candidats finaux. Des modèles peuvent produire des signaux sur les mêmes séances.",
+        "E · Statut Forward": "État réel de l’enfant Forward s’il existe. L’absence de Forward ne vaut pas 0 % : elle peut être désactivée, non lancée ou sans modèle candidat.",
+        "E · Modèles entrants": "Nombre de candidats figés au départ de Forward; affiché même si Forward n’a pas été lancée.",
+        "E · Signaux Forward": "Nombre de signaux produits pendant la période Forward et disponibles pour mesurer la performance hors sélection.",
+        "E · Précision Forward / signal": "Précision sur les signaux Forward, distincte de la médiane entre modèles calculée sur le holdout.",
+        "E · Rendement Forward / signal": "Rendement directionnel moyen des signaux Forward. Ce n’est pas nécessairement un rendement de portefeuille.",
+        "E · Période Forward": "Séances réellement évaluées hors sélection. La durée couverte donne du contexte aux métriques Forward.",
+    }
+    st.caption("A · Identité  |  B · Walk-forward  |  C · Calibration et candidats  |  D · Qualité des candidats  |  E · Forward Simulation")
+    st.dataframe(
+        pd.DataFrame(columns), hide_index=True, width="stretch",
+        column_config=_grid_column_help_config(pd.Index(columns), helps),
+    )
+    counts = st.columns(3)
+    counts[0].metric("Runs avec candidat", f"{sum(bool(item.candidates) for item in analyses)} / {len(analyses)}")
+    yields = [item.candidate_yield for item in analyses if item.candidate_yield is not None]
+    counts[1].metric("Candidate yield médian", "—" if not yields else percent(float(pd.Series(yields).median()), digits=3),
+                     help="Médiane des candidate yields calculables des runs sélectionnés; ce n’est pas un ratio regroupant toutes leurs combinaisons.")
+    counts[2].metric("Forward terminées avec signaux", f"{sum(item.forward_status == 'terminée avec signaux' for item in analyses)} / {len(analyses)}")
+    chosen = st.selectbox("Ouvrir le détail d’un run", run_ids, key="comparison-open-run")
+    if st.button("Ouvrir le run sélectionné", key="comparison-open-detail"):
+        _history_navigation("detail", [chosen])
+
+
 def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) -> None:
+    types = [str(service.run_service.repository.status(run_id)["job_type"]) for run_id in run_ids]
+    mode = comparison_types(types)
+    if mode is None:
+        _page_header("Historique")
+        st.error("Sélectionnez de 2 à 5 runs du même type : uniquement Walk-forward ou uniquement End-to-End.")
+        return
+    if mode == JobType.END_TO_END.value:
+        _page_header("Historique")
+        st.caption("Historique > Comparaison de runs")
+        if st.button("← Retour à Historique", key="history-back-comparison"):
+            _clear_history_navigation()
+        st.subheader("Comparaison de runs — End-to-End")
+        _render_end_to_end_comparison(run_ids)
+        return
     details = [service.run(run_id) for run_id in run_ids]
     analytics = [_load_run_analytics(run_id, item["status"], item) for run_id, item in zip(run_ids, details, strict=True)]
     labels = {
@@ -3663,7 +3804,7 @@ def _history_runs_panel(
     selected = [run_id for run_id in selected if run_id in filtered_ids]
     st.session_state[selected_key] = selected
     if not selected:
-        st.caption("Sélectionnez un run pour l’ouvrir, ou de 2 à 4 runs pour les comparer.")
+        st.caption("Sélectionnez un run pour l’ouvrir, ou de 2 à 5 runs du même type pour les comparer.")
         return
     action = selected_run_action(selected)
     if action == "detail":
@@ -3715,12 +3856,12 @@ def _history_runs_panel(
             str(next(run for run in filtered if str(run["run_id"]) == run_id)["job_type"])
             for run_id in selected
         }
-        if selected_types != {JobType.WALK_FORWARD.value}:
-            st.caption("La comparaison analytique est disponible pour des runs walk-forward uniquement.")
+        if selected_types not in ({JobType.WALK_FORWARD.value}, {JobType.END_TO_END.value}):
+            st.caption("Sélectionnez uniquement des runs du même type : Walk-forward ou End-to-End.")
         elif st.button("Comparer les runs", type="primary", key=f"compare-history-{key_prefix}"):
             _history_navigation("comparison", selected)
         return
-    st.warning("Sélectionnez au maximum 4 runs pour une comparaison.")
+    st.warning("Sélectionnez au maximum 5 runs pour une comparaison.")
 
 
 def _format_storage_size(size_bytes: int) -> str:
@@ -4152,7 +4293,6 @@ def _surveillance_styles() -> None:
         <div class="rstock-surveillance-scope"></div>
         <style>
           div[data-testid="stMainBlockContainer"]:has(.rstock-surveillance-scope) {
-            max-width: 1520px;
             padding-top: 2rem;
             padding-bottom: 2rem;
           }
@@ -4302,16 +4442,16 @@ def _freshness_state(freshness: dict[str, str | None]) -> tuple[str, str]:
 
 def _render_surveillance_header(
     *,
-    last_market: object,
     freshness: dict[str, str | None],
     error_count: int,
 ) -> None:
-    left, right = st.columns([2.7, 1], gap="large")
+    left, right = st.columns([4, 1], gap="large")
     with left:
         _page_header("Surveillance")
         st.markdown(
             '<p class="rstock-surveillance-subtitle">'
-            "Détectez les opportunités, suivez les signaux et passez à l’action."
+            "Vue opérationnelle pour la prochaine séance et le suivi de la "
+            "dernière séance."
             "</p>",
             unsafe_allow_html=True,
         )
@@ -4319,8 +4459,6 @@ def _render_surveillance_header(
     error_class = "rstock-status-pill" if error_count == 0 else "rstock-error-pill"
     with right:
         st.markdown('<div class="rstock-header-right-spacer"></div>', unsafe_allow_html=True)
-        st.caption("Dernière mise à jour")
-        st.markdown(f"**{_compact_datetime(last_market)}**")
         st.markdown(
             f'<span class="{state_class}">{html.escape(state_label)}</span>'
             f'<span class="{error_class}">'
@@ -4331,42 +4469,362 @@ def _render_surveillance_header(
 
 def _render_surveillance_kpis(
     *,
-    today_signals: int,
-    pending_predictions: int,
+    next_session: pd.Timestamp,
+    crosses_weekend: bool,
+    next_signals: OperationalTableView,
+    latest_results: OperationalTableView,
     active_models: int,
-    monitored_symbols: int,
-    last_market: object,
-    freshness: dict[str, str | None],
+    last_update: object,
 ) -> None:
-    state_label, _ = _freshness_state(freshness)
-    columns = st.columns(4, gap="small")
-    cards = (
-        (
-            "Signaux haussiers aujourd’hui",
-            today_signals,
-            "À surveiller maintenant",
-        ),
-        (
-            "Prédictions en attente",
-            pending_predictions,
-            "Validation à venir",
-        ),
-        (
+    values = surveillance_kpi_values(next_signals, latest_results)
+    _render_models_kpi_density_style()
+    with st.container(key="models-kpis"):
+        columns = st.columns(6, gap="small")
+        _render_models_kpi_card(
+            columns[0],
+            "Prochaine séance",
+            f"{next_session:%Y-%m-%d}",
+            "calendar_month",
+            caption="Week-end détecté" if crosses_weekend else "Séance ouvrable suivante",
+        )
+        _render_models_kpi_card(
+            columns[1],
+            "Signaux haussiers",
+            values["next_signal_count"],
+            "trending_up",
+            caption=(
+                f"P(Up) moyen {_models_percent(values['mean_up_probability'])}"
+            ),
+            directional=False,
+        )
+        _render_models_kpi_card(
+            columns[2],
+            "Rendement moyen signaux",
+            _models_percent(values["mean_expected_return"]),
+            "monitoring",
+            caption="Prochaine séance",
+            directional=True,
+        )
+        _render_models_kpi_card(
+            columns[3],
+            "Dernière séance",
+            f"{values['winning_signal_count']} gagnants",
+            "event_available",
+            caption=f"Signaux évalués : {values['evaluated_signal_count']}",
+        )
+        _render_models_kpi_card(
+            columns[4],
+            "P&L veille",
+            _model_detail_currency(values["latest_session_pnl"]),
+            "payments",
+            caption="Dernière séance",
+            directional=True,
+        )
+        _render_models_kpi_card(
+            columns[5],
             "Modèles actifs",
             active_models,
-            f"{monitored_symbols} symboles surveillés",
-        ),
-        (
-            "Dernière mise à jour",
-            _compact_datetime(last_market),
-            state_label,
-        ),
-    )
-    for column, (label, value, caption) in zip(columns, cards, strict=True):
-        with column:
-            with st.container(border=True):
-                st.metric(label, value)
-                st.caption(caption)
+            "model_training",
+            caption=f"MAJ : {_compact_datetime(last_update)}",
+        )
+
+
+def _styled_surveillance_table(
+    table: pd.DataFrame, directional_columns: tuple[str, ...]
+) -> pd.io.formats.style.Styler:
+    styled = style_directional_columns(table, directional_columns)
+    if "Cible" in table:
+        styled = styled.map(
+            lambda _: "font-weight: 650; color: #0f172a", subset=["Cible"]
+        )
+    if "Catégorie" in table:
+        styled = styled.map(
+            lambda _: "font-weight: 600; color: #475569", subset=["Catégorie"]
+        )
+    return styled
+
+
+_SURVEILLANCE_COLUMN_HELP = {
+    "Date": "Séance boursière visée par le signal. Aucune cible de performance.",
+    "Cible": "Titre dont le mouvement est prédit par le modèle. Aucune cible de performance.",
+    "Prédicteurs": "Titres utilisés par le modèle pour prédire la cible. Plus de prédicteurs n'est pas nécessairement meilleur.",
+    "P(Up)": "Probabilité de hausse estimée par le modèle. La force du signal se juge par rapport au seuil sélectionné du modèle, pas à 50 % en absolu.",
+    "Catégorie": "Classification du signal selon le seuil de décision du modèle; elle aide à interpréter le signal.",
+    "Rendement": "Rendement Open→Close réalisé au dernier signal évalué. Cible : positif, idéalement de façon répétée.",
+    "Trades gagnants": "Proportion des signaux évalués avec un rendement positif. Cible : > 50 %; intéressant ≥ 55 %; solide ≥ 60 % avec un échantillon suffisant.",
+    "Dernier signal": "Date du dernier signal déclenché; elle situe la récence de l'évaluation. Aucune cible de performance.",
+    "P&L cumulé": "Gains et pertes cumulés des signaux évalués selon la simulation. Cible : positif et durablement croissant, sans seuil absolu.",
+}
+
+
+def _text_column_with_help(name: str, *, width: str, descriptions: dict[str, str]) -> Any:
+    return st.column_config.TextColumn(width=width, help=descriptions[name])
+
+
+def _grid_column_help_config(
+    columns: pd.Index, descriptions: dict[str, str],
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Attach header help to the displayed columns, retaining existing formats."""
+    existing = existing or {}
+    config = {}
+    for name in columns:
+        if name in existing:
+            column = dict(existing[name])
+            column["help"] = descriptions[name]
+            config[name] = column
+        else:
+            config[name] = st.column_config.Column(help=descriptions[name])
+    return config
+
+
+_PREFILTER_COLUMN_HELP = {
+    "Cible": "Titre que les prédicteurs cherchent à prévoir. Aucune cible idéale.",
+    "Candidats initiaux": "Prédicteurs disponibles avant le préfiltre; mesure la taille initiale de la recherche. Aucune cible idéale.",
+    "Rejet AUC médiane": "Prédicteurs éliminés pour une AUC médiane sous le seuil du préfiltre. Aucune cible absolue; explique les éliminations.",
+    "Rejet fenêtres > 0,50": "Prédicteurs rejetés faute d'une proportion suffisante de fenêtres avec AUC > 0,50. Un nombre élevé signale une constance temporelle limitée; aucune cible absolue.",
+    "Rejet Worst AUC": "Prédicteurs rejetés car leur pire fenêtre ne respecte pas l'AUC minimale. Aucune cible absolue.",
+    "Rejet dispersion": "Prédicteurs rejetés pour une variabilité d'AUC excessive entre fenêtres. Aucune cible absolue.",
+    "Après qualification": "Prédicteurs encore admissibles après les critères de qualité du préfiltre. Aucune cible universelle.",
+    "Après Top N": "Prédicteurs conservés après la limite Top-N. Cible : le Top-N configuré si assez de candidats sont qualifiés.",
+    "Après redondance": "Prédicteurs restant après retrait des relations trop redondantes; préserve la diversité. Aucune cible universelle.",
+    "Retenus": "Prédicteurs finaux utilisés pour construire les combinaisons. Aucune cible absolue.",
+    "Combinaisons": "Combinaisons à évaluer après préfiltre, comparées au nombre avant préfiltre; mesure le volume de recherche. Aucune cible idéale.",
+}
+
+_WF_COMBINATION_COLUMN_HELP = {
+    "Combinaison": "Identifiant de la combinaison cible et prédicteurs. Aucune cible idéale.",
+    "Cible": "Titre dont le mouvement est prédit. Aucune cible idéale.",
+    "Predictors": "Titres prédicteurs de la cible. Plus de prédicteurs n'implique pas nécessairement un meilleur modèle.",
+    "Depth": "Nombre de prédicteurs dans la combinaison; une profondeur supérieure augmente la complexité. Aucune cible idéale.",
+    "AUC dev": "AUC en développement Walk-forward; mesure la discrimination. Cible : > 0,50; ≥ 0,55 peut être intéressant.",
+    "AUC dev médiane": "AUC médiane en développement Walk-forward; mesure la discrimination typique. Cible : > 0,50; ≥ 0,55 peut être intéressant.",
+    "AUC holdout": "AUC sur le holdout indépendant. Cible : > 0,50, idéalement proche du développement; ≥ 0,55 peut être intéressant.",
+    "Delta dev→holdout": "AUC holdout moins AUC développement; mesure le changement hors sélection. Cible : proche de 0; une valeur très négative indique une dégradation.",
+    "Worst AUC": "Plus faible AUC des fenêtres de développement. Cible : > 0,50 si possible; éviter une valeur nettement inférieure.",
+    "Dispersion": "Variabilité de l'AUC entre fenêtres Walk-forward. Cible : faible, proche de 0.",
+    "Fenêtres valides": "Fenêtres Walk-forward évaluables. Cible : autant que possible parmi les fenêtres prévues.",
+    "Observations positives": "Observations positives disponibles; situe la fiabilité des métriques. Cible : assez nombreuses pour éviter un faible échantillon.",
+    "Statut": "Résultat de qualification. Cible : Holdout confirmé après les étapes de validation correspondantes.",
+    "Stabilité / qualification": "Qualification de développement ou motif de non-admissibilité enregistré pour la combinaison. Cible : Qualifiée.",
+    "Score": "Score interne de classement relatif des combinaisons dans le run. Aucun seuil absolu.",
+    "Rang": "Position dans le classement du run. Cible : 1 selon la règle de classement appliquée.",
+    "Seuil calibré": "Seuil de signal associé à la combinaison, lorsqu'il est disponible. Aucune cible universelle.",
+}
+
+_WF_VALIDATION_COLUMN_HELP = {
+    "Phase": "Phase de validation, développement ou holdout final. Aucune cible idéale.",
+    "Fenetres": "Fenêtres utilisées dans cette phase; davantage de fenêtres valides donne plus de contexte temporel.",
+    "AUC mediane": "Médiane des AUC entre fenêtres; mesure la discrimination typique. Cible : > 0,50; ≥ 0,55 peut être intéressant.",
+    "AUC min": "Plus faible AUC de la phase; mesure la pire fenêtre. Cible : idéalement > 0,50, sans dégradation extrême.",
+    "Dispersion": "Variabilité des AUC entre fenêtres; mesure la stabilité temporelle. Cible : faible, proche de 0.",
+    "Verdict": "Conclusion de RStock pour la phase. Cible : qualification ou confirmation selon la phase.",
+}
+
+_WF_BATCH_COLUMN_HELP = {
+    "Batch": "Identifiant du batch Walk-forward. Aucune cible idéale.",
+    "Range start": "Index de début de sa plage de combinaisons; permet la traçabilité. Aucune cible idéale.",
+    "Range stop": "Index de fin de sa plage de combinaisons. Aucune cible idéale.",
+    "Combinaisons": "Combinaisons affectées au batch. Cible : respecter le maximum configuré, sauf pour le dernier batch.",
+    "Run ID": "Identifiant technique du run du batch; sert à la traçabilité. Aucune cible idéale.",
+    "Statut": "État d'exécution du batch. Cible : completed.",
+    "Progression": "Part du travail terminée pour ce batch. Cible : 100 %.",
+    "Durée (s)": "Durée totale du batch en secondes. Aucune cible absolue; plus faible est préférable à charge comparable.",
+    "Début": "Date et heure de démarrage du batch. Aucune cible idéale.",
+    "Fin": "Date et heure de fin du batch. Aucune cible idéale.",
+    "Erreur": "Message d'erreur du batch, s'il y en a un. Cible : aucune erreur.",
+}
+
+_XGBOOST_SELECTION_COLUMN_HELP = {
+    "Direction": "Direction prédite, Up ou Down. Aucune cible idéale.",
+    "Config gagnante": "Configuration XGBoost retenue pour cette direction. Aucune cible absolue.",
+    "Selection score": "Score interne de sélection de la configuration; sert au classement relatif. Aucun seuil absolu.",
+    "Écart avec le 2e meilleur candidat": "Écart de score avec la meilleure autre configuration; un faible écart indique un choix serré. Aucune cible universelle.",
+    "ROC-AUC développement": "Discrimination en développement. Cible : > 0,50; ≥ 0,55 peut être intéressant.",
+    "PR-AUC développement": "Aire sous la courbe précision-rappel en développement; utile si les classes sont déséquilibrées. Cible : au-dessus de la prévalence.",
+    "Stabilité développement": "Dispersion de la ROC-AUC entre fenêtres de développement. Cible : faible, proche de 0.",
+    "ROC-AUC holdout": "Discrimination sur le holdout. Cible : > 0,50 et proche du développement; ≥ 0,55 peut être intéressant.",
+    "PR-AUC holdout": "Aire sous la courbe précision-rappel sur le holdout. Cible : au-dessus de la prévalence du holdout.",
+    "Précision holdout": "Part des prédictions positives correctes sur le holdout. Cible : supérieure à la prévalence; les règles finales peuvent être plus exigeantes.",
+    "Rappel holdout": "Part des observations positives détectées sur le holdout. À interpréter avec la précision et le volume; aucune cible universelle.",
+    "F1 holdout": "Moyenne harmonique de précision et rappel sur le holdout. Plus élevé est préférable, sans seuil universel.",
+    "Taux de prédictions positives": "Part des observations prédites positives; mesure la fréquence potentielle des signaux. Aucune cible universelle.",
+    "Prévalence": "Part réelle de cas positifs; taux de base pour interpréter précision et PR-AUC. Aucune cible idéale.",
+    "TP": "Vrais positifs : prédictions positives réalisées. À interpréter avec FP, rappel et taille de l'échantillon.",
+    "FP": "Faux positifs : prédictions positives non réalisées. Cible : aussi peu que possible à couverture comparable.",
+    "Sets": "Nombre de combinaisons (sets) reportées dans les métriques holdout de calibration. Aucune cible absolue.",
+    "Observations": "Observations utilisées pour l'évaluation; un échantillon plus grand rend les métriques plus interprétables.",
+    "Paramètres clés": "Résumé des principaux hyperparamètres XGBoost retenus. Aucune cible idéale.",
+}
+
+_THRESHOLD_PARAMETER_COLUMN_HELP = {
+    "Configuration": "Identifiant de la configuration de calibration. Aucune cible idéale.",
+    "Sélectionnée": "Indique la configuration retenue. Cible : cochée pour la configuration gagnante.",
+    "% modèles admissibles (critère principal)": "Part des modèles évalués respectant les critères. Cible : élevée sans sacrifier leur qualité.",
+    "Rang": "Position dans le classement des configurations. Cible : 1.",
+    "Paramètres clés": "Résumé des paramètres de calibration de la configuration. Aucune cible idéale.",
+    "Modèles évalués": "Modèles soumis à la configuration; situe la taille de l'échantillon. Aucune cible absolue.",
+    "Modèles admissibles": "Modèles franchissant les critères; plus nombreux peut être utile sans relâcher excessivement les critères.",
+    "Signaux": "Signaux produits par les modèles évalués; un échantillon plus grand rend les métriques plus fiables.",
+    "Précision médiane": "Médiane de la précision des modèles évalués. Cible : au-dessus du taux de base; ≥ 55 % peut être intéressant avec assez de signaux.",
+    "F1 médian": "Médiane du F1 des modèles évalués. Plus élevé est préférable, sans seuil universel.",
+    "Fraction fenêtres admissibles": "Part des fenêtres respectant les critères de robustesse. Cible : élevée, proche de 100 %.",
+    "Stabilité précision": "Variabilité de la précision entre fenêtres. Cible : faible, proche de 0.",
+    "Rendement directionnel moyen": "Rendement Open→Close moyen dans la direction du signal. Cible : > 0 % et stable.",
+    "Stabilité rendement": "Variabilité du rendement entre fenêtres. Cible : faible, proche de 0.",
+    "Mouvement opposé": "Fréquence de mouvement opposé au signal. Cible : faible.",
+    "Raison sélection/rejet": "Motif du choix ou du rejet de la configuration. Aucune cible idéale.",
+}
+
+_THRESHOLD_RESULT_COLUMN_HELP = {
+    "Combinaison": "Combinaison cible et prédicteurs évaluée. Aucune cible idéale.",
+    "Cible": "Titre prédit. Aucune cible idéale.",
+    "Predictors": "Prédicteurs du modèle. Aucune cible idéale.",
+    "Direction": "Direction du signal évalué. Aucune cible idéale.",
+    "Statut promotion": "Admissibilité à la promotion. Cible : Candidat lorsque tous les critères passent.",
+    "Raison": "Motif du statut de promotion. Aucune cible idéale.",
+    "Seuil calibré": "Probabilité minimale retenue pour déclencher un signal. Aucune valeur universelle.",
+    "Signaux holdout": "Signaux produits sur le holdout. Cible : assez nombreux pour une estimation fiable et au moins le minimum configuré.",
+    "Précision holdout": "Part des prédictions positives correctes sur le holdout. Cible : au-dessus du taux de base; ≥ 55 % peut être intéressant avec assez de signaux.",
+    "Success rate holdout": "Fréquence des mouvements favorables sur le holdout selon la métrique enregistrée par RStock. Plus élevée est préférable; distincte de la précision si les définitions diffèrent.",
+    "Recall": "Part des observations positives détectées. À interpréter avec la précision; aucune cible universelle.",
+    "F1": "Équilibre entre précision et rappel. Plus élevé est préférable, sans seuil universel.",
+    "AUC holdout": "Discrimination sur le holdout. Cible : > 0,50; ≥ 0,55 peut être intéressant.",
+    "Rendement directionnel moyen": "Rendement Open→Close moyen dans la direction prédite. Cible : > 0 %.",
+    "Rendement médian": "Rendement directionnel médian, moins sensible aux extrêmes. Cible : > 0 %.",
+    "MFE moyen": "Mouvement favorable maximal moyen en séance. Cible : positif et élevé par rapport au rendement capturé.",
+    "MAE moyen": "Mouvement défavorable maximal moyen en séance. Cible : proche de 0 %.",
+    "Fréquence mouvement opposé": "Part des observations avec un mouvement significatif contre le signal. Cible : faible.",
+    "Score": "Score interne de classement relatif, si disponible. Aucun seuil absolu.",
+}
+
+_THRESHOLD_SUMMARY_COLUMN_HELP = {
+    "Cible": "Titre prédit. Aucune cible idéale.",
+    "Combinaison": "Combinaison évaluée. Aucune cible idéale.",
+    "Direction": "Direction évaluée. Aucune cible idéale.",
+    "Seuil calibré": "Seuil retenu par la calibration actuelle. Aucune cible universelle.",
+    "Meilleur seuil robuste": "Seuil alternatif offrant la meilleure précision avec l'échantillon robuste requis. Aucune cible universelle.",
+    "Delta seuil": "Seuil robuste moins seuil calibré; un faible écart indique moins de sensibilité au choix du seuil.",
+    "Signaux au seuil calibré": "Signaux au seuil actuel; un échantillon suffisant rend l'évaluation plus fiable.",
+    "Signaux au meilleur seuil robuste": "Signaux au seuil robuste; cible : respecter le minimum d'échantillon requis.",
+    "Précision au seuil calibré": "Précision au seuil actuel. Cible : élevée et au-dessus du taux de base.",
+    "Précision au meilleur seuil robuste": "Précision au seuil robuste. Cible : au moins celle du seuil calibré, à échantillon suffisant.",
+    "Delta précision": "Précision du seuil robuste moins celle du seuil calibré; positif indique une amélioration.",
+    "Rendement directionnel moyen au seuil calibré": "Rendement directionnel moyen au seuil actuel. Cible : > 0 %.",
+    "Rendement directionnel moyen au meilleur seuil robuste": "Rendement directionnel moyen au seuil robuste. Cible : > 0 %, idéalement au moins celui du seuil actuel.",
+    "Delta rendement": "Rendement moyen du seuil robuste moins celui du seuil calibré; positif indique une amélioration.",
+    "Fréquence mouvement opposé au seuil calibré": "Fréquence de mouvement contraire au seuil actuel. Cible : faible.",
+    "Fréquence mouvement opposé au meilleur seuil robuste": "Fréquence de mouvement contraire au seuil robuste. Cible : faible, idéalement non supérieure à l'actuelle.",
+    "Diagnostic": "Conclusion de la sensibilité : indique si un autre seuil paraît préférable ou si l'actuel reste robuste.",
+    "Raison sélection calibration": "Règle ayant déterminé le seuil calibré. Aucune cible idéale.",
+    "Rang du seuil calibré": "Rang du seuil actuel parmi les candidats admissibles. Cible : proche de 1.",
+    "Nombre de candidats admissibles": "Seuils respectant les règles d'admissibilité; indique si plusieurs choix robustes existent. Aucune cible absolue.",
+}
+
+_THRESHOLD_SENSITIVITY_COLUMN_HELP = {
+    "Seuil": "Probabilité minimale évaluée pour déclencher un signal. Aucune cible universelle.",
+    "Nombre de signaux": "Signaux générés à ce seuil. Cible : assez nombreux pour une estimation fiable.",
+    "Précision": "Part des signaux corrects. Cible : au-dessus du taux de base; ≥ 55 % peut être intéressant avec assez de signaux.",
+    "Recall": "Part des observations positives captées. À interpréter avec la précision; aucune cible universelle.",
+    "F1": "Équilibre entre précision et rappel. Plus élevé est préférable, sans seuil universel.",
+    "Rendement directionnel moyen": "Rendement moyen dans la direction du signal. Cible : > 0 %.",
+    "Rendement médian": "Rendement médian des signaux, moins sensible aux extrêmes. Cible : > 0 %.",
+    "Fréquence mouvement opposé": "Part des mouvements contraires au signal. Cible : faible.",
+    "MFE moyen": "Mouvement favorable maximal moyen. Cible : positif.",
+    "MAE moyen": "Mouvement défavorable maximal moyen. Cible : proche de 0 %.",
+    "Seuil calibré actuel": "Marque le seuil actuellement retenu par la calibration. Aucune cible supplémentaire.",
+}
+
+_THRESHOLD_CHOICE_COLUMN_HELP = {
+    "Seuil": "Seuil candidat évalué. Aucune cible universelle.",
+    "Sélectionné": "Indique le seuil retenu. Cible : un seul seuil cohérent avec les règles de calibration.",
+    "Admissible": "Indique si le seuil respecte les critères minimaux. Cible : vrai pour un seuil sélectionnable.",
+    "Nombre total de signaux": "Signaux disponibles dans la calibration à ce seuil. Cible : respecter les exigences d'échantillon.",
+    "Fraction de fenêtres admissibles": "Part des fenêtres respectant les critères. Cible : élevée, proche de 100 %.",
+    "Précision calibration": "Précision agrégée selon la logique du run. Cible : élevée et au-dessus du taux de base.",
+    "Stabilité précision": "Variabilité de la précision entre fenêtres. Cible : faible.",
+    "Rendement directionnel moyen": "Rendement moyen dans la direction prédite. Cible : > 0 %.",
+    "Stabilité rendement": "Variabilité du rendement entre fenêtres. Cible : faible.",
+    "Fréquence mouvement opposé": "Part des mouvements contraires au signal. Cible : faible.",
+    "F1": "Équilibre entre précision et rappel. Plus élevé est préférable, sans seuil universel.",
+    "Dans tolérance précision": "Indique si la précision est dans la tolérance de sélection autorisée. Cible : vrai pour un seuil admissible à ce choix.",
+    "Raison de rejet / sélection": "Motif du choix ou de l'élimination du seuil. Aucune cible idéale.",
+}
+
+def _surveillance_column_config(columns: pd.Index) -> dict[str, object]:
+    return {
+        name: _text_column_with_help(
+            name, width="small", descriptions=_SURVEILLANCE_COLUMN_HELP
+        )
+        for name in columns
+    }
+
+
+def _render_next_session_signals(view: OperationalTableView) -> None:
+    with st.container(border=True):
+        st.subheader("Signaux haussiers — prochaine séance")
+        st.caption("Occasions à considérer pour la prochaine séance ouvrable.")
+        controls = st.columns([1, 1.5, 3], gap="small")
+        order = controls[0].selectbox(
+            "Tri",
+            ("P(Up) décroissant", "Cible A–Z", "Rendement décroissant"),
+            key="surveillance-next-sort",
+        )
+        filter_label = controls[1].selectbox(
+            "Filtre",
+            (f"Tous les signaux ({len(view.table)})", "Rendement positif"),
+            key="surveillance-next-filter",
+        )
+        table = view.table.copy()
+        technical = view.technical.copy()
+        if filter_label == "Rendement positif" and not technical.empty:
+            keep = pd.to_numeric(
+                technical["quality_mean_return"], errors="coerce"
+            ).gt(0).to_numpy()
+            table = table.iloc[keep].reset_index(drop=True)
+            technical = technical.iloc[keep].reset_index(drop=True)
+        if not technical.empty:
+            if order == "P(Up) décroissant":
+                sort_values = pd.to_numeric(technical["up_probability"], errors="coerce")
+                positions = sort_values.sort_values(ascending=False, kind="stable").index
+            elif order == "Rendement décroissant":
+                sort_values = pd.to_numeric(
+                    technical["quality_mean_return"], errors="coerce"
+                )
+                positions = sort_values.sort_values(ascending=False, kind="stable").index
+            else:
+                positions = table["Cible"].astype(str).str.upper().sort_values(
+                    kind="stable"
+                ).index
+            table = table.iloc[positions].reset_index(drop=True)
+        if table.empty:
+            st.info("Aucun signal haussier pour la prochaine séance ouvrable.")
+        else:
+            st.dataframe(
+                _styled_surveillance_table(
+                    table, ("P(Up)", "Rendement", "Trades gagnants")
+                ),
+                hide_index=True,
+                width="stretch",
+                column_config=_surveillance_column_config(table.columns),
+            )
+
+
+def _render_latest_session_results(view: OperationalTableView) -> None:
+    with st.container(border=True):
+        st.subheader("Dernière séance")
+        st.caption("Résultats des signaux évalués sur la séance précédente.")
+        if view.table.empty:
+            st.info("Aucun signal évalué disponible.")
+        else:
+            st.dataframe(
+                _styled_surveillance_table(
+                    view.table, ("P(Up)", "Rendement", "P&L cumulé")
+                ),
+                hide_index=True,
+                width="stretch",
+                column_config=_surveillance_column_config(view.table.columns),
+            )
 
 
 def _styled_signal_table(table: pd.DataFrame) -> pd.io.formats.style.Styler:
@@ -4603,7 +5061,7 @@ _DAILY_UPDATE_STAGES = (
 
 
 def _render_daily_update_card(
-    runs: list[dict[str, object]], *, active_model_count: int, stretch: bool = False
+    runs: list[dict[str, object]], *, active_model_count: int
 ) -> None:
     """Submit and follow the existing full operational workflow in one place."""
 
@@ -4619,68 +5077,77 @@ def _render_daily_update_card(
         (run for run in runs if run.get("job_type") == JobType.OPERATIONAL_RUN.value),
         None,
     )
-    with st.container(border=True, height="stretch" if stretch else "content"):
-        if stretch:
-            st.markdown(
-                '<span class="rstock-equal-height-marker rstock-daily-update-card-marker"></span>',
-                unsafe_allow_html=True,
-            )
-        st.subheader("Mise à jour quotidienne")
-        if current is not None:
-            detail = _service().run(str(current["run_id"]))
-            progress = detail["progress"]
-            stage = str(progress.get("stage") or "market_update")
-            stage_index, stage_label = next(
-                (
-                    (index, label)
-                    for index, (name, label) in enumerate(_DAILY_UPDATE_STAGES, start=1)
-                    if name == stage
-                ),
-                (1, "Mise à jour du marché"),
-            )
-            st.caption(f"Étape {stage_index}/5 — {stage_label}")
-            workflow_percent = progress.get("workflow_percent")
+    detail: dict[str, object] = {}
+    quality: dict[str, object] = {}
+    status_level = "info"
+    status_message = "Aucune mise à jour quotidienne exécutée."
+    stage_caption = ""
+    workflow_percent = None
+    if current is not None:
+        detail = _service().run(str(current["run_id"]))
+        progress = detail["progress"]
+        stage = str(progress.get("stage") or "market_update")
+        stage_index, stage_label = next(
+            (
+                (index, label)
+                for index, (name, label) in enumerate(_DAILY_UPDATE_STAGES, start=1)
+                if name == stage
+            ),
+            (1, "Mise à jour du marché"),
+        )
+        stage_caption = f"Étape {stage_index}/5 — {stage_label}"
+        workflow_percent = progress.get("workflow_percent")
+        quality = detail.get("summary", {}).get("production_quality", {})
+        if current.get("status") == "failed":
+            status_level = "error"
+            status_message = str(current.get("error") or "La mise à jour a échoué.")
+        elif current.get("status") == "running":
+            status_message = "Mise à jour quotidienne en cours…"
+        else:
+            status_message = "Mise à jour quotidienne en attente…"
+    elif latest is not None and latest.get("status") == "completed":
+        detail = _service().run(str(latest["run_id"]))
+        quality = detail.get("summary", {}).get("production_quality", {})
+        status_level = "success"
+        status_message = "Mise à jour quotidienne terminée."
+    if not isinstance(quality, dict):
+        quality = {}
+    processed = len(quality.get("models_processed", []))
+    errors = quality.get("errors", [])
+    error_count = len(errors) if isinstance(errors, list) else int(errors or 0)
+    elapsed = float(quality.get("elapsed_seconds", 0.0) or 0.0)
+    summary = f"{processed} modèles traités · {error_count} erreur · {elapsed:.1f} s"
+    with st.container(border=True):
+        columns = st.columns(
+            [1.1, 3.4, 1.25, 1.35],
+            gap="small",
+            vertical_alignment="center",
+        )
+        columns[0].markdown("**Mise à jour quotidienne**")
+        with columns[1]:
+            getattr(st, status_level)(status_message)
+            if stage_caption:
+                st.caption(stage_caption)
             if workflow_percent is not None:
                 st.progress(float(workflow_percent) / 100.0)
-            if current.get("status") == "failed":
-                st.error(str(current.get("error") or "La mise à jour a échoué."))
-            elif current.get("status") == "running":
-                st.info("Mise à jour quotidienne en cours…")
-            else:
-                st.info("Mise à jour quotidienne en attente…")
-            quality = detail.get("summary", {}).get("production_quality", {})
-            if stage == "production_quality" and isinstance(quality, dict):
-                st.caption(
-                    f"{quality.get('dirty_detected', 0)} modèle(s) à recalculer · "
-                    f"{len(quality.get('models_processed', []))} traité(s) · "
-                    f"{quality.get('models_remaining', 0)} restant(s)"
-                )
-        elif latest is not None and latest.get("status") == "completed":
-            st.success("Mise à jour quotidienne terminée.")
-            quality = _service().run(str(latest["run_id"])).get("summary", {}).get("production_quality", {})
-            if isinstance(quality, dict):
-                st.caption(
-                    f"Qualité Production : {quality.get('dirty_detected', 0)} détecté(s) · "
-                    f"{len(quality.get('models_processed', []))} traité(s) · "
-                    f"{quality.get('models_remaining', 0)} restant(s) · "
-                    f"{float(quality.get('elapsed_seconds', 0.0)):.2f} s"
-                )
         retry_failed = current is not None and current.get("status") == "failed"
-        if st.button(
-            "Relancer la mise à jour" if retry_failed else "Mettre à jour RStock",
-            type="primary",
-            width="stretch",
-            disabled=active_model_count == 0 or (
-                current is not None and current.get("status") in {"pending", "running"}
-            ),
-            key="daily-operational-update",
-        ):
-            if retry_failed:
-                _service().resume(str(current["run_id"]))
-            else:
-                _submit_operational_job(JobType.OPERATIONAL_RUN)
-            st.rerun()
-        st.caption("Lance la mise à jour quotidienne de bout en bout.")
+        with columns[2]:
+            if st.button(
+                "Relancer la mise à jour" if retry_failed else "Mettre à jour RStock",
+                type="primary",
+                width="stretch",
+                disabled=active_model_count == 0 or (
+                    current is not None
+                    and current.get("status") in {"pending", "running"}
+                ),
+                key="daily-operational-update",
+            ):
+                if retry_failed:
+                    _service().resume(str(current["run_id"]))
+                else:
+                    _submit_operational_job(JobType.OPERATIONAL_RUN)
+                st.rerun()
+        columns[3].caption(summary)
 
 
 def _load_evaluated_predictions_view(
@@ -4853,82 +5320,58 @@ def _render_surveillance_page(*, polling: bool) -> None:
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
     active_models = models.active_models()
-    priority_model_metrics = signal_priority_model_lookup(active_models)
     universe = models.operational_universe(active_models)
     predictions = PredictionService(project_root).active_history()
     signal_service = SignalService(project_root)
     signals = signal_service.active_history()
     freshness = MarketDataService().freshness(universe.symbols, st.session_state.lab_config)
     runs = _service().runs()
+    quality = load_models_master(project_root)
     signal_view = build_signals_view(signals, predictions)
-    today_signal_view = filter_signal_results_view(signal_view, "Aujourd’hui et demain")
     evaluated_view = _load_evaluated_predictions_view(
         predictions,
         signals,
         project_root=project_root,
     )
+    reference_date = pd.Timestamp.now(tz="America/Toronto").normalize().tz_localize(None)
+    next_session = next_surveillance_session(
+        reference_date,
+        getattr(st.session_state, "lab_calendar", "XNYS"),
+    )
+    next_signals = next_session_signals_view(signal_view, quality, next_session)
+    latest_results = latest_session_results_view(evaluated_view, quality)
     last_market = next(
         (run.get("finished_at") or run.get("created_at") for run in runs if run["job_type"] in {JobType.MARKET_UPDATE.value, JobType.OPERATIONAL_RUN.value} and run["status"] == "completed"),
         None,
     )
-    last_prediction = (
-        predictions["created_at"].max()
-        if not predictions.empty and "created_at" in predictions
-        else None
+    quality_updated = pd.to_datetime(
+        quality.get("quality_updated_at", pd.Series(dtype=object)),
+        errors="coerce",
+        utc=True,
+    ).max()
+    last_update = last_market if pd.isna(quality_updated) else quality_updated
+    latest_operational = next(
+        (run for run in runs if run["job_type"] in OPERATIONAL_JOB_TYPES),
+        None,
     )
-    errors = [
-        run
-        for run in runs
-        if run["status"] == "failed" and run["job_type"] in OPERATIONAL_JOB_TYPES
-    ]
+    error_count = int(
+        latest_operational is not None and latest_operational.get("status") == "failed"
+    )
     _render_surveillance_header(
-        last_market=last_market,
         freshness=freshness,
-        error_count=len(errors),
+        error_count=error_count,
     )
     _render_surveillance_kpis(
-        today_signals=len(today_signal_view.signals.table),
-        pending_predictions=evaluated_view.pending_count,
+        next_session=next_session,
+        crosses_weekend=session_crosses_weekend(reference_date, next_session),
+        next_signals=next_signals,
+        latest_results=latest_results,
         active_models=len(universe.model_ids),
-        monitored_symbols=len(universe.symbols),
-        last_market=last_market,
-        freshness=freshness,
+        last_update=last_update,
     )
-    top_main, top_sidebar = st.columns([2.25, 1], gap="large")
-    with top_main:
-        displayed_signals, selected_signal = _render_signals_card(
-            signal_view,
-            stretch=True,
-        )
-    with top_sidebar:
-        _render_daily_update_card(
-            runs, active_model_count=len(universe.model_ids), stretch=True
-        )
-    main, sidebar = st.columns([2.25, 1], gap="large")
-    with main:
-        _render_signals_followup(
-            displayed_signals,
-            selected_signal,
-            models,
-            active_models=active_models,
-        )
-        _evaluated_predictions_panel(evaluated_view, runs, project_root=project_root)
-        with st.expander("Univers opérationnel"):
-            st.write(", ".join(universe.symbols) or "Aucun symbole")
-            if universe.used_by:
-                st.dataframe(
-                    [{"Symbole": symbol, "Modèles": ", ".join(ids)} for symbol, ids in universe.used_by.items()],
-                    hide_index=True, width="stretch",
-                )
-    with sidebar:
-        priority_view = filter_signal_results_view(signal_view, "Aujourd’hui et demain")
-        _render_priorities_panel(priority_view.signals, priority_model_metrics)
-        _render_operational_info(
-            freshness=freshness,
-            last_prediction=last_prediction,
-            errors=errors,
-        )
-    _live_job_panel(_service(), domain="production")
+    _render_daily_update_card(runs, active_model_count=len(universe.model_ids))
+    _render_next_session_signals(next_signals)
+    _render_latest_session_results(latest_results)
     if surveillance_refresh_decision(runs, polling=polling).final_rerun:
         st.rerun(scope="app")
 
@@ -5210,6 +5653,20 @@ def _render_models_kpi_density_style() -> None:
             line-height: 1.15 !important;
             white-space: nowrap !important;
         }
+        [class*="st-key-model-detail-kpi-card-"][class*="-positive"] [data-testid="stMetricValue"],
+        [class*="st-key-model-detail-kpi-card-"][class*="-positive"] [data-testid="stMetricValue"] *,
+        [class*="st-key-models-kpi-card-"][class*="-positive"] [data-testid="stMetricValue"],
+        [class*="st-key-models-kpi-card-"][class*="-positive"] [data-testid="stMetricValue"] * {
+            color: #198754 !important;
+            font-weight: 600 !important;
+        }
+        [class*="st-key-model-detail-kpi-card-"][class*="-negative"] [data-testid="stMetricValue"],
+        [class*="st-key-model-detail-kpi-card-"][class*="-negative"] [data-testid="stMetricValue"] *,
+        [class*="st-key-models-kpi-card-"][class*="-negative"] [data-testid="stMetricValue"],
+        [class*="st-key-models-kpi-card-"][class*="-negative"] [data-testid="stMetricValue"] * {
+            color: #dc3545 !important;
+            font-weight: 600 !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -5217,31 +5674,181 @@ def _render_models_kpi_density_style() -> None:
 
 
 def _render_models_kpi_card(
-    column: Any, label: str, value: object, icon: str, *, help: str | None = None
+    column: Any,
+    label: str,
+    value: object,
+    icon: str,
+    *,
+    caption: str | None = None,
+    directional: bool | None = None,
+    help: str | None = None,
 ) -> None:
+    uses_directional_color = (
+        icon in {"trending_up", "payments", "target"}
+        if directional is None
+        else directional
+    )
+    tone = (
+        _directional_tone(value)
+        if uses_directional_color
+        else "neutral"
+    )
     with column:
-        with st.container(border=True):
+        with st.container(border=True, key=f"models-kpi-card-{icon}-{tone}"):
             st.metric(f":material/{icon}: {label}", value, help=help)
+            if caption:
+                st.caption(caption)
 
 
-def _models_grid_column_config() -> dict[str, Any]:
+def _directional_tone(value: object) -> str:
+    """Classify a signed display value for presentation-only KPI color."""
+
+    color = directional_display_style(value)
+    if "#198754" in color:
+        return "positive"
+    if "#dc3545" in color:
+        return "negative"
+    return "neutral"
+
+
+def _render_model_detail_kpi_card(
+    column: Any, label: str, value: str, raw_value: object, icon: str
+) -> None:
+    """Render a detail-only KPI with color derived from its signed value."""
+
+    tone = _directional_tone(raw_value)
+    with column:
+        with st.container(border=True, key=f"model-detail-kpi-card-{icon}-{tone}"):
+            st.metric(f":material/{icon}: {label}", value)
+
+
+def _render_model_lineage_cards(
+    items: tuple[tuple[str, str, str], ...],
+) -> None:
+    """Render compact lineage metadata without the former technical text line."""
+
+    st.markdown(
+        """
+        <style>
+        [class*="st-key-model-detail-lineage-card-"] {
+            background-color: #f3f5f7 !important;
+            border-radius: 0.5rem;
+        }
+        [class*="st-key-model-detail-lineage-card-"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background-color: #f3f5f7 !important;
+        }
+        [class*="st-key-model-detail-lineage-card-"] [data-testid="stCaptionContainer"] {
+            font-size: 0.72rem;
+            line-height: 1.1;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    columns = st.columns(len(items), gap="small")
+    for index, (column, (label, value, icon)) in enumerate(zip(columns, items)):
+        with column:
+            with st.container(border=True, key=f"model-detail-lineage-card-{index}"):
+                st.caption(f":material/{icon}: {label}")
+                st.markdown(f"**{value}**")
+
+
+_MODELS_GRID_COLUMN_HELP = {
+    "Cible": "Titre boursier dont le mouvement est prédit par le modèle. Aucune cible idéale.",
+    "Prédicteurs": "Titres utilisés comme variables prédictives pour prévoir le mouvement de la cible. Plus de prédicteurs n’implique pas nécessairement un meilleur modèle.",
+    "Statut": "État actuel du modèle dans son cycle de vie. Cible : actif pour un modèle actuellement utilisé en production.",
+    "Univers": "Univers de titres dans lequel le modèle a été découvert; il situe le contexte de recherche. Aucune cible idéale.",
+    "Source": "Expérience End-to-End à l’origine du modèle; elle assure sa traçabilité. Aucune cible idéale.",
+    "Top-N": "Nombre de prédicteurs présélectionnés avant la recherche des combinaisons; il décrit la largeur de l’espace de recherche. Aucune cible idéale : plus élevé n’est pas nécessairement meilleur.",
+    "Promotion": "Date de promotion du modèle en production; elle indique son ancienneté réelle en exploitation. Aucune cible idéale.",
+    "Signaux": "Nombre de signaux évalués pendant la fenêtre d’analyse sélectionnée. Un échantillon plus grand rend les métriques plus interprétables; éviter de conclure avec quelques signaux.",
+    "Rendement moyen": "Rendement directionnel moyen Open→Close des signaux évalués. Cible : > 0 %, idéalement positif et stable sur suffisamment de signaux.",
+    "Trades gagnants": "Pourcentage des signaux évalués avec un rendement positif. Cible : > 50 % positif; ≥ 55 % intéressant; ≥ 60 % solide si l’échantillon est suffisant.",
+    "P&L cumulé": "Somme des gains et pertes des signaux évalués selon le capital de simulation. Cible : > 0 $ avec une progression durable.",
+    "Drawdown": "Plus forte baisse du P&L cumulé depuis un sommet pendant la période analysée. Cible : le plus près possible de 0 $, à interpréter relativement au P&L et au capital engagé.",
+    "Santé": "Évaluation synthétique de la qualité récente selon les règles de surveillance. Cible : état sain/conforme. « Données insuffisantes » indique trop peu d’observations pour conclure.",
+    "Dernier signal": "Date du dernier signal déclenché par le modèle; elle indique sa récence d’activité. Aucune cible idéale.",
+    "Tendance 63": "Évolution visuelle du P&L cumulé pendant la fenêtre d’analyse sélectionnée. Elle montre si la performance récente progresse, stagne ou se détériore. Cible : tendance globalement ascendante; prudence avec peu de signaux.",
+}
+
+
+def _models_trend_y_bounds(table: pd.DataFrame) -> tuple[float, float] | None:
+    finite = []
+    for trend in table["Tendance 63"]:
+        if not isinstance(trend, (list, tuple)):
+            continue
+        for value in trend:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number):
+                finite.append(number)
+    return (min(finite), max(finite)) if finite else None
+
+
+_MODEL_DETAIL_WINDOWS_HELP = {
+    "Fenêtre": "Nombre de séances utilisées pour les métriques récentes; permet de comparer le court et le moyen terme. Aucune cible idéale.",
+    "Rendement moyen": "Rendement directionnel moyen Open→Close des signaux sur cette fenêtre. Cible : > 0 %, stable sur suffisamment de signaux.",
+    "Trades gagnants": "Part des signaux à rendement positif. Cible : > 50 % positif; ≥ 55 % intéressant; ≥ 60 % solide avec assez de signaux.",
+    "Signaux": "Nombre de signaux évalués sur la fenêtre; plus il est grand, plus les métriques sont interprétables. Éviter de conclure sur quelques signaux.",
+}
+
+_MODEL_DETAIL_SIGNALS_HELP = {
+    "Date": "Date de la séance évaluée. Aucune cible idéale.",
+    "Prob. Up": "Probabilité de hausse estimée; à interpréter selon le seuil de décision du modèle, pas par rapport à 50 % en absolu.",
+    "Prob. Down": "Probabilité de baisse estimée; à interpréter selon la logique et le seuil de décision du modèle.",
+    "Rendement": "Rendement Open→Close observé pour la séance. Cible pour un signal haussier : > 0 %.",
+    "P&L": "Gain ou perte simulé du signal selon le capital utilisé par RStock. Cible : > 0 $.",
+    "MFE": "Meilleur mouvement favorable après l’ouverture; mesure le potentiel disponible. Cible : positif, idéalement supérieur au rendement capturé.",
+    "MAE": "Pire mouvement défavorable pendant la séance; mesure le risque intraday. Cible : près de 0 %, moins négatif étant préférable.",
+    "Verdict": "Résultat final du signal selon les règles de classification de RStock. Cible : gagnant.",
+}
+
+_MODEL_DETAIL_BASELINE_HELP = {
+    "Métrique": "Indicateur comparé entre la promotion et la performance récente. Aucune cible idéale commune à toutes les métriques.",
+    "À la promotion": "Valeur de référence lors de la promotion; sert de baseline hors sélection. Aucune cible absolue.",
+    "Actuel": "Valeur observée depuis la promotion. Cible selon la métrique : proche ou supérieure à la baseline lorsque plus élevé est meilleur.",
+    "Écart": "Différence entre la valeur actuelle et la promotion; révèle une amélioration ou une dégradation. Cible : ≥ 0 lorsque plus élevé est meilleur.",
+}
+
+
+def _model_detail_column_config(
+    descriptions: dict[str, str], *, medium_columns: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        name: _text_column_with_help(
+            name, width="medium" if name in medium_columns else "small",
+            descriptions=descriptions,
+        )
+        for name in descriptions
+    }
+
+
+def _models_grid_column_config(
+    trend_y_bounds: tuple[float, float] | None = None,
+) -> dict[str, Any]:
+    widths = {
+        "Cible": "small", "Prédicteurs": "medium", "Statut": "small",
+        "Univers": "medium", "Source": "medium", "Top-N": "small",
+        "Promotion": "small", "Signaux": "small", "Rendement moyen": "small",
+        "Trades gagnants": "small", "P&L cumulé": "small", "Drawdown": "small",
+        "Santé": "medium", "Dernier signal": "small",
+    }
     return {
         "model_id": None,
-        "Cible": st.column_config.TextColumn(width="small"),
-        "Prédicteurs": st.column_config.TextColumn(width="medium"),
-        "Statut": st.column_config.TextColumn(width="small"),
-        "Univers": st.column_config.TextColumn(width="medium"),
-        "Source": st.column_config.TextColumn(width="medium"),
-        "Top-N": st.column_config.TextColumn(width="small"),
-        "Promotion": st.column_config.TextColumn(width="small"),
-        "Signaux": st.column_config.TextColumn(width="small"),
-        "Rendement moyen": st.column_config.TextColumn(width="small"),
-        "Trades gagnants": st.column_config.TextColumn(width="small"),
-        "P&L cumulé": st.column_config.TextColumn(width="small"),
-        "Drawdown": st.column_config.TextColumn(width="small"),
-        "Santé": st.column_config.TextColumn(width="medium"),
-        "Dernier signal": st.column_config.TextColumn(width="small"),
-        "Tendance 63": st.column_config.LineChartColumn("Tendance 63", width="medium"),
+        **{
+            name: _text_column_with_help(
+                name, width=width, descriptions=_MODELS_GRID_COLUMN_HELP
+            )
+            for name, width in widths.items()
+        },
+        "Tendance 63": st.column_config.LineChartColumn(
+            "Tendance 63", width="medium", help=_MODELS_GRID_COLUMN_HELP["Tendance 63"],
+            color="#2563eb",
+            **({"y_min": trend_y_bounds[0], "y_max": trend_y_bounds[1]}
+               if trend_y_bounds is not None else {}),
+        ),
     }
 
 
@@ -5342,27 +5949,15 @@ def _render_model_quality_detail(model_id: str) -> None:
     source_wf = lineage.get("source_walk_forward_run_id") or model.source_walk_forward_run
     source_e2e = lineage.get("source_end_to_end_run_id") or source_end_to_end
     lineage_items = (
-        ("Univers", lineage.get("primary_universe_name_at_promotion") or "Non disponible"),
-        ("End-to-End source", _model_detail_short_id(source_e2e)),
-        ("Préfiltre / Top-N", prefilter_label),
-        ("Cutoff", _model_detail_date(lineage.get("cutoff_date"))),
-        ("Date de promotion", _model_detail_date(lineage.get("promotion_date") or model.created_at)),
-        ("Validation temporelle", lineage.get("temporal_validation_status") or "Non applicable"),
-        ("Version", f"v{model.artifact_version}" if model.artifact_version is not None else "Non disponible"),
-        ("Run WF", _model_detail_short_id(source_wf)),
+        ("Univers", lineage.get("primary_universe_name_at_promotion") or "Non disponible", "public"),
+        ("Préfiltre / Top-N", prefilter_label, "filter_alt"),
+        ("Cutoff", _model_detail_date(lineage.get("cutoff_date")), "event"),
+        ("Date de promotion", _model_detail_date(lineage.get("promotion_date") or model.created_at), "calendar_month"),
+        ("Validation temporelle", lineage.get("temporal_validation_status") or "Non applicable", "science"),
+        ("Version", f"v{model.artifact_version}" if model.artifact_version is not None else "Non disponible", "inventory_2"),
+        ("Run WF", _model_detail_short_id(source_wf), "history"),
     )
-    st.markdown(" · ".join(
-        f"**{label}:** {value}" for label, value in lineage_items
-    ))
-    with st.expander("Qualification initiale"):
-        qualification = st.columns(3, gap="small")
-        qualification[0].metric("AUC WF médiane", _model_detail_auc(
-            lineage.get("wf_median_auc") or model.development_metrics.get("ROCAUCMedian")
-        ))
-        qualification[1].metric("AUC Holdout", _model_detail_auc(
-            lineage.get("holdout_auc") or model.holdout_metrics.get("FinalUpROCAUC")
-        ))
-        qualification[2].metric("Run WF", _model_detail_short_id(source_wf))
+    _render_model_lineage_cards(lineage_items)
     windows = {
         width: snapshot.get(f"window_{width}", {}) for width in (20, 63, 126)
     }
@@ -5370,73 +5965,78 @@ def _render_model_quality_detail(model_id: str) -> None:
     _render_models_kpi_density_style()
     with st.container(key="model-detail-kpis"):
         kpis = st.columns(4, gap="small")
-        _render_models_kpi_card(
+        _render_model_detail_kpi_card(
             kpis[0], "Rendement moyen 63 séances",
-            _models_percent(windows[63].get("mean_intraday_return")), "trending_up",
+            _models_percent(windows[63].get("mean_intraday_return")),
+            windows[63].get("mean_intraday_return"), "trending_up",
         )
-        _render_models_kpi_card(
-            kpis[1], "Trades gagnants", _models_percent(since.get("win_rate")), "target",
+        _render_model_detail_kpi_card(
+            kpis[1], "Trades gagnants", _models_percent(since.get("win_rate")),
+            since.get("win_rate"), "target",
         )
-        _render_models_kpi_card(
-            kpis[2], "P&L cumulé", _model_detail_currency(since.get("pnl")), "payments",
+        _render_model_detail_kpi_card(
+            kpis[2], "P&L cumulé", _model_detail_currency(since.get("pnl")),
+            since.get("pnl"), "payments",
         )
-        _render_models_kpi_card(
+        _render_model_detail_kpi_card(
             kpis[3], "Drawdown max",
-            _model_detail_currency(since.get("max_drawdown_dollars")), "trending_down",
+            _model_detail_currency(since.get("max_drawdown_dollars")),
+            since.get("max_drawdown_dollars"), "trending_down",
         )
     st.dataframe(
-        performance_windows_display_table(windows), hide_index=True, width="stretch",
+        style_directional_columns(
+            performance_windows_display_table(windows),
+            ("Rendement moyen", "Trades gagnants"),
+        ),
+        hide_index=True, width="stretch",
         height=145,
-        column_config={
-            "Fenêtre": st.column_config.TextColumn(width="small"),
-            "Rendement moyen": st.column_config.TextColumn(width="small"),
-            "Trades gagnants": st.column_config.TextColumn(width="small"),
-            "Signaux": st.column_config.TextColumn(width="small"),
-        },
+        column_config=_model_detail_column_config(_MODEL_DETAIL_WINDOWS_HELP),
     )
 
     charts = st.columns(2, gap="small")
     series = detail.series.copy()
     with charts[0]:
-        st.markdown("#### P&L cumulé")
-        if series.empty:
-            st.info("Aucune série Production disponible.")
-        else:
-            pnl_columns = ["session_date", "cumulative_pnl"]
-            if "baseline_expected_cumulative_pnl" in series:
-                pnl_columns.append("baseline_expected_cumulative_pnl")
+        with st.container(border=True):
+            st.markdown("#### P&L cumulé")
+            if series.empty:
+                st.info("Aucune série Production disponible.")
             else:
-                st.caption("Courbe baseline indisponible")
-            pnl = series[pnl_columns].rename(columns={
-                "cumulative_pnl": "Production",
-                "baseline_expected_cumulative_pnl": "Baseline attendue",
-            }).melt("session_date", var_name="Série", value_name="P&L ($)")
-            st.altair_chart(
-                alt.Chart(pnl).mark_line().encode(
-                    x=alt.X("session_date:T", title=None, axis=alt.Axis(format="%Y-%m-%d")),
-                    y=alt.Y("P&L ($):Q", title="P&L ($)"), color="Série:N",
-                ).properties(height=240),
-                width="stretch",
-            )
+                pnl_columns = ["session_date", "cumulative_pnl"]
+                if "baseline_expected_cumulative_pnl" in series:
+                    pnl_columns.append("baseline_expected_cumulative_pnl")
+                else:
+                    st.caption("Courbe baseline indisponible")
+                pnl = series[pnl_columns].rename(columns={
+                    "cumulative_pnl": "Production",
+                    "baseline_expected_cumulative_pnl": "Baseline attendue",
+                }).melt("session_date", var_name="Série", value_name="P&L ($)")
+                st.altair_chart(
+                    alt.Chart(pnl).mark_line().encode(
+                        x=alt.X("session_date:T", title=None, axis=alt.Axis(format="%Y-%m-%d")),
+                        y=alt.Y("P&L ($):Q", title="P&L ($)"), color="Série:N",
+                    ).properties(height=240),
+                    width="stretch",
+                )
     with charts[1]:
-        st.markdown("#### Rendement moyen roulant")
-        if series.empty:
-            st.info("Aucune série roulante disponible.")
-        else:
-            rolling = series[[
-                "session_date", "rolling_mean_return_20", "rolling_mean_return_63",
-            ]].rename(columns={
-                "rolling_mean_return_20": "20 séances",
-                "rolling_mean_return_63": "63 séances",
-            }).melt("session_date", var_name="Fenêtre", value_name="Rendement")
-            st.altair_chart(
-                alt.Chart(rolling).mark_line().encode(
-                    x=alt.X("session_date:T", title=None, axis=alt.Axis(format="%Y-%m-%d")),
-                    y=alt.Y("Rendement:Q", title="Rendement", axis=alt.Axis(format=".2%")),
-                    color="Fenêtre:N",
-                ).properties(height=240),
-                width="stretch",
-            )
+        with st.container(border=True):
+            st.markdown("#### Rendement moyen roulant")
+            if series.empty:
+                st.info("Aucune série roulante disponible.")
+            else:
+                rolling = series[[
+                    "session_date", "rolling_mean_return_20", "rolling_mean_return_63",
+                ]].rename(columns={
+                    "rolling_mean_return_20": "20 séances",
+                    "rolling_mean_return_63": "63 séances",
+                }).melt("session_date", var_name="Fenêtre", value_name="Rendement")
+                st.altair_chart(
+                    alt.Chart(rolling).mark_line().encode(
+                        x=alt.X("session_date:T", title=None, axis=alt.Axis(format="%Y-%m-%d")),
+                        y=alt.Y("Rendement:Q", title="Rendement", axis=alt.Axis(format=".2%")),
+                        color="Fenêtre:N",
+                    ).properties(height=240),
+                    width="stretch",
+                )
 
     baseline_tab, signals_tab, technical_tab = st.tabs(["Baseline", "Signaux", "Technique"])
     with baseline_tab:
@@ -5448,14 +6048,23 @@ def _render_model_quality_detail(model_id: str) -> None:
             st.info("Baseline indisponible")
         else:
             st.dataframe(
-                comparison_table, hide_index=True, width="stretch",
-                column_config={
-                    "Métrique": st.column_config.TextColumn(width="medium"),
-                    "À la promotion": st.column_config.TextColumn(width="small"),
-                    "Actuel": st.column_config.TextColumn(width="small"),
-                    "Écart": st.column_config.TextColumn(width="small"),
-                },
+                style_directional_columns(
+                    comparison_table, ("À la promotion", "Actuel", "Écart")
+                ),
+                hide_index=True, width="stretch",
+                column_config=_model_detail_column_config(
+                    _MODEL_DETAIL_BASELINE_HELP, medium_columns=("Métrique",)
+                ),
             )
+        with st.expander("Qualification initiale"):
+            qualification = st.columns(3, gap="small")
+            qualification[0].metric("AUC WF médiane", _model_detail_auc(
+                lineage.get("wf_median_auc") or model.development_metrics.get("ROCAUCMedian")
+            ))
+            qualification[1].metric("AUC Holdout", _model_detail_auc(
+                lineage.get("holdout_auc") or model.holdout_metrics.get("FinalUpROCAUC")
+            ))
+            qualification[2].metric("Run WF", _model_detail_short_id(source_wf))
     with signals_tab:
         st.caption("Derniers signaux évalués")
         signals = evaluated_bullish_signals(detail.observations)
@@ -5464,8 +6073,12 @@ def _render_model_quality_detail(model_id: str) -> None:
         else:
             signal_table = evaluated_bullish_signals_display_table(signals).head(10)
             st.dataframe(
-                signal_table[["Date", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
+                style_directional_columns(
+                    signal_table[["Date", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
+                    ("Rendement", "P&L", "MFE", "MAE"),
+                ),
                 hide_index=True, width="stretch",
+                column_config=_model_detail_column_config(_MODEL_DETAIL_SIGNALS_HELP),
             )
         excluded = quality_excluded_observations(detail.observations)
         if not excluded.empty:
@@ -5550,6 +6163,7 @@ def _models_page() -> None:
     health = filters[3].multiselect("Santé", sorted(master["health_label"].dropna().astype(str).unique()), key="models-health-filter")
     query = filters[4].text_input("Recherche", placeholder="Cible ou prédicteur", key="models-predictor-filter")
     visible = filter_quality_models(master, statuses=statuses, universes=universes, sources=sources, health=health, query=query)
+    visible = sort_quality_models(visible, window=window)
     updated = pd.to_datetime(master["quality_updated_at"], errors="coerce", utc=True).max()
     st.caption("Qualité non calculée" if pd.isna(updated) else f"Dernière mise à jour qualité modèles : {updated.tz_convert('America/Toronto').strftime('%Y-%m-%d %H:%M')}")
     pagination = st.columns((0.8, 0.45, 2.75), gap="small")
@@ -5562,7 +6176,18 @@ def _models_page() -> None:
     displayed = visible.iloc[(int(page) - 1) * page_size:int(page) * page_size]
     st.caption(f"{len(visible)} modèles affichés sur {len(master)} · page {int(page)} / {page_count}")
     table = models_grid(displayed, window=window)
-    event = st.dataframe(table, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="models-grid", column_config=_models_grid_column_config())
+    event = st.dataframe(
+        style_directional_columns(
+            table,
+            ("Rendement moyen", "Trades gagnants", "P&L cumulé", "Drawdown"),
+        ),
+        hide_index=True,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        key="models-grid",
+        column_config=_models_grid_column_config(_models_trend_y_bounds(table)),
+    )
     selected_rows = _selected_rows(event, len(displayed))
     selected_key = "selected-model-id"
     if selected_rows:
@@ -5606,7 +6231,7 @@ def _history_page() -> None:
         if mode == "detail" and len(run_ids) == 1 and run_ids[0] in available:
             _render_run_detail_view(service, run_ids[0])
             return
-        if mode == "comparison" and 2 <= len(run_ids) <= 4 and set(run_ids) <= available:
+        if mode == "comparison" and 2 <= len(run_ids) <= 5 and set(run_ids) <= available:
             _render_run_comparison_view(service, run_ids)
             return
         st.session_state.pop("history-navigation", None)

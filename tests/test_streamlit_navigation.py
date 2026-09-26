@@ -465,7 +465,6 @@ def test_models_and_surveillance_pages_expose_the_operational_flow():
         "Prédictions quotidiennes",
         "Détection des signaux",
         "Évaluation des prédictions",
-        "Lance la mise à jour quotidienne de bout en bout.",
     ):
         assert label in source
     for history_kind in (
@@ -506,7 +505,12 @@ def test_models_page_uses_compact_presentation_without_changing_actions():
     assert ".st-key-models-kpis" in source
     assert "font-size: 0.78rem" in source
     assert "font-size: 1.65rem" in source
-    assert "_models_grid_column_config()" in models_page
+    assert 'icon in {"trending_up", "payments", "target"}' in source
+    assert "_directional_tone(value)" in source
+    assert models_page.count("style_directional_columns(") == 1
+    assert '"P&L cumulé", "Drawdown"' in models_page
+    assert "P&L cumulÃ©" not in models_page
+    assert "_models_grid_column_config(_models_trend_y_bounds(table))" in models_page
     assert 'placeholder="Aucune valeur disponible"' in models_page
     assert 'st.columns((0.8, 0.45, 2.75), gap="small")' in models_page
     assert 'st.columns((1.8, 0.8, 0.75, 0.95, 0.75, 2.5), gap="small")' in models_page
@@ -530,11 +534,13 @@ def test_model_detail_uses_compact_cards_and_existing_detail_sources():
         "load_model_quality_detail(",
         "status_badge.badge(",
         "title_column.subheader(",
+        "_render_model_lineage_cards(lineage_items)",
         'st.markdown(" · ".join(',
         'with st.expander("Qualification initiale")',
         'kpis = st.columns(4, gap="small")',
         'st.container(key="model-detail-kpis")',
-        "_render_models_kpi_card(",
+        "_render_model_detail_kpi_card(",
+        "style_directional_columns(",
         "performance_windows_display_table(windows)",
         "P&L cumulé",
         "Rendement moyen roulant",
@@ -545,11 +551,22 @@ def test_model_detail_uses_compact_cards_and_existing_detail_sources():
         'st.expander("Détails techniques")',
         'key="models-detail-back"',
     ):
+        if marker.startswith("st.markdown"):
+            continue
         assert marker in detail
     assert detail.index('st.expander("Détails techniques")') > detail.index(
         'st.tabs(["Baseline", "Signaux", "Technique"])'
     )
+    assert detail.index('with st.expander("Qualification initiale")') > detail.index(
+        "baseline_comparison_display_table"
+    )
+    assert detail.index('with st.expander("Qualification initiale")') < detail.index(
+        'st.expander("Détails techniques")'
+    )
     assert ".st-key-model-detail-kpis" in source
+    assert "model-detail-kpi-card-{icon}-{tone}" in source
+    assert 'st.metric(f":material/{icon}: {label}", value)' in source
+    assert '[class*="st-key-model-detail-lineage-card-"]' in source
     assert "RunService" not in detail
 
 
@@ -695,7 +712,7 @@ def test_surveillance_uses_one_conditional_page_level_polling_fragment():
     assert "_evaluated_predictions_panel = st.fragment" not in source
 
 
-def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
+def test_surveillance_is_a_short_two_session_operational_view():
     source = APP.read_text(encoding="utf-8")
     surveillance = source.split("def _render_surveillance_page", 1)[1].split(
         "def _surveillance_page", 1
@@ -703,24 +720,20 @@ def test_surveillance_is_flat_and_keeps_on_demand_technical_details():
 
     assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' not in source
     assert "_render_predictions_tab" not in source
-    assert "_render_signals_card(" in surveillance
-    assert "_render_signals_followup(" in surveillance
-    assert "_evaluated_predictions_panel(evaluated_view, runs, project_root=project_root)" in surveillance
-    assert "main, sidebar = st.columns([2.25, 1], gap=\"large\")" in surveillance
-    assert (
-        "_render_priorities_panel(priority_view.signals, priority_model_metrics)"
-        in surveillance
-    )
-    assert "Autres prédictions sans signal" in source
-    assert "Prédictions évaluées récemment" in source
-    assert "Détails techniques" in source
-    assert "Pourquoi ce signal ?" in source
-    assert surveillance.index("_render_signals_card") < surveillance.index(
-        "_render_signals_followup"
-    ) < surveillance.index("_evaluated_predictions_panel") < surveillance.index(
-        '_live_job_panel(_service(), domain="production")'
-    )
-    assert 'expanded=False' in source
+    assert "next_surveillance_session(" in surveillance
+    assert "next_session_signals_view(" in surveillance
+    assert "latest_session_results_view(" in surveillance
+    assert "_render_daily_update_card(" in surveillance
+    assert "_render_next_session_signals(next_signals)" in surveillance
+    assert "_render_latest_session_results(latest_results)" in surveillance
+    for removed in (
+        "_render_signals_followup(",
+        "_evaluated_predictions_panel(",
+        "_render_priorities_panel(",
+        "_render_operational_info(",
+        '_live_job_panel(_service(), domain="production")',
+    ):
+        assert removed not in surveillance
 
 
 def test_real_trade_action_is_rendered_before_pending_predictions():
@@ -766,19 +779,17 @@ def test_surveillance_uses_one_daily_operational_update_card():
     assert card.count("st.button(") == 1
     assert '"Relancer la mise à jour" if retry_failed' in card
     assert '_service().resume(str(current["run_id"]))' in card
-    assert "Lance la mise à jour quotidienne de bout en bout." in card
     assert "JobType.OPERATIONAL_RUN" in card
     assert "_DAILY_UPDATE_STAGES" in card
-    assert "st.error" in card
+    assert "getattr(st, status_level)(status_message)" in card
     assert "Mise à jour quotidienne terminée." in card
     assert "_render_daily_update_card(" in surveillance
-    assert "active_model_count=len(universe.model_ids), stretch=True" in surveillance
-    assert 'top_main, top_sidebar = st.columns([2.25, 1], gap="large")' in surveillance
+    assert "active_model_count=len(universe.model_ids)" in surveillance
     assert surveillance.index("_render_daily_update_card") < surveillance.index(
-        "_render_priorities_panel"
+        "_render_next_session_signals"
     )
     assert "_render_production_actions(" not in surveillance
-    assert surveillance.count('_live_job_panel(_service(), domain="production")') == 1
+    assert '_live_job_panel(_service(), domain="production")' not in surveillance
     assert 'domain="experiment"' not in surveillance
     assert 'domain="model"' not in surveillance
     assert job_panel.index("if not runs:") < job_panel.index("title = job_domain_title")
@@ -795,7 +806,7 @@ def test_operational_run_detail_exposes_same_run_relaunch():
     assert "if not is_operational_run and actions[1].button(" in controls
 
 
-def test_surveillance_top_cards_use_an_equal_height_row():
+def test_surveillance_top_cards_reuse_the_models_six_card_row():
     source = APP.read_text(encoding="utf-8")
     styles = source.split("def _surveillance_styles", 1)[1].split(
         "def _render_page_header", 1
@@ -804,24 +815,14 @@ def test_surveillance_top_cards_use_an_equal_height_row():
         "def _surveillance_page", 1
     )[0]
 
-    row_selector = (
-        'div[data-testid="stHorizontalBlock"]'
-        ':has(.rstock-signals-card-marker)'
-        ':has(.rstock-daily-update-card-marker)'
-    )
-    assert row_selector in styles
-    assert "align-items: stretch;" in styles
-    assert (
-        'div[data-testid="stLayoutWrapper"]'
-        ":has(.rstock-signals-card-marker)"
-    ) in styles
-    assert (
-        'div[data-testid="stLayoutWrapper"]'
-        ":has(.rstock-daily-update-card-marker)"
-    ) in styles
-    assert "height: 100%;" in styles
-    assert "stretch=True" in surveillance
-    assert "active_model_count=len(universe.model_ids), stretch=True" in surveillance
+    kpis = source.split("def _render_surveillance_kpis", 1)[1].split(
+        "def _styled_surveillance_table", 1
+    )[0]
+    assert '_render_models_kpi_density_style()' in kpis
+    assert 'st.container(key="models-kpis")' in kpis
+    assert 'columns = st.columns(6, gap="small")' in kpis
+    assert kpis.count("_render_models_kpi_card(") == 6
+    assert "active_model_count=len(universe.model_ids)" in surveillance
 
 
 def test_surveillance_expander_counts_match_their_displayed_grids():
@@ -852,7 +853,7 @@ def test_surveillance_uses_active_views_and_clears_stale_row_selections():
     assert models.count("_invalidate_surveillance_selection_state()") == 3
 
 
-def test_surveillance_uses_four_compact_kpi_cards_and_a_header_status():
+def test_surveillance_uses_six_operational_kpis_and_a_header_status():
     source = APP.read_text(encoding="utf-8")
     surveillance = source.split("def _render_surveillance_page", 1)[1].split(
         "if hasattr(st, \"fragment\")", 1
@@ -866,18 +867,226 @@ def test_surveillance_uses_four_compact_kpi_cards_and_a_header_status():
 
     assert "_render_surveillance_header(" in surveillance
     assert "_render_surveillance_kpis(" in surveillance
-    assert 'columns = st.columns(4, gap="small")' in kpis
+    assert 'columns = st.columns(6, gap="small")' in kpis
     for label in (
-        "Signaux haussiers aujourd’hui",
-        "Prédictions en attente",
+        "Prochaine séance",
+        "Signaux haussiers",
+        "Rendement moyen signaux",
+        "Dernière séance",
+        "P&L veille",
         "Modèles actifs",
-        "Dernière mise à jour",
     ):
         assert label in kpis
-    assert "with st.container(border=True):" in kpis
+    assert kpis.count("_render_models_kpi_card(") == 6
     assert "error_count" in header
     assert "_freshness_state(freshness)" in header
     assert 'timestamp.strftime("%Y-%m-%d %H:%M")' in source
+
+
+def test_surveillance_session_tables_have_expected_columns_and_no_result_kpis():
+    source = APP.read_text(encoding="utf-8")
+    upcoming = source.split("def _render_next_session_signals", 1)[1].split(
+        "def _render_latest_session_results", 1
+    )[0]
+    latest = source.split("def _render_latest_session_results", 1)[1].split(
+        "def _styled_signal_table", 1
+    )[0]
+
+    for label in (
+        "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
+        "Rendement", "Trades gagnants", "Dernier signal",
+    ):
+        assert label in source
+    assert '"P&L cumulé"' in latest
+    assert "_styled_surveillance_table(" in upcoming
+    assert "_styled_surveillance_table(" in latest
+    assert "st.metric(" not in latest
+    assert "_render_models_kpi_card(" not in latest
+
+
+def test_surveillance_session_tables_share_column_tooltips():
+    source = APP.read_text(encoding="utf-8")
+    tooltips = source.split("_SURVEILLANCE_COLUMN_HELP = {", 1)[1].split(
+        "def _render_next_session_signals", 1
+    )[0]
+    upcoming = source.split("def _render_next_session_signals", 1)[1].split(
+        "def _render_latest_session_results", 1
+    )[0]
+    latest = source.split("def _render_latest_session_results", 1)[1].split(
+        "def _styled_signal_table", 1
+    )[0]
+
+    for label in (
+        "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
+        "Rendement", "Trades gagnants", "Dernier signal", "P&L cumulé",
+    ):
+        assert f'"{label}":' in tooltips
+    assert 'descriptions=_SURVEILLANCE_COLUMN_HELP' in tooltips
+    assert '_surveillance_column_config(table.columns)' in upcoming
+    assert '_surveillance_column_config(view.table.columns)' in latest
+
+
+def test_models_grid_columns_have_shared_tooltips():
+    source = APP.read_text(encoding="utf-8")
+    helper = source.split("def _text_column_with_help", 1)[1].split(
+        "def _surveillance_column_config", 1
+    )[0]
+    grid = source.split("_MODELS_GRID_COLUMN_HELP = {", 1)[1].split(
+        "def _model_detail_date", 1
+    )[0]
+
+    assert 'st.column_config.TextColumn(width=width, help=descriptions[name])' in helper
+    for label in (
+        "Cible", "Prédicteurs", "Statut", "Univers", "Source", "Top-N",
+        "Promotion", "Signaux", "Rendement moyen", "Trades gagnants",
+        "P&L cumulé", "Drawdown", "Santé", "Dernier signal", "Tendance 63",
+    ):
+        assert f'"{label}":' in grid
+    assert 'descriptions=_MODELS_GRID_COLUMN_HELP' in grid
+    assert 'help=_MODELS_GRID_COLUMN_HELP["Tendance 63"]' in grid
+    assert "fenêtre d’analyse sélectionnée" in grid
+
+
+def test_models_sparklines_share_bounds_from_displayed_rows():
+    import pandas as pd
+
+    bounds = streamlit_app._models_trend_y_bounds(pd.DataFrame({
+        "Tendance 63": [[0.0, 12.0, float("nan")], [-8.0, None, 4.0]],
+    }))
+    assert bounds == (-8.0, 12.0)
+    chart = streamlit_app._models_grid_column_config(bounds)["Tendance 63"]
+    assert chart["type_config"]["y_min"] == -8.0
+    assert chart["type_config"]["y_max"] == 12.0
+    assert chart["type_config"]["color"] == "#2563eb"
+
+    assert streamlit_app._models_trend_y_bounds(pd.DataFrame({
+        "Tendance 63": [[], [None, float("nan")]],
+    })) is None
+    empty_chart = streamlit_app._models_grid_column_config(None)["Tendance 63"]
+    assert empty_chart["type_config"]["y_min"] is None
+    assert empty_chart["type_config"]["y_max"] is None
+
+
+def test_model_detail_grids_reuse_header_tooltips():
+    source = APP.read_text(encoding="utf-8")
+    detail = source.split("def _render_model_detail", 1)[1].split(
+        "def _models_page", 1
+    )[0]
+    configs = source.split("_MODEL_DETAIL_WINDOWS_HELP = {", 1)[1].split(
+        "def _models_grid_column_config", 1
+    )[0]
+
+    for label in ("Fenêtre", "Rendement moyen", "Trades gagnants", "Signaux"):
+        assert f'"{label}":' in configs
+    for label in ("Date", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"):
+        assert f'"{label}":' in configs
+    for label in ("Métrique", "À la promotion", "Actuel", "Écart"):
+        assert f'"{label}":' in configs
+    assert "_text_column_with_help(" in configs
+    assert "column_config=_model_detail_column_config(_MODEL_DETAIL_WINDOWS_HELP)" in detail
+    assert "_MODEL_DETAIL_BASELINE_HELP, medium_columns=(\"Métrique\",)" in detail
+    assert "column_config=_model_detail_column_config(_MODEL_DETAIL_SIGNALS_HELP)" in detail
+
+
+def test_history_run_grid_tooltips_cover_actual_columns_and_keep_formats():
+    import ast
+    import pandas as pd
+
+    from rstock.application.history_analysis import (
+        COMBINATION_COLUMNS,
+        THRESHOLD_CALIBRATION_COLUMNS,
+        THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS,
+        CALIBRATION_SELECTION_SUMMARY_COLUMNS,
+        CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS,
+        XGBOOST_CALIBRATION_SELECTION_COLUMNS,
+    )
+
+    app = streamlit_app
+    schemas = (
+        (app._PREFILTER_COLUMN_HELP, tuple(app._PREFILTER_COLUMN_HELP)),
+        (app._WF_COMBINATION_COLUMN_HELP, (
+            *(name for name in COMBINATION_COLUMNS if name not in {"Eligible", "Holdout confirmé"}),
+            "Seuil calibré", "Score", "Rang", "AUC dev médiane", "Stabilité / qualification",
+        )),
+        (app._WF_VALIDATION_COLUMN_HELP, ("Phase", "Fenetres", "AUC mediane", "AUC min", "Dispersion", "Verdict")),
+        (app._WF_BATCH_COLUMN_HELP, tuple(app._WF_BATCH_COLUMN_HELP)),
+        (app._XGBOOST_SELECTION_COLUMN_HELP, XGBOOST_CALIBRATION_SELECTION_COLUMNS),
+        (app._THRESHOLD_PARAMETER_COLUMN_HELP, tuple(app._THRESHOLD_PARAMETER_COLUMN_HELP)),
+        (app._THRESHOLD_RESULT_COLUMN_HELP, (*THRESHOLD_CALIBRATION_COLUMNS, "Statut promotion", "Raison", "Score")),
+        (app._THRESHOLD_SUMMARY_COLUMN_HELP, (*THRESHOLD_SENSITIVITY_SUMMARY_COLUMNS, *CALIBRATION_SELECTION_SUMMARY_COLUMNS)),
+        (app._THRESHOLD_CHOICE_COLUMN_HELP, CALIBRATION_CHOICE_DIAGNOSTIC_COLUMNS),
+    )
+    for descriptions, columns in schemas:
+        config = app._grid_column_help_config(pd.Index(columns), descriptions)
+        assert set(config) == set(columns)
+        assert all(config[name]["help"] == descriptions[name] for name in columns)
+
+    progress = streamlit_app.st.column_config.ProgressColumn(
+        min_value=0.0, max_value=100.0, format="%.1f%%"
+    )
+    configured = app._grid_column_help_config(
+        pd.Index(["Progression"]), app._WF_BATCH_COLUMN_HELP, {"Progression": progress}
+    )["Progression"]
+    assert configured["type_config"] == progress["type_config"]
+    assert configured["help"] == app._WF_BATCH_COLUMN_HELP["Progression"]
+    number = streamlit_app.st.column_config.NumberColumn(format="%.4f")
+    configured_number = app._grid_column_help_config(
+        pd.Index(["Seuil"]), app._THRESHOLD_CHOICE_COLUMN_HELP, {"Seuil": number}
+    )["Seuil"]
+    assert configured_number["type_config"] == number["type_config"]
+    assert configured_number["help"] == app._THRESHOLD_CHOICE_COLUMN_HELP["Seuil"]
+
+    source = APP.read_text(encoding="utf-8")
+    for expression in (
+        "_grid_column_help_config(prefilter_table.columns, _PREFILTER_COLUMN_HELP)",
+        "_grid_column_help_config(combinations.columns, _WF_COMBINATION_COLUMN_HELP)",
+        "_grid_column_help_config(validation.columns, _WF_VALIDATION_COLUMN_HELP)",
+        "_grid_column_help_config(table.columns, _WF_BATCH_COLUMN_HELP",
+        "_grid_column_help_config(table.columns, _XGBOOST_SELECTION_COLUMN_HELP)",
+        "_grid_column_help_config(table.columns, _THRESHOLD_PARAMETER_COLUMN_HELP",
+        "_grid_column_help_config(filtered.columns, _THRESHOLD_RESULT_COLUMN_HELP)",
+        "_grid_column_help_config(sensitivity_summary.columns, _THRESHOLD_SUMMARY_COLUMN_HELP",
+        "_grid_column_help_config(sensitivity.columns, {",
+        "_grid_column_help_config(choice_diagnostics.columns, _THRESHOLD_CHOICE_COLUMN_HELP",
+        "_grid_column_help_config(pd.Index(columns), helps)",
+    ):
+        assert expression in source
+    assert "sensitivity.columns[-1]:" in source
+
+    comparison = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "_render_end_to_end_comparison"
+    )
+    column_keys = help_keys = None
+    for node in ast.walk(comparison):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id == "columns":
+                column_keys = tuple(ast.literal_eval(key) for key in node.value.keys)
+            elif node.targets[0].id == "helps":
+                help_keys = tuple(ast.literal_eval(key) for key in node.value.keys)
+    assert column_keys is not None and len(column_keys) == 23
+    assert set(column_keys) == set(help_keys)
+
+
+def test_surveillance_compact_kpi_labels_and_daily_update_alignment():
+    source = APP.read_text(encoding="utf-8")
+    kpis = source.split("def _render_surveillance_kpis", 1)[1].split(
+        "def _styled_surveillance_table", 1
+    )[0]
+    upcoming = source.split("def _render_next_session_signals", 1)[1].split(
+        "def _render_latest_session_results", 1
+    )[0]
+    daily = source.split("def _render_daily_update_card", 1)[1].split(
+        "def _load_evaluated_predictions_view", 1
+    )[0]
+
+    assert 'f"{next_session:%Y-%m-%d}"' in kpis
+    assert "surveillance_session_label(next_session)" not in kpis
+    assert 'f"{values[\'winning_signal_count\']} gagnants"' in kpis
+    assert "evaluated_signal_count']} gagnants" not in kpis
+    assert 'caption=f"MAJ : {_compact_datetime(last_update)}"' in kpis
+    assert "Affiche automatiquement la prochaine séance ouvrable" not in upcoming
+    assert 'vertical_alignment="center"' in daily
 
 
 def test_surveillance_priorities_are_compact_limited_and_have_an_empty_state():
@@ -913,7 +1122,7 @@ def test_surveillance_css_is_scoped_to_its_page_marker():
     assert "rstock-surveillance-scope" in styles
     assert ':has(.rstock-surveillance-scope)' in styles
     assert "rstock-priority-card" in styles
-    assert "max-width: 1520px" in styles
+    assert "max-width: 1520px" not in styles
 
 
 def test_evaluated_predictions_grid_is_always_rendered_with_readable_audit_details():

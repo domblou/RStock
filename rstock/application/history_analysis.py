@@ -211,7 +211,7 @@ def selected_run_action(run_ids: Sequence[str]) -> str | None:
 
     if len(run_ids) == 1:
         return "detail"
-    if 2 <= len(run_ids) <= 4:
+    if 2 <= len(run_ids) <= 5:
         return "comparison"
     return None
 
@@ -1175,6 +1175,9 @@ class RunAnalytics:
     duration_seconds: float | None
     combinations: pd.DataFrame
     tested_count: int | None
+    raw_count: int | None = None
+    requested_cutoff: str | None = None
+    resolved_cutoff: str | None = None
 
     @property
     def qualified_count(self) -> int:
@@ -1229,15 +1232,21 @@ def analyze_run(
         duration_seconds=None if duration is None else float(duration),
         combinations=combinations,
         tested_count=None if tested is None else int(tested),
+        raw_count=summary.get("raw_combination_count"),
+        requested_cutoff=configuration.get("requested_historical_cutoff") or configuration.get("historical_data_cutoff"),
+        resolved_cutoff=configuration.get("resolved_market_session_cutoff") or summary.get("traceability", {}).get("prepared_market_last_date"),
     )
 
 
 def comparison_table(analyses: Sequence[RunAnalytics], labels: Mapping[str, str]) -> pd.DataFrame:
-    """Produce the summary matrix for 2–4 run comparison, including missing values."""
+    """Produce the summary matrix for 2–5 WF runs, including missing values."""
 
     rows = {
+        "Cutoff demandé": [analysis.requested_cutoff for analysis in analyses],
+        "Cutoff résolu": [analysis.resolved_cutoff for analysis in analyses],
         "Profondeur": [analysis.depth for analysis in analyses],
         "Symboles": [len(analysis.symbols) for analysis in analyses],
+        "Combinaisons brutes planifiées": [analysis.raw_count for analysis in analyses],
         "Combinaisons testées": [analysis.tested_count for analysis in analyses],
         "Combinaisons qualifiées": [analysis.qualified_count for analysis in analyses],
         "% qualifiées": [analysis.qualification_rate for analysis in analyses],
@@ -1308,6 +1317,12 @@ def configuration_differences(
     """Show only meaningful experiment settings that differ across compared runs."""
 
     fields = (
+        "walk_forward_window_mode", "walk_forward_train_size", "walk_forward_min_train_size",
+        "walk_forward_test_size", "walk_forward_step_size", "walk_forward_end_offset_sessions",
+        "predictor_prefilter_enabled", "predictor_prefilter_top_n",
+        "predictor_prefilter_min_median_auc", "predictor_prefilter_min_pct_above_random",
+        "predictor_prefilter_min_worst_auc", "predictor_prefilter_max_auc_std",
+        "predictor_prefilter_correlation_threshold", "max_generated_sets",
         "permutation_depth", "lag_depth", "model_history_days",
         "xgb_max_depth", "xgb_eta", "xgb_rounds", "xgb_min_child_weight",
         "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma", "xgb_reg_alpha",
@@ -1319,6 +1334,13 @@ def configuration_differences(
         "model_selection_sample_adequacy_weight",
     )
     values: dict[str, list[object]] = {}
+    for field in (
+        "requested_historical_cutoff", "resolved_market_session_cutoff",
+        "target_symbols", "context_symbols", "predictor_symbols", "evaluate_final_holdout",
+    ):
+        field_values = [config.get(field, "—") for config in configurations]
+        if len({str(value) for value in field_values}) > 1:
+            values[field] = field_values
     for field in fields:
         field_values = [config.get("rstock_config", {}).get(field, "—") for config in configurations]
         if len({str(value) for value in field_values}) > 1:

@@ -175,6 +175,28 @@ def filter_quality_models(
     return result.copy()
 
 
+def sort_quality_models(frame: pd.DataFrame, *, window: int) -> pd.DataFrame:
+    """Apply the default presentation order for the Models grid."""
+
+    if window not in WINDOWS:
+        raise ValueError("Quality window must be 20, 63 or 126 sessions")
+    result = frame.copy()
+    status_rank = {"active": 0, "inactive": 1, "retired": 2}
+    result["_grid_status_rank"] = result["status"].astype(str).map(status_rank).fillna(3)
+    result["_grid_promotion_date"] = pd.to_datetime(
+        result["promotion_date"], errors="coerce", utc=True
+    )
+    result["_grid_signal_count"] = pd.to_numeric(
+        result[f"signal_count_{window}"], errors="coerce"
+    )
+    return result.sort_values(
+        ["_grid_status_rank", "_grid_promotion_date", "_grid_signal_count"],
+        ascending=[True, True, False],
+        na_position="last",
+        kind="stable",
+    ).drop(columns=["_grid_status_rank", "_grid_promotion_date", "_grid_signal_count"])
+
+
 def global_quality_kpis(frame: pd.DataFrame, *, window: int = 63) -> dict[str, Any]:
     if window not in WINDOWS:
         raise ValueError("Quality window must be 20, 63 or 126 sessions")
@@ -237,6 +259,31 @@ def _display_currency(value: object) -> str:
         return f"{float(value):,.2f}".replace(",", " ").replace(".", ",") + " $"
     except (TypeError, ValueError):
         return "—"
+
+
+def directional_display_style(value: object) -> str:
+    """Return a presentation-only color for a signed numeric display value."""
+
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).replace(" ", "").replace("$", "").replace("%", "").replace(",", ".")
+    numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+    if pd.isna(numeric) or numeric == 0:
+        return ""
+    return (
+        "color: #198754; font-weight: 600"
+        if numeric > 0
+        else "color: #dc3545; font-weight: 600"
+    )
+
+
+def style_directional_columns(
+    frame: pd.DataFrame, columns: Iterable[str]
+) -> pd.io.formats.style.Styler:
+    """Style only already-formatted directional values for Streamlit tables."""
+
+    available = [column for column in columns if column in frame]
+    return frame.style.map(directional_display_style, subset=available)
 
 
 def normalize_models_grid(frame: pd.DataFrame) -> pd.DataFrame:

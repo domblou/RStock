@@ -13,6 +13,9 @@ from rstock.application.surveillance import (
     build_signals_view,
     compute_signal_priority_score,
     filter_evaluated_predictions_view,
+    latest_session_results_view,
+    next_session_signals_view,
+    next_surveillance_session,
     prediction_feature_tables,
     prediction_features_table,
     evaluated_predictions_main_table,
@@ -23,6 +26,9 @@ from rstock.application.surveillance import (
     prioritize_signals_view,
     SIGNAL_PRIORITY_POLICY_VERSION,
     signal_priority_model_lookup,
+    session_crosses_weekend,
+    surveillance_session_label,
+    surveillance_kpi_values,
 )
 
 
@@ -70,6 +76,69 @@ def _realized(identifier="prediction-1", date="2026-09-14", intraday=0.02):
         "up_target": 1,
         "down_target": 0,
         "recorded_at": "2026-09-14T22:31:45.123456+00:00",
+    }
+
+
+def test_next_surveillance_session_skips_weekend_and_uses_french_label():
+    session = next_surveillance_session("2026-09-25", "XNYS")
+
+    assert session == pd.Timestamp("2026-09-28")
+    assert surveillance_session_label(session) == "Lundi 2026-09-28"
+    assert session_crosses_weekend("2026-09-25", session) is True
+    assert session_crosses_weekend("2026-09-24", "2026-09-25") is False
+
+
+def test_operational_surveillance_tables_use_exact_sessions_and_quality_values():
+    predictions = pd.DataFrame([
+        _prediction("next", "2026-09-28"),
+        _prediction("evaluated", "2026-09-25"),
+    ])
+    signals = pd.DataFrame([
+        {
+            **_signal("next"),
+            **_prediction("next", "2026-09-28"),
+            "category": "bullish_signal",
+        },
+        {
+            **_signal("evaluated"),
+            **_prediction("evaluated", "2026-09-25"),
+            "category": "bullish_signal",
+        },
+    ])
+    quality = pd.DataFrame([{
+        "model_id": "model_complete_identifier",
+        "mean_return_63": 0.0125,
+        "win_rate_63": 0.625,
+        "last_signal_date": "2026-09-25T14:00:00+00:00",
+    }])
+    signal_view = build_signals_view(signals, predictions)
+    next_view = next_session_signals_view(
+        signal_view, quality, pd.Timestamp("2026-09-28")
+    )
+    evaluated = build_evaluated_predictions_view(
+        predictions,
+        signals,
+        pd.DataFrame([_realized("evaluated", "2026-09-25", -0.02)]),
+    )
+    latest_view = latest_session_results_view(evaluated, quality)
+
+    assert next_view.table["Date"].tolist() == ["2026-09-28"]
+    assert next_view.table["Rendement"].tolist() == ["1,25 %"]
+    assert next_view.table["Trades gagnants"].tolist() == ["62,50 %"]
+    assert tuple(next_view.table.columns) == (
+        "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
+        "Rendement", "Trades gagnants", "Dernier signal",
+    )
+    assert latest_view.table["Date"].tolist() == ["2026-09-25"]
+    assert latest_view.table["Rendement"].tolist() == ["-2,00 %"]
+    assert latest_view.table["P&L cumulé"].tolist() == ["-200,00 $"]
+    assert surveillance_kpi_values(next_view, latest_view) == {
+        "next_signal_count": 1,
+        "mean_up_probability": 0.72,
+        "mean_expected_return": 0.0125,
+        "evaluated_signal_count": 1,
+        "winning_signal_count": 0,
+        "latest_session_pnl": -200.0,
     }
 
 

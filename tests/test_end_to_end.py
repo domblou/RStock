@@ -83,6 +83,113 @@ def test_end_to_end_child_preserves_frozen_walk_forward_window_geometry(tmp_path
     assert temporal.config.walk_forward_train_size == 504
 
 
+@pytest.mark.parametrize("explicit_cutoff", [None, "2026-09-24"])
+def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
+    tmp_path, monkeypatch, explicit_cutoff
+):
+    from datetime import date, timedelta
+
+    from rstock.application import workflows
+    from rstock.data import prefix_symbol_columns
+    from rstock.market_cache import MarketDataResult
+    from rstock.traceability import prepared_dataset_hash
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 9, 26)
+
+    monkeypatch.setattr(end_to_end, "date", FixedDate)
+    calls = []
+    dates = pd.date_range("2026-09-10", "2026-09-25")
+    prices = pd.DataFrame({
+        "Open": range(100, 116), "High": range(101, 117),
+        "Low": range(99, 115), "Close": range(100, 116),
+    }, index=dates)
+
+    class FakeMarketDataService:
+        def load(self, spec, *, as_of=None, **kwargs):
+            calls.append(as_of)
+            end = as_of or FixedDate.today()
+            start = end - timedelta(days=spec.config.model_history_days)
+            selected = prices.loc[
+                (prices.index.date >= start) & (prices.index.date <= end)
+            ]
+            return MarketDataResult(
+                prices=pd.concat([
+                    prefix_symbol_columns(selected, symbol)
+                    for symbol in ("AAA", "BBB")
+                ], axis=1),
+                symbols=["AAA", "BBB"], failed_symbols=[], events=[],
+            ), {"AAA": "XNYS", "BBB": "XNYS"}
+
+    monkeypatch.setattr(workflows, "MarketDataService", FakeMarketDataService)
+    repository = RunRepository(tmp_path / "runs")
+    parent = replace(
+        _spec(tmp_path, historical_data_cutoff=explicit_cutoff),
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path, model_history_days=10),
+    )
+    root_id = repository.create(parent)
+    manifest = build_pipeline_manifest(repository, root_id, parent)
+    expected_as_of = explicit_cutoff or "2026-09-26"
+    assert manifest["prepared_dataset_as_of"] == expected_as_of
+    (repository.run_directory(root_id) / "orchestration").mkdir()
+    repository.write_json(root_id, PIPELINE_MANIFEST, manifest)
+    monkeypatch.setattr(
+        end_to_end, "date",
+        type("NextDate", (date,), {"today": classmethod(lambda cls: cls(2026, 9, 27))}),
+    )
+    manifest = persist_or_validate_pipeline_manifest(repository, root_id, parent)
+    assert manifest["prepared_dataset_as_of"] == expected_as_of
+
+    source = end_to_end.build_stage_spec(
+        repository, root_id, parent, "walk_forward", manifest
+    )
+    assert source.historical_data_cutoff == expected_as_of
+    prepared_source, *_ = workflows._prepared_inputs(source, None, None)
+    digest = prepared_dataset_hash(prepared_source)
+    source_id = manifest["stages"][0]["child_run_id"]
+    repository.run_directory(source_id).mkdir()
+    repository.write_json(source_id, "summary.json", {
+        "traceability": {
+            "prepared_market_last_date": prepared_source.index.max().isoformat(),
+            "prepared_dataset_sha256": digest,
+        }
+    })
+
+    descendant = end_to_end.build_stage_spec(
+        repository, root_id, parent, "xgboost_calibration", manifest
+    )
+    assert descendant.historical_data_cutoff == expected_as_of
+    prepared_descendant, *_ = workflows._prepared_inputs(descendant, None, None)
+    assert prepared_descendant.index.equals(prepared_source.index)
+    assert prepared_dataset_hash(prepared_descendant) == digest
+    assert calls == [date.fromisoformat(expected_as_of)] * 2
+
+    xgboost_id = manifest["stages"][1]["child_run_id"]
+    (repository.run_directory(xgboost_id) / "results").mkdir(parents=True)
+    repository.write_json(xgboost_id, "results/selected_configurations.json", {
+        "Up": {"parameters": {"max_depth": 2, "eta": 0.05, "num_boost_round": 20}},
+        "Down": {"parameters": {"max_depth": 2, "eta": 0.05, "num_boost_round": 20}},
+    })
+    threshold_parameters = end_to_end.build_stage_spec(
+        repository, root_id, parent, "threshold_parameter_calibration", manifest
+    )
+    assert threshold_parameters.historical_data_cutoff == expected_as_of
+
+    threshold_parameters_id = manifest["stages"][2]["child_run_id"]
+    (repository.run_directory(threshold_parameters_id) / "results").mkdir(parents=True)
+    repository.write_json(
+        threshold_parameters_id,
+        "results/selected_threshold_calibration_configuration.json",
+        {"parameters": {"threshold_calibration_min_robust_signals": 20}},
+    )
+    threshold = end_to_end.build_stage_spec(
+        repository, root_id, parent, "threshold_calibration", manifest
+    )
+    assert threshold.historical_data_cutoff == expected_as_of
+
+
 def _fake_registry(
     repository,
     calls,
@@ -1134,6 +1241,76 @@ def test_end_to_end_auto_forward_returns_and_dispatches_the_reserved_child(
     )["forward_simulation"]
     assert persisted_forward["child_run_id"] == child_id
     assert persisted_forward["status"] == "launched"
+
+
+def test_end_to_end_auto_forward_without_candidates_completes_child_without_simulation(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import rstock.application.forward_simulation as forward_module
+
+    class RecordingBackend:
+        launches = []
+
+        def launch(self, _runs_root, run_id, _max_concurrent_jobs):
+            self.launches.append(run_id)
+            return 7654
+
+    backend = RecordingBackend()
+    repository = RunRepository(tmp_path / "runs")
+    parent = _spec(
+        tmp_path,
+        historical_data_cutoff="2026-06-22",
+        requested_historical_cutoff="2026-06-22",
+        resolved_market_session_cutoff="2026-06-22",
+        forward_simulation_enabled=True,
+        forward_simulation_mode="63_sessions",
+    )
+    run_id = _create_parent(repository, parent)
+
+    def empty_snapshot(_repository, _root_id, _spec, *, result_directory, **_kwargs):
+        path = result_directory / "forward_model_snapshot.json"
+        path.write_text(json.dumps({
+            "source_end_to_end_run_id": run_id,
+            "resolved_market_session_cutoff": "2026-06-22",
+            "candidate_count": 0,
+            "models": [],
+        }), encoding="utf-8")
+        return {
+            "candidate_count": 0,
+            "resolved_market_session_cutoff": "2026-06-22",
+            "snapshot_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    class ForbiddenMarketData:
+        def load(self, *_args, **_kwargs):
+            raise AssertionError("Forward market data must not load without models")
+
+    monkeypatch.setattr(end_to_end, "build_forward_model_snapshot", empty_snapshot)
+    monkeypatch.setattr(worker_module, "LocalProcessBackend", lambda: backend)
+    monkeypatch.setattr(forward_module, "MarketDataService", ForbiddenMarketData)
+
+    execute_run(repository, run_id, 1, registry=_fake_registry(repository, Counter()))
+
+    parent_forward = repository.summary(run_id)["forward_simulation"]
+    child_id = parent_forward["child_run_id"]
+    assert parent_forward["status"] == "launched"
+    assert backend.launches == [child_id]
+    assert repository.read_json(run_id, "results/pipeline_summary.json")["forward_simulation"]["child_run_id"] == child_id
+    assert repository.run_metadata(child_id).visible_in_history is True
+    assert any(item.status["run_id"] == child_id for item in RunService(repository).history_summaries())
+
+    execute_run(repository, child_id, 1)
+
+    assert repository.status(child_id)["status"] == "completed"
+    summary = repository.summary(child_id)
+    assert summary["result"] == "skipped_no_models"
+    assert summary["candidate_count"] == 0
+    assert summary["simulation_executed"] is False
+    assert summary["reason"] == "no_eligible_models"
+    assert summary["precision"] is None
+    assert repository.read_json(child_id, "results/forward_summary.json")["result"] == "skipped_no_models"
+    assert not (repository.run_directory(child_id) / "results/forward_observations.csv").exists()
 
 
 def test_end_to_end_without_auto_forward_never_dispatches_a_forward_child(
