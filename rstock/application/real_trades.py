@@ -136,6 +136,15 @@ class RealTradeService:
         note: object = None,
     ) -> RealTrade:
         source = self._source(prediction)
+        if str(prediction.get("model_status_at_prediction") or "") == "watching":
+            raise ValueError("Un signal en observation ne peut pas créer une transaction réelle.")
+        persisted = self.repository.read_table("predictions")
+        if "prediction_id" in persisted and "model_status_at_prediction" in persisted:
+            matching = persisted.loc[
+                persisted["prediction_id"].astype(str).eq(source["prediction_id"])
+            ]
+            if matching["model_status_at_prediction"].astype(str).eq("watching").any():
+                raise ValueError("Un signal en observation ne peut pas créer une transaction réelle.")
         return self._upsert(
             source,
             entry_price=entry_price,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from rstock.progress import CancellationCheck, check_cancellation
 from rstock.traceability import prepared_dataset_hash
 
 from .auto_promotion import _promotion_guidance
-from .domain import ExperimentSpec
+from .domain import ExperimentSpec, JobType
 from .repository import RunRepository
 from .services import MarketDataService
 
@@ -85,6 +86,21 @@ def validate_forward_snapshot(
     snapshot = _read_json(path)
     if snapshot.get("source_end_to_end_run_id") != spec.source_end_to_end_run:
         raise ValueError("forward_snapshot_source_mismatch")
+    source_spec = repository.load_spec(spec.source_end_to_end_run)
+    if source_spec.derivation is not None:
+        if not expected:
+            raise ValueError("forward_snapshot_sha256_missing")
+        prepared, cutoff = _derived_discovery_data(
+            repository, spec.source_end_to_end_run, source_spec
+        )
+        if (
+            snapshot.get("prepared_dataset_sha256") != prepared_dataset_hash(prepared)
+            or snapshot.get("resolved_market_session_cutoff") != cutoff.date().isoformat()
+        ):
+            raise ValueError("forward_snapshot_derived_discovery_mismatch")
+        _validate_derived_model_files(
+            path.parent, spec.source_end_to_end_run, snapshot
+        )
     for model in snapshot.get("models", []):
         if not isinstance(model, dict) or not model.get("source_model_id"):
             raise ValueError("forward_snapshot_model_invalid")
@@ -213,12 +229,72 @@ def validate_forward_checkpoint_bundle(
 
 
 def _stage_ids(repository: RunRepository, root_run_id: str) -> dict[str, str]:
-    manifest = _read_json(repository.run_directory(root_run_id) / "orchestration" / "pipeline.json")
+    from .end_to_end import effective_stage_run_id, load_pipeline_manifest
+
+    manifest = load_pipeline_manifest(repository, root_run_id)
+    if manifest is None:
+        raise ValueError("Forward model snapshot requires a pipeline manifest")
     return {
-        str(item["stage_key"]): str(item["child_run_id"])
+        str(item["stage_key"]): str(effective_stage_run_id(manifest, str(item["stage_key"])))
         for item in manifest.get("stages", [])
-        if isinstance(item, dict) and item.get("child_run_id")
+        if isinstance(item, dict)
+        and effective_stage_run_id(manifest, str(item["stage_key"])) is not None
     }
+
+
+def _derived_discovery_data(
+    repository: RunRepository, root_run_id: str, spec: ExperimentSpec,
+) -> tuple[pd.DataFrame, pd.Timestamp]:
+    from .derived_snapshot import load_source_prepared_snapshot
+
+    stages = _stage_ids(repository, root_run_id)
+    walk_forward_id = stages["walk_forward"]
+    traceability = repository.summary(walk_forward_id).get("traceability")
+    if not isinstance(traceability, dict) or not traceability.get("prepared_dataset_sha256"):
+        raise ValueError("Source Walk-forward prepared digest is missing")
+    snapshot_path = (
+        repository.run_directory(walk_forward_id)
+        / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
+    )
+    if (
+        spec.derivation is None
+        or not spec.derivation.prepared_snapshot_sha256
+        or not snapshot_path.is_file()
+        or _sha256(snapshot_path) != spec.derivation.prepared_snapshot_sha256
+    ):
+        raise ValueError("Derived prepared snapshot has changed")
+    child_spec = replace(
+        spec, job_type=JobType.XGBOOST_CALIBRATION, derivation=None,
+        source_walk_forward_run=walk_forward_id,
+        source_prepared_dataset_sha256=str(traceability["prepared_dataset_sha256"]),
+        prepared_dataset_digest_required=True,
+        prepared_snapshot_required=True,
+    )
+    prepared, _, _, _ = load_source_prepared_snapshot(repository, child_spec)
+    return prepared, prepared.index.max().normalize()
+
+
+def _validate_derived_model_files(
+    result_dir: Path, root_run_id: str, snapshot: dict[str, Any],
+) -> None:
+    if snapshot.get("source_end_to_end_run_id") != root_run_id:
+        raise ValueError("Derived Forward snapshot belongs to another run")
+    for model in snapshot.get("models", []):
+        if not isinstance(model, dict):
+            raise ValueError("Derived Forward model metadata is invalid")
+        identity = f"{root_run_id}:{model.get('set')}:{model.get('direction')}"
+        model_id = hashlib.sha256(identity.encode()).hexdigest()[:20]
+        if model.get("source_model_id") != model_id:
+            raise ValueError("Derived Forward model identity differs")
+        directory = result_dir / SNAPSHOT_DIRECTORY / model_id
+        for label in ("up", "down"):
+            path = directory / f"{label}.ubj"
+            if not path.is_file() or _sha256(path) != model.get(f"{label}_booster_sha256"):
+                raise ValueError("Derived Forward model artifact has changed")
+        if not (directory / "metadata.json").is_file() or _read_json(
+            directory / "metadata.json"
+        ) != model:
+            raise ValueError("Derived Forward model metadata has changed")
 
 
 def build_forward_model_snapshot(
@@ -228,7 +304,14 @@ def build_forward_model_snapshot(
 ) -> dict[str, Any]:
     """Persist boosters fitted once on discovery data ending at the cutoff."""
 
-    cutoff_text = spec.resolved_market_session_cutoff or spec.historical_data_cutoff
+    derived_prepared = None
+    if spec.derivation is not None:
+        derived_prepared, cutoff = _derived_discovery_data(
+            repository, root_run_id, spec
+        )
+        cutoff_text = cutoff.date().isoformat()
+    else:
+        cutoff_text = spec.resolved_market_session_cutoff or spec.historical_data_cutoff
     if cutoff_text is None:
         raise ValueError("Forward model snapshot requires a resolved historical cutoff")
     cutoff = pd.Timestamp(cutoff_text).normalize()
@@ -237,6 +320,13 @@ def build_forward_model_snapshot(
     manifest_path = result_dir / SNAPSHOT_FILENAME
     if manifest_path.is_file():
         snapshot = _read_json(manifest_path)
+        if derived_prepared is not None:
+            if (
+                snapshot.get("prepared_dataset_sha256") != prepared_dataset_hash(derived_prepared)
+                or snapshot.get("resolved_market_session_cutoff") != cutoff.date().isoformat()
+            ):
+                raise ValueError("Derived Forward prepared digest differs")
+            _validate_derived_model_files(result_dir, root_run_id, snapshot)
         if all(
             (result_dir / SNAPSHOT_DIRECTORY / str(model.get("source_model_id")) / name).is_file()
             for model in snapshot.get("models", [])
@@ -259,14 +349,17 @@ def build_forward_model_snapshot(
     selected_xgb = selected_xgboost_parameters(
         _read_json(repository.run_directory(xgb_id) / "results" / "selected_configurations.json")
     )
-    downloaded, _ = MarketDataService().load(
-        spec, as_of=cutoff.date(), cancellation_check=cancellation_check
-    )
-    prices = downloaded.prices.loc[downloaded.prices.index <= cutoff].copy()
-    prepared = prepare_dataset(
-        prices, downloaded.symbols, spec.config.intraday_target_threshold,
-        spec.config.lag_depth, spec.config.intraday_down_threshold,
-    )
+    if derived_prepared is not None:
+        prepared = derived_prepared
+    else:
+        downloaded, _ = MarketDataService().load(
+            spec, as_of=cutoff.date(), cancellation_check=cancellation_check
+        )
+        prices = downloaded.prices.loc[downloaded.prices.index <= cutoff].copy()
+        prepared = prepare_dataset(
+            prices, downloaded.symbols, spec.config.intraday_target_threshold,
+            spec.config.lag_depth, spec.config.intraday_down_threshold,
+        )
     if prepared.empty or prepared.index.max() > cutoff:
         raise ValueError("Discovery dataset exceeds the resolved historical cutoff")
     model_root = result_dir / SNAPSHOT_DIRECTORY

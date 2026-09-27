@@ -446,6 +446,11 @@ def _lineage_text(
 ) -> str:
     """Describe the orchestration relationship without conflating it with sources."""
 
+    derivation = configuration.get("derivation")
+    if job_type == "end_to_end" and isinstance(derivation, Mapping):
+        source_id = derivation.get("source_end_to_end_run_id")
+        if source_id:
+            return f"Dérivé de {source_id}"
     parent = metadata.get("parent_run_id")
     reference = metadata.get("reference_run_id")
     root = metadata.get("root_run_id")

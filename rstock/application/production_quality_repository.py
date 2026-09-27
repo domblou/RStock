@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,6 +51,7 @@ class ProductionQualityRepository:
         self.series_root = self.root / "series"
         self.baselines_root = self.root / "baselines"
         self.lineage_root = self.root / "lineage"
+        self.source_fingerprints_root = self.root / "source_fingerprints"
         self.generations_root = self.root / "generations"
         self.current_generation_path = self.root / "current_generation.json"
         self.manifest_path = self.root / "manifest.json"
@@ -65,6 +68,47 @@ class ProductionQualityRepository:
             / f"model_id={self._model_token(model_id)}"
             / "observations.parquet"
         )
+
+    def source_fingerprints_path(self, model_id: str) -> Path:
+        return self.source_fingerprints_root / f"{self._model_token(model_id)}.json"
+
+    def load_source_fingerprints(self, model_id: str) -> dict[str, str]:
+        return self.load_source_fingerprint_state(model_id)[0]
+
+    def load_source_fingerprint_state(self, model_id: str) -> tuple[dict[str, str], str | None]:
+        path = self.source_fingerprints_path(model_id)
+        if not path.exists():
+            return {}, None
+        payload = self._load_json(path)
+        if payload.get("schema_version") != 1 or not isinstance(payload.get("fingerprints"), dict):
+            raise ValueError("Invalid quality source fingerprint index")
+        return (
+            {str(key): str(value) for key, value in payload["fingerprints"].items()},
+            payload.get("observation_generation"),
+        )
+
+    def record_source_fingerprints(
+        self, model_id: str, fingerprints: dict[str, str], *,
+        expected_observation_generation: str,
+    ) -> None:
+        """Commit source identities only after their observations are durable."""
+
+        if not fingerprints:
+            return
+        with self.transaction():
+            manifest = self.load_manifest()
+            if manifest.get("observation_generations", {}).get(model_id) != expected_observation_generation:
+                raise ValueError("Quality observations changed before recording source fingerprints")
+            current = self.load_source_fingerprints(model_id)
+            current.update(fingerprints)
+            self._atomic_text(
+                self.source_fingerprints_path(model_id),
+                json.dumps({
+                    "schema_version": 1,
+                    "observation_generation": expected_observation_generation,
+                    "fingerprints": current,
+                }, sort_keys=True) + "\n",
+            )
 
     def snapshot_path(self) -> Path:
         return self._derived_root() / "snapshots" / "models.parquet"
@@ -269,6 +313,8 @@ class ProductionQualityRepository:
 
     def write_model_series(self, model_id: str, series: pd.DataFrame) -> None:
         with self.transaction():
+            if self.current_generation_path.exists():
+                raise ValueError("Published quality generations are immutable")
             self._atomic_parquet(self.series_path(model_id), series)
 
     def load_model_snapshot(self, model_id: str) -> dict[str, Any] | None:
@@ -279,6 +325,8 @@ class ProductionQualityRepository:
         if str(snapshot.get("model_id")) != str(model_id):
             raise ValueError("Snapshot model_id does not match its path")
         with self.transaction():
+            if self.current_generation_path.exists():
+                raise ValueError("Published quality generations are immutable")
             self._atomic_text(
                 self.model_snapshot_path(model_id),
                 json.dumps(snapshot, indent=2, ensure_ascii=False, sort_keys=True, default=str) + "\n",
@@ -293,6 +341,8 @@ class ProductionQualityRepository:
         if not model_id:
             raise ValueError("Master snapshot row requires model_id")
         with self.transaction():
+            if self.current_generation_path.exists():
+                raise ValueError("Published quality generations are immutable")
             current = self.load_master_snapshot()
             if not current.empty and "model_id" in current:
                 current = current[current["model_id"].astype(str) != model_id]
@@ -300,6 +350,102 @@ class ProductionQualityRepository:
             result = result.sort_values("model_id", kind="stable").reset_index(drop=True)
             self._atomic_parquet(self.snapshot_path(), result)
             return result
+
+    def publish_model_quality_batch(
+        self,
+        updates: dict[str, tuple[dict[str, Any], pd.DataFrame]],
+        *,
+        expected_observation_generations: dict[str, str],
+    ) -> str | None:
+        """Publish one complete derived generation for a daily quality batch."""
+
+        if not updates:
+            return None
+        with self.transaction():
+            persisted = self.load_manifest().get("observation_generations", {})
+            for model_id in updates:
+                if persisted.get(model_id) != expected_observation_generations.get(model_id):
+                    raise ValueError("Quality observations changed during derived publication")
+            source = self._derived_root()
+            previous_publication = (
+                self._load_json(self.current_generation_path)
+                if self.current_generation_path.exists() else {}
+            )
+            self.generations_root.mkdir(parents=True, exist_ok=True)
+            token = uuid.uuid4().hex
+            name = (
+                f"generation_daily_{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}_{token[:8]}"
+            )
+            stage = self.generations_root / f".{name}.tmp"
+            final = self.generation_path(name)
+            try:
+                for directory in ("snapshots", "series"):
+                    origin = source / directory
+                    if origin.exists():
+                        shutil.copytree(origin, stage / directory)
+                previous_path = source / "snapshots" / "models.parquet"
+                master = (
+                    pd.read_parquet(previous_path, engine="pyarrow")
+                    if previous_path.exists() else pd.DataFrame()
+                )
+                rows = []
+                for model_id, (snapshot, series) in sorted(updates.items()):
+                    if str(snapshot.get("model_id")) != model_id:
+                        raise ValueError("Quality snapshot model identity changed")
+                    self._atomic_parquet(
+                        stage / "series" / f"{self._model_token(model_id)}.parquet", series
+                    )
+                    self._atomic_text(
+                        stage / "snapshots" / f"{self._model_token(model_id)}.json",
+                        json.dumps(snapshot, indent=2, ensure_ascii=False, sort_keys=True, default=str) + "\n",
+                    )
+                    from .production_quality import master_snapshot_row
+
+                    rows.append(master_snapshot_row(snapshot, series))
+                if not master.empty and "model_id" in master:
+                    master = master[~master["model_id"].astype(str).isin(updates)]
+                master = pd.concat([master, pd.DataFrame(rows)], ignore_index=True)
+                master = master.sort_values("model_id", kind="stable").reset_index(drop=True)
+                self._atomic_parquet(stage / "snapshots" / "models.parquet", master)
+                os.replace(stage, final)
+                self._atomic_text(
+                    self.current_generation_path,
+                    json.dumps({
+                        "generation": name,
+                        "published_at": self._now(),
+                        "published_observation_generations": {
+                            **previous_publication.get("published_observation_generations", {}),
+                            **{model_id: persisted[model_id] for model_id in updates},
+                        },
+                    }, indent=2, sort_keys=True) + "\n",
+                )
+                return name
+            finally:
+                if stage.exists():
+                    shutil.rmtree(stage)
+
+    def reconcile_published_models(self) -> dict[str, Any]:
+        """Clear only dirty work already included in the published pointer."""
+
+        with self.transaction():
+            manifest = self.load_manifest()
+            if not self.current_generation_path.exists():
+                return manifest
+            published = self._load_json(self.current_generation_path).get(
+                "published_observation_generations", {}
+            )
+            dirty = set(manifest.get("dirty_model_ids", []))
+            remaining = {
+                model_id for model_id in dirty
+                if not published.get(model_id)
+                or published[model_id]
+                != manifest.get("observation_generations", {}).get(model_id)
+            }
+            if remaining != dirty:
+                manifest["dirty_model_ids"] = sorted(remaining)
+                manifest["status"] = "dirty" if remaining else "ready"
+                self._write_manifest(manifest)
+            return manifest
 
     @staticmethod
     def _comparable(frame: pd.DataFrame) -> pd.DataFrame:
@@ -369,7 +515,7 @@ class ProductionQualityRepository:
         return manifest
 
     def upsert_observations(
-        self, model_id: str, rows: pd.DataFrame
+        self, model_id: str, rows: pd.DataFrame, *, allow_origin_repair: bool = False
     ) -> ObservationUpsertResult:
         incoming = normalize_quality_observations(rows)
         validate_quality_observations(incoming)
@@ -392,6 +538,14 @@ class ProductionQualityRepository:
             incoming_indexed = incoming.set_index(list(OBSERVATION_KEY), drop=False)
             added_keys = incoming_indexed.index.difference(current_indexed.index)
             common_keys = incoming_indexed.index.intersection(current_indexed.index)
+            for key in common_keys:
+                original = current_indexed.loc[key]
+                if not allow_origin_repair:
+                    incoming_indexed.loc[key, "prediction_origin"] = original["prediction_origin"]
+                    incoming_indexed.loc[key, "origin_inference_version"] = original["origin_inference_version"]
+                incoming_indexed.loc[key, "model_status_at_prediction"] = original[
+                    "model_status_at_prediction"
+                ]
             updated = 0
             unchanged = 0
             updated_keys: list[object] = []
@@ -443,11 +597,19 @@ class ProductionQualityRepository:
                 len(combined),
             )
 
-    def mark_model_clean(self, model_id: str) -> dict[str, Any]:
+    def mark_model_clean(
+        self, model_id: str, *, expected_observation_generation: str | None = None
+    ) -> dict[str, Any]:
         """Explicit future-phase hook; observations never clear dirty implicitly."""
 
         with self.transaction():
             manifest = self.load_manifest()
+            if (
+                expected_observation_generation is not None
+                and manifest.get("observation_generations", {}).get(str(model_id))
+                != expected_observation_generation
+            ):
+                return manifest
             dirty = set(manifest.get("dirty_model_ids", []))
             dirty.discard(str(model_id))
             manifest["dirty_model_ids"] = sorted(dirty)

@@ -41,8 +41,10 @@ from .domain import ExperimentSpec, JobStatus, JobType
 from .production_domain import OperationalUniverse, ProductionModel, ProductionModelStatus
 from .production_quality import (
     EvaluationStatus,
+    PredictionModelStatus,
     PredictionOrigin,
     RealizedEvaluationBatch,
+    resolve_prediction_model_status,
 )
 from .production_repository import ProductionRepository
 from .production_quality_baseline import PromotionQualityService
@@ -405,8 +407,8 @@ class ProductionTrainingService:
         model = self.repository.get(model_id)
         if model.status == ProductionModelStatus.RETIRED:
             raise ValueError("A retired model cannot be trained")
-        if model.status == ProductionModelStatus.ACTIVE:
-            raise ValueError("Deactivate an active model before retraining it")
+        if model.status in {ProductionModelStatus.ACTIVE, ProductionModelStatus.WATCHING}:
+            raise ValueError("Stop an active or watching model before retraining it")
         names = predictor_columns(prepared, model.predictors, model.lag_depth, config.date_feature_regex)
         outcomes = {
             "up": intraday_target_column(model.target),
@@ -452,27 +454,33 @@ class ProductionTrainingService:
                 json.dumps(metadata, indent=2, ensure_ascii=False, default=str) + "\n",
                 encoding="utf-8",
             )
-        model.status = ProductionModelStatus.TRAINED
-        model.artifact_version = version
-        model.training_metadata = {**model.training_metadata, **metadata}
-        self.repository.update(model)
-        return model
+        def finish_training(current: ProductionModel) -> ProductionModel:
+            if current.status != model.status or current.artifact_version != model.artifact_version:
+                raise ValueError("Model lifecycle changed during training")
+            current.status = ProductionModelStatus.TRAINED
+            current.artifact_version = version
+            current.training_metadata = {**current.training_metadata, **metadata}
+            if model.status != ProductionModelStatus.TRAINED:
+                current.status_history.append({
+                    "from": model.status.value, "to": ProductionModelStatus.TRAINED.value,
+                    "at": metadata["trained_at"], "artifact_version": version,
+                })
+            return current
+
+        return self.repository.mutate_model(model_id, finish_training)
 
 
 class ProductionLifecycleService:
     def __init__(self, repository: ProductionRepository) -> None:
         self.repository = repository
 
-    def activate(self, model_id: str) -> ProductionModel:
-        model = self.repository.get(model_id)
-        directory = self.repository.artifact_directory(model_id)
+    def _validate_artifacts(self, model: ProductionModel) -> None:
+        directory = self.repository.artifact_directory(model.model_id)
         required = [directory / "up.ubj", directory / "down.ubj", directory / "production.metadata.json"]
-        if model.status not in {ProductionModelStatus.TRAINED, ProductionModelStatus.INACTIVE}:
-            raise ValueError("Only a trained or inactive model can be activated")
         if model.feature_version not in SUPPORTED_FEATURE_VERSIONS:
             raise ValueError("The production feature version is not supported")
-        # This validates every frozen modeling parameter before the status can
-        # become active, independently for Up and Down.
+        # Validate every frozen modeling parameter before observation or
+        # activation, independently for Up and Down.
         XGBoostParameters(**model.xgboost_parameters)
         XGBoostParameters(**(model.down_xgboost_parameters or model.xgboost_parameters))
         if model.artifact_version is None or not all(path.is_file() for path in required):
@@ -496,25 +504,61 @@ class ProductionLifecycleService:
             )
         ):
             raise ValueError("Production artifact metadata is incompatible or incomplete")
-        model.status = ProductionModelStatus.ACTIVE
-        self.repository.update(model)
+
+    @staticmethod
+    def _transition(model: ProductionModel, target: ProductionModelStatus) -> ProductionModel:
+        previous = model.status
+        changed_at = utc_now()
+        model.status = target
+        model.status_history.append({
+            "from": previous.value, "to": target.value, "at": changed_at,
+            "artifact_version": model.artifact_version,
+        })
+        if target == ProductionModelStatus.WATCHING and model.watching_started_at is None:
+            model.watching_started_at = changed_at
+        elif target == ProductionModelStatus.ACTIVE and model.activated_at is None:
+            model.activated_at = changed_at
+        elif target == ProductionModelStatus.INACTIVE:
+            model.deactivated_at = changed_at
         return model
+
+    def watch(self, model_id: str) -> ProductionModel:
+        def transition(model: ProductionModel) -> ProductionModel:
+            if model.status != ProductionModelStatus.TRAINED:
+                raise ValueError("Only a trained model can start observation")
+            self._validate_artifacts(model)
+            return self._transition(model, ProductionModelStatus.WATCHING)
+
+        return self.repository.mutate_model(model_id, transition)
+
+    def activate(self, model_id: str) -> ProductionModel:
+        def transition(model: ProductionModel) -> ProductionModel:
+            if model.status not in {
+                ProductionModelStatus.TRAINED,
+                ProductionModelStatus.WATCHING,
+                ProductionModelStatus.INACTIVE,
+            }:
+                raise ValueError("Only a trained, watching or inactive model can be activated")
+            self._validate_artifacts(model)
+            return self._transition(model, ProductionModelStatus.ACTIVE)
+
+        return self.repository.mutate_model(model_id, transition)
 
     def deactivate(self, model_id: str) -> ProductionModel:
-        model = self.repository.get(model_id)
-        if model.status != ProductionModelStatus.ACTIVE:
-            raise ValueError("Only an active model can be deactivated")
-        model.status = ProductionModelStatus.INACTIVE
-        self.repository.update(model)
-        return model
+        def transition(model: ProductionModel) -> ProductionModel:
+            if model.status not in {ProductionModelStatus.ACTIVE, ProductionModelStatus.WATCHING}:
+                raise ValueError("Only an active or watching model can be deactivated")
+            return self._transition(model, ProductionModelStatus.INACTIVE)
+
+        return self.repository.mutate_model(model_id, transition)
 
     def retire(self, model_id: str) -> ProductionModel:
-        model = self.repository.get(model_id)
-        if model.status == ProductionModelStatus.ACTIVE:
-            raise ValueError("Deactivate an active model before retiring it")
-        model.status = ProductionModelStatus.RETIRED
-        self.repository.update(model)
-        return model
+        def transition(model: ProductionModel) -> ProductionModel:
+            if model.status in {ProductionModelStatus.ACTIVE, ProductionModelStatus.WATCHING}:
+                raise ValueError("Deactivate an active or watching model before retiring it")
+            return self._transition(model, ProductionModelStatus.RETIRED)
+
+        return self.repository.mutate_model(model_id, transition)
 
 
 class OperationalUniverseService:
@@ -540,10 +584,19 @@ class OperationalUniverseService:
             used_by={symbol: tuple(ids) for symbol, ids in sorted(used_by.items())},
         )
 
+    def tracked(self) -> OperationalUniverse:
+        return self.current(self.repository.tracked_models())
+
 
 class DailyPredictionService:
     def __init__(self, repository: ProductionRepository) -> None:
         self.repository = repository
+
+    @staticmethod
+    def _model_status_context(model: ProductionModel) -> str:
+        if model.status not in {ProductionModelStatus.WATCHING, ProductionModelStatus.ACTIVE}:
+            raise ValueError("Operational predictions require a watching or active model")
+        return model.status.value
 
     def generate(
         self,
@@ -552,11 +605,21 @@ class DailyPredictionService:
         *,
         market_data: pd.DataFrame | None = None,
         persist: bool = True,
+        models: Sequence[ProductionModel] | None = None,
     ) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []
-        for model in self.repository.active_models():
+        selected_models = tuple(self.repository.tracked_models() if models is None else models)
+        persisted = self.repository.read_table("predictions")
+        existing = {
+            str(row["prediction_id"]): row
+            for row in persisted.to_dict("records")
+            if row.get("prediction_id") is not None
+        }
+        for model in selected_models:
             try:
-                rows.append(self._predict_model(model, prepared, market_data))
+                prediction = self._predict_model(model, prepared, market_data)
+                # A resumed run reuses the original event, including its scope.
+                rows.append(existing.get(prediction["prediction_id"], prediction))
             except Exception as error:
                 # One stale/corrupt model must be visible as an operational
                 # error without suppressing predictions from other models.
@@ -567,7 +630,10 @@ class DailyPredictionService:
                 ))
         frame = pd.DataFrame(rows)
         if persist and not frame.empty:
-            self.repository.append_table("predictions", frame, key="prediction_id")
+            self.repository.append_table(
+                "predictions", frame, key="prediction_id",
+                expected_models=selected_models,
+            )
         return frame
 
     def backfill(
@@ -577,16 +643,18 @@ class DailyPredictionService:
         market_data: pd.DataFrame | None = None,
         max_days: int = 30,
         persist: bool = True,
+        models: Sequence[ProductionModel] | None = None,
     ) -> pd.DataFrame:
         """Create missing operational predictions for recent observed sessions.
 
-        This deliberately uses the production artifacts and active models at
+        This deliberately uses the production artifacts and tracked models at
         execution time. It is not the historical simulation/replay mechanism.
         """
         if max_days < 1:
             raise ValueError("max_days must be positive")
         if prepared.empty:
             return pd.DataFrame()
+        selected_models = tuple(self.repository.tracked_models() if models is None else models)
         dates = pd.DatetimeIndex(prepared.index).normalize()
         latest = dates.max()
         target_dates = dates[dates >= latest - pd.Timedelta(days=max_days - 1)]
@@ -596,8 +664,15 @@ class DailyPredictionService:
             .astype(str)
         )
         rows: list[dict[str, Any]] = []
-        for model in self.repository.active_models():
+        for model in selected_models:
             for target_date in target_dates:
+                if (
+                    model.status == ProductionModelStatus.WATCHING
+                    and model.watching_started_at is not None
+                    and pd.Timestamp(target_date).date()
+                    < pd.Timestamp(model.watching_started_at).date()
+                ):
+                    continue
                 prediction_id = self._prediction_id(model, target_date)
                 if prediction_id in existing:
                     continue
@@ -616,7 +691,10 @@ class DailyPredictionService:
                     continue
         frame = pd.DataFrame(rows)
         if persist and not frame.empty:
-            self.repository.append_table("predictions", frame, key="prediction_id")
+            self.repository.append_table(
+                "predictions", frame, key="prediction_id",
+                expected_models=selected_models,
+            )
         return frame
     def replay(
         self,
@@ -890,6 +968,7 @@ class DailyPredictionService:
             "down_threshold": model.down_threshold,
             "signal_status": signal_status,
             "prediction_origin": PredictionOrigin.SCHEDULED_LIVE.value,
+            "model_status_at_prediction": self._model_status_context(model),
             "status": "predicted",
             "error": None,
             "created_at": utc_now(),
@@ -955,6 +1034,7 @@ class DailyPredictionService:
             "down_threshold": model.down_threshold,
             "signal_status": signal_status,
             "prediction_origin": PredictionOrigin.OPERATIONAL_BACKFILL.value,
+            "model_status_at_prediction": self._model_status_context(model),
             "status": "predicted",
             "error": None,
             "created_at": utc_now(),
@@ -984,6 +1064,11 @@ class DailyPredictionService:
             "up_threshold": model.signal_threshold, "down_threshold": model.down_threshold,
             "signal_status": "error",
             "prediction_origin": None if origin is None else origin.value,
+            "model_status_at_prediction": (
+                model.status.value
+                if model.status in {ProductionModelStatus.WATCHING, ProductionModelStatus.ACTIVE}
+                else PredictionModelStatus.LEGACY_UNKNOWN.value
+            ),
             "status": "error", "error": error, "created_at": utc_now(),
         }
 
@@ -1011,6 +1096,13 @@ class ProductionSignalService:
                 frame = frame.iloc[0:0].copy()
             else:
                 frame = frame[frame["model_id"].astype(str).isin(active_ids)].copy()
+            if not frame.empty:
+                frame = frame[
+                    frame.apply(resolve_prediction_model_status, axis=1).isin({
+                        PredictionModelStatus.ACTIVE.value,
+                        PredictionModelStatus.LEGACY_UNKNOWN.value,
+                    })
+                ].copy()
         rows = []
         for item in frame.to_dict("records"):
             check_cancellation(cancellation_check)
@@ -1028,6 +1120,7 @@ class ProductionSignalService:
                 "target": item["target"], "category": category,
                 "predictors": item.get("predictors"),
                 "model_version": item.get("model_version"),
+                "model_status_at_prediction": resolve_prediction_model_status(item),
                 "up_probability": item.get("up_probability"), "down_probability": item.get("down_probability"),
                 "up_threshold": item.get("up_threshold"), "down_threshold": item.get("down_threshold"),
                 "created_at": utc_now(),
@@ -1095,6 +1188,7 @@ class RealizedResultService:
                 "prediction_id": prediction_id,
                 "model_id": item.get("model_id"),
                 "model_version": item.get("model_version"),
+                "model_status_at_prediction": resolve_prediction_model_status(item),
                 "session_date": item.get("prediction_date"),
                 "evaluation_status": None,
                 "exclusion_reason": None,
@@ -1202,6 +1296,7 @@ class RealizedResultService:
                 "result_id": prediction_id, "prediction_id": prediction_id,
                 "model_id": item["model_id"], "target": item["target"],
                 "prediction_date": item["prediction_date"],
+                "model_status_at_prediction": resolve_prediction_model_status(item),
                 "open": opened, "high": high, "low": low, "close": closed,
                 "intraday_return": intraday,
                 "mfe": metrics[1], "mae": metrics[2],

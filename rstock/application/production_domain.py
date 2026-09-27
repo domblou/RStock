@@ -10,9 +10,14 @@ from typing import Any
 class ProductionModelStatus(str, Enum):
     CANDIDATE = "candidate"
     TRAINED = "trained"
+    WATCHING = "watching"
     ACTIVE = "active"
     INACTIVE = "inactive"
     RETIRED = "retired"
+
+    @property
+    def display_label(self) -> str:
+        return "En observation" if self is ProductionModelStatus.WATCHING else self.value.capitalize()
 
 
 @dataclass(slots=True)
@@ -48,6 +53,10 @@ class ProductionModel:
     calibration_metrics: dict[str, Any] = field(default_factory=dict)
     calibration_sample_size: int | None = None
     holdout_signal_metrics: dict[str, Any] = field(default_factory=dict)
+    watching_started_at: str | None = None
+    activated_at: str | None = None
+    deactivated_at: str | None = None
+    status_history: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.target or not self.predictors:
@@ -110,6 +119,12 @@ class ProductionModel:
         restored.setdefault("calibration_metrics", {})
         restored.setdefault("calibration_sample_size", None)
         restored.setdefault("holdout_signal_metrics", {})
+        # Historical registry records have no lifecycle dates or transition log.
+        # Their missing values remain unknown rather than being inferred now.
+        restored.setdefault("watching_started_at", None)
+        restored.setdefault("activated_at", None)
+        restored.setdefault("deactivated_at", None)
+        restored.setdefault("status_history", [])
         return cls(**restored)
 
 

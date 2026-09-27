@@ -11,6 +11,7 @@ from rstock.application.real_trades import (
     performance_kpis,
     performance_table,
 )
+from rstock.application.production_repository import ProductionRepository
 
 
 def _prediction(identifier: str = "prediction-1", *, date: str = "2026-09-15") -> dict[str, object]:
@@ -99,3 +100,17 @@ def test_real_trade_requires_a_stable_bullish_prediction_identity(tmp_path):
         service.save_from_prediction(
             _prediction(), entry_price=1, exit_price=2, quantity=1.5
         )
+
+
+def test_real_trade_rejects_watching_signal_even_if_ui_record_omits_context(tmp_path):
+    source = _prediction()
+    ProductionRepository(tmp_path).write_table(
+        "predictions",
+        pd.DataFrame([{**source, "model_status_at_prediction": "watching"}]),
+    )
+    service = RealTradeService(tmp_path)
+    with pytest.raises(ValueError, match="observation"):
+        service.save_from_prediction(
+            source, entry_price=100, exit_price=101, quantity=1
+        )
+    assert service.trades() == []

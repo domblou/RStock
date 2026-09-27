@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from rstock.config import HISTORICAL_MISSING_CONFIG_DEFAULTS, RStockConfig
 
 from .universes import UniverseSelection
+from .derivation import Derivation
 
 
 class JobType(str, Enum):
@@ -254,6 +255,7 @@ class ExperimentSpec:
     resolved_market_session_cutoff: str | None = None
     source_prepared_dataset_sha256: str | None = None
     prepared_dataset_digest_required: bool = False
+    prepared_snapshot_required: bool = False
     # Runtime-only worker context; deliberately excluded from persisted snapshots.
     execution_run_id: str | None = None
     forward_simulation_enabled: bool = False
@@ -263,6 +265,8 @@ class ExperimentSpec:
     source_forward_model_snapshot_sha256: str | None = None
     source_end_to_end_run: str | None = None
     source_threshold_calibration_run: str | None = None
+    derivation: Derivation | None = None
+    experimental_overrides: tuple[dict[str, Any], ...] = ()
     auto_promote_candidates: bool = False
     temporal_validation_enabled: bool = False
     pipeline_version: int = 2
@@ -291,6 +295,29 @@ class ExperimentSpec:
     )
 
     def __post_init__(self) -> None:
+        if self.derivation is not None:
+            if self.job_type is not JobType.END_TO_END:
+                raise ValueError("Only an End-to-End can be derived")
+            if self.temporal_validation_enabled or self.forced_symbol_sets is not None:
+                raise ValueError("Temporal and forced End-to-End derivation is not supported")
+            self.derivation.validate_plan(
+                promotion_enabled=self.auto_promote_candidates,
+                forward_enabled=self.forward_simulation_enabled,
+            )
+            for override in self.derivation.overrides:
+                effective = (
+                    self.combinations_per_target
+                    if override.field == "combinations_per_target"
+                    else getattr(self, override.field)
+                    if override.field.startswith("forward_simulation_")
+                    else getattr(self.config, override.field)
+                )
+                if isinstance(effective, tuple):
+                    effective = list(effective)
+                if effective != override.new_value:
+                    raise ValueError(
+                        f"Effective value does not match override {override.field}"
+                    )
         if self.historical_forced_validation_backfill and self.auto_promote_candidates:
             raise ValueError(
                 "Historical forced validation backfill cannot promote candidates"
@@ -546,6 +573,12 @@ class ExperimentSpec:
                 self.source_forward_model_snapshot_sha256
             ),
         )
+        if self.derivation is not None:
+            values["derivation"] = self.derivation.to_dict()
+        if self.prepared_snapshot_required:
+            values["prepared_snapshot_required"] = True
+        if self.experimental_overrides:
+            values["experimental_overrides"] = list(self.experimental_overrides)
         return values
 
     @classmethod
@@ -656,6 +689,9 @@ class ExperimentSpec:
             prepared_dataset_digest_required=bool(
                 values.get("prepared_dataset_digest_required", False)
             ),
+            prepared_snapshot_required=bool(
+                values.get("prepared_snapshot_required", False)
+            ),
             forward_simulation_enabled=bool(
                 values.get("forward_simulation_enabled", False)
             ),
@@ -677,6 +713,12 @@ class ExperimentSpec:
             source_threshold_calibration_run=_optional_string(
                 values.get("source_threshold_calibration_run")
             ),
+            derivation=(
+                None
+                if values.get("derivation") is None
+                else Derivation.from_dict(values["derivation"])
+            ),
+            experimental_overrides=tuple(values.get("experimental_overrides") or ()),
             auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),
             temporal_validation_enabled=bool(
                 values.get("temporal_validation_enabled", False)

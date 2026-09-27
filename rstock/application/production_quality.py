@@ -42,6 +42,23 @@ class PredictionOrigin(str, Enum):
     LEGACY_UNKNOWN = "legacy_unknown"
 
 
+class PredictionModelStatus(str, Enum):
+    """Frozen operational status, independent of the current registry status."""
+
+    WATCHING = "watching"
+    ACTIVE = "active"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+def resolve_prediction_model_status(prediction: Mapping[str, Any]) -> str:
+    """Keep old events explicitly unknown; never consult the model registry."""
+
+    value = prediction.get("model_status_at_prediction")
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return PredictionModelStatus.LEGACY_UNKNOWN.value
+    return PredictionModelStatus(str(value)).value
+
+
 class EvaluationStatus(str, Enum):
     EVALUATED = "evaluated"
     PENDING = "pending"
@@ -74,6 +91,7 @@ OBSERVATION_COLUMNS = (
     "target",
     "set_id",
     "prediction_origin",
+    "model_status_at_prediction",
     "origin_inference_version",
     "prediction_status",
     "signal_category",
@@ -108,6 +126,7 @@ _STRING_COLUMNS = {
     "target",
     "set_id",
     "prediction_origin",
+    "model_status_at_prediction",
     "prediction_status",
     "signal_category",
     "evaluation_status",
@@ -155,7 +174,13 @@ def normalize_quality_observations(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = frame.copy()
     for name in OBSERVATION_COLUMNS:
         if name not in normalized:
-            normalized[name] = pd.NA
+            normalized[name] = (
+                PredictionModelStatus.LEGACY_UNKNOWN.value
+                if name == "model_status_at_prediction" else pd.NA
+            )
+    normalized["model_status_at_prediction"] = normalized[
+        "model_status_at_prediction"
+    ].fillna(PredictionModelStatus.LEGACY_UNKNOWN.value)
     normalized = normalized.loc[:, OBSERVATION_COLUMNS]
     for name in _STRING_COLUMNS:
         normalized[name] = normalized[name].astype("string")
@@ -190,6 +215,9 @@ def validate_quality_observations(frame: pd.DataFrame) -> None:
     allowed_origins = {item.value for item in PredictionOrigin}
     if not origins <= allowed_origins:
         raise ValueError("Unsupported prediction_origin")
+    model_statuses = set(frame["model_status_at_prediction"].dropna().astype(str))
+    if not model_statuses <= {item.value for item in PredictionModelStatus}:
+        raise ValueError("Unsupported model_status_at_prediction")
     statuses = set(frame["evaluation_status"].dropna().astype(str))
     allowed_statuses = {item.value for item in EvaluationStatus}
     if not statuses <= allowed_statuses:
@@ -316,7 +344,7 @@ def build_quality_observations(
     realized_results: pd.DataFrame,
     evaluations: pd.DataFrame,
     *,
-    train_end_by_model: Mapping[str, object] | None = None,
+    train_end_by_model: Mapping[object, object] | None = None,
     ingested_at: object | None = None,
 ) -> pd.DataFrame:
     """Build canonical observations from operational provenance without metrics."""
@@ -345,9 +373,12 @@ def build_quality_observations(
         prediction_id = str(prediction.get("prediction_id"))
         model_id = str(prediction.get("model_id"))
         model_version = prediction.get("model_version")
-        origin = resolve_prediction_origin(
-            prediction, train_end=train_ends.get(model_id)
+        # Prefer the artifact version that produced this event. The model-id
+        # fallback retains the contract of the initial historical migration.
+        train_end = train_ends.get(
+            (model_id, str(model_version)), train_ends.get(model_id)
         )
+        origin = resolve_prediction_origin(prediction, train_end=train_end)
         signal = signal_lookup.get(prediction_id, {})
         result = result_lookup.get(prediction_id, {})
         evaluation = evaluation_lookup.get(prediction_id, {})
@@ -382,6 +413,7 @@ def build_quality_observations(
                 prediction.get("target"), prediction.get("predictors")
             ),
             "prediction_origin": origin.origin.value,
+            "model_status_at_prediction": resolve_prediction_model_status(prediction),
             "origin_inference_version": origin.rule_version,
             "prediction_status": prediction.get("status"),
             "signal_category": category,
@@ -602,6 +634,13 @@ def compute_model_quality(
     as_of = _market_sessions(as_of_session, 1, calendar_name)[-1]
     live = eligible_live_observations(observations)
     live = live[live["session_date"] <= as_of].copy()
+    production_live = live[live["model_status_at_prediction"].isin({
+        PredictionModelStatus.ACTIVE.value,
+        PredictionModelStatus.LEGACY_UNKNOWN.value,
+    })].copy()
+    watching_live = live[
+        live["model_status_at_prediction"].eq(PredictionModelStatus.WATCHING.value)
+    ].copy()
     ingested = pd.to_datetime(live.get("quality_ingested_at"), errors="coerce", utc=True)
     generated_at = (
         ingested.max().isoformat()
@@ -609,6 +648,12 @@ def compute_model_quality(
         else pd.Timestamp(as_of).tz_localize("UTC").isoformat()
     )
     windows = {str(width): compute_quality_metrics(live, _market_sessions(as_of, width, calendar_name)) for width in QUALITY_WINDOWS}
+    production_windows = {
+        str(width): compute_quality_metrics(
+            production_live, _market_sessions(as_of, width, calendar_name)
+        )
+        for width in QUALITY_WINDOWS
+    }
     promotion = (lineage or {}).get("promotion_date")
     if promotion:
         calendar = xcals.get_calendar(calendar_name)
@@ -622,6 +667,8 @@ def compute_model_quality(
     if sessions.tz is not None:
         sessions = sessions.tz_localize(None)
     since = compute_quality_metrics(live, sessions)
+    production_since = compute_quality_metrics(production_live, sessions)
+    watching_since = compute_quality_metrics(watching_live, sessions)
     series = build_quality_series(live, sessions)
     last_evaluated = evaluated_observations(live)
     snapshot = {
@@ -631,6 +678,11 @@ def compute_model_quality(
         "as_of_session": str(pd.Timestamp(as_of).date()), "model_id": (lineage or {}).get("model_id"),
         "identity": dict(lineage or {}), "baseline_status": "available" if baseline and baseline.get("availability_status") == "available" else "unavailable",
         "window_20": windows["20"], "window_63": windows["63"], "window_126": windows["126"],
+        "production_window_20": production_windows["20"],
+        "production_window_63": production_windows["63"],
+        "production_window_126": production_windows["126"],
+        "production_since_activation": production_since,
+        "watching_since_start": watching_since,
         "since_promotion": since, "last_signal_date": since["last_signal_date"],
         "last_evaluated_date": None if last_evaluated.empty else str(pd.Timestamp(last_evaluated["session_date"].max()).date()),
         "excluded_observations": since["excluded_observations"], "pending_observations": since["pending_observations"],
@@ -654,12 +706,21 @@ def master_snapshot_row(snapshot: Mapping[str, Any], series: pd.DataFrame) -> di
         "promotion_date": identity.get("promotion_date"), "baseline_status": snapshot["baseline_status"],
         "health_status": snapshot["health_status"], "quality_updated_at": snapshot["generated_at"],
         "pnl_since_promotion": since["pnl"], "max_drawdown_dollars": since["max_drawdown_dollars"],
+        "production_pnl_since_activation": (
+            snapshot.get("production_since_activation") or since
+        )["pnl"],
         "max_drawdown_return_points": since["max_drawdown_return_points"], "last_signal_date": snapshot["last_signal_date"],
         "last_evaluated_date": snapshot["last_evaluated_date"],
     }
     for width in QUALITY_WINDOWS:
         metrics = snapshot[f"window_{width}"]
         row.update({f"signal_count_{width}": metrics["signal_count"], f"mean_return_{width}": metrics["mean_intraday_return"], f"win_rate_{width}": metrics["win_rate"]})
+        production_metrics = snapshot.get(f"production_window_{width}") or metrics
+        row.update({
+            f"production_signal_count_{width}": production_metrics["signal_count"],
+            f"production_mean_return_{width}": production_metrics["mean_intraday_return"],
+            f"production_win_rate_{width}": production_metrics["win_rate"],
+        })
     row["trend_63"] = json.dumps([] if series.empty else [None if pd.isna(v) else float(v) for v in series["cumulative_pnl"].tail(32)])
     return row
 
@@ -677,8 +738,19 @@ class ProductionQualityMetricsService:
         snapshot, series = compute_model_quality(observations, baseline, lineage, as_of_session, calendar_name=self.calendar_name)
         if snapshot["model_id"] is None:
             snapshot["model_id"] = model_id
-        self.repository.write_model_series(model_id, series)
-        self.repository.write_model_snapshot(model_id, snapshot)
-        self.repository.upsert_master_snapshot(master_snapshot_row(snapshot, series))
-        self.repository.mark_model_clean(model_id)
+        if self.repository.current_generation_path.exists():
+            manifest = self.repository.load_manifest()
+            self.repository.publish_model_quality_batch(
+                {model_id: (snapshot, series)},
+                expected_observation_generations=manifest.get("observation_generations", {}),
+            )
+            self.repository.mark_model_clean(
+                model_id,
+                expected_observation_generation=manifest.get("observation_generations", {}).get(model_id),
+            )
+        else:
+            self.repository.write_model_series(model_id, series)
+            self.repository.write_model_snapshot(model_id, snapshot)
+            self.repository.upsert_master_snapshot(master_snapshot_row(snapshot, series))
+            self.repository.mark_model_clean(model_id)
         return snapshot

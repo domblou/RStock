@@ -656,3 +656,144 @@ def test_phase_six_rebuild_stages_then_atomically_publishes_generation(tmp_path)
     checkpoint = runs.read_json(run_id, CHECKPOINT_NAME)
     assert checkpoint["status"] == "completed"
     assert checkpoint["completed_model_ids"] == ["model_A", "model_B"]
+
+
+def test_daily_reconciliation_keeps_frozen_origin_and_classifies_by_artifact_version(tmp_path):
+    production = ProductionRepository(tmp_path)
+    production.add(replace(
+        _model(), artifact_version=2,
+        training_metadata={"train_end": "2026-09-18"},
+    ))
+    prediction = {
+        **_prediction("historical", model_version=2, prediction_date="2026-09-22"),
+        "as_of_date": "2026-09-21", "created_at": "2026-09-21T20:45:16Z",
+        "model_status_at_prediction": "watching",
+    }
+    prediction.pop("prediction_origin")
+    source = _canonical_observations({**prediction, "prediction_origin": "legacy_inferred_live"})
+    signals = pd.DataFrame([{
+        "signal_id": "historical", "prediction_id": "historical",
+        "category": "bullish_signal", "model_id": "model_A",
+    }])
+    result = pd.DataFrame([{
+        "result_id": "historical", "prediction_id": "historical",
+        "model_id": "model_A", "open": 100, "high": 103, "low": 99,
+        "close": 102, "intraday_return": 0.02, "mfe": 0.03,
+        "mae": -0.01, "recorded_at": "2026-09-22T21:00:00Z",
+    }])
+    production.append_tables({
+        "predictions": (pd.DataFrame([prediction]), "prediction_id"),
+        "signals": (signals, "signal_id"),
+        "realized_results": (result, "result_id"),
+    })
+    evaluations = pd.DataFrame([{"prediction_id": "historical", "evaluation_status": "evaluated"}])
+    first = synchronize_production_quality(
+        tmp_path, candidate_predictions=pd.DataFrame([prediction]),
+        new_results=result, evaluations=evaluations, as_of_session="2026-09-25",
+    )
+    quality = ProductionQualityRepository(tmp_path)
+    stored = quality.load_observations("model_A")
+    assert stored.iloc[0]["prediction_origin"] == "legacy_inferred_live"
+    assert stored.iloc[0]["model_status_at_prediction"] == "watching"
+    assert quality.load_model_snapshot("model_A")["window_63"]["signal_count"] == 1
+    assert quality.load_model_snapshot("model_A")["since_promotion"]["pnl"] == pytest.approx(200)
+
+    # A later run with insufficient training context cannot demote the
+    # already established origin or relabel the observation after activation.
+    degraded = source.copy()
+    degraded["prediction_origin"] = "legacy_unknown"
+    degraded["model_status_at_prediction"] = "active"
+    degraded["intraday_return"] = 0.03
+    quality.upsert_observations("model_A", degraded)
+    retained = quality.load_observations("model_A").iloc[0]
+    assert retained["prediction_origin"] == "legacy_inferred_live"
+    assert retained["model_status_at_prediction"] == "watching"
+    assert retained["intraday_return"] == pytest.approx(0.03)
+    assert first["published_generation"] is not None
+
+    # A different artifact version cannot borrow the current version's
+    # training date for a first classification.
+    older = {**prediction, "prediction_id": "older", "model_version": 1}
+    unknown = build_quality_observations(
+        pd.DataFrame([older]), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+        train_end_by_model={("model_A", "2"): "2026-09-18"},
+    )
+    assert unknown.iloc[0]["prediction_origin"] == "legacy_unknown"
+
+
+def test_prediction_rewrite_preserves_original_origin_and_status(tmp_path):
+    repository = ProductionRepository(tmp_path)
+    original = _prediction("same", origin="legacy_inferred_live")
+    original["model_status_at_prediction"] = "watching"
+    repository.append_table("predictions", pd.DataFrame([original]), key="prediction_id")
+    repository.append_table(
+        "predictions",
+        pd.DataFrame([{**original, "prediction_origin": "legacy_unknown",
+                       "model_status_at_prediction": "active"}]),
+        key="prediction_id",
+    )
+    stored = repository.read_table("predictions").iloc[0]
+    assert stored["prediction_origin"] == "legacy_inferred_live"
+    assert stored["model_status_at_prediction"] == "watching"
+
+
+def test_daily_quality_batch_keeps_published_generation_immutable_on_failure(monkeypatch, tmp_path):
+    quality = ProductionQualityRepository(tmp_path)
+    quality.write_lineage("model_A", {"model_id": "model_A", "promotion_date": "2026-01-01"})
+    first = _metric_observations([0.01])
+    quality.upsert_observations("model_A", first)
+    initial_snapshot, initial_series = compute_model_quality(
+        quality.load_observations("model_A"), None,
+        quality.load_lineage("model_A"), "2026-01-09",
+    )
+    first_name = quality.publish_model_quality_batch(
+        {"model_A": (initial_snapshot, initial_series)},
+        expected_observation_generations=quality.load_manifest()["observation_generations"],
+    )
+    first_path = quality.generation_path(first_name) / "snapshots" / "models.parquet"
+    original_bytes = first_path.read_bytes()
+    second = _metric_observations([0.01, 0.02])
+    quality.upsert_observations("model_A", second)
+    snapshot, series = compute_model_quality(
+        quality.load_observations("model_A"), None,
+        quality.load_lineage("model_A"), "2026-01-09",
+    )
+    original_write = quality._atomic_parquet
+
+    def fail_master(path, frame):
+        if path.name == "models.parquet":
+            raise OSError("interrupted before pointer publication")
+        return original_write(path, frame)
+
+    monkeypatch.setattr(quality, "_atomic_parquet", fail_master)
+    with pytest.raises(OSError, match="interrupted"):
+        quality.publish_model_quality_batch(
+            {"model_A": (snapshot, series)},
+            expected_observation_generations=quality.load_manifest()["observation_generations"],
+        )
+    assert quality._load_json(quality.current_generation_path)["generation"] == first_name
+    assert first_path.read_bytes() == original_bytes
+    assert quality.load_master_snapshot().iloc[0]["signal_count_63"] == 1
+    assert quality.load_manifest()["dirty_model_ids"] == ["model_A"]
+
+    monkeypatch.setattr(quality, "_atomic_parquet", original_write)
+    next_name = quality.publish_model_quality_batch(
+        {"model_A": (snapshot, series)},
+        expected_observation_generations=quality.load_manifest()["observation_generations"],
+    )
+    assert next_name != first_name
+    assert first_path.read_bytes() == original_bytes
+    assert quality.load_master_snapshot().iloc[0]["signal_count_63"] == 2
+
+
+def test_new_observation_after_publication_remains_dirty(tmp_path):
+    quality = ProductionQualityRepository(tmp_path)
+    quality.upsert_observations("model_A", _metric_observations([0.01]))
+    observed_generation = quality.load_manifest()["observation_generations"]["model_A"]
+    quality.upsert_observations("model_A", _metric_observations([0.01, 0.02]))
+
+    quality.mark_model_clean(
+        "model_A", expected_observation_generation=observed_generation
+    )
+
+    assert quality.load_manifest()["dirty_model_ids"] == ["model_A"]

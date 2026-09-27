@@ -10,9 +10,13 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 import pandas as pd
 
-from .production_quality import LIVE_PREDICTION_ORIGINS, MONITORING_NOTIONAL
+from .production_quality import (
+    LIVE_PREDICTION_ORIGINS, MONITORING_NOTIONAL,
+    PredictionModelStatus, compute_quality_metrics,
+)
 from .production_quality_repository import ProductionQualityRepository
 from .production_repository import ProductionRepository
+from .model_ui import model_status_label
 
 
 HEALTH_LABELS = {
@@ -31,8 +35,14 @@ MASTER_COLUMNS = (
     "universe_id", "universe_name", "source_end_to_end_run_id",
     "predictor_prefilter_top_n", "promotion_date",
     "signal_count_20", "signal_count_63", "signal_count_126",
+    "production_signal_count_20", "production_signal_count_63",
+    "production_signal_count_126",
     "mean_return_20", "mean_return_63", "mean_return_126",
+    "production_mean_return_20", "production_mean_return_63",
+    "production_mean_return_126",
     "win_rate_20", "win_rate_63", "win_rate_126",
+    "production_win_rate_20", "production_win_rate_63",
+    "production_win_rate_126", "production_pnl_since_activation",
     "pnl_since_promotion", "max_drawdown_dollars",
     "max_drawdown_return_points", "last_signal_date", "last_evaluated_date",
     "baseline_status", "health_status", "quality_updated_at", "trend_63",
@@ -181,7 +191,10 @@ def sort_quality_models(frame: pd.DataFrame, *, window: int) -> pd.DataFrame:
     if window not in WINDOWS:
         raise ValueError("Quality window must be 20, 63 or 126 sessions")
     result = frame.copy()
-    status_rank = {"active": 0, "inactive": 1, "retired": 2}
+    status_rank = {
+        "active": 0, "watching": 1, "candidate": 2,
+        "trained": 3, "inactive": 4, "retired": 5,
+    }
     result["_grid_status_rank"] = result["status"].astype(str).map(status_rank).fillna(3)
     result["_grid_promotion_date"] = pd.to_datetime(
         result["promotion_date"], errors="coerce", utc=True
@@ -200,21 +213,49 @@ def sort_quality_models(frame: pd.DataFrame, *, window: int) -> pd.DataFrame:
 def global_quality_kpis(frame: pd.DataFrame, *, window: int = 63) -> dict[str, Any]:
     if window not in WINDOWS:
         raise ValueError("Quality window must be 20, 63 or 126 sessions")
-    signals = pd.to_numeric(frame.get(f"signal_count_{window}"), errors="coerce").fillna(0)
-    means = pd.to_numeric(frame.get(f"mean_return_{window}"), errors="coerce")
-    wins = pd.to_numeric(frame.get(f"win_rate_{window}"), errors="coerce")
+    production = frame[frame["status"].astype(str).eq("active")].copy()
+    scope_count = pd.to_numeric(
+        production.get(
+            f"production_signal_count_{window}",
+            pd.Series(index=production.index, dtype=float),
+        ),
+        errors="coerce",
+    )
+
+    def scoped_values(scoped: str, historical: str) -> pd.Series:
+        fallback = pd.to_numeric(
+            production.get(historical, pd.Series(index=production.index, dtype=float)),
+            errors="coerce",
+        )
+        if scoped not in production:
+            return fallback
+        return pd.to_numeric(production[scoped], errors="coerce").where(
+            scope_count.notna(), fallback
+        )
+
+    signals = scoped_values(
+        f"production_signal_count_{window}", f"signal_count_{window}"
+    ).fillna(0)
+    means = scoped_values(
+        f"production_mean_return_{window}", f"mean_return_{window}"
+    )
+    wins = scoped_values(
+        f"production_win_rate_{window}", f"win_rate_{window}"
+    )
     signal_total = float(signals.sum())
     def weighted(values: pd.Series) -> float | None:
         valid = values.notna() & signals.gt(0)
         denominator = float(signals[valid].sum())
         return None if denominator == 0 else float((values[valid] * signals[valid]).sum() / denominator)
     return {
-        "active_models": int(frame.get("status", pd.Series(dtype=str)).astype(str).eq("active").sum()),
-        "data_insufficient": int(frame.get("health_label", pd.Series(dtype=str)).isin({
+        "active_models": len(production),
+        "data_insufficient": int(production.get("health_label", pd.Series(dtype=str)).isin({
             "Données insuffisantes", "Non calculé", "Non calculé — version différente",
         }).sum()),
         "mean_return": weighted(means),
-        "pnl": float(pd.to_numeric(frame.get("pnl_since_promotion"), errors="coerce").fillna(0).sum()),
+        "pnl": float(scoped_values(
+            "production_pnl_since_activation", "pnl_since_promotion"
+        ).fillna(0).sum()),
         "win_rate": weighted(wins),
         "signals": int(signal_total),
     }
@@ -317,7 +358,8 @@ def models_grid(frame: pd.DataFrame, *, window: int) -> pd.DataFrame:
     grid = pd.DataFrame({
         "model_id": frame["model_id"], "Cible": frame["target"],
         "Prédicteurs": frame["predictors"].map(lambda value: ", ".join(str(item) for item in _decode_list(value))),
-        "Statut": frame["status"], "Univers": frame["universe_name"].fillna("—"),
+        "Statut": frame["status"].map(model_status_label),
+        "Univers": frame["universe_name"].fillna("—"),
         "Source": frame["source_end_to_end_run_id"].fillna("—"),
         "Top-N": frame["predictor_prefilter_top_n"].where(
             frame["predictor_prefilter_top_n"].notna(), "—"
@@ -386,6 +428,59 @@ def evaluated_bullish_signals(observations: pd.DataFrame, *, limit: int = 100) -
         [returns.gt(0), returns.lt(0)], ["Gagnant", "Perdant"], default="Nul"
     )
     return values
+
+
+def model_phase_metrics(
+    observations: pd.DataFrame, series: pd.DataFrame
+) -> dict[str, dict[str, Any]]:
+    """Reuse the quality engine with immutable prediction scopes."""
+
+    sessions = (
+        pd.DatetimeIndex(pd.to_datetime(series["session_date"], errors="coerce").dropna())
+        if not series.empty and "session_date" in series
+        else pd.DatetimeIndex(pd.to_datetime(
+            observations.get("session_date", pd.Series(dtype="datetime64[ns]")),
+            errors="coerce",
+        ).dropna().unique())
+    )
+    scope = observations.get(
+        "model_status_at_prediction",
+        pd.Series("legacy_unknown", index=observations.index),
+    ).astype("string")
+    phases = {
+        "En observation": compute_quality_metrics(
+            observations[scope.eq(PredictionModelStatus.WATCHING.value).fillna(False)],
+            sessions,
+        ),
+        "Production active": compute_quality_metrics(
+            observations[scope.eq(PredictionModelStatus.ACTIVE.value).fillna(False)],
+            sessions,
+        ),
+    }
+    if scope.eq(PredictionModelStatus.LEGACY_UNKNOWN.value).fillna(False).any():
+        phases["Historique sans contexte"] = compute_quality_metrics(
+            observations[scope.eq(PredictionModelStatus.LEGACY_UNKNOWN.value).fillna(False)],
+            sessions,
+        )
+    phases["Historique complet"] = compute_quality_metrics(observations, sessions)
+    return phases
+
+
+def model_phase_comparison_table(
+    observations: pd.DataFrame, series: pd.DataFrame
+) -> pd.DataFrame:
+    phases = model_phase_metrics(observations, series)
+    return pd.DataFrame([
+        {
+            "Période": label,
+            "Signaux": _display_integer_text(metrics.get("signal_count")),
+            "Rendement moyen": _display_percent(metrics.get("mean_intraday_return")),
+            "Trades gagnants": _display_percent(metrics.get("win_rate")),
+            "P&L cumulé": _display_currency(metrics.get("pnl")),
+            "Drawdown": _display_currency(metrics.get("max_drawdown_dollars")),
+        }
+        for label, metrics in phases.items()
+    ]).astype("string")
 
 
 def excluded_observations(observations: pd.DataFrame, *, limit: int = 100) -> pd.DataFrame:

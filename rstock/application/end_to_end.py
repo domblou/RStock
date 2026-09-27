@@ -16,6 +16,7 @@ from rstock.progress import CancellationCheck, ProgressCallback, check_cancellat
 
 from .auto_promotion import AutoPromotionRunner, PROMOTION_CHECKPOINT
 from .domain import ExperimentSpec, JobType, RunMetadata, RunPurpose, RunRole
+from .derivation import STAGE_DEPENDENCIES
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from .repository import RunRepository, utc_now
 from .temporal_validation import (
@@ -26,26 +27,23 @@ from .forward_simulation import build_forward_model_snapshot
 
 
 PIPELINE_SCHEMA_VERSION = 1
+DERIVED_PIPELINE_SCHEMA_VERSION = 2
 PIPELINE_MANIFEST = "orchestration/pipeline.json"
 CHILD_ID_POLICY_DETERMINISTIC = 1
 CHILD_ID_POLICY_RESERVED = 2
 
 SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
-    ("walk_forward", JobType.WALK_FORWARD, ()),
-    ("xgboost_calibration", JobType.XGBOOST_CALIBRATION, ("walk_forward",)),
+    ("walk_forward", JobType.WALK_FORWARD, STAGE_DEPENDENCIES["walk_forward"]),
+    ("xgboost_calibration", JobType.XGBOOST_CALIBRATION, STAGE_DEPENDENCIES["xgboost_calibration"]),
     (
         "threshold_parameter_calibration",
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
-        ("walk_forward", "xgboost_calibration"),
+        STAGE_DEPENDENCIES["threshold_parameter_calibration"],
     ),
     (
         "threshold_calibration",
         JobType.THRESHOLD_CALIBRATION,
-        (
-            "walk_forward",
-            "xgboost_calibration",
-            "threshold_parameter_calibration",
-        ),
+        STAGE_DEPENDENCIES["threshold_calibration"],
     ),
 )
 FORCED_SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
@@ -114,6 +112,130 @@ def _relation_key(stage_key: str) -> str:
     return f"pipeline_stage:{stage_key}"
 
 
+def effective_stage_run_id(
+    manifest: dict[str, Any], stage_key: str,
+) -> str | None:
+    """Resolve the physical run providing a stage, regardless of ownership."""
+    stage = _stage(manifest, stage_key)
+    if manifest.get("schema_version") == DERIVED_PIPELINE_SCHEMA_VERSION:
+        mode = stage["mode"]
+        if mode == "inherited":
+            return str(stage["source_run_id"])
+        if mode == "not_executed":
+            return None
+    child_id = stage.get("child_run_id")
+    return None if child_id is None else str(child_id)
+
+
+def _build_derived_pipeline_manifest(
+    repository: RunRepository,
+    root_run_id: str,
+    spec: ExperimentSpec,
+    *,
+    reserved_child_ids: dict[str, str] | None,
+) -> dict[str, Any]:
+    derivation = spec.derivation
+    if derivation is None:
+        raise ValueError("Missing derivation plan")
+    if derivation.source_end_to_end_run_id == root_run_id:
+        raise ValueError("An End-to-End cannot derive from itself")
+    if repository.status(derivation.source_end_to_end_run_id).get("status") != "completed":
+        raise ValueError("Source End-to-End must be completed")
+    source_path = (
+        repository.run_directory(derivation.source_end_to_end_run_id)
+        / PIPELINE_MANIFEST
+    )
+    if not source_path.is_file() or _sha256(source_path) != derivation.source_manifest_sha256:
+        raise ValueError("Source End-to-End manifest is missing or has changed")
+    source_manifest = load_pipeline_manifest(
+        repository, derivation.source_end_to_end_run_id
+    )
+    if source_manifest is None or source_manifest["schema_version"] != PIPELINE_SCHEMA_VERSION:
+        raise ValueError("Derived sources are not supported in this pipeline version")
+    modes = derivation.validate_plan(
+        promotion_enabled=spec.auto_promote_candidates,
+        forward_enabled=spec.forward_simulation_enabled,
+    )
+    for stage_key, reference in derivation.inherited_stages.items():
+        source_stage = _stage(source_manifest, stage_key)
+        if source_stage["child_run_id"] != reference.source_run_id:
+            raise ValueError(f"Inherited source run mismatch: {stage_key}")
+        if repository.status(reference.source_run_id).get("status") != "completed":
+            raise ValueError(f"Inherited source run is not completed: {stage_key}")
+        if source_stage.get("artifact_digests") != reference.required_artifact_digests:
+            raise ValueError(f"Inherited artifact digests mismatch: {stage_key}")
+        if source_stage.get("expected_fingerprint") != reference.configuration_fingerprint:
+            raise ValueError(f"Inherited source fingerprint mismatch: {stage_key}")
+        if repository.configuration_fingerprint(reference.source_run_id) != (
+            reference.configuration_fingerprint
+        ):
+            raise ValueError(f"Inherited configuration fingerprint mismatch: {stage_key}")
+    if derivation.prepared_snapshot_sha256 is not None:
+        walk_forward_id = derivation.inherited_stages["walk_forward"].source_run_id
+        snapshot_path = (
+            repository.run_directory(walk_forward_id)
+            / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
+        )
+        if not snapshot_path.is_file() or _sha256(snapshot_path) != (
+            derivation.prepared_snapshot_sha256
+        ):
+            raise ValueError("Inherited prepared snapshot has changed")
+    recomputed = {
+        stage for stage, mode in modes.items()
+        if mode == "recomputed" and stage != "promotion"
+    }
+    if reserved_child_ids is not None and set(reserved_child_ids) != recomputed:
+        raise ValueError("Derived child reservations do not match the plan")
+    child_ids = (
+        dict(reserved_child_ids)
+        if reserved_child_ids is not None
+        else {stage: repository.generate_run_id() for stage in recomputed}
+    )
+    effective_ids: dict[str, str | None] = {}
+    stages: list[dict[str, Any]] = []
+    job_types = {stage: job for stage, job, _ in SCIENTIFIC_STAGES}
+    job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
+    for stage_key, dependencies in STAGE_DEPENDENCIES.items():
+        mode = modes[stage_key]
+        reference = derivation.inherited_stages.get(stage_key)
+        effective_id = (
+            reference.source_run_id if reference is not None
+            else child_ids.get(stage_key)
+        )
+        effective_ids[stage_key] = effective_id
+        stages.append({
+            "stage_key": stage_key,
+            "mode": mode,
+            "expected_job_type": (
+                None if stage_key == "promotion" else job_types[stage_key].value
+            ),
+            "child_run_id": child_ids.get(stage_key),
+            "source_run_id": None if reference is None else reference.source_run_id,
+            "expected_fingerprint": (
+                None if reference is None else reference.configuration_fingerprint
+            ),
+            "dependency_run_ids": [effective_ids[item] for item in dependencies],
+            "artifact_digests": (
+                {} if reference is None
+                else dict(reference.required_artifact_digests)
+            ),
+            "not_executed_reason": "disabled" if mode == "not_executed" else None,
+        })
+    return {
+        "schema_version": DERIVED_PIPELINE_SCHEMA_VERSION,
+        "root_run_id": root_run_id,
+        "pipeline_version": spec.pipeline_version,
+        "child_id_policy_version": CHILD_ID_POLICY_RESERVED,
+        "prepared_dataset_as_of": source_manifest["prepared_dataset_as_of"],
+        "auto_promote_candidates": spec.auto_promote_candidates,
+        "forward_simulation_enabled": spec.forward_simulation_enabled,
+        "temporal_validation_enabled": False,
+        "forced_candidate_validation": False,
+        "derivation": derivation.to_dict(),
+        "stages": stages,
+    }
+
+
 def build_pipeline_manifest(
     repository: RunRepository,
     root_run_id: str,
@@ -122,6 +244,10 @@ def build_pipeline_manifest(
     child_id_policy_version: int = CHILD_ID_POLICY_RESERVED,
     reserved_child_ids: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    if spec.derivation is not None:
+        return _build_derived_pipeline_manifest(
+            repository, root_run_id, spec, reserved_child_ids=reserved_child_ids
+        )
     scientific_stages = _scientific_stages_for_spec(spec)
     if child_id_policy_version not in {
         CHILD_ID_POLICY_DETERMINISTIC,
@@ -246,6 +372,9 @@ def load_pipeline_manifest(
 def validate_pipeline_manifest(
     manifest: dict[str, Any], *, root_run_id: str
 ) -> None:
+    if manifest.get("schema_version") == DERIVED_PIPELINE_SCHEMA_VERSION:
+        _validate_derived_pipeline_manifest(manifest, root_run_id=root_run_id)
+        return
     if manifest.get("schema_version") != PIPELINE_SCHEMA_VERSION:
         raise ValueError("Version du manifest End-to-end incompatible")
     if manifest.get("root_run_id") != root_run_id:
@@ -342,6 +471,82 @@ def validate_pipeline_manifest(
         raise ValueError("Dépendances de promotion End-to-end incompatibles")
 
 
+def _validate_derived_pipeline_manifest(
+    manifest: dict[str, Any], *, root_run_id: str,
+) -> None:
+    from .derivation import Derivation
+
+    if manifest.get("root_run_id") != root_run_id:
+        raise ValueError("Derived manifest belongs to another run")
+    raw_derivation = manifest.get("derivation")
+    if not isinstance(raw_derivation, dict):
+        raise ValueError("Derived manifest has no derivation plan")
+    derivation = Derivation.from_dict(raw_derivation)
+    stages = manifest.get("stages")
+    if not isinstance(stages, list) or len(stages) != len(STAGE_DEPENDENCIES) or [
+        item.get("stage_key") for item in stages if isinstance(item, dict)
+    ] != list(STAGE_DEPENDENCIES):
+        raise ValueError("Derived pipeline stages are invalid")
+    modes = derivation.validate_plan(
+        promotion_enabled=manifest.get("auto_promote_candidates") is True,
+        forward_enabled=manifest.get("forward_simulation_enabled") is True,
+    )
+    if manifest.get("child_id_policy_version") != CHILD_ID_POLICY_RESERVED:
+        raise ValueError("Derived child ID policy is invalid")
+    if manifest.get("temporal_validation_enabled") or manifest.get("forced_candidate_validation"):
+        raise ValueError("Derived temporal or forced pipeline is not supported")
+    job_types = {stage: job for stage, job, _ in SCIENTIFIC_STAGES}
+    job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
+    effective_ids: dict[str, str | None] = {}
+    owned_ids: set[str] = set()
+    for stage in stages:
+        stage_key = stage["stage_key"]
+        mode = modes[stage_key]
+        if stage.get("mode") != mode:
+            raise ValueError(f"Derived stage mode mismatch: {stage_key}")
+        expected_job_type = (
+            None if stage_key == "promotion" else job_types[stage_key].value
+        )
+        if stage.get("expected_job_type") != expected_job_type:
+            raise ValueError(f"Derived stage job type mismatch: {stage_key}")
+        child_id = stage.get("child_run_id")
+        source_id = stage.get("source_run_id")
+        reference = derivation.inherited_stages.get(stage_key)
+        if mode == "inherited":
+            if (
+                reference is None or child_id is not None
+                or source_id != reference.source_run_id
+                or stage.get("expected_fingerprint") != reference.configuration_fingerprint
+                or stage.get("artifact_digests") != reference.required_artifact_digests
+            ):
+                raise ValueError(f"Invalid inherited stage: {stage_key}")
+        elif mode == "recomputed":
+            if source_id is not None or (stage_key != "promotion" and not child_id):
+                raise ValueError(f"Invalid recomputed stage: {stage_key}")
+            if stage_key == "promotion" and child_id is not None:
+                raise ValueError("Promotion is an internal stage")
+            if stage.get("expected_fingerprint") is not None and not isinstance(
+                stage["expected_fingerprint"], str
+            ):
+                raise ValueError(f"Invalid stage fingerprint: {stage_key}")
+            if not isinstance(stage.get("artifact_digests"), dict):
+                raise ValueError(f"Invalid artifact digests: {stage_key}")
+            if child_id is not None:
+                if child_id in owned_ids or child_id == root_run_id:
+                    raise ValueError("Duplicate derived child ID")
+                owned_ids.add(child_id)
+        else:
+            if child_id is not None or source_id is not None:
+                raise ValueError(f"Disabled stage has a run: {stage_key}")
+            if stage.get("artifact_digests") != {}:
+                raise ValueError(f"Disabled stage has artifacts: {stage_key}")
+        effective_ids[stage_key] = effective_stage_run_id(manifest, stage_key)
+        if stage.get("dependency_run_ids") != [
+            effective_ids[key] for key in STAGE_DEPENDENCIES[stage_key]
+        ]:
+            raise ValueError(f"Derived stage dependencies mismatch: {stage_key}")
+
+
 def persist_or_validate_pipeline_manifest(
     repository: RunRepository, run_id: str, spec: ExperimentSpec
 ) -> dict[str, Any]:
@@ -351,6 +556,35 @@ def persist_or_validate_pipeline_manifest(
         (repository.run_directory(run_id) / "orchestration").mkdir(exist_ok=True)
         repository.write_json(run_id, PIPELINE_MANIFEST, expected)
         return load_pipeline_manifest(repository, run_id) or expected
+    if spec.derivation is not None:
+        if persisted.get("schema_version") != DERIVED_PIPELINE_SCHEMA_VERSION:
+            raise ValueError("Derived pipeline manifest schema mismatch")
+        reserved = {
+            str(item["stage_key"]): str(item["child_run_id"])
+            for item in persisted["stages"]
+            if item.get("mode") == "recomputed" and item.get("child_run_id")
+        }
+        expected = build_pipeline_manifest(
+            repository, run_id, spec, reserved_child_ids=reserved
+        )
+        for key in (
+            "schema_version", "root_run_id", "pipeline_version",
+            "prepared_dataset_as_of", "auto_promote_candidates",
+            "forward_simulation_enabled",
+            "derivation",
+        ):
+            if persisted.get(key) != expected.get(key):
+                raise ValueError(f"Derived pipeline field changed: {key}")
+        for actual, wanted in zip(persisted["stages"], expected["stages"], strict=True):
+            for key in (
+                "stage_key", "mode", "expected_job_type", "child_run_id",
+                "source_run_id", "dependency_run_ids",
+            ):
+                if actual.get(key) != wanted.get(key):
+                    raise ValueError(f"Derived stage reservation changed: {key}")
+        return persisted
+    if persisted.get("schema_version") != PIPELINE_SCHEMA_VERSION:
+        raise ValueError("Ordinary End-to-End manifest schema mismatch")
     policy_version = int(
         persisted.get("child_id_policy_version", CHILD_ID_POLICY_DETERMINISTIC)
     )
@@ -451,6 +685,9 @@ def _base_child_spec(
     return replace(
         parent,
         job_type=job_type,
+        derivation=None,
+        experimental_overrides=(),
+        prepared_snapshot_required=False,
         source_experiment_run=root_run_id,
         source_walk_forward_run=None,
         source_xgboost_calibration_run=None,
@@ -501,7 +738,9 @@ def build_stage_spec(
             )
         return child
 
-    walk_forward_id = str(_stage(manifest, "walk_forward")["child_run_id"])
+    walk_forward_id = effective_stage_run_id(manifest, "walk_forward")
+    if walk_forward_id is None:
+        raise ValueError("Walk-forward source is unavailable")
     cutoff, dataset_digest = _walk_forward_traceability(
         repository, walk_forward_id
     )
@@ -519,6 +758,7 @@ def build_stage_spec(
         ),
         source_prepared_dataset_sha256=dataset_digest,
         prepared_dataset_digest_required=True,
+        prepared_snapshot_required=parent.derivation is not None,
     )
     if stage_key == "fixed_candidate_evaluation":
         return replace(
@@ -542,7 +782,9 @@ def build_stage_spec(
     if stage_key == "xgboost_calibration":
         return child
 
-    xgboost_id = str(_stage(manifest, "xgboost_calibration")["child_run_id"])
+    xgboost_id = effective_stage_run_id(manifest, "xgboost_calibration")
+    if xgboost_id is None:
+        raise ValueError("XGBoost calibration source is unavailable")
     selected = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
@@ -555,9 +797,11 @@ def build_stage_spec(
     if stage_key == "threshold_parameter_calibration":
         return child
 
-    threshold_parameter_id = str(
-        _stage(manifest, "threshold_parameter_calibration")["child_run_id"]
+    threshold_parameter_id = effective_stage_run_id(
+        manifest, "threshold_parameter_calibration"
     )
+    if threshold_parameter_id is None:
+        raise ValueError("Threshold parameter source is unavailable")
     selection = _read_result_json(
         repository,
         threshold_parameter_id,
@@ -566,10 +810,34 @@ def build_stage_spec(
     parameters = selection.get("parameters")
     if not isinstance(parameters, dict):
         raise ValueError("Paramètres de calibration des seuils absents")
+    effective_parameters = dict(parameters)
+    experimental_overrides = ()
+    if parent.derivation is not None:
+        from rstock.threshold_parameter_calibration import THRESHOLD_PARAMETER_FIELDS
+
+        experimental_overrides = tuple(
+            item.to_dict() for item in parent.derivation.overrides
+            if item.field in THRESHOLD_PARAMETER_FIELDS
+        )
+        recorded_overrides = []
+        for item in experimental_overrides:
+            field = str(item["field"])
+            selected_value = effective_parameters.get(field)
+            if (
+                parent.derivation.fork_stage == "threshold_calibration"
+                and selected_value != item["old_value"]
+            ):
+                raise ValueError(f"Inherited threshold selection differs from override: {field}")
+            effective_parameters[field] = item["new_value"]
+            recorded_overrides.append({
+                **item, "selected_value_at_execution": selected_value,
+            })
+        experimental_overrides = tuple(recorded_overrides)
     return replace(
         child,
         source_threshold_parameter_calibration_run=threshold_parameter_id,
-        frozen_threshold_calibration_parameters=dict(parameters),
+        frozen_threshold_calibration_parameters=effective_parameters,
+        experimental_overrides=experimental_overrides,
     )
 
 
@@ -622,19 +890,57 @@ def _validate_or_persist_artifacts(
     if manifest is None:
         raise ValueError("Manifest End-to-end absent")
     stage = _stage(manifest, stage_key)
+    run_id = effective_stage_run_id(manifest, stage_key)
+    if run_id is None:
+        raise ValueError(f"Stage has no effective run: {stage_key}")
     actual = artifact_digests(
-        repository, str(stage["child_run_id"]), stage_key
+        repository, run_id, stage_key
     )
     persisted = stage.get("artifact_digests") or {}
     if persisted and persisted != actual:
         raise ValueError(
             f"Les artefacts de l'étape {stage_key} ont changé depuis leur validation"
         )
+    if not persisted and stage.get("mode") == "inherited":
+        raise ValueError(f"Inherited stage has no frozen artifact digests: {stage_key}")
     if not persisted:
         _persist_stage_values(
             repository, root_run_id, stage_key, artifact_digests=actual
         )
     return actual
+
+
+def _validate_inherited_stage(
+    repository: RunRepository, root_run_id: str, stage_key: str,
+) -> str:
+    manifest = load_pipeline_manifest(repository, root_run_id)
+    if manifest is None:
+        raise ValueError("Derived manifest is missing")
+    stage = _stage(manifest, stage_key)
+    if stage.get("mode") != "inherited":
+        raise ValueError(f"Stage is not inherited: {stage_key}")
+    source_id = effective_stage_run_id(manifest, stage_key)
+    if source_id is None:
+        raise ValueError(f"Inherited stage source is missing: {stage_key}")
+    if repository.storage(source_id)["state"] != "full":
+        raise ValueError(f"Inherited stage source has been purged: {stage_key}")
+    if repository.status(source_id).get("status") != "completed":
+        raise ValueError(f"Inherited stage source is not completed: {stage_key}")
+    if repository.configuration_fingerprint(source_id) != stage["expected_fingerprint"]:
+        raise ValueError(f"Inherited stage fingerprint changed: {stage_key}")
+    if stage_key == "walk_forward":
+        derivation = repository.load_spec(root_run_id).derivation
+        if derivation is not None and derivation.prepared_snapshot_sha256 is not None:
+            snapshot_path = (
+                repository.run_directory(source_id)
+                / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
+            )
+            if not snapshot_path.is_file() or _sha256(snapshot_path) != (
+                derivation.prepared_snapshot_sha256
+            ):
+                raise ValueError("Inherited prepared snapshot has changed")
+    _validate_or_persist_artifacts(repository, root_run_id, stage_key)
+    return source_id
 
 
 def _materialize_stage(
@@ -1126,6 +1432,10 @@ def run_end_to_end(
     execute_reserved_child: Callable[[RunRepository, str], None],
     phase_callback: Callable[..., None],
 ) -> dict[str, Any]:
+    if spec.derivation is not None and not spec.derivation.prepared_snapshot_sha256:
+        raise ValueError("Derived prepared snapshot digest is required")
+    if spec.derivation is not None and spec.auto_promote_candidates:
+        raise ValueError("Derived automatic promotion is deferred")
     repository = RunRepository(output.parent.parent)
     root_run_id = output.parent.name
     if spec.forced_symbol_sets == ():
@@ -1166,17 +1476,36 @@ def run_end_to_end(
         scientific_stages
     ):
         check_cancellation(cancellation_check)
+        current_stage = _stage(manifest, stage_key)
         for dependency in dependencies:
             dependency_stage = _stage(manifest, dependency)
-            dependency_id = str(dependency_stage["child_run_id"])
+            dependency_id = effective_stage_run_id(manifest, dependency)
+            if dependency_id is None:
+                raise ValueError(f"Dependency has no run: {dependency}")
             status = repository.status(dependency_id)
             if status.get("status") != "completed":
                 raise RuntimeError(
                     f"Dépendance incomplète pour {stage_key}: {dependency_id}"
                 )
-            _validate_or_persist_artifacts(
-                repository, root_run_id, dependency
+            if dependency_stage.get("mode") == "inherited":
+                _validate_inherited_stage(repository, root_run_id, dependency)
+            else:
+                _validate_or_persist_artifacts(
+                    repository, root_run_id, dependency
+                )
+
+        if current_stage.get("mode") == "inherited":
+            source_id = _validate_inherited_stage(
+                repository, root_run_id, stage_key
             )
+            completed.append({
+                "stage_key": stage_key,
+                "job_type": job_type.value,
+                "child_run_id": source_id,
+                "mode": "inherited",
+                "artifact_digests": dict(current_stage["artifact_digests"]),
+            })
+            continue
 
         child_run_id, child_spec = _materialize_stage(
             repository, root_run_id, spec, stage_key, stage_index
@@ -1256,6 +1585,7 @@ def run_end_to_end(
                 raise ValueError("Forward end must follow the historical cutoff")
             child_spec = replace(
                 spec, job_type=JobType.FORWARD_SIMULATION,
+                derivation=None,
                 source_end_to_end_run=root_run_id,
                 source_forward_model_snapshot_sha256=forward_snapshot.get("snapshot_sha256"),
                 forward_simulation_start_date=start.date().isoformat(),
@@ -1265,26 +1595,53 @@ def run_end_to_end(
                 auto_promote_candidates=False,
                 run_description="Forward Simulation automatique",
             )
-            forward_id = repository.generate_run_id()
-            repository.create(child_spec, run_id=forward_id, metadata=RunMetadata(
-                run_role=RunRole.PIPELINE_STAGE, parent_run_id=root_run_id,
-                relation_key="forward_simulation", relation_type="forward_simulation",
-                stage_key="forward_simulation", visible_in_history=True,
-            ))
-            forward_status = repository.status(forward_id)
-            forward_status.update(
-                dispatch_state="created",
-                dispatch_requested_at=None,
-                dispatch_launched_at=None,
-                dispatch_attempt_count=0,
-                dispatch_last_error=None,
-            )
-            repository.write_json(forward_id, "status.json", forward_status)
-            repository.append_log(
-                forward_id,
-                f"Forward created pending by End-to-End {root_run_id}",
-            )
-            forward_child = {"child_run_id": forward_id, "status": "pending"}
+            if spec.derivation is not None:
+                forward_id = str(_stage(manifest, "forward_simulation")["child_run_id"])
+                stage_fingerprint = _stage(manifest, "forward_simulation").get(
+                    "expected_fingerprint"
+                )
+                if stage_fingerprint is None:
+                    _persist_stage_values(
+                        repository, root_run_id, "forward_simulation",
+                        expected_fingerprint=child_spec.fingerprint,
+                    )
+                elif stage_fingerprint != child_spec.fingerprint:
+                    raise ValueError("Derived Forward fingerprint has changed")
+            else:
+                forward_id = repository.generate_run_id()
+            forward_directory = repository.run_directory(forward_id)
+            if forward_directory.exists():
+                existing = repository.load_spec(forward_id)
+                metadata = repository.run_metadata(forward_id)
+                if (
+                    existing.fingerprint != child_spec.fingerprint
+                    or metadata.parent_run_id != root_run_id
+                    or metadata.stage_key != "forward_simulation"
+                ):
+                    raise ValueError("Existing Forward child does not match this branch")
+            else:
+                repository.create(child_spec, run_id=forward_id, metadata=RunMetadata(
+                    run_role=RunRole.PIPELINE_STAGE, parent_run_id=root_run_id,
+                    relation_key="forward_simulation", relation_type="forward_simulation",
+                    stage_key="forward_simulation", visible_in_history=True,
+                ))
+                forward_status = repository.status(forward_id)
+                forward_status.update(
+                    dispatch_state="created",
+                    dispatch_requested_at=None,
+                    dispatch_launched_at=None,
+                    dispatch_attempt_count=0,
+                    dispatch_last_error=None,
+                )
+                repository.write_json(forward_id, "status.json", forward_status)
+                repository.append_log(
+                    forward_id,
+                    f"Forward created pending by End-to-End {root_run_id}",
+                )
+            forward_child = {
+                "child_run_id": forward_id,
+                "status": repository.status(forward_id)["status"],
+            }
         except Exception as error:
             forward_child = {"status": "not_started", "error": str(error)}
 
@@ -1543,7 +1900,10 @@ def run_end_to_end(
 
     output.mkdir(parents=True, exist_ok=True)
     summary = {
-        "schema_version": PIPELINE_SCHEMA_VERSION,
+        "schema_version": (
+            DERIVED_PIPELINE_SCHEMA_VERSION
+            if spec.derivation is not None else PIPELINE_SCHEMA_VERSION
+        ),
         "pipeline_version": spec.pipeline_version,
         "root_run_id": root_run_id,
         "walk_forward_protocol": (

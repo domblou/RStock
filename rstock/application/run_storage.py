@@ -231,6 +231,11 @@ class RunStorageService:
                     False, "Le pipeline End-to-end parent n’est pas terminé."
                 )
 
+        derived_dependency = self._derived_dependent({run_id, *related})
+        if derived_dependency is not None:
+            return PurgeEligibility(
+                False, f"Le dérivé {derived_dependency} référence encore ces artefacts."
+            )
         dependency = self._unfinished_dependent(run_id, {*related})
         if dependency is not None:
             return PurgeEligibility(
@@ -283,6 +288,12 @@ class RunStorageService:
         )
 
     def purge(self, run_id: str) -> dict[str, Any]:
+        from .runner import RunService
+
+        with RunService(self.repository)._submission_lock():
+            return self._purge_locked(run_id)
+
+    def _purge_locked(self, run_id: str) -> dict[str, Any]:
         current = self.state(run_id)
         if current["state"] == "purged":
             return current
@@ -372,6 +383,13 @@ class RunStorageService:
                 child_id = stage.get("child_run_id")
                 if child_id:
                     child_id = str(child_id)
+                    if (
+                        stage.get("stage_key") == "forward_simulation"
+                        and not self.repository.run_directory(child_id).exists()
+                    ):
+                        # Forward is best-effort; its reserved ID can remain
+                        # unmaterialized if child creation failed.
+                        continue
                     related.append(child_id)
                     try:
                         child_type = JobType(
@@ -436,6 +454,28 @@ class RunStorageService:
             except (FileNotFoundError, ValueError):
                 continue
             if any(snapshot.get(field) in candidate_ids for field in _SOURCE_FIELDS):
+                return other_id
+        return None
+
+    def _derived_dependent(self, candidate_ids: set[str]) -> str | None:
+        for other_id in self.repository.list_run_ids():
+            if other_id in candidate_ids:
+                continue
+            try:
+                configuration = self.repository.read_json(other_id, "config.json")
+            except (FileNotFoundError, ValueError):
+                continue
+            derivation = configuration.get("derivation")
+            if not isinstance(derivation, Mapping):
+                continue
+            if derivation.get("source_end_to_end_run_id") in candidate_ids:
+                return other_id
+            inherited = derivation.get("inherited_stages")
+            if isinstance(inherited, Mapping) and any(
+                isinstance(reference, Mapping)
+                and reference.get("source_run_id") in candidate_ids
+                for reference in inherited.values()
+            ):
                 return other_id
         return None
 

@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 
-MODEL_STATUS_ORDER = ("active", "candidate", "trained", "inactive", "retired")
+MODEL_STATUS_ORDER = ("active", "watching", "candidate", "trained", "inactive", "retired")
 DEFAULT_MODEL_STATUSES = frozenset(
     status for status in MODEL_STATUS_ORDER if status != "retired"
 )
@@ -36,6 +36,11 @@ JOB_DOMAIN_TITLES = {
 def _status(model: Any) -> str:
     value = getattr(model, "status", "")
     return str(getattr(value, "value", value)).casefold()
+
+
+def model_status_label(status: object) -> str:
+    value = str(getattr(status, "value", status))
+    return "En observation" if value == "watching" else value
 
 
 def job_domain(job_type: object) -> str | None:

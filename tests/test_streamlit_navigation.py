@@ -513,9 +513,10 @@ def test_models_page_uses_compact_presentation_without_changing_actions():
     assert "_models_grid_column_config(_models_trend_y_bounds(table))" in models_page
     assert 'placeholder="Aucune valeur disponible"' in models_page
     assert 'st.columns((0.8, 0.45, 2.75), gap="small")' in models_page
-    assert 'st.columns((1.8, 0.8, 0.75, 0.95, 0.75, 2.5), gap="small")' in models_page
+    assert 'st.columns((1.8, 0.8, 1.3, 0.75, 1.2, 0.75, 1.0), gap="small")' in models_page
     for action in (
         "_submit_operational_job(JobType.PRODUCTION_TRAINING",
+        "service.watch(selected_id)",
         "service.activate(selected_id)",
         "service.deactivate(selected_id)",
         "service.retire(selected_id)",
@@ -784,7 +785,8 @@ def test_surveillance_uses_one_daily_operational_update_card():
     assert "getattr(st, status_level)(status_message)" in card
     assert "Mise à jour quotidienne terminée." in card
     assert "_render_daily_update_card(" in surveillance
-    assert "active_model_count=len(universe.model_ids)" in surveillance
+    assert "tracked_model_count=len(models.tracked_models())" in surveillance
+    assert "active_models=len(universe.model_ids)" in surveillance
     assert surveillance.index("_render_daily_update_card") < surveillance.index(
         "_render_next_session_signals"
     )
@@ -822,7 +824,7 @@ def test_surveillance_top_cards_reuse_the_models_six_card_row():
     assert 'st.container(key="models-kpis")' in kpis
     assert 'columns = st.columns(6, gap="small")' in kpis
     assert kpis.count("_render_models_kpi_card(") == 6
-    assert "active_model_count=len(universe.model_ids)" in surveillance
+    assert "active_models=len(universe.model_ids)" in surveillance
 
 
 def test_surveillance_expander_counts_match_their_displayed_grids():
@@ -850,7 +852,7 @@ def test_surveillance_uses_active_views_and_clears_stale_row_selections():
     assert ".active_history()" in surveillance
     assert "active_realized_results()" in source
     assert "models.active_models()" in source
-    assert models.count("_invalidate_surveillance_selection_state()") == 3
+    assert models.count("_invalidate_surveillance_selection_state()") == 4
 
 
 def test_surveillance_uses_six_operational_kpis_and_a_header_status():

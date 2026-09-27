@@ -220,6 +220,8 @@ class RunService:
             time.sleep(0.05)
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
+        if spec.derivation is not None:
+            raise ValueError("Submit derived experiments through create_derived")
         with self._submission_lock():
             for status in self.repository.list_runs():
                 if (
@@ -233,6 +235,35 @@ class RunService:
                     self.repository.root,
                     run_id,
                     self.max_concurrent_heavy_jobs,
+                )
+                status = self.repository.status(run_id)
+                status["launcher_pid"] = pid
+                self.repository.write_json(run_id, "status.json", status)
+            except Exception as error:
+                self.repository.append_log(run_id, f"Worker launch failed: {error}")
+                self.repository.transition(run_id, JobStatus.FAILED, error=str(error))
+                raise
+            return SubmissionResult(run_id, True)
+
+    def create_derived(
+        self, source_run_id: str, fork_stage: str,
+        changes: dict[str, object],
+        *, forward_enabled: bool = False,
+    ) -> SubmissionResult:
+        """Atomically preflight shared artifacts and launch a new root run."""
+        from .derived_experiments import build_derived_spec
+        from .end_to_end import persist_or_validate_pipeline_manifest
+
+        with self._submission_lock():
+            spec = build_derived_spec(
+                self.repository, source_run_id, fork_stage, changes,
+                forward_enabled=forward_enabled,
+            )
+            run_id = self.repository.create(spec)
+            try:
+                persist_or_validate_pipeline_manifest(self.repository, run_id, spec)
+                pid = self.backend.launch(
+                    self.repository.root, run_id, self.max_concurrent_heavy_jobs
                 )
                 status = self.repository.status(run_id)
                 status["launcher_pid"] = pid
@@ -279,7 +310,9 @@ class RunService:
         """Launch a manual forward evaluation from an immutable source snapshot."""
 
         from .domain import RunMetadata, RunRole
-        from .forward_simulation import SNAPSHOT_FILENAME, _sha256
+        from .forward_simulation import (
+            SNAPSHOT_FILENAME, _sha256, validate_forward_snapshot,
+        )
         from rstock.calendars import resolve_market_session_on_or_before
 
         with self._submission_lock():
@@ -299,6 +332,7 @@ class RunService:
                 raise ValueError("Forward period must be strictly after the source cutoff")
             specification = replace(
                 source, job_type=JobType.FORWARD_SIMULATION,
+                derivation=None,
                 source_end_to_end_run=source_end_to_end_run,
                 source_forward_model_snapshot_sha256=_sha256(snapshot),
                 forward_simulation_start_date=start.date().isoformat(),
@@ -308,6 +342,7 @@ class RunService:
                 auto_promote_candidates=False,
                 run_description="Forward Simulation manuelle",
             )
+            validate_forward_snapshot(self.repository, specification)
             run_id = self.repository.create(
                 specification,
                 metadata=RunMetadata(
@@ -649,6 +684,11 @@ class RunService:
         if self.repository.storage(run_id)["state"] != "full":
             raise ValueError("Un run purgé ne peut pas être relancé.")
         spec = self.repository.load_spec(run_id)
+        if spec.derivation is not None:
+            raise ValueError(
+                "Use Create a derived experiment to start a new branch; "
+                "resume keeps the existing derived run ID"
+            )
         traceability = self.repository.summary(run_id).get("traceability", {})
         replay_values: dict[str, object] = {}
         if spec.job_type is JobType.WALK_FORWARD:
@@ -824,6 +864,24 @@ class RunService:
             if pipeline is not None:
                 pipeline_stages = []
                 for item in pipeline["stages"]:
+                    if item.get("mode") == "inherited":
+                        source_id = str(item["source_run_id"])
+                        source_status = self.repository.status(source_id)
+                        pipeline_stages.append({
+                            **item,
+                            "child_run_id": source_id,
+                            "status": source_status["status"],
+                            "progress": 100.0,
+                            "duration_seconds": source_status.get("duration_seconds"),
+                            "error": source_status.get("error"),
+                        })
+                        continue
+                    if item.get("mode") == "not_executed":
+                        pipeline_stages.append({
+                            **item, "status": "not_requested", "progress": None,
+                            "duration_seconds": None, "error": None,
+                        })
+                        continue
                     child_run_id = item.get("child_run_id")
                     if child_run_id is None:
                         promotion = None

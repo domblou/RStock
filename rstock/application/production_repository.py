@@ -14,7 +14,8 @@ from typing import Any, Callable, Iterator
 
 import pandas as pd
 
-from .production_domain import ProductionModel
+from .production_domain import ProductionModel, ProductionModelStatus
+from .production_quality import PredictionModelStatus, resolve_prediction_model_status
 
 
 WRITE_ATTEMPTS = 5
@@ -122,6 +123,17 @@ class ProductionRepository:
 
         return [model for model in self.models() if model.is_active]
 
+    def tracked_models(self) -> list[ProductionModel]:
+        """Models receiving observations; only ACTIVE is production eligible."""
+
+        return [
+            model for model in self.models()
+            if model.status in {ProductionModelStatus.WATCHING, ProductionModelStatus.ACTIVE}
+        ]
+
+    def tracked_model_ids(self) -> frozenset[str]:
+        return frozenset(model.model_id for model in self.tracked_models())
+
     def active_model_ids(self) -> frozenset[str]:
         return frozenset(model.model_id for model in self.active_models())
 
@@ -180,6 +192,23 @@ class ProductionRepository:
             models[positions[0]] = model
             self._write_models(models)
 
+    def mutate_model(
+        self, model_id: str, mutation: Callable[[ProductionModel], ProductionModel]
+    ) -> ProductionModel:
+        """Apply a lifecycle change to the latest persisted registry record."""
+
+        with self.transaction():
+            models = self.models()
+            for index, current in enumerate(models):
+                if current.model_id == model_id:
+                    updated = mutation(current)
+                    if updated.model_id != model_id:
+                        raise ValueError("A lifecycle change cannot replace model_id")
+                    models[index] = updated
+                    self._write_models(models)
+                    return updated
+        raise KeyError(f"Unknown production model: {model_id}")
+
     def artifact_directory(self, model_id: str) -> Path:
         return self.artifacts_root / model_id
 
@@ -198,13 +227,52 @@ class ProductionRepository:
     def read_active_model_table(self, name: str) -> pd.DataFrame:
         """Read a surveillance view without altering persisted history."""
 
+        return self._read_model_table(
+            name, self.active_model_ids(),
+            {PredictionModelStatus.ACTIVE.value, PredictionModelStatus.LEGACY_UNKNOWN.value},
+        )
+
+    def read_tracked_model_table(self, name: str) -> pd.DataFrame:
+        """Read observation and active events for the current tracked population."""
+
+        return self._read_model_table(
+            name, self.tracked_model_ids(),
+            {item.value for item in PredictionModelStatus},
+        )
+
+    def read_watching_model_table(self, name: str) -> pd.DataFrame:
+        watching_ids = frozenset(
+            model.model_id for model in self.tracked_models()
+            if model.status == ProductionModelStatus.WATCHING
+        )
+        return self._read_model_table(
+            name, watching_ids, {PredictionModelStatus.WATCHING.value},
+        )
+
+    def _read_model_table(
+        self, name: str, model_ids: frozenset[str], allowed_contexts: set[str]
+    ) -> pd.DataFrame:
         frame = self.read_table(name)
         if frame.empty:
             return frame
         if "model_id" not in frame:
             return frame.iloc[0:0].copy()
-        active_ids = self.active_model_ids()
-        return frame[frame["model_id"].astype(str).isin(active_ids)].copy()
+        frame = frame[frame["model_id"].astype(str).isin(model_ids)].copy()
+        if frame.empty:
+            return frame
+        if name == "realized_results" and "prediction_id" in frame:
+            predictions = self.read_table("predictions")
+            if "prediction_id" not in predictions:
+                return frame.iloc[0:0].copy()
+            contexts = {
+                str(row["prediction_id"]): resolve_prediction_model_status(row)
+                for row in predictions.to_dict("records")
+            }
+            return frame[frame["prediction_id"].astype(str).map(contexts).isin(allowed_contexts)].copy()
+        if name in {"predictions", "signals"}:
+            contexts = frame.apply(resolve_prediction_model_status, axis=1)
+            return frame[contexts.isin(allowed_contexts)].copy()
+        return frame
 
     def write_table(self, name: str, frame: pd.DataFrame) -> None:
         with self.transaction():
@@ -212,17 +280,36 @@ class ProductionRepository:
                 self.history_root / f"{name}.csv", frame.to_csv(index=False)
             )
 
-    def append_table(self, name: str, rows: pd.DataFrame, *, key: str) -> pd.DataFrame:
-        return self.append_tables({name: (rows, key)})[name]
+    def append_table(
+        self, name: str, rows: pd.DataFrame, *, key: str,
+        expected_models: tuple[ProductionModel, ...] | None = None,
+    ) -> pd.DataFrame:
+        return self.append_tables(
+            {name: (rows, key)}, expected_models=expected_models
+        )[name]
 
     def append_tables(
-        self, updates: dict[str, tuple[pd.DataFrame, str]]
+        self, updates: dict[str, tuple[pd.DataFrame, str]], *,
+        expected_models: tuple[ProductionModel, ...] | None = None,
     ) -> dict[str, pd.DataFrame]:
         """Publish one or several operational histories as one directory swap."""
 
         if not updates:
             return {}
         with self.transaction():
+            if expected_models is not None:
+                current = {model.model_id: model for model in self.models()}
+                for expected in expected_models:
+                    actual = current.get(expected.model_id)
+                    if (
+                        actual is None
+                        or actual.status != expected.status
+                        or actual.artifact_version != expected.artifact_version
+                        or len(actual.status_history) != len(expected.status_history)
+                    ):
+                        raise ValueError(
+                            "Tracked model lifecycle changed during prediction; rerun with current models"
+                        )
             self.root.mkdir(parents=True, exist_ok=True)
             staging = Path(
                 tempfile.mkdtemp(prefix=".history.staging-", dir=self.root)
@@ -248,6 +335,35 @@ class ProductionRepository:
                         else rows.copy()
                     )
                     if key in combined:
+                        if name == "predictions" and "prediction_origin" in previous:
+                            original_origins = previous.drop_duplicates(key, keep="first").set_index(key)[
+                                "prediction_origin"
+                            ]
+                            original_origins = original_origins[
+                                original_origins.notna() & original_origins.astype(str).ne("")
+                            ]
+                            persisted_origin = combined[key].map(original_origins)
+                            if "prediction_origin" not in combined:
+                                combined["prediction_origin"] = None
+                            combined["prediction_origin"] = persisted_origin.where(
+                                persisted_origin.notna(), combined["prediction_origin"]
+                            )
+                        if (
+                            "model_status_at_prediction" in combined
+                            and name in {"predictions", "signals"}
+                            and key == (
+                                "prediction_id" if name == "predictions" else "signal_id"
+                            )
+                        ):
+                            # A retry may correct an event's payload, but a later
+                            # activation must never relabel its original scope.
+                            first_context = {
+                                str(item[key]): resolve_prediction_model_status(item)
+                                for item in reversed(combined.to_dict("records"))
+                            }
+                            combined["model_status_at_prediction"] = combined[key].astype(str).map(
+                                first_context
+                            )
                         # Stable event identities are correction keys: a later
                         # publication replaces the prior payload atomically.
                         # This lets derived quality detect late corrected

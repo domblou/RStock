@@ -83,6 +83,11 @@ from rstock.application.run_comparison import (
 )
 from rstock.application.runner import running_duration
 from rstock.application.end_to_end import historical_forced_validation_state
+from rstock.application.derivation import (
+    FORK_STAGE_KEYS, STAGE_PARAMETER_FIELDS, stage_modes,
+)
+from rstock.application.derived_experiments import source_parameter_value
+from rstock.application.end_to_end import load_pipeline_manifest
 from rstock.application.qualification_holdout_diagnostic import diagnostic_state
 from rstock.application.temporal_validation_ui import (
     candidate_identity_tables,
@@ -152,6 +157,7 @@ from rstock.application.production_quality_ui import (
     load_model_quality_detail,
     load_models_master,
     models_grid,
+    model_phase_comparison_table,
     performance_windows_display_table,
     sort_quality_models,
     style_directional_columns,
@@ -164,10 +170,12 @@ from rstock.application.real_trades import (
 )
 from rstock.application.model_ui import (
     DEFAULT_MODEL_STATUSES,
+    MODEL_STATUS_ORDER,
     filter_models,
     job_domain,
     job_domain_title,
     model_filter_options,
+    model_status_label,
 )
 from rstock.application.simulation import (
     SIMULATION_MODE_DAILY_RETRAIN,
@@ -2756,9 +2764,143 @@ def _render_walk_forward_tabs(
     )
 
 
+def _render_derived_creation(
+    run_id: str, detail: dict[str, object], service: ExperimentService,
+) -> None:
+    configuration = detail.get("configuration", {})
+    if not isinstance(configuration, Mapping):
+        return
+    derivation = configuration.get("derivation")
+    if isinstance(derivation, Mapping):
+        st.caption(f"Dérivé de {derivation.get('source_end_to_end_run_id', '—')}")
+        return
+    status = detail.get("status", {})
+    if not isinstance(status, Mapping) or status.get("status") != "completed":
+        return
+    if configuration.get("temporal_validation_enabled") or configuration.get("forced_symbol_sets") is not None:
+        return
+    key = f"derive-open-{run_id}"
+    if st.button("Créer une expérience dérivée", key=f"derive-button-{run_id}"):
+        st.session_state[key] = True
+    if not st.session_state.get(key):
+        return
+    repository = service.run_service.repository
+    source_spec = repository.load_spec(run_id)
+    source_manifest = load_pipeline_manifest(repository, run_id)
+    if source_manifest is None or source_manifest.get("schema_version") != 1:
+        st.error("Le manifest source ne permet pas cette dérivation.")
+        return
+    labels = {
+        "xgboost_calibration": "Calibration XGBoost",
+        "threshold_parameter_calibration": "Calibration paramètres de seuil",
+        "threshold_calibration": "Calibration des seuils",
+    }
+    fork = st.selectbox(
+        "Point de dérivation", FORK_STAGE_KEYS,
+        format_func=lambda value: labels[value], key=f"derive-fork-{run_id}",
+    )
+    forward_enabled = st.checkbox(
+        "Lancer une Forward Simulation pour cette expérience dérivée",
+        value=False, key=f"derive-forward-{run_id}",
+    )
+    modes = stage_modes(fork, forward_enabled=forward_enabled)
+    st.caption("Amont hérité : " + ", ".join(
+        labels.get(stage, "Walk-forward")
+        for stage in ("walk_forward", *FORK_STAGE_KEYS)
+        if modes[stage] == "inherited"
+    ))
+    st.caption("À recalculer : " + ", ".join(
+        labels[stage] for stage in FORK_STAGE_KEYS
+        if modes[stage] == "recomputed"
+    ))
+    if forward_enabled:
+        st.caption("À recalculer : Forward.")
+        st.caption("Non exécutée : promotion automatique.")
+    else:
+        st.caption("Non exécutées : Forward, promotion automatique.")
+    fields = [
+        field for stage in FORK_STAGE_KEYS
+        if modes[stage] == "recomputed"
+        for field in sorted(STAGE_PARAMETER_FIELDS.get(stage, ()))
+    ]
+    changes: dict[str, object] = {}
+    with st.container(border=True):
+        if forward_enabled:
+            original_mode = source_parameter_value(
+                repository, source_spec, source_manifest, "forward_simulation_mode"
+            )
+            forward_modes = ("63_sessions", "126_sessions", "custom_end_date")
+            selected_mode = st.selectbox(
+                "Fenêtre Forward", forward_modes,
+                index=(forward_modes.index(original_mode)
+                       if original_mode in forward_modes else 0),
+                key=f"derive-forward-mode-{run_id}-{fork}",
+            )
+            if selected_mode != original_mode:
+                changes["forward_simulation_mode"] = selected_mode
+            if selected_mode == "custom_end_date":
+                original_end = source_parameter_value(
+                    repository, source_spec, source_manifest,
+                    "forward_simulation_end_date",
+                )
+                default_end = (
+                    pd.Timestamp(original_end).date() if original_end
+                    else pd.Timestamp(source_manifest["prepared_dataset_as_of"]).date()
+                    + timedelta(days=90)
+                )
+                selected_end = st.date_input(
+                    "Date de fin Forward", value=default_end,
+                    key=f"derive-forward-end-{run_id}-{fork}",
+                ).isoformat()
+                if selected_end != original_end:
+                    changes["forward_simulation_end_date"] = selected_end
+        for field in fields:
+            try:
+                original = source_parameter_value(
+                    repository, source_spec, source_manifest, field
+                )
+            except (OSError, ValueError, KeyError) as error:
+                st.error(f"Valeur source indisponible pour {field} : {error}")
+                return
+            if isinstance(original, bool):
+                value = st.checkbox(field, value=original, key=f"derive-value-{run_id}-{fork}-{field}")
+            elif isinstance(original, int):
+                value = st.number_input(field, value=original, step=1, key=f"derive-value-{run_id}-{fork}-{field}")
+            elif isinstance(original, float):
+                value = st.number_input(field, value=original, format="%.6f", key=f"derive-value-{run_id}-{fork}-{field}")
+            else:
+                raw = st.text_input(field, value=json.dumps(original), key=f"derive-value-{run_id}-{fork}-{field}")
+                try:
+                    value = json.loads(raw)
+                except json.JSONDecodeError:
+                    value = raw
+            if value != original:
+                changes[field] = value
+        st.write("Paramètres modifiés :")
+        st.write(", ".join(
+            f"{field} : {source_parameter_value(repository, source_spec, source_manifest, field)} → {value}"
+            for field, value in changes.items()
+        ) or "Aucun")
+        submitted = st.button(
+            "Lancer l’expérience dérivée", disabled=not changes, key=f"derive-submit-{run_id}-{fork}"
+        )
+    if submitted:
+        try:
+            result = service.create_derived(
+                run_id, fork, changes, forward_enabled=forward_enabled
+            )
+        except (OSError, ValueError, RuntimeError, TypeError) as error:
+            st.error(f"Dérivation impossible : {error}")
+        else:
+            st.session_state[key] = False
+            st.success(f"End-to-End dérivé créé : {result.run_id}")
+
+
 def _render_pipeline_summary(
     run_id: str, detail: dict[str, object], service: ExperimentService | None = None
 ) -> None:
+    if service is not None:
+        _render_derived_creation(run_id, detail, service)
     summary = detail.get("summary", {})
     protocol = summary.get("walk_forward_protocol") if isinstance(summary, Mapping) else None
     if isinstance(protocol, str) and protocol:
@@ -2851,6 +2993,12 @@ def _render_pipeline_child(
         st.info("Cette étape n'est pas encore réservée dans le manifest.")
         return
     child_run_id = stage.get("child_run_id")
+    if stage.get("mode") == "inherited":
+        st.caption(f"Héritée du run source : {stage.get('source_run_id')}")
+        if st.button(
+            "Ouvrir le run source", key=f"open-inherited-{parent_run_id}-{stage_key}"
+        ):
+            _history_navigation("detail", [str(stage["source_run_id"])])
     if not child_run_id or stage.get("status") == "reserved":
         st.caption(
             f"Étape {stage.get('status', 'pending')} - aucun artefact chargé."
@@ -4207,7 +4355,7 @@ def _submit_operational_job(
     if model_id:
         symbols = models.repository.get(model_id).symbols
     else:
-        symbols = models.operational_universe().symbols
+        symbols = models.tracked_universe().symbols
     if len(symbols) < 2:
         st.error("Au moins deux symboles opérationnels sont nécessaires.")
         return
@@ -5061,7 +5209,7 @@ _DAILY_UPDATE_STAGES = (
 
 
 def _render_daily_update_card(
-    runs: list[dict[str, object]], *, active_model_count: int
+    runs: list[dict[str, object]], *, tracked_model_count: int
 ) -> None:
     """Submit and follow the existing full operational workflow in one place."""
 
@@ -5136,7 +5284,7 @@ def _render_daily_update_card(
                 "Relancer la mise à jour" if retry_failed else "Mettre à jour RStock",
                 type="primary",
                 width="stretch",
-                disabled=active_model_count == 0 or (
+                disabled=tracked_model_count == 0 or (
                     current is not None
                     and current.get("status") in {"pending", "running"}
                 ),
@@ -5315,6 +5463,60 @@ def _evaluated_predictions_panel(
         _render_prediction_audit_details(selected_record)
 
 
+def _render_watching_surveillance_section(
+    *, project_root: Path, models: ModelService,
+    signal_service: SignalService, quality: pd.DataFrame,
+    next_session: pd.Timestamp,
+) -> None:
+    """Read only observation events; never expose a production trade action."""
+
+    watching_models = [
+        model for model in models.tracked_models() if model.status.value == "watching"
+    ]
+    with st.container(border=True):
+        st.subheader("En observation")
+        st.caption("Signaux suivis et évalués, non utilisés en production.")
+        if not watching_models:
+            st.info("Aucun modèle en observation.")
+            return
+        predictions = PredictionService(project_root).watching_history()
+        signals = signal_service.watching_history()
+        realized = signal_service.watching_realized_results()
+        watching_quality = quality[quality["status"].astype(str).eq("watching")]
+        upcoming = next_session_signals_view(
+            build_signals_view(signals, predictions), watching_quality, next_session
+        )
+        freshness = MarketDataService().freshness(
+            models.tracked_universe().symbols, st.session_state.lab_config
+        )
+        evaluated = build_evaluated_predictions_view(
+            predictions, signals, realized, freshness
+        )
+        latest = latest_session_results_view(evaluated, watching_quality)
+        st.markdown("**Signaux à venir**")
+        if upcoming.table.empty:
+            st.caption("Aucun signal en observation pour la prochaine séance.")
+        else:
+            st.dataframe(
+                _styled_surveillance_table(
+                    upcoming.table, ("P(Up)", "Rendement", "Trades gagnants")
+                ),
+                hide_index=True, width="stretch",
+                column_config=_surveillance_column_config(upcoming.table.columns),
+            )
+        st.markdown("**Dernière séance**")
+        if latest.table.empty:
+            st.caption("Aucun signal en observation évalué récemment.")
+        else:
+            st.dataframe(
+                _styled_surveillance_table(
+                    latest.table, ("P(Up)", "Rendement", "P&L cumulé")
+                ),
+                hide_index=True, width="stretch",
+                column_config=_surveillance_column_config(latest.table.columns),
+            )
+
+
 def _render_surveillance_page(*, polling: bool) -> None:
     _surveillance_styles()
     project_root = st.session_state.lab_config.project_root
@@ -5369,9 +5571,16 @@ def _render_surveillance_page(*, polling: bool) -> None:
         active_models=len(universe.model_ids),
         last_update=last_update,
     )
-    _render_daily_update_card(runs, active_model_count=len(universe.model_ids))
+    _render_daily_update_card(
+        runs, tracked_model_count=len(models.tracked_models())
+    )
+    st.subheader("Production")
     _render_next_session_signals(next_signals)
     _render_latest_session_results(latest_results)
+    _render_watching_surveillance_section(
+        project_root=project_root, models=models, signal_service=signal_service,
+        quality=quality, next_session=next_session,
+    )
     if surveillance_refresh_decision(runs, polling=polling).final_rerun:
         st.rerun(scope="app")
 
@@ -5924,7 +6133,7 @@ def _render_model_quality_detail(model_id: str) -> None:
         title_column, status_badge, quality_badge = st.columns((3.0, 0.65, 1.35), gap="small")
         title_column.subheader(f"{target} ← {', '.join(str(item) for item in predictors)}")
         status_badge.badge(
-            model.status.value,
+            model.status.display_label,
             color="green" if model.status.value == "active" else "gray",
         )
         quality_badge.badge(quality_status, color="gray")
@@ -5934,6 +6143,8 @@ def _render_model_quality_detail(model_id: str) -> None:
             " | Dernière observation évaluée : "
             f"{_model_detail_date(snapshot.get('last_evaluated_date'))}"
         )
+        if model.status.value == "watching":
+            st.caption("En observation — non utilisé en production")
     if detail.quality_state == "missing":
         st.caption("Qualité non calculée pour ce modèle.")
     elif detail.quality_state == "version_mismatch":
@@ -5958,6 +6169,14 @@ def _render_model_quality_detail(model_id: str) -> None:
         ("Run WF", _model_detail_short_id(source_wf), "history"),
     )
     _render_model_lineage_cards(lineage_items)
+    st.caption(
+        "Début de l’observation : "
+        f"{_model_detail_date(model.watching_started_at)}"
+        " · Activation : "
+        f"{_model_detail_date(model.activated_at)}"
+        " · Dernière désactivation : "
+        f"{_model_detail_date(model.deactivated_at)}"
+    )
     windows = {
         width: snapshot.get(f"window_{width}", {}) for width in (20, 63, 126)
     }
@@ -5992,6 +6211,22 @@ def _render_model_quality_detail(model_id: str) -> None:
         height=145,
         column_config=_model_detail_column_config(_MODEL_DETAIL_WINDOWS_HELP),
     )
+    st.markdown("#### Historique par période")
+    if detail.observations.empty:
+        st.caption("Aucune observation évaluée pour comparer les périodes.")
+    else:
+        st.dataframe(
+            style_directional_columns(
+                model_phase_comparison_table(detail.observations, detail.series),
+                ("Rendement moyen", "Trades gagnants", "P&L cumulé", "Drawdown"),
+            ),
+            hide_index=True, width="stretch",
+        )
+        if detail.observations["model_status_at_prediction"].eq("legacy_unknown").any():
+            st.caption(
+                "Les événements antérieurs sans statut figé sont affichés dans "
+                "une période distincte; ils ne sont pas reclassés selon le statut courant."
+            )
 
     charts = st.columns(2, gap="small")
     series = detail.series.copy()
@@ -5999,7 +6234,7 @@ def _render_model_quality_detail(model_id: str) -> None:
         with st.container(border=True):
             st.markdown("#### P&L cumulé")
             if series.empty:
-                st.info("Aucune série Production disponible.")
+                st.info("Aucune série de suivi disponible.")
             else:
                 pnl_columns = ["session_date", "cumulative_pnl"]
                 if "baseline_expected_cumulative_pnl" in series:
@@ -6007,7 +6242,7 @@ def _render_model_quality_detail(model_id: str) -> None:
                 else:
                     st.caption("Courbe baseline indisponible")
                 pnl = series[pnl_columns].rename(columns={
-                    "cumulative_pnl": "Production",
+                    "cumulative_pnl": "Historique complet",
                     "baseline_expected_cumulative_pnl": "Baseline attendue",
                 }).melt("session_date", var_name="Série", value_name="P&L ($)")
                 st.altair_chart(
@@ -6072,9 +6307,16 @@ def _render_model_quality_detail(model_id: str) -> None:
             st.info("Aucun signal haussier live évalué.")
         else:
             signal_table = evaluated_bullish_signals_display_table(signals).head(10)
+            signal_table["Période"] = signals.loc[signal_table.index, "model_status_at_prediction"].map(
+                lambda value: (
+                    "En observation" if value == "watching" else
+                    "Production active" if value == "active" else
+                    "Historique antérieur"
+                )
+            )
             st.dataframe(
                 style_directional_columns(
-                    signal_table[["Date", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
+                    signal_table[["Date", "Période", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
                     ("Rendement", "P&L", "MFE", "MAE"),
                 ),
                 hide_index=True, width="stretch",
@@ -6098,6 +6340,10 @@ def _render_model_quality_detail(model_id: str) -> None:
             "cutoff_date": lineage.get("cutoff_date"),
             "source_configuration": model.source_configuration,
             "training_metadata": model.training_metadata,
+            "watching_started_at": model.watching_started_at,
+            "activated_at": model.activated_at,
+            "deactivated_at": model.deactivated_at,
+            "status_history": model.status_history,
             "temporal_validation_reason": lineage.get("temporal_validation_reason"),
         })
     if detail.quality_state == "current":
@@ -6153,7 +6399,14 @@ def _models_page() -> None:
         _render_models_kpi_card(kpis[5], f"Signaux {window} séances", int(values["signals"]), "notifications")
 
     filters = st.columns((1, 1, 1.35, 1, 1.35), gap="small")
-    statuses = filters[0].multiselect("Statut", sorted(master["status"].dropna().astype(str).unique()), key="models-status-filter")
+    status_options = [
+        *MODEL_STATUS_ORDER,
+        *sorted(set(master["status"].dropna().astype(str)) - set(MODEL_STATUS_ORDER)),
+    ]
+    statuses = filters[0].multiselect(
+        "Statut", status_options, key="models-status-filter",
+        format_func=model_status_label, placeholder="Tous les statuts",
+    )
     universe_options = sorted(master["universe_name"].dropna().astype(str).unique())
     universes = filters[1].multiselect(
         "Univers", universe_options, key="models-universe-filter",
@@ -6199,7 +6452,7 @@ def _models_page() -> None:
         _live_job_panel(_service(), domain="model")
         return
     st.markdown("**1 modèle sélectionné**")
-    controls = st.columns((1.8, 0.8, 0.75, 0.95, 0.75, 2.5), gap="small")
+    controls = st.columns((1.8, 0.8, 1.3, 0.75, 1.2, 0.75, 1.0), gap="small")
     if controls[0].button("Ouvrir le détail du modèle", type="primary"):
         st.session_state["models-navigation"] = {"mode": "detail", "model_id": selected_id}
         st.rerun()
@@ -6210,13 +6463,16 @@ def _models_page() -> None:
     selected = service.repository.model_from_summary(
         {"registry_payload": selected_row["registry_payload"]}
     )
-    if controls[1].button("Entraîner", disabled=selected.status.value in {"active", "retired"}):
+    if controls[1].button("Entraîner", disabled=selected.status.value in {"active", "watching", "retired"}):
         _submit_operational_job(JobType.PRODUCTION_TRAINING, model_id=selected_id)
-    if controls[2].button("Activer", disabled=selected.status.value not in {"trained", "inactive"}):
+    if controls[2].button("Démarrer le suivi", disabled=selected.status.value != "trained"):
+        service.watch(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
+    if controls[3].button("Activer", disabled=selected.status.value not in {"trained", "watching", "inactive"}):
         service.activate(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
-    if controls[3].button("Désactiver", disabled=selected.status.value != "active"):
+    stop_label = "Arrêter le suivi" if selected.status.value == "watching" else "Désactiver"
+    if controls[4].button(stop_label, disabled=selected.status.value not in {"active", "watching"}):
         service.deactivate(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
-    if controls[4].button("Retirer", disabled=selected.status.value == "active"):
+    if controls[5].button("Retirer", disabled=selected.status.value in {"active", "watching"}):
         service.retire(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
     _live_job_panel(_service(), domain="model")
 

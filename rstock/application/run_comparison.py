@@ -9,6 +9,9 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Mapping, Sequence
 
+from .auto_promotion import _promotion_guidance
+from .end_to_end import effective_stage_run_id
+
 
 def _json(path: Path) -> dict[str, Any]:
     try:
@@ -69,14 +72,72 @@ class EndToEndComparison:
 
 
 def _stage_ids(parent: Path, pipeline: Mapping[str, Any]) -> dict[str, str]:
+    manifest_path = parent / "orchestration" / "pipeline.json"
+    if manifest_path.is_file():
+        manifest = _json(manifest_path)
+        stages = manifest.get("stages", [])
+        resolved: dict[str, str] = {}
+        for item in stages if isinstance(stages, list) else []:
+            if not isinstance(item, dict) or not item.get("stage_key"):
+                continue
+            key = str(item["stage_key"])
+            try:
+                run_id = effective_stage_run_id(manifest, key)
+            except (KeyError, ValueError):
+                continue
+            if run_id is not None:
+                resolved[key] = run_id
+        return resolved
     stages = pipeline.get("stages")
     if not isinstance(stages, list):
-        stages = _json(parent / "orchestration" / "pipeline.json").get("stages", [])
+        stages = []
     return {
         str(item["stage_key"]): str(item["child_run_id"])
         for item in stages
         if isinstance(item, dict) and item.get("stage_key") and item.get("child_run_id")
     }
+
+
+def _final_candidate_sets(
+    parent: Path, threshold_results: Path | None, config: Mapping[str, Any],
+) -> tuple[int | None, set[str], set[str]]:
+    snapshot_path = parent / "results" / "forward_model_snapshot.json"
+    if snapshot_path.is_file():
+        models = _json(snapshot_path).get("models")
+        if not isinstance(models, list):
+            return None, set(), set()
+        return (
+            len(models),
+            {str(item["set"]) for item in models if isinstance(item, dict) and item.get("set")},
+            {str(item["target"]) for item in models if isinstance(item, dict) and item.get("target")},
+        )
+    if threshold_results is None or not all(
+        (threshold_results / name).is_file()
+        for name in (
+            "selected_thresholds_by_set.json", "threshold_metrics_by_set.csv",
+            "holdout_metrics.csv",
+        )
+    ):
+        return None, set(), set()
+    try:
+        selected = json.loads(
+            (threshold_results / "selected_thresholds_by_set.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(selected, dict):
+            return None, set(), set()
+        guidance = _promotion_guidance(
+            threshold_results, selected, config.get("rstock_config")
+        )
+    except (OSError, ValueError, TypeError, KeyError):
+        return None, set(), set()
+    if "Statut promotion" not in guidance:
+        return None, set(), set()
+    candidates = guidance[guidance["Statut promotion"].eq("Candidat")]
+    return (
+        len(candidates),
+        set(candidates["Combinaison"].astype(str)),
+        set(candidates["Cible"].astype(str)),
+    )
 
 
 def _candidate_quality(path: Path, sets: set[str]) -> tuple[float | None, float | None, float | None, int | None]:
@@ -149,14 +210,14 @@ def load_end_to_end_comparison(project_root: Path, run_id: str) -> EndToEndCompa
                  if "threshold_calibration" in stages else {})
     up = threshold.get("holdout_combination_counts", {}).get("Up", {})
     snapshot = _json(parent / "results" / "forward_model_snapshot.json")
-    models = snapshot.get("models")
-    models = models if isinstance(models, list) else None
-    candidates = len(models) if models is not None else None
-    sets = {str(item["set"]) for item in models or [] if isinstance(item, dict) and item.get("set")}
-    targets = {str(item["target"]) for item in models or [] if isinstance(item, dict) and item.get("target")}
+    threshold_results = (
+        runs / stages["threshold_calibration"] / "results"
+        if "threshold_calibration" in stages else None
+    )
+    candidates, sets, targets = _final_candidate_sets(parent, threshold_results, config)
     quality = _candidate_quality(
-        runs / stages["threshold_calibration"] / "results" / "holdout_metrics.csv", sets
-    ) if "threshold_calibration" in stages else (None, None, None, None)
+        threshold_results / "holdout_metrics.csv", sets
+    ) if threshold_results is not None else (None, None, None, None)
     forward_status, forward = _forward_state(
         runs, config.get("forward_simulation_enabled") is True, pipeline, root_summary
     )
@@ -169,7 +230,7 @@ def load_end_to_end_comparison(project_root: Path, run_id: str) -> EndToEndCompa
         qualified=wf.get("eligible_combinations"),
         confirmed=int(confirmed) if _number(confirmed) is not None else None,
         up_evaluable=up.get("evaluated_combinations") if isinstance(up, dict) else None,
-        candidates=candidates, targets=len(targets) if models is not None else None,
+        candidates=candidates, targets=len(targets) if candidates is not None else None,
         holdout_auc=quality[0], holdout_precision=quality[1],
         holdout_return=quality[2], holdout_signals=quality[3],
         forward_status=forward_status,

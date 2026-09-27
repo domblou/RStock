@@ -58,6 +58,95 @@ def _run(
     return parent
 
 
+def _historical_threshold_artifacts(root: Path, threshold_id: str = "threshold") -> None:
+    result = root / "runs" / threshold_id / "results"
+    _write(result / "selected_thresholds_by_set.json", {
+        '["AAA","BBB"]': {"Up": {"status": "selected", "threshold": 0.6}}
+    })
+    (result / "threshold_metrics_by_set.csv").write_text(
+        "Set,Direction,Selected\n", encoding="utf-8"
+    )
+    with (result / "holdout_metrics.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=[
+            "Set", "Direction", "Threshold", "SignalCount", "ROCAUC", "Precision",
+            "DirectionalReturnMean", "OppositeMoveFrequency",
+        ])
+        writer.writeheader()
+        writer.writerow({
+            "Set": '["AAA","BBB"]', "Direction": "Up", "Threshold": 0.6,
+            "SignalCount": 25, "ROCAUC": 0.72, "Precision": 0.5,
+            "DirectionalReturnMean": 0.01, "OppositeMoveFrequency": 0.1,
+        })
+
+
+def test_historical_v1_without_forward_snapshot_reads_frozen_threshold_candidates(tmp_path):
+    parent = _run(tmp_path, candidates=True)
+    (parent / "results/forward_model_snapshot.json").unlink()
+    _write(parent / "orchestration/pipeline.json", {
+        "schema_version": 1,
+        "stages": [
+            {"stage_key": "walk_forward", "child_run_id": "wf"},
+            {"stage_key": "threshold_calibration", "child_run_id": "threshold"},
+        ],
+    })
+    _historical_threshold_artifacts(tmp_path)
+
+    item = load_end_to_end_comparison(tmp_path, "ete")
+
+    assert (item.up_evaluable, item.candidates, item.targets) == (12, 1, 1)
+    assert item.candidate_yield == 0.01
+    assert (item.holdout_auc, item.holdout_precision, item.holdout_return, item.holdout_signals) == (
+        0.72, 0.5, 0.01, 25,
+    )
+
+
+def test_historical_fallback_requires_valid_threshold_artifacts(tmp_path):
+    parent = _run(tmp_path, candidates=True)
+    (parent / "results/forward_model_snapshot.json").unlink()
+    _historical_threshold_artifacts(tmp_path)
+    (tmp_path / "runs/threshold/results/selected_thresholds_by_set.json").write_text(
+        "not json", encoding="utf-8"
+    )
+
+    item = load_end_to_end_comparison(tmp_path, "ete")
+
+    assert item.candidates is None
+    assert item.holdout_auc is None
+
+
+@pytest.mark.parametrize("threshold_mode", ["inherited", "recomputed"])
+def test_derived_v2_resolves_effective_threshold_stage(tmp_path, threshold_mode):
+    _run(tmp_path, candidates=True)
+    _historical_threshold_artifacts(tmp_path)
+    derived = tmp_path / "runs" / "derived"
+    _write(derived / "config.json", {"forward_simulation_enabled": False})
+    _write(derived / "status.json", {"status": "completed"})
+    threshold_stage = (
+        {"stage_key": "threshold_calibration", "mode": "inherited", "source_run_id": "threshold"}
+        if threshold_mode == "inherited" else
+        {"stage_key": "threshold_calibration", "mode": "recomputed", "child_run_id": "threshold_derived"}
+    )
+    if threshold_mode == "recomputed":
+        _historical_threshold_artifacts(tmp_path, "threshold_derived")
+        _write(tmp_path / "runs/threshold_derived/summary.json", {
+            "holdout_combination_counts": {"Up": {"evaluated_combinations": 12}}
+        })
+    _write(derived / "orchestration/pipeline.json", {
+        "schema_version": 2,
+        "stages": [
+            {"stage_key": "walk_forward", "mode": "inherited", "source_run_id": "wf"},
+            threshold_stage,
+        ],
+    })
+
+    item = load_end_to_end_comparison(tmp_path, "derived")
+
+    assert (item.evaluated, item.candidates, item.targets) == (100, 1, 1)
+    assert item.up_evaluable == 12
+    assert item.holdout_auc == 0.72
+    assert item.holdout_signals == 25
+
+
 @pytest.mark.parametrize("count", [2, 5])
 def test_homogeneous_comparison_modes_and_mixed_rejection(count):
     assert comparison_types(["walk_forward"] * count) == "walk_forward"

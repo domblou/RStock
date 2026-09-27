@@ -249,6 +249,7 @@ PIPELINE_STAGE_LABELS = {
     "temporal_validation_end_to_end": "Validation temporelle",
     "forced_candidate_validation_end_to_end": "Revalidation candidats",
     "promotion": "Promotion",
+    "forward_simulation": "Forward",
 }
 
 PIPELINE_STAGE_LABEL_COLUMN = "Étape"
@@ -291,6 +292,12 @@ def pipeline_stage_rows(stages: object) -> list[dict[str, object]]:
                 PIPELINE_STAGE_LABEL_COLUMN: PIPELINE_STAGE_LABELS.get(
                     stage_key, stage_key
                 ),
+                **({"Origine": {
+                    "inherited": "Héritée",
+                    "recomputed": "Recalculée",
+                    "not_executed": "Non exécutée",
+                }.get(str(item.get("mode")), "—")}
+                   if item.get("mode") else {}),
                 "Statut": "disabled" if status == "not_requested" else status,
                 "Progression": item.get("progress"),
                 "Durée (s)": item.get("duration_seconds"),

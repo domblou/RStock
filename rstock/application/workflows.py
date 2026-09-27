@@ -150,6 +150,20 @@ def _prepared_inputs(
 ) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
     phase_started_at = perf_counter()
     _phase(progress_callback, "data_preparation", "started")
+    if spec.prepared_snapshot_required:
+        from .derived_snapshot import load_source_prepared_snapshot
+
+        prepared, predictor_symbols, target_symbols, calendars = (
+            load_source_prepared_snapshot(
+                RunRepository(spec.config.project_root / "runs"), spec
+            )
+        )
+        _phase(
+            progress_callback, "data_preparation", "completed",
+            symbols=len(predictor_symbols), rows=len(prepared),
+            elapsed_seconds=perf_counter() - phase_started_at,
+        )
+        return prepared, predictor_symbols, target_symbols, calendars
     historical_cutoff = (
         None
         if spec.historical_data_cutoff is None
@@ -997,6 +1011,13 @@ def _threshold_calibration(
     result.run_configuration["frozen_threshold_calibration_parameters_sha256"] = (
         spec.frozen_threshold_calibration_parameters_sha256
     )
+    if spec.experimental_overrides:
+        result.run_configuration["experimental_overrides"] = list(
+            spec.experimental_overrides
+        )
+        result.run_configuration["threshold_parameter_selection_source"] = (
+            spec.source_threshold_parameter_calibration_run
+        )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     traceability = _persist_prepared_traceability(
         result.run_configuration, prepared, spec
@@ -2240,7 +2261,7 @@ def _market_update(
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
     repository = ProductionRepository(spec.config.project_root)
-    operational = OperationalUniverseService(repository).current()
+    operational = OperationalUniverseService(repository).tracked()
     if tuple(spec.symbols) != operational.symbols:
         raise ValueError(
             "Operational universe changed after submission; submit a new market update"
@@ -2268,21 +2289,21 @@ def _daily_prediction(
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
     repository = ProductionRepository(spec.config.project_root)
-    active = repository.active_models()
-    operational = OperationalUniverseService(repository).current()
+    tracked = repository.tracked_models()
+    operational = OperationalUniverseService(repository).current(tracked)
     if tuple(spec.symbols) != operational.symbols:
         raise ValueError(
             "Operational universe changed after submission; submit a new prediction"
         )
-    if not active:
-        raise ValueError("No active production model")
+    if not tracked:
+        raise ValueError("No tracked production model")
     source_history = [
         int(model.source_configuration.get("rstock_config", {}).get("model_history_days", 0))
-        for model in active
+        for model in tracked
     ]
     effective_config = replace(
         spec.config,
-        lag_depth=max(model.lag_depth for model in active),
+        lag_depth=max(model.lag_depth for model in tracked),
         model_history_days=max([spec.config.model_history_days, *source_history]),
     )
     prepared, downloaded = _operational_prepared(
@@ -2297,19 +2318,24 @@ def _daily_prediction(
         prepared,
         market_data=getattr(downloaded, "prices", None),
         persist=False,
+        models=tracked,
     )
     current_predictions = prediction_service.generate(
         prepared,
         effective_config,
         market_data=getattr(downloaded, "prices", None),
         persist=False,
+        models=tracked,
     )
     predictions = pd.concat(
         [backfilled_predictions, current_predictions], ignore_index=True
     )
     check_cancellation(cancellation_check)
     if not predictions.empty:
-        repository.append_table("predictions", predictions, key="prediction_id")
+        repository.append_table(
+            "predictions", predictions, key="prediction_id",
+            expected_models=tuple(tracked),
+        )
     _phase(progress_callback, "daily_prediction", "completed", predictions=len(predictions))
     predictions.to_csv(output / "predictions.csv", index=False)
     return {"job_type": spec.job_type.value, "predictions": len(predictions), "errors": int((predictions.get("status") == "error").sum()) if not predictions.empty else 0}
@@ -2322,16 +2348,29 @@ def _daily_screening(
     check_cancellation(cancellation_check)
     _phase(progress_callback, "screening", "started")
     repository = ProductionRepository(spec.config.project_root)
+    predictions = repository.read_tracked_model_table("predictions")
     signals = ProductionSignalService(repository).screen(
-        cancellation_check=cancellation_check, persist=False
+        predictions, cancellation_check=cancellation_check,
+        persist=False, restrict_to_active_models=False,
     )
     check_cancellation(cancellation_check)
     if not signals.empty:
         repository.append_table("signals", signals, key="signal_id")
     _phase(progress_callback, "screening", "completed", records=len(signals))
     signals.to_csv(output / "screening.csv", index=False)
-    counts = signals["category"].value_counts().to_dict() if not signals.empty else {}
-    return {"job_type": spec.job_type.value, "categories": _json_value(counts)}
+    active_signals = signals[
+        signals["model_status_at_prediction"].isin({"active", "legacy_unknown"})
+    ] if not signals.empty else signals
+    watching_signals = signals[
+        signals["model_status_at_prediction"].eq("watching")
+    ] if not signals.empty else signals
+    return {
+        "job_type": spec.job_type.value,
+        "categories": _json_value(active_signals["category"].value_counts().to_dict())
+        if not active_signals.empty else {},
+        "watching_categories": _json_value(watching_signals["category"].value_counts().to_dict())
+        if not watching_signals.empty else {},
+    }
 
 
 def _realized_validation(
@@ -2358,21 +2397,21 @@ def _operational_run(
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
     repository = ProductionRepository(spec.config.project_root)
-    active = repository.active_models()
-    operational = OperationalUniverseService(repository).current()
+    tracked = repository.tracked_models()
+    operational = OperationalUniverseService(repository).current(tracked)
     if tuple(spec.symbols) != operational.symbols:
         raise ValueError(
             "Operational universe changed after submission; submit a new operational run"
         )
-    if not active:
-        raise ValueError("No active production model")
+    if not tracked:
+        raise ValueError("No tracked production model")
     source_history = [
         int(model.source_configuration.get("rstock_config", {}).get("model_history_days", 0))
-        for model in active
+        for model in tracked
     ]
     effective_config = replace(
         spec.config,
-        lag_depth=max(model.lag_depth for model in active),
+        lag_depth=max(model.lag_depth for model in tracked),
         model_history_days=max([spec.config.model_history_days, *source_history]),
     )
     prepared, downloaded = _operational_prepared(
@@ -2390,12 +2429,14 @@ def _operational_run(
         prepared,
         market_data=getattr(downloaded, "prices", None),
         persist=False,
+        models=tracked,
     )
     current_predictions = prediction_service.generate(
         prepared,
         effective_config,
         market_data=getattr(downloaded, "prices", None),
         persist=False,
+        models=tracked,
     )
     predictions = pd.concat(
         [backfilled_predictions, current_predictions], ignore_index=True
@@ -2404,7 +2445,8 @@ def _operational_run(
     check_cancellation(cancellation_check)
     _phase(progress_callback, "screening", "started")
     signals = ProductionSignalService(repository).screen(
-        predictions, cancellation_check=cancellation_check, persist=False
+        predictions, cancellation_check=cancellation_check,
+        persist=False, restrict_to_active_models=False,
     )
     _phase(progress_callback, "screening", "completed", records=len(signals))
     check_cancellation(cancellation_check)
@@ -2426,15 +2468,30 @@ def _operational_run(
     if not realized.empty:
         updates["realized_results"] = (realized, "result_id")
     if updates:
-        repository.append_tables(updates)
+        repository.append_tables(updates, expected_models=tuple(tracked))
     # Operational events are durable before this derived phase begins.  An
     # exception below deliberately fails the run without rolling them back.
     check_cancellation(cancellation_check)
     _phase(progress_callback, "production_quality", "started")
     as_of_session = pd.Timestamp(downloaded.prices.index.max()).normalize()
+    # Reconcile recent persisted backfills after an interruption between the
+    # atomic history publication and quality publication. Source fingerprints
+    # skip unchanged identities before canonical observation construction.
+    recent_predictions = repository.read_tracked_model_table("predictions")
+    if not recent_predictions.empty:
+        recent_dates = pd.to_datetime(
+            recent_predictions.get(
+                "prediction_date", pd.Series(index=recent_predictions.index, dtype=str)
+            ),
+            errors="coerce",
+        )
+        recent_predictions = recent_predictions[
+            recent_dates >= as_of_session - pd.Timedelta(days=29)
+        ].copy()
     quality_summary = synchronize_production_quality(
         spec.config.project_root,
-        candidate_predictions=predictions,
+        candidate_predictions=recent_predictions,
+        candidate_signals=signals,
         new_results=realized,
         evaluations=evaluation_batch.evaluations,
         as_of_session=as_of_session,
@@ -2446,7 +2503,15 @@ def _operational_run(
     realized.to_csv(output / "realized_results.csv", index=False)
     return {
         "job_type": spec.job_type.value, "updated_symbols": len(downloaded.symbols),
-        "predictions": len(predictions), "signals": int((signals.get("category") == "bullish_signal").sum()) if not signals.empty else 0,
+        "predictions": len(predictions),
+        "signals": int((
+            signals["category"].eq("bullish_signal")
+            & signals["model_status_at_prediction"].isin({"active", "legacy_unknown"})
+        ).sum()) if not signals.empty else 0,
+        "watching_signals": int((
+            signals["category"].eq("bullish_signal")
+            & signals["model_status_at_prediction"].eq("watching")
+        ).sum()) if not signals.empty else 0,
         "realized_results": len(realized),
         "production_quality": quality_summary,
     }

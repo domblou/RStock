@@ -1,0 +1,506 @@
+{
+  "affected_models": 30,
+  "applied": true,
+  "backup": "C:\\Dev\\RStock\\reports\\production_quality_origin_repair\\20260927T015546Z\\quality_before.zip",
+  "models": {
+    "model_2464cc46f354": {
+      "after": {
+        "drawdown": null,
+        "pnl": null,
+        "return_63": null,
+        "signals_63": 0,
+        "win_rate_63": null
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "PLTR"
+    },
+    "model_2b29de565c0f": {
+      "after": {
+        "drawdown": -127.00392376838101,
+        "pnl": -195.957124566552,
+        "return_63": -0.0097978562283276,
+        "signals_63": 2,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 19,
+      "target": "SYK"
+    },
+    "model_39a8c9623ab1": {
+      "after": {
+        "drawdown": -81.46142607909199,
+        "pnl": -177.01595443925999,
+        "return_63": -0.008850797721963,
+        "signals_63": 2,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": -81.461426079092,
+        "signals_63": 1
+      },
+      "repaired_observations": 19,
+      "target": "STX"
+    },
+    "model_3b24fcde562c": {
+      "after": {
+        "drawdown": null,
+        "pnl": null,
+        "return_63": null,
+        "signals_63": 0,
+        "win_rate_63": null
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "AMD"
+    },
+    "model_521acffc5f96": {
+      "after": {
+        "drawdown": -173.35986360299802,
+        "pnl": 142.76208917072603,
+        "return_63": 0.004758736305690865,
+        "signals_63": 3,
+        "win_rate_63": 0.6666666666666666
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "DE"
+    },
+    "model_5a13695db90d": {
+      "after": {
+        "drawdown": -331.58095835130996,
+        "pnl": -306.97588745558795,
+        "return_63": -0.015348794372779398,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "MKC"
+    },
+    "model_5d171394ad2f": {
+      "after": {
+        "drawdown": -301.979167055164,
+        "pnl": -399.709488380791,
+        "return_63": -0.01998547441903955,
+        "signals_63": 2,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": -301.979167055164,
+        "signals_63": 1
+      },
+      "repaired_observations": 19,
+      "target": "INTC"
+    },
+    "model_72b823a259a3": {
+      "after": {
+        "drawdown": -65.18033821164799,
+        "pnl": 42.00610926225302,
+        "return_63": 0.0021003054631126505,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": -65.18033821164799,
+        "signals_63": 1
+      },
+      "repaired_observations": 20,
+      "target": "DE"
+    },
+    "model_7900e39408d8": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": 38.108688369822005,
+        "return_63": 0.0019054344184911004,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 19,
+      "target": "MU"
+    },
+    "model_8996b9727376": {
+      "after": {
+        "drawdown": null,
+        "pnl": null,
+        "return_63": null,
+        "signals_63": 0,
+        "win_rate_63": null
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "SYK"
+    },
+    "model_8ac716bcacda": {
+      "after": {
+        "drawdown": -238.54020181464603,
+        "pnl": -29.604696514823004,
+        "return_63": -0.0009868232171607665,
+        "signals_63": 3,
+        "win_rate_63": 0.3333333333333333
+      },
+      "before": {
+        "pnl": -65.18033821164799,
+        "signals_63": 1
+      },
+      "repaired_observations": 20,
+      "target": "DE"
+    },
+    "model_90a35a2a9228": {
+      "after": {
+        "drawdown": null,
+        "pnl": null,
+        "return_63": null,
+        "signals_63": 0,
+        "win_rate_63": null
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "REGN"
+    },
+    "model_9630517a616d": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": 179.42718879089398,
+        "return_63": 0.0179427188790894,
+        "signals_63": 1,
+        "win_rate_63": 1.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "TMUS"
+    },
+    "model_9e0df8356f55": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": 59.959597703886,
+        "return_63": 0.0059959597703886,
+        "signals_63": 1,
+        "win_rate_63": 1.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 19,
+      "target": "DDOG"
+    },
+    "model_ac893c31d783": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": -180.97921034092903,
+        "return_63": -0.0180979210340929,
+        "signals_63": 1,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "ADP"
+    },
+    "model_ad04504f520b": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": -187.02496125207801,
+        "return_63": -0.0187024961252078,
+        "signals_63": 1,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "GPC"
+    },
+    "model_b7a6153fb3cb": {
+      "after": {
+        "drawdown": -121.19326153850301,
+        "pnl": 627.87791051172,
+        "return_63": 0.020929263683723998,
+        "signals_63": 3,
+        "win_rate_63": 0.6666666666666666
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "AMD"
+    },
+    "model_b7afb7c03ea2": {
+      "after": {
+        "drawdown": -73.11312125887798,
+        "pnl": -209.38757122441098,
+        "return_63": -0.01046937856122055,
+        "signals_63": 2,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 19,
+      "target": "SPGI"
+    },
+    "model_bb6ac93bf560": {
+      "after": {
+        "drawdown": -64.21335740482,
+        "pnl": -59.512564464927,
+        "return_63": -0.00297562822324635,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "PANW"
+    },
+    "model_c67cfe7d52a4": {
+      "after": {
+        "drawdown": -124.93537465526902,
+        "pnl": -71.09143103199901,
+        "return_63": -0.0035545715515999505,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "KKR"
+    },
+    "model_cde3471bf4d1": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": -101.36261158605801,
+        "return_63": -0.0050681305793029,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 19,
+      "target": "VLO"
+    },
+    "model_d32c9d239d66": {
+      "after": {
+        "drawdown": -476.768495242361,
+        "pnl": -422.924551619091,
+        "return_63": -0.010573113790477276,
+        "signals_63": 4,
+        "win_rate_63": 0.25
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "KKR"
+    },
+    "model_d4148c5e661a": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": -258.420743063043,
+        "return_63": -0.0258420743063043,
+        "signals_63": 1,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 17,
+      "target": "INTC"
+    },
+    "model_e939b0bb2f2d": {
+      "after": {
+        "drawdown": -178.791354528032,
+        "pnl": -110.21112523237299,
+        "return_63": -0.0027552781308093255,
+        "signals_63": 4,
+        "win_rate_63": 0.25
+      },
+      "before": {
+        "pnl": 76.723551771229,
+        "signals_63": 1
+      },
+      "repaired_observations": 20,
+      "target": "CHRW"
+    },
+    "model_f5237b843379": {
+      "after": {
+        "drawdown": null,
+        "pnl": null,
+        "return_63": null,
+        "signals_63": 0,
+        "win_rate_63": null
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "SYK"
+    },
+    "model_f5348882a246": {
+      "after": {
+        "drawdown": -301.979167055164,
+        "pnl": 10.234635371275033,
+        "return_63": 0.0005117317685637505,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": -301.979167055164,
+        "signals_63": 1
+      },
+      "repaired_observations": 19,
+      "target": "INTC"
+    },
+    "model_f5c5bc3de32d": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": -136.274449965533,
+        "return_63": -0.0136274449965533,
+        "signals_63": 1,
+        "win_rate_63": 0.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "SPGI"
+    },
+    "model_f770768ab169": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": -90.47205635243898,
+        "return_63": -0.004523602817621949,
+        "signals_63": 2,
+        "win_rate_63": 0.5
+      },
+      "before": {
+        "pnl": 92.030785884409,
+        "signals_63": 1
+      },
+      "repaired_observations": 17,
+      "target": "SLB"
+    },
+    "model_f8f948d764ce": {
+      "after": {
+        "drawdown": 0.0,
+        "pnl": 179.17544631757198,
+        "return_63": 0.0179175446317572,
+        "signals_63": 1,
+        "win_rate_63": 1.0
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "PLTR"
+    },
+    "model_fea2b232b3de": {
+      "after": {
+        "drawdown": null,
+        "pnl": null,
+        "return_63": null,
+        "signals_63": 0,
+        "win_rate_63": null
+      },
+      "before": {
+        "pnl": null,
+        "signals_63": 0
+      },
+      "repaired_observations": 20,
+      "target": "MCK"
+    }
+  },
+  "origins_restored": {
+    "legacy_inferred_live": 118,
+    "operational_backfill": 468
+  },
+  "publication": {
+    "dirty_detected": 30,
+    "elapsed_seconds": 4.820677599986084,
+    "models_processed": [
+      "model_2464cc46f354",
+      "model_2b29de565c0f",
+      "model_39a8c9623ab1",
+      "model_3b24fcde562c",
+      "model_521acffc5f96",
+      "model_5a13695db90d",
+      "model_5d171394ad2f",
+      "model_72b823a259a3",
+      "model_7900e39408d8",
+      "model_8996b9727376",
+      "model_8ac716bcacda",
+      "model_90a35a2a9228",
+      "model_9630517a616d",
+      "model_9e0df8356f55",
+      "model_ac893c31d783",
+      "model_ad04504f520b",
+      "model_b7a6153fb3cb",
+      "model_b7afb7c03ea2",
+      "model_bb6ac93bf560",
+      "model_c67cfe7d52a4",
+      "model_cde3471bf4d1",
+      "model_d32c9d239d66",
+      "model_d4148c5e661a",
+      "model_e939b0bb2f2d",
+      "model_f5237b843379",
+      "model_f5348882a246",
+      "model_f5c5bc3de32d",
+      "model_f770768ab169",
+      "model_f8f948d764ce",
+      "model_fea2b232b3de"
+    ],
+    "models_remaining": 0,
+    "observation_candidates": 0,
+    "published_generation": "generation_daily_20260927T015604324364_e836c003"
+  },
+  "repaired_observations": 586,
+  "report_path": "C:\\Dev\\RStock\\reports\\production_quality_origin_repair\\20260927T015546Z\\result.json",
+  "skipped": {
+    "insufficient_temporal_evidence": 19
+  },
+  "source_sha256": "9adc7cd378ca6fabbb495a495056449898e350adc3714226101527320aa22162"
+}

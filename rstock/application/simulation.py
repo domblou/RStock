@@ -13,6 +13,7 @@ import pandas as pd
 from rstock.config import RStockConfig
 from rstock.market_cache import market_data_service
 
+from .production_quality import resolve_prediction_model_status
 from .production_repository import ProductionRepository
 from .production_services import (
     DailyPredictionService,
@@ -156,6 +157,23 @@ class SimulationService:
         signals = self.repository.read_table("signals")
         evaluated_predictions = self.repository.read_table("realized_results")
         predictions = self.repository.read_table("predictions")
+        # Legacy events predate the context field and came from the historical
+        # active-only pipeline.  New observation events are never tradable here.
+        if not signals.empty:
+            signal_context = signals.get("model_status_at_prediction")
+            if signal_context is not None:
+                signals = signals[signal_context.fillna("legacy_unknown").isin({
+                    "active", "legacy_unknown",
+                })].copy()
+            if not predictions.empty and "prediction_id" in predictions:
+                eligible_ids = {
+                    str(row["prediction_id"])
+                    for row in predictions.to_dict("records")
+                    if resolve_prediction_model_status(row) in {"active", "legacy_unknown"}
+                }
+                signals = signals[
+                    signals["prediction_id"].astype(str).isin(eligible_ids)
+                ].copy()
         evaluated_signals = self._evaluated_signal_rows(
             evaluated_predictions, signals
         )

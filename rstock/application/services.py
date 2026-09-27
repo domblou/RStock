@@ -99,6 +99,9 @@ class ModelService:
     def active_models(self):
         return self.repository.active_models()
 
+    def tracked_models(self):
+        return self.repository.tracked_models()
+
     def promote(
         self, run_id: str, set_name: str, *,
         xgboost_calibration_run: str | None = None,
@@ -124,6 +127,9 @@ class ModelService:
     def activate(self, model_id: str):
         return ProductionLifecycleService(self.repository).activate(model_id)
 
+    def watch(self, model_id: str):
+        return ProductionLifecycleService(self.repository).watch(model_id)
+
     def deactivate(self, model_id: str):
         return ProductionLifecycleService(self.repository).deactivate(model_id)
 
@@ -135,6 +141,9 @@ class ModelService:
         active_models: Sequence[ProductionModel] | None = None,
     ):
         return OperationalUniverseService(self.repository).current(active_models)
+
+    def tracked_universe(self):
+        return OperationalUniverseService(self.repository).tracked()
 
 
 class PredictionService:
@@ -152,6 +161,9 @@ class PredictionService:
     def active_history(self) -> pd.DataFrame:
         return self.repository.read_active_model_table("predictions")
 
+    def watching_history(self) -> pd.DataFrame:
+        return self.repository.read_watching_model_table("predictions")
+
 
 class SignalService:
     """Extension point for persisted directional signals and future monitoring."""
@@ -168,11 +180,17 @@ class SignalService:
     def active_history(self) -> pd.DataFrame:
         return self.repository.read_active_model_table("signals")
 
+    def watching_history(self) -> pd.DataFrame:
+        return self.repository.read_watching_model_table("signals")
+
     def realized_results(self) -> pd.DataFrame:
         return self.repository.read_table("realized_results")
 
     def active_realized_results(self) -> pd.DataFrame:
         return self.repository.read_active_model_table("realized_results")
+
+    def watching_realized_results(self) -> pd.DataFrame:
+        return self.repository.read_watching_model_table("realized_results")
 
 
 class ExperimentService:
@@ -198,6 +216,16 @@ class ExperimentService:
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
         return self.run_service.submit(spec)
+
+    def create_derived(
+        self, source_run_id: str, fork_stage: str,
+        changes: dict[str, object],
+        *, forward_enabled: bool = False,
+    ) -> SubmissionResult:
+        return self.run_service.create_derived(
+            source_run_id, fork_stage, changes,
+            forward_enabled=forward_enabled,
+        )
 
     def start_historical_forced_validation(
         self, parent_run_id: str

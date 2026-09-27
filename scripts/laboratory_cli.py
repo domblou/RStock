@@ -66,9 +66,9 @@ def main() -> None:
             JobType.REALIZED_VALIDATION,
             JobType.OPERATIONAL_RUN,
         }:
-            derived = model_service.operational_universe().symbols
+            derived = model_service.tracked_universe().symbols
             if symbols and symbols != derived:
-                _parser().error("--symbols must match the current operational universe")
+                _parser().error("--symbols must match the current tracked universe")
             symbols = derived
         elif not symbols:
             _parser().error("--symbols is required for experimental jobs")

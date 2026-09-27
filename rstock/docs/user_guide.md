@@ -324,18 +324,43 @@ La profondeur doit donc rester raisonnable.
 
 # 5. Préfiltrage
 
-Avant d'exécuter les analyses les plus coûteuses, RStock peut éliminer certaines combinaisons peu prometteuses.
+## 5.1 Rôle
 
-Le préfiltrage utilise notamment :
+Le préfiltrage ne cherche pas à déterminer qu’un modèle est bon ou prêt pour la production.
 
-- la performance AUC sur plusieurs fenêtres;
-- la stabilité;
-- les corrélations;
-- différents critères minimums.
+Son rôle est plutôt de :
 
-L’objectif n’est pas de décider qu’un modèle est bon.
+- éliminer rapidement les prédicteurs les moins prometteurs;
+- réduire les doublons et la redondance;
+- limiter le nombre de combinaisons à tester;
+- concentrer les calculs coûteux sur un espace de recherche plus pertinent.
 
-L’objectif est de réduire le nombre de combinaisons qui doivent passer dans les étapes plus coûteuses.
+La validation réelle des modèles vient ensuite dans le Walk-forward, le holdout et les étapes de calibration.
+
+## 5.2 Objectif du préfiltrage 
+
+Avant de lancer le Walk-forward complet, qui est beaucoup plus coûteux, RStock réduit l’espace de recherche **pour chaque titre cible**.
+
+Chaque prédicteur potentiel est d’abord évalué individuellement sur plusieurs fenêtres historiques. L’objectif est d’identifier les prédicteurs qui présentent un signal suffisamment **discriminant et stable dans le temps**, sans exiger qu’ils constituent déjà de bons modèles finaux.
+
+Le préfiltrage vérifie notamment :
+
+- **AUC médiane** : le prédicteur doit démontrer une capacité minimale à distinguer les séances haussières des autres;
+- **Proportion de fenêtres avec AUC > 0,50** : le signal doit être présent dans une part suffisante des périodes, et pas seulement dans quelques fenêtres;
+- **Worst AUC** : une très mauvaise période peut éliminer un prédicteur même si sa performance moyenne est acceptable;
+- **Dispersion des AUC** : une forte variation entre les fenêtres indique un signal moins stable;
+- **Corrélation / redondance** : deux prédicteurs très similaires n’apportent pas nécessairement deux sources d’information différentes.
+
+Après ces contrôles, RStock **classe les prédicteurs survivants et conserve seulement les Top-N les plus prometteurs pour chaque cible**.
+
+Par exemple, avec `Top-N = 12`, au maximum 12 prédicteurs sont conservés pour une cible avant l’étape de réduction de redondance.
+
+> **Important :** ici, « meilleur » ou « optimal » ne signifie pas encore « meilleur modèle de trading ».  
+> Cela signifie simplement que le prédicteur présente un profil jugé suffisamment intéressant au préfiltrage : signal AUC acceptable, répétable dans plusieurs fenêtres et relativement stable.
+
+Une dernière étape élimine ensuite les prédicteurs trop redondants entre eux.
+
+Les prédicteurs finalement retenus servent alors à construire les combinaisons de profondeur 1, 2, 3, etc., qui seront réellement évaluées par le Walk-forward.
 
 ---
 
@@ -1301,11 +1326,11 @@ L’objectif est de trouver des modèles dont le comportement historique est suf
 
 # 26. Rattrapage des prédictions quotidiennes
 
-La version V1 du rattrapage peut recréer les prédictions quotidiennes, les signaux et l’évaluation des journées qui n’ont pas été traitées. Le rattrapage est limité aux 30 derniers jours et utilise les modèles actuellement actifs au moment de son exécution.
+La version V1 du rattrapage peut recréer les prédictions quotidiennes, les signaux et l’évaluation des journées qui n’ont pas été traitées. Le rattrapage est limité aux 30 derniers jours et utilise les modèles actuellement suivis (`Active` et `Watching`) au moment de son exécution.
 
 Les variables d’une prédiction restent calculées uniquement à partir des observations disponibles avant sa date cible (`D-X`). Les résultats ne sont évalués que lorsque les données `Open`, `High`, `Low` et `Close` requises sont présentes et valides.
 
-Cette V1 ne reconstitue donc pas nécessairement le modèle qui était actif à la date historique de chaque prédiction. Une V2 devra conserver et utiliser l’historique des modèles actifs à chaque date.
+Cette V1 ne reconstitue donc pas nécessairement le modèle qui était actif à la date historique de chaque prédiction. Le contexte `watching` ou `active` est figé à la création de chaque nouvelle prédiction; les anciennes prédictions sans ce contexte restent `legacy_unknown`.
 
 ---
 
@@ -1367,3 +1392,36 @@ python -m rstock.application.production_quality_phase9 --project-root C:\Dev\RSt
 Elle produit un inventaire, un dry-run de provenance, une sauvegarde, les
 rapports de migration et les benchmarks sous `reports/production_quality_phase9/`.
 La commande de rollback exacte est enregistrée dans le rapport final.
+
+---
+
+# 28. Modèles en observation
+
+Un modèle entraîné peut être placé **En observation** depuis la vue **Modèles**
+avec **Démarrer le suivi**. Le modèle conserve son identifiant et sa version
+d’artefact. Il participe au traitement quotidien, produit des prédictions et
+des signaux, et accumule les résultats et les métriques de qualité habituels.
+Il ne compte pas comme modèle actif en production : ses signaux sont séparés
+dans la section **En observation** de la vue **Surveillance** et exclus des KPI
+globaux et de la simulation de production.
+
+Depuis la vue **Modèles**, **Activer** passe un modèle en observation en
+production; **Arrêter le suivi** le rend inactif. Le parcours
+`Candidate → Trained → Watching → Active → Inactive` conserve le même modèle.
+L’activation directe depuis `Trained` reste possible. La promotion automatique
+crée toujours un `Candidate` : le suivi commence seulement après une action
+explicite. Le réentraînement d’un modèle en observation est refusé; il faut
+d’abord arrêter le suivi pour éviter de changer silencieusement la version
+observée.
+
+Le **Détail du modèle** présente la même analyse pour les modèles en observation
+et actifs. Son tableau **Historique par période** distingue les signaux créés
+pendant l’observation, ceux créés en production active et l’historique complet.
+La séparation utilise le statut figé dans chaque prédiction, même après une
+activation ou une désactivation. Les anciennes prédictions sans statut figé
+sont présentées dans une période distincte « Historique sans contexte »; elles
+restent dans l’historique complet. Une désactivation arrête
+les nouvelles prédictions, mais conserve les données et leur contexte d’origine.
+Lorsqu’une mesure de santé existe, elle reste « Données insuffisantes » tant
+qu’aucune politique de santé versionnée ne définit un autre verdict. Sans
+mesure disponible, l’interface indique « Non calculé ».
