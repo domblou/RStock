@@ -35,6 +35,25 @@ _SOURCE_FILES = (
 )
 
 
+def _artifact_path(results: Path | tuple[Path, Path], name: str) -> Path:
+    if isinstance(results, tuple):
+        calibration, holdout = results
+        return (holdout if name.startswith("holdout_") else calibration) / name
+    return results / name
+
+
+def _guidance(
+    results: Path | tuple[Path, Path], selected: dict[str, Any],
+    promotion_config: object | None,
+) -> pd.DataFrame:
+    if isinstance(results, tuple):
+        calibration, holdout = results
+        return _promotion_guidance(
+            holdout, selected, promotion_config, calibration_results=calibration
+        )
+    return _promotion_guidance(results, selected, promotion_config)
+
+
 def _sha256(path: Path) -> str | None:
     if not path.is_file():
         return None
@@ -109,9 +128,9 @@ def _selected_up_pairs(selected: dict[str, Any], metrics: pd.DataFrame) -> pd.Da
 
 
 def _candidate_sets(
-    selected: dict[str, Any], results: Path, promotion_config: object | None = None
+    selected: dict[str, Any], results: Path | tuple[Path, Path], promotion_config: object | None = None
 ) -> set[str]:
-    guidance = _promotion_guidance(results, selected, promotion_config)
+    guidance = _guidance(results, selected, promotion_config)
     if guidance.empty or "Statut promotion" not in guidance or "Combinaison" not in guidance:
         return set()
     return set(
@@ -157,11 +176,11 @@ def _optional_int(value: object) -> int | None:
 
 
 def _candidate_population(
-    selected: dict[str, Any], results: Path, promotion_config: object | None = None
+    selected: dict[str, Any], results: Path | tuple[Path, Path], promotion_config: object | None = None
 ) -> dict[tuple[str, str], dict[str, object]]:
     """Build the final Up population already selected by promotion guidance."""
 
-    guidance = _promotion_guidance(results, selected, promotion_config)
+    guidance = _guidance(results, selected, promotion_config)
     if (
         guidance.empty
         or "Statut promotion" not in guidance
@@ -261,9 +280,9 @@ def candidate_identity_stability(
 
 
 def _single_candidate_yield(
-    selected: dict[str, Any], results: Path, promotion_config: object | None = None
+    selected: dict[str, Any], results: Path | tuple[Path, Path], promotion_config: object | None = None
 ) -> dict[str, object]:
-    metrics = _read_csv(results / "holdout_metrics.csv")
+    metrics = _read_csv(_artifact_path(results, "holdout_metrics.csv"))
     eligible = _selected_up_pairs(selected, metrics)
     if not eligible.empty:
         eligible = eligible.assign(
@@ -289,9 +308,9 @@ def _single_candidate_yield(
 
 def _gate_yield(
     reference_selected: dict[str, Any],
-    reference_results: Path,
+    reference_results: Path | tuple[Path, Path],
     validation_selected: dict[str, Any],
-    validation_results: Path,
+    validation_results: Path | tuple[Path, Path],
     promotion_config: object | None = None,
 ) -> dict[str, object]:
     """Compare the final, evaluated Up population used by promotion.
@@ -329,14 +348,14 @@ def _gate_yield(
     return {"status": "passed", "reason": None, "metrics": metrics}
 
 
-def _gate_auc(reference: Path, validation: Path) -> dict[str, object]:
+def _gate_auc(reference: Path | tuple[Path, Path], validation: Path | tuple[Path, Path]) -> dict[str, object]:
     source = []
     for label, directory in (("reference", reference), ("validation", validation)):
-        selected_path = directory / "selected_thresholds_by_set.json"
+        selected_path = _artifact_path(directory, "selected_thresholds_by_set.json")
         if not selected_path.is_file():
             return {"status": "inconclusive", "reason": f"Sélections {label} absentes.", "metrics": {}}
         selected = _read_json(selected_path)
-        pairs = _selected_up_pairs(selected, _read_csv(directory / "holdout_metrics.csv"))
+        pairs = _selected_up_pairs(selected, _read_csv(_artifact_path(directory, "holdout_metrics.csv")))
         values = [item for item in (_as_float(value) for value in pairs.get("ROCAUC", [])) if item is not None]
         source.append((label, _summary(values)))
     metrics = dict(source)
@@ -349,10 +368,10 @@ def _gate_auc(reference: Path, validation: Path) -> dict[str, object]:
 
 
 def _candidate_predictions(
-    selected: dict[str, Any], results: Path, promotion_config: object | None = None
+    selected: dict[str, Any], results: Path | tuple[Path, Path], promotion_config: object | None = None
 ) -> pd.DataFrame:
     candidates = _candidate_sets(selected, results, promotion_config)
-    values = _read_csv(results / "holdout_predictions.csv")
+    values = _read_csv(_artifact_path(results, "holdout_predictions.csv"))
     required = {"Set", "Direction", "Date", "Target", "IntradayReturn", "Prediction"}
     if not required.issubset(values.columns) or not candidates:
         return values.iloc[0:0].copy()
@@ -516,10 +535,11 @@ def _scientific_snapshot(spec: Any) -> dict[str, Any]:
 
 
 def _resolved_temporal_context(
-    *, run_id: str, purpose: RunPurpose, end_offset: int, results: Path
+    *, run_id: str, purpose: RunPurpose, end_offset: int,
+    results: Path | tuple[Path, Path]
 ) -> dict[str, object]:
     """Persist the effective holdout period already resolved by the pipeline."""
-    predictions_path = results / "holdout_predictions.csv"
+    predictions_path = _artifact_path(results, "holdout_predictions.csv")
     effective_start: str | None = None
     effective_end: str | None = None
     if predictions_path.is_file():
@@ -581,6 +601,21 @@ class TemporalValidationRunner:
             raise ValueError("Étape threshold_calibration temporelle absente")
         return str(matches[0]["child_run_id"])
 
+    def _source_results(self, run_id: str) -> tuple[str, str | None, Path | tuple[Path, Path]]:
+        manifest = self.repository.read_json(run_id, "orchestration/pipeline.json")
+        threshold_id = self._threshold_run_id(run_id)
+        calibration = self.repository.run_directory(threshold_id) / "results"
+        holdout_stages = [
+            item for item in manifest["stages"]
+            if isinstance(item, dict) and item.get("stage_key") == "holdout_evaluation"
+        ]
+        if not holdout_stages:
+            return threshold_id, None, calibration
+        holdout_id = str(holdout_stages[0]["child_run_id"])
+        return threshold_id, holdout_id, (
+            calibration, self.repository.run_directory(holdout_id) / "results"
+        )
+
     def _preflight(self) -> tuple[dict[str, object], str | None]:
         try:
             reference_spec = self.repository.load_spec(self.root_run_id)
@@ -603,12 +638,11 @@ class TemporalValidationRunner:
                 raise ValueError("Le child temporel ne doit pas chaîner validation ou promotion")
             if _scientific_snapshot(reference_spec) != _scientific_snapshot(validation_spec):
                 raise ValueError("The scientific configurations of both chains differ")
-            reference_threshold = self._threshold_run_id(self.root_run_id)
-            validation_threshold = self._threshold_run_id(self.validation_run_id)
+            reference_threshold, reference_holdout, reference_results = self._source_results(self.root_run_id)
+            validation_threshold, validation_holdout, validation_results = self._source_results(self.validation_run_id)
             source_digests: dict[str, dict[str, str | None]] = {}
-            for label, run_id in (("reference", reference_threshold), ("validation", validation_threshold)):
-                results = self.repository.run_directory(run_id) / "results"
-                source_digests[label] = {name: _sha256(results / name) for name in _SOURCE_FILES}
+            for label, results in (("reference", reference_results), ("validation", validation_results)):
+                source_digests[label] = {name: _sha256(_artifact_path(results, name)) for name in _SOURCE_FILES}
             required_sources = {
                 "reference": _SOURCE_FILES[:3],
                 "validation": _SOURCE_FILES[:3],
@@ -624,13 +658,13 @@ class TemporalValidationRunner:
                     run_id=self.root_run_id,
                     purpose=reference_metadata.run_purpose,
                     end_offset=reference_spec.config.walk_forward_end_offset_sessions,
-                    results=self.repository.run_directory(reference_threshold) / "results",
+                    results=reference_results,
                 ),
                 "validation": _resolved_temporal_context(
                     run_id=self.validation_run_id,
                     purpose=validation_metadata.run_purpose,
                     end_offset=validation_spec.config.walk_forward_end_offset_sessions,
-                    results=self.repository.run_directory(validation_threshold) / "results",
+                    results=validation_results,
                 ),
             }
             parameters = {
@@ -655,6 +689,9 @@ class TemporalValidationRunner:
                 "temporal_context": temporal_context,
                 "parameters": parameters,
             }
+            if reference_holdout is not None or validation_holdout is not None:
+                identity["reference_holdout_run_id"] = reference_holdout
+                identity["validation_holdout_run_id"] = validation_holdout
             return identity, None
         except (OSError, ValueError, KeyError) as error:
             return {"reference_run_id": self.root_run_id, "validation_run_id": self.validation_run_id}, str(error)
@@ -711,10 +748,10 @@ class TemporalValidationRunner:
         else:
             self._persist({**identity, "input_sha256": input_sha256, "status": "pending", "final_status": None, "error": None, "gates": {}, "executed_at": None})
 
-        reference_results = self.repository.run_directory(str(identity["reference_threshold_run_id"])) / "results"
-        validation_results = self.repository.run_directory(str(identity["validation_threshold_run_id"])) / "results"
-        reference_selected = _read_json(reference_results / "selected_thresholds_by_set.json")
-        validation_selected = _read_json(validation_results / "selected_thresholds_by_set.json")
+        _, _, reference_results = self._source_results(self.root_run_id)
+        _, _, validation_results = self._source_results(self.validation_run_id)
+        reference_selected = _read_json(_artifact_path(reference_results, "selected_thresholds_by_set.json"))
+        validation_selected = _read_json(_artifact_path(validation_results, "selected_thresholds_by_set.json"))
         parameters = identity["parameters"]
         assert isinstance(parameters, dict)
         promotion_config = self.repository.load_spec(self.root_run_id).config

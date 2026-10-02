@@ -979,7 +979,7 @@ def apply_frozen_thresholds_by_set(
     return empty
 
 
-def _holdout_combination_counts(
+def holdout_combination_counts(
     selected_thresholds_by_set: Mapping[str, Mapping[str, Mapping[str, object]]],
     holdout_predictions: pd.DataFrame,
 ) -> dict[str, dict[str, object]]:
@@ -1185,7 +1185,7 @@ def run_controlled_threshold_calibration(
     sampled_output.insert(
         0, "Set", [symbol_set_id(row) for _, row in sampled.iterrows()]
     )
-    holdout_counts = _holdout_combination_counts(
+    holdout_counts = holdout_combination_counts(
         selected_by_set, holdout_predictions
     )
     missing_by_direction = {

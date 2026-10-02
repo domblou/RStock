@@ -21,6 +21,8 @@ class JobType(str, Enum):
     XGBOOST_CALIBRATION = "xgboost_calibration"
     THRESHOLD_PARAMETER_CALIBRATION = "threshold_parameter_calibration"
     THRESHOLD_CALIBRATION = "threshold_calibration"
+    HOLDOUT_EVALUATION = "holdout_evaluation"
+    PROMOTION_QUALIFICATION = "promotion_qualification"
     FIXED_CANDIDATE_EVALUATION = "fixed_candidate_evaluation"
     FORCED_CANDIDATE_VALIDATION = "forced_candidate_validation"
     QUALIFICATION_HOLDOUT_DIAGNOSTIC = "qualification_holdout_diagnostic"
@@ -44,6 +46,8 @@ class JobType(str, Enum):
             JobType.XGBOOST_CALIBRATION,
             JobType.THRESHOLD_PARAMETER_CALIBRATION,
             JobType.THRESHOLD_CALIBRATION,
+            JobType.HOLDOUT_EVALUATION,
+            JobType.PROMOTION_QUALIFICATION,
             JobType.FIXED_CANDIDATE_EVALUATION,
             JobType.FORCED_CANDIDATE_VALIDATION,
             JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC,
@@ -265,14 +269,17 @@ class ExperimentSpec:
     source_forward_model_snapshot_sha256: str | None = None
     source_end_to_end_run: str | None = None
     source_threshold_calibration_run: str | None = None
+    source_holdout_evaluation_run: str | None = None
     derivation: Derivation | None = None
     experimental_overrides: tuple[dict[str, Any], ...] = ()
     auto_promote_candidates: bool = False
     temporal_validation_enabled: bool = False
-    pipeline_version: int = 2
+    pipeline_version: int = 3
     forced_symbol_sets: tuple[tuple[str, ...], ...] | None = None
     forced_candidate_identities: tuple[tuple[str, str], ...] | None = None
     historical_forced_validation_backfill: bool = False
+    # None means a historical forced run whose period was not locked.
+    forced_period_lock: dict[str, Any] | None = None
     frozen_selected_thresholds_by_set: dict[
         str, dict[str, dict[str, object]]
     ] | None = None
@@ -295,6 +302,11 @@ class ExperimentSpec:
     )
 
     def __post_init__(self) -> None:
+        if self.forced_period_lock is not None and (
+            not isinstance(self.forced_period_lock, dict)
+            or self.forced_period_lock.get("schema_version") != 1
+        ):
+            raise ValueError("Invalid forced period lock")
         if self.derivation is not None:
             if self.job_type is not JobType.END_TO_END:
                 raise ValueError("Only an End-to-End can be derived")
@@ -314,6 +326,7 @@ class ExperimentSpec:
                     if override.field == "combinations_per_target"
                     else getattr(self, override.field)
                     if override.field.startswith("forward_simulation_")
+                    or override.field == "evaluate_final_holdout"
                     else getattr(self.config, override.field)
                 )
                 if isinstance(effective, tuple):
@@ -530,6 +543,7 @@ class ExperimentSpec:
         values.update(
             source_end_to_end_run=self.source_end_to_end_run,
             source_threshold_calibration_run=self.source_threshold_calibration_run,
+            source_holdout_evaluation_run=self.source_holdout_evaluation_run,
             auto_promote_candidates=self.auto_promote_candidates,
             temporal_validation_enabled=self.temporal_validation_enabled,
             pipeline_version=self.pipeline_version,
@@ -553,6 +567,7 @@ class ExperimentSpec:
             historical_forced_validation_backfill=(
                 self.historical_forced_validation_backfill
             ),
+            forced_period_lock=self.forced_period_lock,
             frozen_selected_thresholds_by_set=(
                 self.frozen_selected_thresholds_by_set
             ),
@@ -717,6 +732,9 @@ class ExperimentSpec:
             source_threshold_calibration_run=_optional_string(
                 values.get("source_threshold_calibration_run")
             ),
+            source_holdout_evaluation_run=_optional_string(
+                values.get("source_holdout_evaluation_run")
+            ),
             derivation=(
                 None
                 if values.get("derivation") is None
@@ -761,6 +779,10 @@ class ExperimentSpec:
             ),
             historical_forced_validation_backfill=bool(
                 values.get("historical_forced_validation_backfill", False)
+            ),
+            forced_period_lock=(
+                None if values.get("forced_period_lock") is None
+                else dict(values["forced_period_lock"])
             ),
             frozen_selected_thresholds_by_set=(
                 None

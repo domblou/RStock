@@ -12,7 +12,7 @@ import pandas as pd
 
 EXPERIMENT_JOB_TYPES = frozenset({
     "walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
-    "threshold_calibration", "end_to_end",
+    "threshold_calibration", "holdout_evaluation", "promotion_qualification", "end_to_end",
     "forward_simulation",
     "fixed_candidate_evaluation",
     "forced_candidate_validation",
@@ -29,6 +29,8 @@ JOB_LABELS = {
     "xgboost_calibration": "Calibration XGBoost",
     "threshold_parameter_calibration": "Calibration des paramètres de seuils",
     "threshold_calibration": "Calibration des seuils",
+    "holdout_evaluation": "Évaluation holdout",
+    "promotion_qualification": "Qualification promotion",
     "fixed_candidate_evaluation": "Évaluation des candidats à seuil figé",
     "forced_candidate_validation": "Revalidation forcée des candidats",
     "qualification_holdout_diagnostic": "Diagnostic holdout des rejets WF",

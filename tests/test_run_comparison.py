@@ -114,6 +114,49 @@ def test_historical_fallback_requires_valid_threshold_artifacts(tmp_path):
     assert item.holdout_auc is None
 
 
+@pytest.mark.parametrize("schema_version", [3, 4])
+def test_split_comparison_reads_qualification_and_holdout_from_their_own_runs(
+    tmp_path, schema_version,
+):
+    parent = _run(tmp_path, candidates=False)
+    (parent / "results/forward_model_snapshot.json").unlink()
+    _write(parent / "orchestration/pipeline.json", {
+        "schema_version": schema_version,
+        "stages": [
+            ({"stage_key": "walk_forward", "child_run_id": "wf"}
+             if schema_version == 3 else
+             {"stage_key": "walk_forward", "mode": "inherited", "source_run_id": "wf"}),
+            ({"stage_key": "threshold_calibration", "child_run_id": "threshold"}
+             if schema_version == 3 else
+             {"stage_key": "threshold_calibration", "mode": "inherited", "source_run_id": "threshold"}),
+            ({"stage_key": "holdout_evaluation", "child_run_id": "holdout"}
+             if schema_version == 3 else
+             {"stage_key": "holdout_evaluation", "mode": "inherited", "source_run_id": "holdout"}),
+            {"stage_key": "promotion_qualification", "child_run_id": "qualification",
+             **({"mode": "recomputed"} if schema_version == 4 else {})},
+        ],
+    })
+    _write(tmp_path / "runs/holdout/summary.json", {
+        "run_configuration": {"holdout_combination_counts": {
+            "Up": {"evaluated_combinations": 4}
+        }}
+    })
+    _write(tmp_path / "runs/qualification/results/qualification.json", {
+        "decisions": [{"Combinaison": '["AAA","BBB"]', "Cible": "AAA",
+                       "candidate": True}]
+    })
+    source = tmp_path / "runs/threshold/results/holdout_metrics.csv"
+    destination = tmp_path / "runs/holdout/results/holdout_metrics.csv"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+    source.unlink()
+
+    item = load_end_to_end_comparison(tmp_path, "ete")
+
+    assert (item.up_evaluable, item.candidates, item.targets) == (4, 1, 1)
+    assert (item.holdout_auc, item.holdout_signals) == (0.72, 25)
+
+
 @pytest.mark.parametrize("threshold_mode", ["inherited", "recomputed"])
 def test_derived_v2_resolves_effective_threshold_stage(tmp_path, threshold_mode):
     _run(tmp_path, candidates=True)
@@ -230,6 +273,6 @@ def test_comparison_view_has_critical_help_and_no_end_to_end_chart():
         "Signaux holdout", "Statut Forward", "Précision Forward", "Période Forward",
     ):
         assert label in end_to_end
-    assert "st.column_config.TextColumn(help=description)" in end_to_end
+    assert "_grid_column_help_config(pd.Index(columns), helps)" in end_to_end
     assert "st.altair_chart" not in end_to_end
     assert "Aucun modèle admissible — Forward Simulation non exécutée." in source

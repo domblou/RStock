@@ -40,6 +40,7 @@ def _source(tmp_path):
         ),
         symbols=("AAA", "BBB"),
         historical_data_cutoff="2026-09-26",
+        pipeline_version=2,  # Deliberate legacy-composite source for derivation v1.
     )
     source_id = repository.create(source_spec)
     source_manifest = build_pipeline_manifest(repository, source_id, source_spec)

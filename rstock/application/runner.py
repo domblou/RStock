@@ -873,6 +873,8 @@ class RunService:
                             "status": source_status["status"],
                             "progress": 100.0,
                             "duration_seconds": source_status.get("duration_seconds"),
+                            "started_at": source_status.get("started_at"),
+                            "finished_at": source_status.get("finished_at"),
                             "error": source_status.get("error"),
                         })
                         continue
@@ -894,6 +896,14 @@ class RunService:
                             promotion = self.repository.read_json(
                                 run_id, "orchestration/promotion.json"
                             )
+                        trigger_path = (
+                            self.repository.run_directory(run_id)
+                            / "orchestration" / "promotion_trigger.json"
+                        )
+                        trigger = (
+                            self.repository.read_json(run_id, "orchestration/promotion_trigger.json")
+                            if trigger_path.exists() else None
+                        )
                         completed = (
                             None
                             if promotion is None
@@ -917,6 +927,9 @@ class RunService:
                                 "status": (
                                     str(promotion.get("status"))
                                     if promotion is not None
+                                    else "blocked"
+                                    if trigger is not None and trigger.get("requested")
+                                    and not trigger.get("authorized")
                                     else "pending"
                                     if pipeline["auto_promote_candidates"]
                                     else "not_requested"
@@ -928,6 +941,7 @@ class RunService:
                                     else promotion.get("error")
                                 ),
                                 "promotion": promotion,
+                                "promotion_trigger": trigger,
                             }
                         )
                         continue
@@ -951,6 +965,8 @@ class RunService:
                             "status": child_status["status"],
                             "progress": child_progress.get("workflow_percent"),
                             "duration_seconds": child_status.get("duration_seconds"),
+                            "started_at": child_status.get("started_at"),
+                            "finished_at": child_status.get("finished_at"),
                             "error": child_status.get("error"),
                         }
                     )

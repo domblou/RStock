@@ -24,6 +24,8 @@ _SCIENTIFIC_RESULT_TYPES = frozenset(
         JobType.XGBOOST_CALIBRATION,
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
         JobType.THRESHOLD_CALIBRATION,
+        JobType.HOLDOUT_EVALUATION,
+        JobType.PROMOTION_QUALIFICATION,
         JobType.FIXED_CANDIDATE_EVALUATION,
     }
 )
@@ -130,6 +132,15 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
         "threshold child id",
     ),
     RunTabDefinition(
+        "holdout_evaluation", "Évaluation holdout", frozenset({JobType.END_TO_END}),
+        "child_holdout_evaluation", "holdout child id",
+    ),
+    RunTabDefinition(
+        "promotion_qualification", "Qualification promotion",
+        frozenset({JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION}),
+        "child_promotion_qualification", "qualification child id",
+    ),
+    RunTabDefinition(
         "fixed_candidate_evaluation",
         "Évaluation fixe",
         frozenset({JobType.FORCED_CANDIDATE_VALIDATION}),
@@ -176,6 +187,8 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "logs",
     ),
     JobType.THRESHOLD_CALIBRATION: ("results", "configuration", "files", "logs"),
+    JobType.HOLDOUT_EVALUATION: ("results", "configuration", "files", "logs"),
+    JobType.PROMOTION_QUALIFICATION: ("results", "configuration", "files", "logs"),
     JobType.FIXED_CANDIDATE_EVALUATION: (
         "results",
         "configuration",
@@ -186,6 +199,7 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "summary",
         "walk_forward",
         "fixed_candidate_evaluation",
+        "promotion_qualification",
         "technical",
     ),
     JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: (
@@ -199,6 +213,8 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "xgboost",
         "threshold_parameters",
         "thresholds",
+        "holdout_evaluation",
+        "promotion_qualification",
         "temporal_validation",
         "promotion",
         "technical",
@@ -245,6 +261,8 @@ PIPELINE_STAGE_LABELS = {
     "xgboost_calibration": "Calibration XGBoost",
     "threshold_parameter_calibration": "Paramètres seuils",
     "threshold_calibration": "Seuils",
+    "holdout_evaluation": "Évaluation holdout",
+    "promotion_qualification": "Qualification promotion",
     "fixed_candidate_evaluation": "Évaluation des candidats à seuil figé",
     "temporal_validation_end_to_end": "Validation temporelle",
     "forced_candidate_validation_end_to_end": "Revalidation candidats",
@@ -259,6 +277,8 @@ PIPELINE_CHILD_TABS = {
     "child_xgboost": "xgboost_calibration",
     "child_threshold_parameters": "threshold_parameter_calibration",
     "child_thresholds": "threshold_calibration",
+    "child_holdout_evaluation": "holdout_evaluation",
+    "child_promotion_qualification": "promotion_qualification",
     "child_fixed_candidate_evaluation": "fixed_candidate_evaluation",
 }
 
@@ -302,6 +322,9 @@ def pipeline_stage_rows(stages: object) -> list[dict[str, object]]:
                 "Progression": item.get("progress"),
                 "Durée (s)": item.get("duration_seconds"),
                 "Run ID enfant": item.get("child_run_id"),
+                "Début": item.get("started_at"),
+                "Fin": item.get("finished_at"),
+                "Run source": item.get("source_run_id"),
                 "Erreur": item.get("error"),
             }
         )

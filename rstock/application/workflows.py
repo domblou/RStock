@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -40,6 +41,7 @@ from rstock.threshold_calibration import (
     apply_frozen_thresholds_by_set,
     evaluate_applied_thresholds,
     generate_holdout_probabilities,
+    holdout_combination_counts,
     run_controlled_threshold_calibration,
     split_development_holdout,
     validate_threshold_calibration_config,
@@ -153,11 +155,27 @@ def _prepared_inputs(
     if spec.prepared_snapshot_required:
         from .derived_snapshot import load_source_prepared_snapshot
 
+        if spec.forced_period_lock is not None:
+            source = spec.source_walk_forward_run
+            if source == spec.forced_period_lock["temporal_walk_forward_run_id"]:
+                expected = spec.forced_period_lock["prepared_snapshot_sha256"]
+                snapshot_path = (spec.config.project_root / "runs" / str(source)
+                                 / "checkpoints" / "artifacts" / "prepared_snapshot.pkl")
+                if not snapshot_path.is_file() or hashlib.sha256(snapshot_path.read_bytes()).hexdigest() != expected:
+                    raise ValueError("Forced temporal snapshot digest differs")
+            else:
+                source_spec = RunRepository(spec.config.project_root / "runs").load_spec(str(source))
+                if source_spec.forced_period_lock != spec.forced_period_lock:
+                    raise ValueError("Forced Walk-forward period contract differs")
+
         prepared, predictor_symbols, target_symbols, calendars = (
             load_source_prepared_snapshot(
                 RunRepository(spec.config.project_root / "runs"), spec
             )
         )
+        if spec.forced_period_lock is not None:
+            from .forced_period import validate_forced_period
+            validate_forced_period(prepared, spec.forced_period_lock)
         _phase(
             progress_callback, "data_preparation", "completed",
             symbols=len(predictor_symbols), rows=len(prepared),
@@ -656,6 +674,9 @@ def _resumable_walk_forward(
 
     if checkpoint.artifact_exists("prepared_snapshot"):
         prepared, preparation = checkpoint.load_snapshot()
+        if spec.forced_period_lock is not None:
+            from .forced_period import validate_forced_period
+            validate_forced_period(prepared, spec.forced_period_lock)
         predictor_symbols = list(preparation["predictor_symbols"])
         target_symbols = list(preparation["target_symbols"])
         calendars = dict(preparation["calendars"])
@@ -1062,6 +1083,265 @@ def _threshold_calibration(
     }
 
 
+def _stage_source_results(spec: ExperimentSpec, run_id: str | None, job_type: JobType) -> Path:
+    if not run_id:
+        raise ValueError(f"Missing {job_type.value} source run")
+    repository = RunRepository(spec.config.project_root / "runs")
+    status = repository.status(run_id)
+    if status.get("job_type") != job_type.value or status.get("status") != JobStatus.COMPLETED.value:
+        raise ValueError(f"Incomplete or incompatible {job_type.value} source: {run_id}")
+    return repository.run_directory(run_id) / "results"
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _holdout_evaluation(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    calibration = _stage_source_results(
+        spec, spec.source_threshold_calibration_run, JobType.THRESHOLD_CALIBRATION
+    )
+    selection_path = calibration / "selected_thresholds_by_set.json"
+    selected = json.loads(selection_path.read_text(encoding="utf-8"))
+    if selected != spec.frozen_selected_thresholds_by_set:
+        raise ValueError("Frozen threshold selection differs from calibration source")
+    sampled_path = calibration / "sampled_combinations.csv"
+    sampled = pd.read_csv(sampled_path)
+    calibration_config = json.loads((calibration / "run_configuration.json").read_text(encoding="utf-8"))
+    prepared, *_ = _prepared_inputs(spec, progress_callback, cancellation_check)
+    development, holdout, holdout_start = split_development_holdout(
+        prepared, int(calibration_config["final_holdout_size"])
+    )
+    if (
+        development.index.max().isoformat() != calibration_config["development_end"]
+        or holdout_start.isoformat() != calibration_config["final_holdout_start"]
+    ):
+        raise ValueError("Holdout period differs from frozen calibration boundary")
+    eligible = any(
+        choice.get("status") == "selected" and choice.get("threshold") is not None
+        for directions in selected.values() for choice in directions.values()
+    )
+    predictions = pd.DataFrame()
+    metrics = pd.DataFrame(columns=[
+        "Set", "Observation", "Direction", "Threshold", "SignalCount",
+        "ROCAUC", "Precision", "DirectionalReturnMean", "OppositeMoveFrequency",
+    ])
+    if spec.evaluate_final_holdout and eligible:
+        directional = _resolve_threshold_xgboost_parameters(spec)
+        raw = generate_holdout_probabilities(
+            development, holdout, sampled, spec.config,
+            parameters_by_direction={"Up": directional.up, "Down": directional.down},
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+        )
+        predictions = apply_frozen_thresholds_by_set(raw, selected)
+        metrics = evaluate_applied_thresholds(predictions, spec.config)
+    missing = list(calibration_config["missing_frozen_thresholds"])
+    counts = holdout_combination_counts(selected, predictions)
+    output.mkdir(parents=True, exist_ok=True)
+    metrics.to_csv(output / "holdout_metrics.csv", index=False)
+    if not predictions.empty:
+        predictions.to_csv(output / "holdout_predictions.csv", index=False)
+    configuration = {
+        "protocol": "frozen_threshold_holdout_v1",
+        "holdout_requested": spec.evaluate_final_holdout,
+        "holdout_evaluated": spec.evaluate_final_holdout and eligible,
+        "holdout_skipped_reason": (
+            "disabled" if not spec.evaluate_final_holdout else
+            "no_eligible_frozen_threshold" if not eligible else None
+        ),
+        "outcome": (
+            "completed_no_eligible_threshold" if spec.evaluate_final_holdout and not eligible
+            else "completed_partial_holdout" if spec.evaluate_final_holdout and missing
+            else "completed"
+        ),
+        "missing_frozen_thresholds": missing,
+        "holdout_combination_counts": counts,
+        "missing_threshold_count_up": sum(item["direction"] == "Up" for item in missing),
+        "missing_threshold_count_down": sum(item["direction"] == "Down" for item in missing),
+        "development_end": calibration_config["development_end"],
+        "final_holdout_start": calibration_config["final_holdout_start"],
+        "final_holdout_size": calibration_config["final_holdout_size"],
+        "source_threshold_calibration_run": spec.source_threshold_calibration_run,
+        "selected_thresholds_sha256": _file_sha256(selection_path),
+        "sampled_combinations_sha256": _file_sha256(sampled_path),
+        "source_walk_forward_run": spec.source_walk_forward_run,
+        "source_prepared_dataset_sha256": spec.source_prepared_dataset_sha256,
+    }
+    configuration["traceability"] = _persist_prepared_traceability(
+        {}, prepared, spec
+    )
+    (output / "run_configuration.json").write_text(
+        json.dumps(configuration, indent=2) + "\n", encoding="utf-8"
+    )
+    return {
+        "job_type": spec.job_type.value,
+        "holdout_metrics": _json_value(metrics.to_dict("records")),
+        "holdout_predictions_count": len(predictions),
+        "outcome": configuration["outcome"],
+        "run_configuration": configuration,
+        "traceability": configuration["traceability"],
+    }
+
+
+def _promotion_qualification(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    from .auto_promotion import _promotion_guidance
+    from .history_analysis import _promotion_reasons, promotion_policy
+
+    if spec.forced_period_lock is not None:
+        fixed = _stage_source_results(
+            spec, spec.source_threshold_calibration_run,
+            JobType.FIXED_CANDIDATE_EVALUATION,
+        )
+        walk = _stage_source_results(spec, spec.source_walk_forward_run, JobType.WALK_FORWARD)
+        selected_path = fixed / "selected_thresholds_by_set.json"
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+        if selected != spec.frozen_selected_thresholds_by_set:
+            raise ValueError("Forced threshold selection differs from reference")
+        qualification_path = walk / "qualification.csv"
+        walk_rows = pd.read_csv(qualification_path)
+        holdout_path = fixed / "holdout_metrics.csv"
+        try:
+            metrics = pd.read_csv(holdout_path)
+        except pd.errors.EmptyDataError:
+            metrics = pd.DataFrame()
+        fixed_config_path = fixed / "run_configuration.json"
+        fixed_config = json.loads(fixed_config_path.read_text(encoding="utf-8"))
+        errors = fixed_config.get("candidate_errors", {})
+        rows = []
+        for set_name, direction in spec.forced_candidate_identities or ():
+            relevant = walk_rows[walk_rows["Set"].astype(str) == set_name]
+            wf_passed = (
+                len(relevant) == 1
+                and str(relevant.iloc[0].get("Eligible", False)).lower() in {"true", "1"}
+            )
+            metric_rows = (metrics[
+                (metrics["Set"].astype(str) == set_name)
+                & (metrics["Direction"].astype(str) == direction)
+            ] if {"Set", "Direction"}.issubset(metrics.columns) else pd.DataFrame())
+            metric = metric_rows.iloc[0] if len(metric_rows) == 1 else None
+            thresholds = selected.get(set_name, {})
+            selection = thresholds.get(direction, {})
+            record = {
+                "Combinaison": set_name,
+                "Cible": str(relevant.iloc[0].get("Observation", "")) if len(relevant) == 1 else "",
+                "Direction": direction,
+                "Seuil calibré": selection.get("threshold"),
+                "Signaux holdout": None if metric is None else metric.get("SignalCount"),
+                "AUC holdout": None if metric is None else metric.get("ROCAUC"),
+                "Précision holdout": None if metric is None else metric.get("Precision"),
+                "Rendement directionnel moyen": None if metric is None else metric.get("DirectionalReturnMean"),
+                "Fréquence mouvement opposé": None if metric is None else metric.get("OppositeMoveFrequency"),
+                "walk_forward_passed": wf_passed,
+            }
+            reasons = _promotion_reasons(pd.Series(record), selected, spec.config)
+            if direction != "Up":
+                reasons.append("Direction Up requise pour la promotion")
+            if not wf_passed:
+                reasons.append("Walk-forward forcé non qualifié")
+            if len(metric_rows) != 1:
+                reasons.append("Métrique holdout forcée absente ou ambiguë")
+            if set_name in errors:
+                reasons.append(f"Évaluation forcée échouée : {errors[set_name]}")
+            for required_direction in ("Up", "Down"):
+                required = thresholds.get(required_direction, {})
+                if required.get("status") != "selected" or required.get("threshold") is None:
+                    reasons.append(f"Seuil {required_direction} requis absent")
+            record.update(candidate=not reasons, reasons=reasons,
+                          **{"Statut promotion": "Candidat" if not reasons else "Non candidat",
+                             "Raison": " ; ".join(reasons) if reasons else "Tous les critères passent"})
+            rows.append(record)
+        candidates = sorted({row["Combinaison"] for row in rows if row["candidate"]})
+        source_digests = {
+            "selected_thresholds_by_set.json": _file_sha256(selected_path),
+            "holdout_metrics.csv": _file_sha256(holdout_path),
+            "run_configuration.json": _file_sha256(fixed_config_path),
+            "walk_forward_qualification.csv": _file_sha256(qualification_path),
+        }
+        payload = {
+            "schema_version": 2,
+            "protocol": "forced_candidate_promotion_qualification_v1",
+            "source_walk_forward_run": spec.source_walk_forward_run,
+            "source_fixed_candidate_evaluation_run": spec.source_threshold_calibration_run,
+            "source_threshold_calibration_run": spec.source_threshold_calibration_run,
+            "source_holdout_evaluation_run": spec.source_holdout_evaluation_run,
+            "source_artifact_digests": source_digests,
+            "period_lock": spec.forced_period_lock,
+            "policy_parameters": promotion_policy(spec.config),
+            "candidate_sets": candidates,
+            "decisions": _json_value(rows),
+        }
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "qualification.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return {"job_type": spec.job_type.value, "candidate_count": len(candidates), **payload}
+
+    calibration = _stage_source_results(
+        spec, spec.source_threshold_calibration_run, JobType.THRESHOLD_CALIBRATION
+    )
+    holdout = _stage_source_results(
+        spec, spec.source_holdout_evaluation_run, JobType.HOLDOUT_EVALUATION
+    )
+    selected_path = calibration / "selected_thresholds_by_set.json"
+    selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    guidance = _promotion_guidance(
+        holdout, selected, promotion_config=spec.config,
+        calibration_results=calibration,
+        require_holdout=True,
+    )
+    decisions = []
+    for _, row in guidance.iterrows():
+        set_name = str(row["Combinaison"])
+        reasons = _promotion_reasons(row, selected, spec.config)
+        directional = selected.get(set_name, {})
+        for direction in ("Up", "Down"):
+            choice = directional.get(direction, {})
+            if choice.get("status") != "selected" or choice.get("threshold") is None:
+                reasons.append(f"Seuil {direction} requis absent")
+        values = row.to_dict()
+        values.update(candidate=not reasons, reasons=reasons,
+                      **{"Statut promotion": "Candidat" if not reasons else "Non candidat",
+                         "Raison": " ; ".join(reasons) if reasons else "Tous les critères passent"})
+        decisions.append(values)
+    rows = _json_value(decisions)
+    candidates = sorted({str(row["Combinaison"]) for row in rows if row["candidate"]})
+    source_digests = {
+        "selected_thresholds_by_set.json": _file_sha256(selected_path),
+        "threshold_metrics_by_set.csv": _file_sha256(calibration / "threshold_metrics_by_set.csv"),
+        "holdout_metrics.csv": _file_sha256(holdout / "holdout_metrics.csv"),
+    }
+    if (holdout / "holdout_predictions.csv").is_file():
+        source_digests["holdout_predictions.csv"] = _file_sha256(
+            holdout / "holdout_predictions.csv"
+        )
+    payload = {
+        "schema_version": 1,
+        "protocol": "holdout_promotion_qualification_v1",
+        "source_threshold_calibration_run": spec.source_threshold_calibration_run,
+        "source_holdout_evaluation_run": spec.source_holdout_evaluation_run,
+        "source_artifact_digests": source_digests,
+        "policy_parameters": promotion_policy(spec.config),
+        "candidate_sets": candidates,
+        "decisions": rows,
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "qualification.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return {"job_type": spec.job_type.value, "candidate_count": len(candidates), **payload}
+
+
 def _fixed_candidate_evaluation(
     spec: ExperimentSpec,
     output: Path,
@@ -1114,6 +1394,9 @@ def _fixed_candidate_evaluation(
     effective_config, threshold_parameter_source = (
         _resolve_threshold_calibration_config(spec)
     )
+    if (spec.forced_period_lock is not None
+            and effective_config.final_holdout_size != spec.forced_period_lock["final_holdout_size"]):
+        raise ValueError("Forced holdout size differs from frozen temporal period")
     development, holdout, holdout_start = split_development_holdout(
         prepared, effective_config.final_holdout_size
     )
@@ -2590,6 +2873,8 @@ class WorkflowRegistry:
                     _threshold_parameter_calibration
                 ),
                 JobType.THRESHOLD_CALIBRATION: _threshold_calibration,
+                JobType.HOLDOUT_EVALUATION: _holdout_evaluation,
+                JobType.PROMOTION_QUALIFICATION: _promotion_qualification,
                 JobType.FIXED_CANDIDATE_EVALUATION: (
                     _fixed_candidate_evaluation
                 ),

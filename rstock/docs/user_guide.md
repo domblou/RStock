@@ -1001,16 +1001,33 @@ Le type d’expérience **End-to-end** enchaîne les étapes suivantes :
 1. walk-forward;
 2. calibration XGBoost;
 3. calibration automatique des paramètres de seuils;
-4. calibration des seuils;
-5. promotion automatique facultative.
+4. calibration des seuils, qui fige les seuils;
+5. évaluation holdout avec ces seuils figés;
+6. qualification de promotion, qui persiste les décisions candidat/non-candidat;
+7. promotion automatique facultative.
+
+Les trois étapes de seuils, holdout et qualification sont des runs enfants
+distincts dans les nouveaux End-to-end. Chacun apparaît dans l'Historique,
+avec ses résultats, sa configuration et sa provenance. Les anciens runs gardent
+leur calibration des seuils composite en lecture.
 
 L’option **Promouvoir automatiquement les candidats** appartient uniquement au
 lancement End-to-end. La promotion est une étape interne persistée du pipeline,
 et non une expérience autonome. Elle réutilise les protections d’idempotence de
 la promotion manuelle.
 
+La politique de déclenchement conserve sa décision dans
+`orchestration/promotion_trigger.json` : autorisation après validation temporelle,
+`promotion_qualification_run_id` retenu et raison du choix. Le coordinateur
+fige la population et les digests dans `orchestration/promotion.json` ;
+l'exécution y inscrit un checkpoint par identité. Une reprise conserve le même
+plan et réconcilie les modèles déjà publiés. Seul `PromotionService` écrit dans
+le registre Production.
+
 Le détail d’un End-to-end regroupe **Résumé**, **Walk-forward**, **XGBoost**,
-**Paramètres seuils**, **Seuils**, **Promotion** et **Technique**. Les onglets
+**Paramètres seuils**, **Seuils**, **Évaluation holdout**, **Qualification promotion**,
+**Promotion** et **Technique**. Les deux nouveaux onglets apparaissent pour les
+nouveaux runs. Les onglets
 scientifiques ouvrent les mêmes résultats que les runs enfants correspondants.
 La synthèse permet de repérer une étape échouée ou en attente; une reprise
 conserve les identifiants réservés, réutilise les checkpoints disponibles et ne
@@ -1024,6 +1041,18 @@ revalidé. Son manifest conserve explicitement cette provenance. Pour un ancien
 run, la date du dataset est reprise du snapshot et de la traçabilité du
 Walk-forward uniquement si ces deux sources concordent.
 
+Pour un nouveau run, une dérivation depuis **Seuils** recalcule seuils, holdout
+et qualification; depuis **Évaluation holdout**, elle recalcule holdout et
+qualification; depuis **Qualification promotion**, elle ne recalcule que la
+qualification. Ainsi `promotion_min_holdout_signals` peut être changé au dernier
+point sans relancer les calculs scientifiques précédents. Les étapes héritées
+référencent les runs et digests sources, sans copie de leurs datasets.
+La taille du holdout (`final_holdout_size`) appartient au point **Seuils**,
+car elle détermine aussi la frontière entre développement et holdout.
+Le point holdout permet aussi de modifier `evaluate_final_holdout` ; si cette
+évaluation est désactivée, la qualification en aval ne peut pas attribuer de
+résultats holdout inexistants aux candidats.
+
 La validation temporelle optionnelle utilise trois passes. Après la chaîne de
 référence offset 0, un second End-to-end autonome offset 63 redécouvre les
 candidats avec son préfiltre normal. Un troisième child, **Revalidation des
@@ -1035,6 +1064,17 @@ XGBoost et le seuil sélectionné dans la référence. Le modèle est réentraî
 les données offset 63 avec ces hyperparamètres figés, puis le seuil de référence
 est appliqué directement au holdout. Cette passe ne relance ni calibration
 XGBoost, ni calibration des paramètres de seuil, ni sélection de seuil.
+
+Dans les nouveaux pipelines, la revalidation forcée fige la période du child
+temporel avant de démarrer : cutoff effectif, bornes développement/holdout,
+liste des séances XNYS et digests du dataset et du snapshot préparé. Le
+Walk-forward forcé réutilise ce snapshot; l'évaluation fixe refuse toute
+divergence de période ou de digest. Le contrat figure dans les manifests du
+child temporel et de la revalidation forcée. Une troisième étape enfant,
+**Qualification promotion**, persiste ensuite la décision individuelle avec
+les critères holdout, le résultat du Walk-forward forcé et la présence des
+seuils Up/Down requis. Les anciens runs gardent leur format de revalidation
+en lecture et en reprise.
 
 Après leur achèvement, RStock compare automatiquement quatre gates : rendement
 des candidats, AUC holdout médiane, avantage de précision par rapport à la

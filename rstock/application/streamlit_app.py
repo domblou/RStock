@@ -84,7 +84,8 @@ from rstock.application.run_comparison import (
 from rstock.application.runner import running_duration
 from rstock.application.end_to_end import historical_forced_validation_state
 from rstock.application.derivation import (
-    FORK_STAGE_KEYS, STAGE_PARAMETER_FIELDS, stage_modes,
+    FORK_STAGE_KEYS, SPLIT_FORK_STAGE_KEYS, STAGE_PARAMETER_FIELDS,
+    SPLIT_STAGE_PARAMETER_FIELDS, stage_modes,
 )
 from rstock.application.derived_experiments import source_parameter_value
 from rstock.application.end_to_end import load_pipeline_manifest
@@ -2437,15 +2438,46 @@ def _render_standard_results(
         _render_xgboost_calibration_selection(run_id)
     elif job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:
         _render_threshold_parameter_calibration_selection(run_id)
+    elif job_type is JobType.HOLDOUT_EVALUATION and status.get("status") == "completed":
+        result_dir = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+        configuration = _read_light_json(result_dir / "run_configuration.json")
+        if configuration is not None:
+            st.subheader("Protocole et provenance holdout")
+            st.json(configuration)
+        for filename, label in (("holdout_metrics.csv", "Métriques holdout"),
+                                ("holdout_predictions.csv", "Prédictions et observations holdout")):
+            path = result_dir / filename
+            if path.is_file():
+                st.subheader(label)
+                st.dataframe(pd.read_csv(path), hide_index=True, width="stretch")
+    elif job_type is JobType.PROMOTION_QUALIFICATION and status.get("status") == "completed":
+        result_dir = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+        qualification = _read_light_json(result_dir / "qualification.json")
+        if qualification is not None:
+            st.subheader("Décision de qualification")
+            st.json({key: value for key, value in qualification.items() if key != "decisions"})
+            st.dataframe(pd.DataFrame(qualification.get("decisions", [])),
+                         hide_index=True, width="stretch")
     elif (
         job_type is JobType.THRESHOLD_CALIBRATION
         and status.get("status") == "completed"
+        and (st.session_state.lab_config.project_root / "runs" / run_id
+             / "results" / "holdout_metrics.csv").is_file()
     ):
         _render_threshold_calibration_promotion(
             run_id,
             project_root=st.session_state.lab_config.project_root,
             configuration=detail["configuration"],
         )
+    if job_type is JobType.THRESHOLD_CALIBRATION and status.get("status") == "completed":
+        result_dir = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+        metrics_path = result_dir / "threshold_metrics_by_set.csv"
+        if metrics_path.is_file() and not (result_dir / "holdout_metrics.csv").is_file():
+            st.subheader("Seuils figés et diagnostics de calibration")
+            st.dataframe(pd.read_csv(metrics_path), hide_index=True, width="stretch")
+            selected = _read_light_json(result_dir / "selected_thresholds_by_set.json")
+            if selected is not None:
+                st.json(selected)
     st.json(detail["summary"])
 
 
@@ -2799,7 +2831,7 @@ def _render_derived_creation(
     repository = service.run_service.repository
     source_spec = repository.load_spec(run_id)
     source_manifest = load_pipeline_manifest(repository, run_id)
-    if source_manifest is None or source_manifest.get("schema_version") != 1:
+    if source_manifest is None or source_manifest.get("schema_version") not in {1, 3}:
         st.error("Le manifest source ne permet pas cette dérivation.")
         return
     labels = {
@@ -2807,22 +2839,29 @@ def _render_derived_creation(
         "threshold_parameter_calibration": "Calibration paramètres de seuil",
         "threshold_calibration": "Calibration des seuils",
     }
+    labels.update({"walk_forward": "Walk-forward",
+                   "holdout_evaluation": "Évaluation holdout",
+                   "promotion_qualification": "Qualification promotion"})
+    split = source_manifest["schema_version"] == 3
+    fork_keys = SPLIT_FORK_STAGE_KEYS if split else FORK_STAGE_KEYS
+    parameter_fields = SPLIT_STAGE_PARAMETER_FIELDS if split else STAGE_PARAMETER_FIELDS
     fork = st.selectbox(
-        "Point de dérivation", FORK_STAGE_KEYS,
+        "Point de dérivation", fork_keys,
         format_func=lambda value: labels[value], key=f"derive-fork-{run_id}",
     )
     forward_enabled = st.checkbox(
         "Lancer une Forward Simulation pour cette expérience dérivée",
         value=False, key=f"derive-forward-{run_id}",
     )
-    modes = stage_modes(fork, forward_enabled=forward_enabled)
+    modes = stage_modes(fork, forward_enabled=forward_enabled,
+                        schema_version=2 if split else 1)
     st.caption("Amont hérité : " + ", ".join(
         labels.get(stage, "Walk-forward")
-        for stage in ("walk_forward", *FORK_STAGE_KEYS)
+        for stage in ("walk_forward", *fork_keys)
         if modes[stage] == "inherited"
     ))
     st.caption("À recalculer : " + ", ".join(
-        labels[stage] for stage in FORK_STAGE_KEYS
+        labels[stage] for stage in fork_keys
         if modes[stage] == "recomputed"
     ))
     if forward_enabled:
@@ -2831,9 +2870,9 @@ def _render_derived_creation(
     else:
         st.caption("Non exécutées : Forward, promotion automatique.")
     fields = [
-        field for stage in FORK_STAGE_KEYS
+        field for stage in fork_keys
         if modes[stage] == "recomputed"
-        for field in sorted(STAGE_PARAMETER_FIELDS.get(stage, ()))
+        for field in sorted(parameter_fields.get(stage, ()))
     ]
     changes: dict[str, object] = {}
     with st.container(border=True):
@@ -3011,19 +3050,26 @@ def _render_pipeline_child(
             "Ouvrir le run source", key=f"open-inherited-{parent_run_id}-{stage_key}"
         ):
             _history_navigation("detail", [str(stage["source_run_id"])])
-    if not child_run_id or stage.get("status") == "reserved":
+    effective_run_id = stage.get("source_run_id") if stage.get("mode") == "inherited" else child_run_id
+    if not effective_run_id or (stage.get("status") == "reserved" and stage.get("mode") != "inherited"):
         st.caption(
             f"Étape {stage.get('status', 'pending')} - aucun artefact chargé."
         )
         return
-    child_detail = service.run(str(child_run_id))
+    child_detail = service.run(str(effective_run_id))
     child_status = child_detail["status"]
     st.caption(
-        f"Run enfant : {child_run_id} - statut : {child_status.get('status', '-')}"
+        f"Run : {effective_run_id} - statut : {child_status.get('status', '-')} · "
+        f"début : {child_status.get('started_at') or '—'} · "
+        f"fin : {child_status.get('finished_at') or '—'}"
     )
+    st.json({"provenance": child_detail.get("metadata"),
+             "artifact_digests": stage.get("artifact_digests")})
+    if st.button("Ouvrir le détail autonome", key=f"open-child-{parent_run_id}-{stage_key}"):
+        _history_navigation("detail", [str(effective_run_id)])
     _render_job_detail_tabs(
         service,
-        str(child_run_id),
+        str(effective_run_id),
         status=child_status,
         detail=child_detail,
     )
@@ -3034,6 +3080,21 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
     if stage is None:
         st.info("L'étape Promotion n'est pas encore disponible.")
         return
+    trigger = stage.get("promotion_trigger")
+    if isinstance(trigger, dict):
+        qualification_id = trigger.get("promotion_qualification_run_id")
+        if qualification_id:
+            st.caption(
+                f"Qualification retenue : {qualification_id} "
+                f"({trigger.get('source_selection_reason')})"
+            )
+        if stage.get("status") == "blocked":
+            reason = {
+                "temporal_validation_not_passed": "validation temporelle non validée",
+                "no_reference_candidates": "aucun candidat du run de référence",
+            }.get(str(trigger.get("reason")), str(trigger.get("reason")))
+            st.info(f"Promotion non déclenchée : {reason}.")
+            return
     if stage.get("status") in {"not_requested", "disabled"}:
         st.info("Promotion désactivée (auto_promote_candidates=False).")
         return
@@ -3495,7 +3556,12 @@ def _render_end_to_end_tabs(
     }
     render_lazy_tabs(
         st,
-        tabs_for_job(JobType.END_TO_END),
+        tuple(tab for tab in tabs_for_job(JobType.END_TO_END)
+              if tab.renderer_key not in {
+                  "child_holdout_evaluation", "child_promotion_qualification"
+              } or pipeline_stage_by_key(
+                  detail.get("pipeline_stages"), PIPELINE_CHILD_TABS[tab.renderer_key]
+              ) is not None),
         {
             "summary": lambda: _render_pipeline_summary(run_id, detail, service),
             **child_renderers,
@@ -3521,11 +3587,15 @@ def _render_forced_candidate_validation_tabs(
         for renderer_key in (
             "child_walk_forward",
             "child_fixed_candidate_evaluation",
+            "child_promotion_qualification",
         )
     }
     render_lazy_tabs(
         st,
-        tabs_for_job(JobType.FORCED_CANDIDATE_VALIDATION),
+        tuple(tab for tab in tabs_for_job(JobType.FORCED_CANDIDATE_VALIDATION)
+              if tab.renderer_key != "child_promotion_qualification"
+              or pipeline_stage_by_key(detail.get("pipeline_stages"),
+                                       "promotion_qualification") is not None),
         {
             "summary": lambda: _render_pipeline_summary(run_id, detail),
             **child_renderers,

@@ -10,8 +10,8 @@ from typing import Any, Mapping
 import pandas as pd
 
 from .derivation import (
-    Derivation, InheritedStage, ParameterOverride, PARAMETER_OWNER,
-    SCIENTIFIC_STAGE_KEYS, stage_modes,
+    Derivation, InheritedStage, ParameterOverride, derivation_graph,
+    SCIENTIFIC_STAGE_KEYS, SPLIT_SCIENTIFIC_STAGE_KEYS, stage_modes,
 )
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
@@ -25,6 +25,8 @@ def source_parameter_value(
 ) -> Any:
     if field == "combinations_per_target":
         return source_spec.combinations_per_target
+    if field == "evaluate_final_holdout":
+        return source_spec.evaluate_final_holdout
     if field.startswith("forward_simulation_"):
         return getattr(source_spec, field)
     if field.startswith("threshold_calibration_"):
@@ -66,15 +68,21 @@ def build_derived_spec(
     if repository.storage(source_end_to_end_run_id)["state"] != "full":
         raise ValueError("Source End-to-End has been purged")
     manifest = load_pipeline_manifest(repository, source_end_to_end_run_id)
-    if manifest is None or manifest["schema_version"] != 1:
+    if manifest is None or manifest["schema_version"] not in {1, 3}:
         raise ValueError("Source End-to-End manifest is unavailable")
     if manifest.get("temporal_validation_enabled") is not source_spec.temporal_validation_enabled:
         raise ValueError("Source temporal validation provenance is inconsistent")
-    modes = stage_modes(fork_stage)
+    schema_version = 2 if manifest["schema_version"] == 3 else 1
+    _, parameter_fields = derivation_graph(schema_version)
+    parameter_owner = {field: stage for stage, fields in parameter_fields.items()
+                       for field in fields}
+    scientific_keys = (SPLIT_SCIENTIFIC_STAGE_KEYS if schema_version == 2
+                       else SCIENTIFIC_STAGE_KEYS)
+    modes = stage_modes(fork_stage, schema_version=schema_version)
     inherited: dict[str, InheritedStage] = {}
     for stage in manifest["stages"]:
         key = stage["stage_key"]
-        if key not in SCIENTIFIC_STAGE_KEYS or modes[key] != "inherited":
+        if key not in scientific_keys or modes[key] != "inherited":
             continue
         run_id = str(stage["child_run_id"])
         if repository.status(run_id).get("status") != "completed":
@@ -126,13 +134,13 @@ def build_derived_spec(
     config_changes: dict[str, Any] = {}
     other_changes: dict[str, Any] = {}
     for field, new_value in changes.items():
-        if field not in PARAMETER_OWNER:
+        if field not in parameter_owner:
             raise ValueError(f"Unsupported derivation parameter: {field}")
         old_value = source_parameter_value(repository, source_spec, manifest, field)
         if old_value == new_value:
             continue
         overrides.append(ParameterOverride(field, old_value, new_value))
-        if field == "combinations_per_target" or field.startswith("forward_simulation_"):
+        if field in {"combinations_per_target", "evaluate_final_holdout"} or field.startswith("forward_simulation_"):
             other_changes[field] = new_value
         else:
             config_changes[field] = (
@@ -143,6 +151,7 @@ def build_derived_spec(
         raise ValueError("At least one parameter must change")
     source_path = repository.run_directory(source_end_to_end_run_id) / PIPELINE_MANIFEST
     derivation = Derivation(
+        schema_version=schema_version,
         source_end_to_end_run_id=source_end_to_end_run_id,
         fork_stage=fork_stage,
         source_manifest_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),

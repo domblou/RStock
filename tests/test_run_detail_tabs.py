@@ -45,10 +45,35 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
         "xgboost",
         "threshold_parameters",
         "thresholds",
+        "holdout_evaluation",
+        "promotion_qualification",
         "temporal_validation",
         "promotion",
         "technical",
     ]
+
+
+def test_split_jobs_have_standalone_history_and_results_tabs():
+    for job_type in (JobType.HOLDOUT_EVALUATION, JobType.PROMOTION_QUALIFICATION):
+        assert job_type.value in EXPERIMENT_JOB_TYPES
+        assert _keys(job_type) == ["results", "configuration", "files", "logs"]
+    assert _keys(JobType.FORCED_CANDIDATE_VALIDATION) == [
+        "summary", "walk_forward", "fixed_candidate_evaluation",
+        "promotion_qualification", "technical",
+    ]
+
+
+def test_split_stage_row_exposes_run_timestamps_and_inherited_provenance():
+    row = pipeline_stage_rows([{
+        "stage_key": "holdout_evaluation", "mode": "inherited",
+        "source_run_id": "source-holdout", "child_run_id": "source-holdout",
+        "status": "completed", "started_at": "2026-09-01T12:00:00+00:00",
+        "finished_at": "2026-09-01T12:05:00+00:00",
+    }])[0]
+    assert row["Run ID enfant"] == "source-holdout"
+    assert row["Run source"] == "source-holdout"
+    assert row["Début"] == "2026-09-01T12:00:00+00:00"
+    assert row["Fin"] == "2026-09-01T12:05:00+00:00"
 
 
 def test_each_end_to_end_scientific_tab_targets_the_expected_child_stage():
@@ -57,6 +82,8 @@ def test_each_end_to_end_scientific_tab_targets_the_expected_child_stage():
         "child_xgboost": "xgboost_calibration",
         "child_threshold_parameters": "threshold_parameter_calibration",
         "child_thresholds": "threshold_calibration",
+        "child_holdout_evaluation": "holdout_evaluation",
+        "child_promotion_qualification": "promotion_qualification",
         "child_fixed_candidate_evaluation": "fixed_candidate_evaluation",
     }
 

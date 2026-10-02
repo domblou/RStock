@@ -14,9 +14,9 @@ import pandas as pd
 from rstock.modeling import selected_xgboost_parameters
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation
 
-from .auto_promotion import AutoPromotionRunner, PROMOTION_CHECKPOINT
+from .auto_promotion import PromotionCoordinator
 from .domain import ExperimentSpec, JobType, RunMetadata, RunPurpose, RunRole
-from .derivation import STAGE_DEPENDENCIES
+from .derivation import STAGE_DEPENDENCIES, SPLIT_STAGE_DEPENDENCIES
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from .repository import RunRepository, utc_now
 from .temporal_validation import (
@@ -24,10 +24,13 @@ from .temporal_validation import (
     TemporalValidationRunner,
 )
 from .forward_simulation import build_forward_model_snapshot
+from .forced_period import build_forced_period_lock
 
 
 PIPELINE_SCHEMA_VERSION = 1
 DERIVED_PIPELINE_SCHEMA_VERSION = 2
+SPLIT_PIPELINE_SCHEMA_VERSION = 3
+SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION = 4
 PIPELINE_MANIFEST = "orchestration/pipeline.json"
 CHILD_ID_POLICY_DETERMINISTIC = 1
 CHILD_ID_POLICY_RESERVED = 2
@@ -46,6 +49,43 @@ SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
         STAGE_DEPENDENCIES["threshold_calibration"],
     ),
 )
+SPLIT_SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
+    *SCIENTIFIC_STAGES,
+    ("holdout_evaluation", JobType.HOLDOUT_EVALUATION, ("threshold_calibration",)),
+    ("promotion_qualification", JobType.PROMOTION_QUALIFICATION, ("holdout_evaluation",)),
+)
+SPLIT_STAGE_PARAMETER_FIELDS: dict[str, tuple[str, ...]] = {
+    "threshold_calibration": (
+        "final_holdout_size", "threshold_calibration_min_signals_per_window",
+        "threshold_calibration_min_robust_signals",
+        "threshold_calibration_min_window_fraction",
+        "threshold_calibration_precision_tolerance",
+        "threshold_calibration_quantiles", "threshold_calibration_grid_decimals",
+    ),
+    "holdout_evaluation": (
+        "lag_depth", "date_feature_regex", "intraday_target_threshold",
+        "intraday_down_threshold",
+    ),
+    "promotion_qualification": (
+        "promotion_min_holdout_signals", "promotion_min_holdout_auc",
+        "promotion_min_holdout_precision",
+        "promotion_min_mean_directional_return",
+        "promotion_max_opposite_movement_frequency",
+    ),
+}
+
+
+def _stage_parameter_contract(spec: ExperimentSpec, stage_key: str) -> dict[str, Any]:
+    values = {
+        field: getattr(spec.config, field)
+        for field in SPLIT_STAGE_PARAMETER_FIELDS.get(stage_key, ())
+    }
+    if stage_key == "holdout_evaluation":
+        values["evaluate_final_holdout"] = spec.evaluate_final_holdout
+    return {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in values.items()
+    }
 FORCED_SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
     ("walk_forward", JobType.WALK_FORWARD, ()),
     (
@@ -80,6 +120,13 @@ REQUIRED_ARTIFACTS: dict[str, tuple[str, ...]] = {
         "results/selected_thresholds_by_set.json",
         "results/run_configuration.json",
     ),
+    "holdout_evaluation": (
+        "results/holdout_metrics.csv",
+        "results/run_configuration.json",
+    ),
+    "promotion_qualification": (
+        "results/qualification.json",
+    ),
     "fixed_candidate_evaluation": (
         "results/selected_thresholds_by_set.json",
         "results/holdout_metrics.csv",
@@ -91,21 +138,21 @@ REQUIRED_ARTIFACTS: dict[str, tuple[str, ...]] = {
 def _scientific_stages_for_spec(
     spec: ExperimentSpec,
 ) -> tuple[tuple[str, JobType, tuple[str, ...]], ...]:
-    return (
-        FORCED_SCIENTIFIC_STAGES
-        if spec.forced_symbol_sets is not None
-        else SCIENTIFIC_STAGES
-    )
+    if spec.forced_symbol_sets is not None:
+        return FORCED_SCIENTIFIC_STAGES
+    if spec.pipeline_version >= 3 and (spec.derivation is None or spec.derivation.schema_version == 2):
+        return SPLIT_SCIENTIFIC_STAGES
+    return SCIENTIFIC_STAGES
 
 
 def _scientific_stages_for_manifest(
     manifest: dict[str, Any],
 ) -> tuple[tuple[str, JobType, tuple[str, ...]], ...]:
-    return (
-        FORCED_SCIENTIFIC_STAGES
-        if manifest.get("forced_candidate_validation", False)
-        else SCIENTIFIC_STAGES
-    )
+    if manifest.get("forced_candidate_validation", False):
+        return FORCED_SCIENTIFIC_STAGES
+    if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}:
+        return SPLIT_SCIENTIFIC_STAGES
+    return SCIENTIFIC_STAGES
 
 
 def _relation_key(stage_key: str) -> str:
@@ -117,7 +164,9 @@ def effective_stage_run_id(
 ) -> str | None:
     """Resolve the physical run providing a stage, regardless of ownership."""
     stage = _stage(manifest, stage_key)
-    if manifest.get("schema_version") == DERIVED_PIPELINE_SCHEMA_VERSION:
+    if (manifest.get("schema_version") == SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+            or manifest.get("schema_version") == DERIVED_PIPELINE_SCHEMA_VERSION
+            and manifest.get("workflow_type") != JobType.FORCED_CANDIDATE_VALIDATION.value):
         mode = stage["mode"]
         if mode == "inherited":
             return str(stage["source_run_id"])
@@ -150,7 +199,9 @@ def _build_derived_pipeline_manifest(
     source_manifest = load_pipeline_manifest(
         repository, derivation.source_end_to_end_run_id
     )
-    if source_manifest is None or source_manifest["schema_version"] != PIPELINE_SCHEMA_VERSION:
+    source_schema = (SPLIT_PIPELINE_SCHEMA_VERSION if derivation.schema_version == 2
+                     else PIPELINE_SCHEMA_VERSION)
+    if source_manifest is None or source_manifest["schema_version"] != source_schema:
         raise ValueError("Derived sources are not supported in this pipeline version")
     if (
         derivation.source_temporal_validation_enabled is not None
@@ -199,9 +250,12 @@ def _build_derived_pipeline_manifest(
     )
     effective_ids: dict[str, str | None] = {}
     stages: list[dict[str, Any]] = []
-    job_types = {stage: job for stage, job, _ in SCIENTIFIC_STAGES}
+    scientific_stages = _scientific_stages_for_spec(spec)
+    dependencies_graph = (SPLIT_STAGE_DEPENDENCIES if derivation.schema_version == 2
+                          else STAGE_DEPENDENCIES)
+    job_types = {stage: job for stage, job, _ in scientific_stages}
     job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
-    for stage_key, dependencies in STAGE_DEPENDENCIES.items():
+    for stage_key, dependencies in dependencies_graph.items():
         mode = modes[stage_key]
         reference = derivation.inherited_stages.get(stage_key)
         effective_id = (
@@ -209,7 +263,7 @@ def _build_derived_pipeline_manifest(
             else child_ids.get(stage_key)
         )
         effective_ids[stage_key] = effective_id
-        stages.append({
+        entry = {
             "stage_key": stage_key,
             "mode": mode,
             "expected_job_type": (
@@ -226,7 +280,14 @@ def _build_derived_pipeline_manifest(
                 else dict(reference.required_artifact_digests)
             ),
             "not_executed_reason": "disabled" if mode == "not_executed" else None,
-        })
+        }
+        if derivation.schema_version == 2 and stage_key in job_types:
+            entry["parameter_contract"] = (
+                dict(_stage(source_manifest, stage_key)["parameter_contract"])
+                if mode == "inherited"
+                else _stage_parameter_contract(spec, stage_key)
+            )
+        stages.append(entry)
     anchor = spec.historical_data_cutoff
     if not anchor:
         raise ValueError("Derived dataset session is missing")
@@ -239,7 +300,8 @@ def _build_derived_pipeline_manifest(
         if pd.Timestamp(traced_date).date().isoformat() != anchor:
             raise ValueError("Derived dataset session differs from Walk-forward traceability")
     result = {
-        "schema_version": DERIVED_PIPELINE_SCHEMA_VERSION,
+        "schema_version": (SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+                           if derivation.schema_version == 2 else DERIVED_PIPELINE_SCHEMA_VERSION),
         "root_run_id": root_run_id,
         "pipeline_version": spec.pipeline_version,
         "child_id_policy_version": CHILD_ID_POLICY_RESERVED,
@@ -273,6 +335,8 @@ def build_pipeline_manifest(
             repository, root_run_id, spec, reserved_child_ids=reserved_child_ids
         )
     scientific_stages = _scientific_stages_for_spec(spec)
+    split_pipeline = scientific_stages is SPLIT_SCIENTIFIC_STAGES
+    terminal_stage = "promotion_qualification" if split_pipeline else "threshold_calibration"
     if child_id_policy_version not in {
         CHILD_ID_POLICY_DETERMINISTIC,
         CHILD_ID_POLICY_RESERVED,
@@ -309,16 +373,17 @@ def build_pipeline_manifest(
         child_ids[FORCED_CANDIDATE_VALIDATION_STAGE] = repository.generate_run_id()
     stages: list[dict[str, Any]] = []
     for stage_key, job_type, dependencies in scientific_stages:
-        stages.append(
-            {
-                "stage_key": stage_key,
-                "expected_job_type": job_type.value,
-                "child_run_id": child_ids[stage_key],
-                "expected_fingerprint": None,
-                "dependency_run_ids": [child_ids[item] for item in dependencies],
-                "artifact_digests": {},
-            }
-        )
+        stage_entry = {
+            "stage_key": stage_key,
+            "expected_job_type": job_type.value,
+            "child_run_id": child_ids[stage_key],
+            "expected_fingerprint": None,
+            "dependency_run_ids": [child_ids[item] for item in dependencies],
+            "artifact_digests": {},
+        }
+        if split_pipeline:
+            stage_entry["parameter_contract"] = _stage_parameter_contract(spec, stage_key)
+        stages.append(stage_entry)
     if spec.temporal_validation_enabled:
         stages.append(
             {
@@ -326,7 +391,7 @@ def build_pipeline_manifest(
                 "expected_job_type": JobType.END_TO_END.value,
                 "child_run_id": child_ids[TEMPORAL_VALIDATION_STAGE],
                 "expected_fingerprint": None,
-                "dependency_run_ids": [child_ids["threshold_calibration"]],
+                "dependency_run_ids": [child_ids[terminal_stage]],
                 "artifact_digests": {},
             }
         )
@@ -338,7 +403,7 @@ def build_pipeline_manifest(
                 "child_run_id": child_ids[FORCED_CANDIDATE_VALIDATION_STAGE],
                 "expected_fingerprint": None,
                 "dependency_run_ids": [
-                    child_ids["threshold_calibration"],
+                    child_ids[terminal_stage],
                     child_ids[TEMPORAL_VALIDATION_STAGE],
                 ],
                 "artifact_digests": {},
@@ -359,14 +424,16 @@ def build_pipeline_manifest(
                 else child_ids[
                     "fixed_candidate_evaluation"
                     if spec.forced_symbol_sets is not None
-                    else "threshold_calibration"
+                    else terminal_stage
                 ]
             ],
             "artifact_digests": {},
         }
     )
     return {
-        "schema_version": PIPELINE_SCHEMA_VERSION,
+        "schema_version": (
+            SPLIT_PIPELINE_SCHEMA_VERSION if split_pipeline else PIPELINE_SCHEMA_VERSION
+        ),
         "prepared_dataset_as_of": str(
             spec.resolved_market_session_cutoff
             or spec.historical_data_cutoff
@@ -396,10 +463,12 @@ def load_pipeline_manifest(
 def validate_pipeline_manifest(
     manifest: dict[str, Any], *, root_run_id: str
 ) -> None:
-    if manifest.get("schema_version") == DERIVED_PIPELINE_SCHEMA_VERSION:
+    if manifest.get("schema_version") in {DERIVED_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}:
         _validate_derived_pipeline_manifest(manifest, root_run_id=root_run_id)
         return
-    if manifest.get("schema_version") != PIPELINE_SCHEMA_VERSION:
+    if manifest.get("schema_version") not in {
+        PIPELINE_SCHEMA_VERSION, SPLIT_PIPELINE_SCHEMA_VERSION,
+    }:
         raise ValueError("Version du manifest End-to-end incompatible")
     if manifest.get("root_run_id") != root_run_id:
         raise ValueError("Le manifest End-to-end appartient à un autre run")
@@ -407,6 +476,11 @@ def validate_pipeline_manifest(
     if not isinstance(stages, list):
         raise ValueError("Étapes End-to-end absentes du manifest")
     scientific_stages = _scientific_stages_for_manifest(manifest)
+    terminal_stage = (
+        "promotion_qualification"
+        if manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION
+        else "threshold_calibration"
+    )
     expected = [item[0] for item in scientific_stages]
     if manifest.get("temporal_validation_enabled", False):
         expected.append(TEMPORAL_VALIDATION_STAGE)
@@ -435,6 +509,11 @@ def validate_pipeline_manifest(
             raise ValueError(f"Dépendances invalides pour l'étape {stage_key}")
         if not isinstance(item.get("artifact_digests"), dict):
             raise ValueError(f"Digests invalides pour l'étape {stage_key}")
+        if (
+            manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION
+            and not isinstance(item.get("parameter_contract"), dict)
+        ):
+            raise ValueError(f"Parameter contract missing for {stage_key}")
         child_ids[stage_key] = str(item["child_run_id"])
         if policy_version == CHILD_ID_POLICY_DETERMINISTIC and item.get(
             "child_run_id"
@@ -451,7 +530,7 @@ def validate_pipeline_manifest(
             temporal.get("expected_job_type") != JobType.END_TO_END.value
             or not temporal.get("child_run_id")
             or temporal.get("dependency_run_ids")
-            != [child_ids["threshold_calibration"]]
+            != [child_ids[terminal_stage]]
             or not isinstance(temporal.get("artifact_digests"), dict)
         ):
             raise ValueError("Réservation de validation temporelle invalide")
@@ -468,7 +547,7 @@ def validate_pipeline_manifest(
             }
             or not forced.get("child_run_id")
             or forced.get("dependency_run_ids") != [
-                child_ids["threshold_calibration"],
+                child_ids[terminal_stage],
                 str(temporal["child_run_id"]),
             ]
             or not isinstance(forced.get("artifact_digests"), dict)
@@ -488,7 +567,7 @@ def validate_pipeline_manifest(
         else child_ids[
             "fixed_candidate_evaluation"
             if manifest.get("forced_candidate_validation", False)
-            else "threshold_calibration"
+            else terminal_stage
         ]
     )
     if promotion["dependency_run_ids"] != [expected_promotion_dependency]:
@@ -506,10 +585,16 @@ def _validate_derived_pipeline_manifest(
     if not isinstance(raw_derivation, dict):
         raise ValueError("Derived manifest has no derivation plan")
     derivation = Derivation.from_dict(raw_derivation)
+    dependencies_graph = (SPLIT_STAGE_DEPENDENCIES if derivation.schema_version == 2
+                          else STAGE_DEPENDENCIES)
+    expected_schema = (SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+                       if derivation.schema_version == 2 else DERIVED_PIPELINE_SCHEMA_VERSION)
+    if manifest.get("schema_version") != expected_schema:
+        raise ValueError("Derived manifest schema differs from derivation")
     stages = manifest.get("stages")
-    if not isinstance(stages, list) or len(stages) != len(STAGE_DEPENDENCIES) or [
+    if not isinstance(stages, list) or len(stages) != len(dependencies_graph) or [
         item.get("stage_key") for item in stages if isinstance(item, dict)
-    ] != list(STAGE_DEPENDENCIES):
+    ] != list(dependencies_graph):
         raise ValueError("Derived pipeline stages are invalid")
     modes = derivation.validate_plan(
         promotion_enabled=manifest.get("auto_promote_candidates") is True,
@@ -532,7 +617,9 @@ def _validate_derived_pipeline_manifest(
             raise ValueError("Derived temporal validation provenance is invalid")
     elif temporal_provenance is not None:
         raise ValueError("Historic derivation has unexpected temporal provenance")
-    job_types = {stage: job for stage, job, _ in SCIENTIFIC_STAGES}
+    job_types = {stage: job for stage, job, _ in (
+        SPLIT_SCIENTIFIC_STAGES if derivation.schema_version == 2 else SCIENTIFIC_STAGES
+    )}
     job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
     effective_ids: dict[str, str | None] = {}
     owned_ids: set[str] = set()
@@ -546,6 +633,10 @@ def _validate_derived_pipeline_manifest(
         )
         if stage.get("expected_job_type") != expected_job_type:
             raise ValueError(f"Derived stage job type mismatch: {stage_key}")
+        if derivation.schema_version == 2 and stage_key in job_types and not isinstance(
+            stage.get("parameter_contract"), dict
+        ):
+            raise ValueError(f"Derived stage parameter contract is missing: {stage_key}")
         child_id = stage.get("child_run_id")
         source_id = stage.get("source_run_id")
         reference = derivation.inherited_stages.get(stage_key)
@@ -579,7 +670,7 @@ def _validate_derived_pipeline_manifest(
                 raise ValueError(f"Disabled stage has artifacts: {stage_key}")
         effective_ids[stage_key] = effective_stage_run_id(manifest, stage_key)
         if stage.get("dependency_run_ids") != [
-            effective_ids[key] for key in STAGE_DEPENDENCIES[stage_key]
+            effective_ids[key] for key in dependencies_graph[stage_key]
         ]:
             raise ValueError(f"Derived stage dependencies mismatch: {stage_key}")
 
@@ -594,7 +685,10 @@ def persist_or_validate_pipeline_manifest(
         repository.write_json(run_id, PIPELINE_MANIFEST, expected)
         return load_pipeline_manifest(repository, run_id) or expected
     if spec.derivation is not None:
-        if persisted.get("schema_version") != DERIVED_PIPELINE_SCHEMA_VERSION:
+        expected_derived_schema = (SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+                                   if spec.derivation.schema_version == 2
+                                   else DERIVED_PIPELINE_SCHEMA_VERSION)
+        if persisted.get("schema_version") != expected_derived_schema:
             raise ValueError("Derived pipeline manifest schema mismatch")
         reserved = {
             str(item["stage_key"]): str(item["child_run_id"])
@@ -620,8 +714,17 @@ def persist_or_validate_pipeline_manifest(
             ):
                 if actual.get(key) != wanted.get(key):
                     raise ValueError(f"Derived stage reservation changed: {key}")
+            if spec.derivation.schema_version == 2 and actual.get(
+                "parameter_contract"
+            ) != wanted.get("parameter_contract"):
+                raise ValueError("Derived stage parameter contract changed")
         return persisted
-    if persisted.get("schema_version") != PIPELINE_SCHEMA_VERSION:
+    expected_schema = (
+        SPLIT_PIPELINE_SCHEMA_VERSION
+        if _scientific_stages_for_spec(spec) is SPLIT_SCIENTIFIC_STAGES
+        else PIPELINE_SCHEMA_VERSION
+    )
+    if persisted.get("schema_version") != expected_schema:
         raise ValueError("Ordinary End-to-End manifest schema mismatch")
     policy_version = int(
         persisted.get("child_id_policy_version", CHILD_ID_POLICY_DETERMINISTIC)
@@ -678,6 +781,11 @@ def persist_or_validate_pipeline_manifest(
                 raise ValueError(
                     f"Réservation End-to-end altérée pour {wanted['stage_key']}"
                 )
+        if (
+            expected_schema == SPLIT_PIPELINE_SCHEMA_VERSION
+            and actual.get("parameter_contract") != wanted.get("parameter_contract")
+        ):
+            raise ValueError(f"Stage parameters changed: {wanted['stage_key']}")
     return persisted
 
 
@@ -734,6 +842,7 @@ def _base_child_spec(
         frozen_threshold_calibration_parameters=None,
         source_end_to_end_run=root_run_id,
         source_threshold_calibration_run=None,
+        source_holdout_evaluation_run=None,
         auto_promote_candidates=False,
         temporal_validation_enabled=False,
         historical_data_cutoff=(
@@ -761,6 +870,16 @@ def build_stage_spec(
     job_type = JobType(str(stage["expected_job_type"]))
     child = _base_child_spec(parent, root_run_id=root_run_id, job_type=job_type)
     if stage_key == "walk_forward":
+        if parent.forced_period_lock is not None:
+            lock = parent.forced_period_lock
+            return replace(
+                child,
+                source_walk_forward_run=str(lock["temporal_walk_forward_run_id"]),
+                source_prepared_dataset_sha256=str(lock["prepared_dataset_sha256"]),
+                prepared_dataset_digest_required=True,
+                prepared_snapshot_required=True,
+                historical_data_cutoff=str(lock["effective_cutoff"]),
+            )
         # A completed child keeps its persisted specification on resume. New
         # pipelines freeze the request date before the first market load.
         existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
@@ -796,8 +915,25 @@ def build_stage_spec(
         ),
         source_prepared_dataset_sha256=dataset_digest,
         prepared_dataset_digest_required=True,
-        prepared_snapshot_required=parent.derivation is not None,
+        prepared_snapshot_required=(parent.derivation is not None or parent.forced_period_lock is not None),
     )
+    if stage_key == "promotion_qualification" and parent.forced_period_lock is not None:
+        fixed_id = effective_stage_run_id(manifest, "fixed_candidate_evaluation")
+        if fixed_id is None:
+            raise ValueError("Fixed evaluation source is unavailable")
+        return replace(child, source_threshold_calibration_run=fixed_id,
+                       source_holdout_evaluation_run=fixed_id)
+    if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}:
+        if stage_key == "promotion_qualification":
+            threshold_id = effective_stage_run_id(manifest, "threshold_calibration")
+            holdout_id = effective_stage_run_id(manifest, "holdout_evaluation")
+            if threshold_id is None or holdout_id is None:
+                raise ValueError("Qualification sources are unavailable")
+            return replace(
+                child,
+                source_threshold_calibration_run=threshold_id,
+                source_holdout_evaluation_run=holdout_id,
+            )
     if stage_key == "fixed_candidate_evaluation":
         return replace(
             child,
@@ -835,6 +971,21 @@ def build_stage_spec(
     if stage_key == "threshold_parameter_calibration":
         return child
 
+    if (
+        manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}
+        and stage_key == "holdout_evaluation"
+    ):
+        threshold_id = effective_stage_run_id(manifest, "threshold_calibration")
+        if threshold_id is None:
+            raise ValueError("Threshold calibration source is unavailable")
+        return replace(
+            child,
+            source_threshold_calibration_run=threshold_id,
+            frozen_selected_thresholds_by_set=_read_result_json(
+                repository, threshold_id, "selected_thresholds_by_set.json"
+            ),
+        )
+
     threshold_parameter_id = effective_stage_run_id(
         manifest, "threshold_parameter_calibration"
     )
@@ -871,12 +1022,18 @@ def build_stage_spec(
                 **item, "selected_value_at_execution": selected_value,
             })
         experimental_overrides = tuple(recorded_overrides)
-    return replace(
+    child = replace(
         child,
         source_threshold_parameter_calibration_run=threshold_parameter_id,
         frozen_threshold_calibration_parameters=effective_parameters,
         experimental_overrides=experimental_overrides,
     )
+    if (
+        manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}
+        and stage_key == "threshold_calibration"
+    ):
+        child = replace(child, evaluate_final_holdout=False)
+    return child
 
 
 def _sha256(path: Path) -> str:
@@ -892,13 +1049,27 @@ def artifact_digests(
 ) -> dict[str, str]:
     run_directory = repository.run_directory(run_id)
     values: dict[str, str] = {}
-    for filename in REQUIRED_ARTIFACTS[stage_key]:
+    required = REQUIRED_ARTIFACTS[stage_key]
+    if (
+        stage_key == "threshold_calibration"
+        and repository.load_spec(run_id).pipeline_version >= 3
+    ):
+        required = (
+            *required,
+            "results/threshold_metrics_by_set.csv",
+            "results/sampled_combinations.csv",
+        )
+    for filename in required:
         path = run_directory / filename
         if not path.is_file():
             raise ValueError(
                 f"Artefact requis absent pour {stage_key}/{run_id}: {filename}"
             )
         values[filename] = _sha256(path)
+    if stage_key == "holdout_evaluation":
+        predictions = run_directory / "results/holdout_predictions.csv"
+        if predictions.is_file():
+            values["results/holdout_predictions.csv"] = _sha256(predictions)
     return values
 
 
@@ -1082,7 +1253,7 @@ def _materialize_temporal_validation(
                 relation_key=TEMPORAL_VALIDATION_STAGE,
                 relation_type="temporal_validation_end_to_end",
                 stage_key=TEMPORAL_VALIDATION_STAGE,
-                stage_index=len(SCIENTIFIC_STAGES),
+                stage_index=len(_scientific_stages_for_manifest(manifest)),
                 reference_run_id=root_run_id,
             ),
         )
@@ -1130,12 +1301,20 @@ def _forced_candidate_spec(
         _stage(manifest, "threshold_parameter_calibration")["child_run_id"]
     )
     threshold_id = str(_stage(manifest, "threshold_calibration")["child_run_id"])
-    _, guidance, candidate_ids = AutoPromotionRunner(
+    _, guidance, candidate_ids = PromotionCoordinator(
         repository,
         root_run_id=root_run_id,
         walk_forward_run_id=walk_forward_id,
         xgboost_calibration_run_id=xgboost_id,
         threshold_calibration_run_id=threshold_id,
+        holdout_evaluation_run_id=(
+            str(_stage(manifest, "holdout_evaluation")["child_run_id"])
+            if manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION else None
+        ),
+        promotion_qualification_run_id=(
+            str(_stage(manifest, "promotion_qualification")["child_run_id"])
+            if manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION else None
+        ),
     ).source_candidates()
     direction_by_set = {
         str(row["Combinaison"]): str(row["Direction"])
@@ -1208,6 +1387,17 @@ def _forced_candidate_spec(
         all_symbols = parent.symbols
         targets = parent.target_symbols
         context = parent.context_symbols
+    period_lock = (
+        build_forced_period_lock(repository, str(
+            _stage(manifest, TEMPORAL_VALIDATION_STAGE)["child_run_id"]
+        ))
+        if parent.pipeline_version >= 3 and not historical_backfill
+        else None
+    )
+    temporal_walk_spec = (
+        repository.load_spec(str(period_lock["temporal_walk_forward_run_id"]))
+        if period_lock is not None else None
+    )
     return replace(
         parent,
         job_type=JobType.FORCED_CANDIDATE_VALIDATION,
@@ -1216,12 +1406,14 @@ def _forced_candidate_spec(
             if validation_spec is not None
             else replace(parent.config, walk_forward_end_offset_sessions=63)
         ),
-        symbols=all_symbols,
-        target_symbols=targets,
-        context_symbols=context,
-        predictor_symbols=all_symbols,
+        symbols=temporal_walk_spec.symbols if temporal_walk_spec else all_symbols,
+        target_symbols=temporal_walk_spec.target_symbols if temporal_walk_spec else targets,
+        context_symbols=temporal_walk_spec.context_symbols if temporal_walk_spec else context,
+        predictor_symbols=temporal_walk_spec.predictor_symbols if temporal_walk_spec else all_symbols,
         forced_symbol_sets=forced_sets,
         forced_candidate_identities=identities,
+        source_walk_forward_run=(str(period_lock["temporal_walk_forward_run_id"])
+                                 if period_lock else parent.source_walk_forward_run),
         source_xgboost_calibration_run=xgboost_id,
         frozen_xgboost_parameters=frozen_xgboost,
         source_threshold_parameter_calibration_run=threshold_parameter_id,
@@ -1231,6 +1423,12 @@ def _forced_candidate_spec(
         temporal_validation_enabled=False,
         auto_promote_candidates=False,
         pipeline_version=1,
+        forced_period_lock=period_lock,
+        historical_data_cutoff=(period_lock["effective_cutoff"] if period_lock else parent.historical_data_cutoff),
+        resolved_market_session_cutoff=(period_lock["effective_cutoff"] if period_lock else parent.resolved_market_session_cutoff),
+        source_prepared_dataset_sha256=(period_lock["prepared_dataset_sha256"] if period_lock else parent.source_prepared_dataset_sha256),
+        prepared_dataset_digest_required=period_lock is not None,
+        prepared_snapshot_required=period_lock is not None,
         historical_forced_validation_backfill=historical_backfill,
         run_description="Revalidation des candidats de référence",
     )
@@ -1249,6 +1447,25 @@ def _materialize_forced_candidate_validation(
     specification = _forced_candidate_spec(
         repository, root_run_id, parent, manifest, validation_spec=validation_spec
     )
+    if specification.forced_period_lock is not None:
+        lock = specification.forced_period_lock
+        temporal_manifest = load_pipeline_manifest(repository, temporal_id)
+        if temporal_manifest is None:
+            raise ValueError("Temporal child manifest is missing")
+        if temporal_manifest.get("resolved_period") is not None and temporal_manifest["resolved_period"] != lock:
+            raise ValueError("Temporal child period lock changed")
+        if temporal_manifest.get("resolved_period") is None:
+            temporal_manifest["resolved_period"] = lock
+            repository.write_json(temporal_id, PIPELINE_MANIFEST, temporal_manifest)
+        refreshed = load_pipeline_manifest(repository, root_run_id)
+        if refreshed is None:
+            raise ValueError("Reference manifest is missing")
+        recorded = _stage(refreshed, FORCED_CANDIDATE_VALIDATION_STAGE).get("period_lock")
+        if recorded is not None and recorded != lock:
+            raise ValueError("Forced period lock changed")
+        if recorded is None:
+            _persist_stage_values(repository, root_run_id, FORCED_CANDIDATE_VALIDATION_STAGE,
+                                  period_lock=lock)
     if stage.get("expected_job_type") == JobType.END_TO_END.value:
         # Historical V2 manifests keep their original immutable contract.
         specification = replace(specification, job_type=JobType.END_TO_END)
@@ -1275,7 +1492,7 @@ def _materialize_forced_candidate_validation(
                 relation_key=FORCED_CANDIDATE_VALIDATION_STAGE,
                 relation_type="forced_candidate_validation",
                 stage_key=FORCED_CANDIDATE_VALIDATION_STAGE,
-                stage_index=len(SCIENTIFIC_STAGES) + 1,
+                stage_index=len(_scientific_stages_for_manifest(manifest)) + 1,
                 reference_run_id=root_run_id,
                 validation_run_id=temporal_id,
             ),
@@ -1472,8 +1689,9 @@ def run_end_to_end(
 ) -> dict[str, Any]:
     if spec.derivation is not None and not spec.derivation.prepared_snapshot_sha256:
         raise ValueError("Derived prepared snapshot digest is required")
-    if spec.derivation is not None and spec.auto_promote_candidates:
-        raise ValueError("Derived automatic promotion is deferred")
+    from .promotion_pipeline import PromotionTriggerPolicy
+
+    PromotionTriggerPolicy.validate_request(spec)
     repository = RunRepository(output.parent.parent)
     root_run_id = output.parent.name
     if spec.forced_symbol_sets == ():
@@ -1803,144 +2021,21 @@ def run_end_to_end(
         )
         manifest = load_pipeline_manifest(repository, root_run_id) or manifest
 
-    promotion_summary: dict[str, Any] = {
-        "requested": spec.auto_promote_candidates,
-        "executed": False,
-    }
-    promotion_allowed = (
-        not spec.temporal_validation_enabled
-        or temporal_comparison is not None
-        and temporal_comparison.get("final_status") == "passed"
+    from .promotion_pipeline import PromotionPipeline
+
+    promotion_summary, manifest, promotion_state = PromotionPipeline(
+        repository, root_run_id,
+    ).run(
+        spec, manifest, temporal_comparison, forced_child_id,
+        stage_count=stage_count, progress_callback=progress_callback,
+        cancellation_check=cancellation_check, phase_callback=phase_callback,
     )
-    if spec.auto_promote_candidates and not promotion_allowed:
-        promotion_summary["reason"] = "temporal_validation_not_passed"
-        promotion_summary["temporal_validation_status"] = temporal_comparison.get(
-            "final_status"
-        ) if temporal_comparison is not None else None
-    if spec.auto_promote_candidates and promotion_allowed:
-        check_cancellation(cancellation_check)
-        promotion_manifest = manifest
-        if forced_child_id is not None:
-            from .forced_candidate_validation import load_forced_validation_manifest
-
-            promotion_manifest = load_forced_validation_manifest(
-                repository, forced_child_id
-            )
-            if promotion_manifest is None:
-                raise ValueError("Manifest de revalidation forcée absent")
-        walk_forward_id = str(_stage(promotion_manifest, "walk_forward")["child_run_id"])
-        if forced_child_id is not None:
-            xgboost_id = str(
-                _stage(manifest, "xgboost_calibration")["child_run_id"]
-            )
-            threshold_id = str(
-                _stage(
-                    promotion_manifest, "fixed_candidate_evaluation"
-                )["child_run_id"]
-            )
-        else:
-            xgboost_id = str(
-                _stage(promotion_manifest, "xgboost_calibration")["child_run_id"]
-            )
-            threshold_id = str(
-                _stage(promotion_manifest, "threshold_calibration")["child_run_id"]
-            )
-        runner = AutoPromotionRunner(
-            repository,
-            root_run_id=root_run_id,
-            walk_forward_run_id=walk_forward_id,
-            xgboost_calibration_run_id=xgboost_id,
-            threshold_calibration_run_id=threshold_id,
-            promotion_provenance=(
-                {
-                    "reference_run_id": root_run_id,
-                    "temporal_validation_run_id": str(
-                        _stage(manifest, TEMPORAL_VALIDATION_STAGE)["child_run_id"]
-                    ),
-                    "forced_candidate_validation_run_id": forced_child_id,
-                    "promotion_policy_version": 1,
-                }
-                if forced_child_id is not None
-                else None
-            ),
-        )
-        promotion_state = runner.prepare()
-        manifest = load_pipeline_manifest(repository, root_run_id) or manifest
-        promotion_stage = _stage(manifest, "promotion")
-        expected = promotion_stage.get("expected_fingerprint")
-        if expected is None:
-            _persist_stage_values(
-                repository,
-                root_run_id,
-                "promotion",
-                expected_fingerprint=promotion_state["plan_sha256"],
-            )
-        elif expected != promotion_state["plan_sha256"]:
-            raise ValueError("Fingerprint du plan de promotion incompatible")
-        persisted_digests = promotion_stage.get("artifact_digests") or {}
-        if persisted_digests:
-            actual = _sha256(runner.checkpoint_path)
-            if persisted_digests != {PROMOTION_CHECKPOINT: actual}:
-                raise ValueError("Le checkpoint de promotion a changé")
-
-        phase_callback(
-            progress_callback,
-            "promotion",
-            "started",
-            stage_index=stage_count,
-            stage_count=stage_count,
-            candidates=promotion_state["candidate_count"],
-        )
-        promotion_state = runner.execute(
-            progress_callback=progress_callback,
-            cancellation_check=cancellation_check,
-        )
-        promotion_digest = _sha256(runner.checkpoint_path)
-        manifest = load_pipeline_manifest(repository, root_run_id) or manifest
-        promotion_stage = _stage(manifest, "promotion")
-        persisted_digests = promotion_stage.get("artifact_digests") or {}
-        actual_digests = {PROMOTION_CHECKPOINT: promotion_digest}
-        if persisted_digests and persisted_digests != actual_digests:
-            raise ValueError("Le checkpoint de promotion a changé")
-        if not persisted_digests:
-            _persist_stage_values(
-                repository,
-                root_run_id,
-                "promotion",
-                artifact_digests=actual_digests,
-            )
-        phase_callback(
-            progress_callback,
-            "promotion",
-            "completed",
-            stage_index=stage_count,
-            stage_count=stage_count,
-            candidates=promotion_state["candidate_count"],
-            created=promotion_state["created_count"],
-            reused=promotion_state["reused_count"],
-        )
-        promotion_summary = {
-            "requested": True,
-            "executed": True,
-            "plan_sha256": promotion_state["plan_sha256"],
-            "candidate_count": promotion_state["candidate_count"],
-            "created_count": promotion_state["created_count"],
-            "reused_count": promotion_state["reused_count"],
-            "models": [
-                {
-                    "set_name": item["set_name"],
-                    "model_id": item["model_id"],
-                    "created": item["created"],
-                }
-                for item in promotion_state["candidates"]
-            ],
-        }
 
     output.mkdir(parents=True, exist_ok=True)
     summary = {
         "schema_version": (
-            DERIVED_PIPELINE_SCHEMA_VERSION
-            if spec.derivation is not None else PIPELINE_SCHEMA_VERSION
+            manifest["schema_version"] if spec.derivation is not None
+            else PIPELINE_SCHEMA_VERSION
         ),
         "pipeline_version": spec.pipeline_version,
         "root_run_id": root_run_id,

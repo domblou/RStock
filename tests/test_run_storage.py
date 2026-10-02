@@ -352,7 +352,7 @@ def test_end_to_end_waits_for_all_children_and_preserves_manifest_artifacts(
     tmp_path,
 ):
     repository = RunRepository(tmp_path / "runs")
-    parent_spec = _spec(tmp_path, JobType.END_TO_END)
+    parent_spec = replace(_spec(tmp_path, JobType.END_TO_END), pipeline_version=2)
     parent = repository.create(
         parent_spec,
         metadata=RunMetadata(run_role=RunRole.PIPELINE_PARENT),

@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 
 DERIVATION_SCHEMA_VERSION = 1
+SPLIT_DERIVATION_SCHEMA_VERSION = 2
 
 # Insertion order is the scientific execution order. The optional downstream
 # stages are part of the same dependency graph, even though Forward runs in a
@@ -31,8 +32,18 @@ STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "promotion": ("threshold_calibration",),
     "forward_simulation": ("threshold_calibration",),
 }
+SPLIT_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    **{key: value for key, value in STAGE_DEPENDENCIES.items()
+       if key not in {"promotion", "forward_simulation"}},
+    "holdout_evaluation": ("threshold_calibration",),
+    "promotion_qualification": ("holdout_evaluation",),
+    "promotion": ("promotion_qualification",),
+    "forward_simulation": ("promotion_qualification",),
+}
 SCIENTIFIC_STAGE_KEYS = tuple(STAGE_DEPENDENCIES)[:4]
 FORK_STAGE_KEYS = SCIENTIFIC_STAGE_KEYS[1:]
+SPLIT_SCIENTIFIC_STAGE_KEYS = tuple(SPLIT_STAGE_DEPENDENCIES)[:6]
+SPLIT_FORK_STAGE_KEYS = SPLIT_SCIENTIFIC_STAGE_KEYS[1:]
 STAGE_MODES = frozenset({"inherited", "recomputed", "not_executed"})
 
 # An owner is the earliest stage from which changing this field is permitted.
@@ -71,6 +82,23 @@ PARAMETER_OWNER = {
     for stage, fields in STAGE_PARAMETER_FIELDS.items()
     for field in fields
 }
+SPLIT_STAGE_PARAMETER_FIELDS = {
+    **{key: value for key, value in STAGE_PARAMETER_FIELDS.items()
+       if key not in {"promotion", "forward_simulation"}},
+    "threshold_calibration": STAGE_PARAMETER_FIELDS["threshold_calibration"]
+        | frozenset({"final_holdout_size"}),
+    "holdout_evaluation": frozenset({"evaluate_final_holdout"}),
+    "promotion_qualification": STAGE_PARAMETER_FIELDS["promotion"],
+    "forward_simulation": STAGE_PARAMETER_FIELDS["forward_simulation"],
+}
+
+
+def derivation_graph(schema_version: int) -> tuple[dict[str, tuple[str, ...]], dict[str, frozenset[str]]]:
+    if schema_version == DERIVATION_SCHEMA_VERSION:
+        return STAGE_DEPENDENCIES, STAGE_PARAMETER_FIELDS
+    if schema_version == SPLIT_DERIVATION_SCHEMA_VERSION:
+        return SPLIT_STAGE_DEPENDENCIES, SPLIT_STAGE_PARAMETER_FIELDS
+    raise ValueError("Unsupported derivation schema")
 
 
 def _nonempty(value: object, name: str) -> str:
@@ -88,18 +116,20 @@ def _digest(value: object, name: str) -> str:
 
 def stage_modes(
     fork_stage: str, *, promotion_enabled: bool = False,
-    forward_enabled: bool = False,
+    forward_enabled: bool = False, schema_version: int = DERIVATION_SCHEMA_VERSION,
 ) -> dict[str, str]:
     """Invalidate the fork and its transitive dependants in the stage DAG."""
-    if fork_stage not in FORK_STAGE_KEYS:
+    dependencies, _ = derivation_graph(schema_version)
+    fork_keys = (FORK_STAGE_KEYS if schema_version == 1 else SPLIT_FORK_STAGE_KEYS)
+    if fork_stage not in fork_keys:
         raise ValueError(f"Unsupported derivation point: {fork_stage}")
     invalidated = {fork_stage}
-    for stage, dependencies in STAGE_DEPENDENCIES.items():
-        if any(dependency in invalidated for dependency in dependencies):
+    for stage, parents in dependencies.items():
+        if any(dependency in invalidated for dependency in parents):
             invalidated.add(stage)
     modes = {
         stage: "recomputed" if stage in invalidated else "inherited"
-        for stage in STAGE_DEPENDENCIES
+        for stage in dependencies
     }
     if not promotion_enabled:
         modes["promotion"] = "not_executed"
@@ -111,17 +141,20 @@ def stage_modes(
 def validate_overrides(
     fork_stage: str, overrides: tuple["ParameterOverride", ...],
     *, promotion_enabled: bool = False, forward_enabled: bool = False,
+    schema_version: int = DERIVATION_SCHEMA_VERSION,
 ) -> None:
     modes = stage_modes(
         fork_stage, promotion_enabled=promotion_enabled,
-        forward_enabled=forward_enabled,
+        forward_enabled=forward_enabled, schema_version=schema_version,
     )
     seen: set[str] = set()
     for override in overrides:
         if override.field in seen:
             raise ValueError(f"Duplicate derivation override: {override.field}")
         seen.add(override.field)
-        owner = PARAMETER_OWNER.get(override.field)
+        _, fields = derivation_graph(schema_version)
+        owner = next((stage for stage, names in fields.items()
+                      if override.field in names), None)
         if owner is None:
             raise ValueError(f"Unsupported derivation parameter: {override.field}")
         if modes[owner] != "recomputed":
@@ -217,8 +250,7 @@ class Derivation:
     schema_version: int = DERIVATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != DERIVATION_SCHEMA_VERSION:
-            raise ValueError("Unsupported derivation schema")
+        derivation_graph(self.schema_version)
         _nonempty(self.source_end_to_end_run_id, "source_end_to_end_run_id")
         _digest(self.source_manifest_sha256, "source_manifest_sha256")
         if self.prepared_snapshot_sha256 is not None:
@@ -227,7 +259,7 @@ class Derivation:
             self.source_temporal_validation_enabled, bool
         ):
             raise ValueError("Source temporal validation provenance must be boolean")
-        if self.fork_stage not in FORK_STAGE_KEYS:
+        if self.fork_stage not in (FORK_STAGE_KEYS if self.schema_version == 1 else SPLIT_FORK_STAGE_KEYS):
             raise ValueError(f"Unsupported derivation point: {self.fork_stage}")
         try:
             datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
@@ -248,17 +280,19 @@ class Derivation:
         modes = stage_modes(
             self.fork_stage,
             promotion_enabled=promotion_enabled,
-            forward_enabled=forward_enabled,
+            forward_enabled=forward_enabled, schema_version=self.schema_version,
         )
+        scientific_keys = (SCIENTIFIC_STAGE_KEYS if self.schema_version == 1
+                           else SPLIT_SCIENTIFIC_STAGE_KEYS)
         expected = {
-            stage for stage in SCIENTIFIC_STAGE_KEYS if modes[stage] == "inherited"
+            stage for stage in scientific_keys if modes[stage] == "inherited"
         }
         if set(self.inherited_stages) != expected:
             raise ValueError("Inherited stage references do not match the fork plan")
         validate_overrides(
             self.fork_stage, self.overrides,
             promotion_enabled=promotion_enabled,
-            forward_enabled=forward_enabled,
+            forward_enabled=forward_enabled, schema_version=self.schema_version,
         )
         return modes
 

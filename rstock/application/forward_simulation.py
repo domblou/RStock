@@ -344,7 +344,14 @@ def build_forward_model_snapshot(
     threshold_results = repository.run_directory(threshold_id) / "results"
     selected_thresholds = _read_json(threshold_results / "selected_thresholds_by_set.json")
     source_config = _read_json(root / "config.json").get("rstock_config", {})
-    guidance = _promotion_guidance(threshold_results, selected_thresholds, source_config)
+    if "promotion_qualification" in stages:
+        qualification = _read_json(
+            repository.run_directory(stages["promotion_qualification"])
+            / "results" / "qualification.json"
+        )
+        guidance = pd.DataFrame(qualification["decisions"])
+    else:
+        guidance = _promotion_guidance(threshold_results, selected_thresholds, source_config)
     candidates = guidance[guidance.get("Statut promotion", pd.Series(dtype=str)).eq("Candidat")]
     selected_xgb = selected_xgboost_parameters(
         _read_json(repository.run_directory(xgb_id) / "results" / "selected_configurations.json")

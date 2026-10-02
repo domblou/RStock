@@ -15,9 +15,11 @@ from .end_to_end import (
     build_stage_spec,
 )
 from .repository import RunRepository
+from .forced_period import build_forced_period_lock
 
 
 FORCED_VALIDATION_SCHEMA_VERSION = 1
+SPLIT_FORCED_VALIDATION_SCHEMA_VERSION = 2
 FORCED_VALIDATION_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
     ("walk_forward", JobType.WALK_FORWARD, ()),
     (
@@ -25,6 +27,11 @@ FORCED_VALIDATION_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
         JobType.FIXED_CANDIDATE_EVALUATION,
         ("walk_forward",),
     ),
+)
+SPLIT_FORCED_VALIDATION_STAGES = (
+    *FORCED_VALIDATION_STAGES,
+    ("promotion_qualification", JobType.PROMOTION_QUALIFICATION,
+     ("walk_forward", "fixed_candidate_evaluation")),
 )
 
 
@@ -35,13 +42,18 @@ def _stage(manifest: dict[str, Any], stage_key: str) -> dict[str, Any]:
     return matches[0]
 
 
-def _build_manifest(repository: RunRepository, run_id: str) -> dict[str, Any]:
+def _build_manifest(repository: RunRepository, run_id: str, spec: ExperimentSpec) -> dict[str, Any]:
+    stages = (SPLIT_FORCED_VALIDATION_STAGES if spec.forced_period_lock is not None
+              else FORCED_VALIDATION_STAGES)
     child_ids = {
         stage_key: repository.generate_run_id()
-        for stage_key, _job_type, _dependencies in FORCED_VALIDATION_STAGES
+        for stage_key, _job_type, _dependencies in stages
     }
     return {
-        "schema_version": FORCED_VALIDATION_SCHEMA_VERSION,
+        "schema_version": (SPLIT_FORCED_VALIDATION_SCHEMA_VERSION
+                           if spec.forced_period_lock is not None
+                           else FORCED_VALIDATION_SCHEMA_VERSION),
+        **({"period_lock": spec.forced_period_lock} if spec.forced_period_lock is not None else {}),
         "workflow_type": JobType.FORCED_CANDIDATE_VALIDATION.value,
         "child_id_policy_version": CHILD_ID_POLICY_RESERVED,
         "root_run_id": run_id,
@@ -54,7 +66,7 @@ def _build_manifest(repository: RunRepository, run_id: str) -> dict[str, Any]:
                 "dependency_run_ids": [child_ids[item] for item in dependencies],
                 "artifact_digests": {},
             }
-            for stage_key, job_type, dependencies in FORCED_VALIDATION_STAGES
+            for stage_key, job_type, dependencies in stages
         ],
     }
 
@@ -66,12 +78,18 @@ def load_forced_validation_manifest(
     if not path.is_file():
         return None
     manifest = repository.read_json(run_id, PIPELINE_MANIFEST)
+    schema = manifest.get("schema_version")
+    spec = repository.load_spec(run_id)
+    stages = (SPLIT_FORCED_VALIDATION_STAGES if schema == 2 else FORCED_VALIDATION_STAGES)
+    if schema == 2 and spec.forced_symbol_sets == ():
+        stages = ()
     if (
-        manifest.get("schema_version") != FORCED_VALIDATION_SCHEMA_VERSION
+        schema not in {FORCED_VALIDATION_SCHEMA_VERSION, SPLIT_FORCED_VALIDATION_SCHEMA_VERSION}
         or manifest.get("workflow_type") != JobType.FORCED_CANDIDATE_VALIDATION.value
         or manifest.get("root_run_id") != run_id
         or [item.get("stage_key") for item in manifest.get("stages", [])]
-        != [item[0] for item in FORCED_VALIDATION_STAGES]
+        != [item[0] for item in stages]
+        or (schema == 2 and manifest.get("period_lock") != repository.load_spec(run_id).forced_period_lock)
     ):
         raise ValueError("Manifest de revalidation forcée incompatible")
     return manifest
@@ -147,26 +165,47 @@ def run_forced_candidate_validation(
         raise ValueError("Candidats forcés absents")
     repository = RunRepository(output.parent.parent)
     run_id = output.parent.name
+    if spec.forced_period_lock is not None and build_forced_period_lock(
+        repository, str(spec.forced_period_lock["temporal_run_id"])
+    ) != spec.forced_period_lock:
+        raise ValueError("Forced period lock differs from completed temporal source")
     if spec.forced_symbol_sets == ():
         output.mkdir(parents=True, exist_ok=True)
+        if spec.forced_period_lock is not None:
+            existing = load_forced_validation_manifest(repository, run_id)
+            if existing is None:
+                (repository.run_directory(run_id) / "orchestration").mkdir(exist_ok=True)
+                repository.write_json(run_id, PIPELINE_MANIFEST, {
+                    "schema_version": SPLIT_FORCED_VALIDATION_SCHEMA_VERSION,
+                    "workflow_type": spec.job_type.value,
+                    "child_id_policy_version": CHILD_ID_POLICY_RESERVED,
+                    "root_run_id": run_id,
+                    "period_lock": spec.forced_period_lock,
+                    "stages": [],
+                })
         return {
-            "schema_version": FORCED_VALIDATION_SCHEMA_VERSION,
+            "schema_version": (SPLIT_FORCED_VALIDATION_SCHEMA_VERSION
+                               if spec.forced_period_lock is not None
+                               else FORCED_VALIDATION_SCHEMA_VERSION),
             "job_type": spec.job_type.value,
             "root_run_id": run_id,
             "candidate_count": 0,
             "historical_backfill": spec.historical_forced_validation_backfill,
+            "period_lock": spec.forced_period_lock,
             "stages": [],
             "promotion": {"requested": False, "executed": False},
         }
     manifest = load_forced_validation_manifest(repository, run_id)
     if manifest is None:
-        manifest = _build_manifest(repository, run_id)
+        manifest = _build_manifest(repository, run_id, spec)
         (repository.run_directory(run_id) / "orchestration").mkdir(exist_ok=True)
         repository.write_json(run_id, PIPELINE_MANIFEST, manifest)
         manifest = load_forced_validation_manifest(repository, run_id) or manifest
     completed: list[dict[str, object]] = []
+    stages = (SPLIT_FORCED_VALIDATION_STAGES if spec.forced_period_lock is not None
+              else FORCED_VALIDATION_STAGES)
     for stage_index, (stage_key, job_type, dependencies) in enumerate(
-        FORCED_VALIDATION_STAGES
+        stages
     ):
         check_cancellation(cancellation_check)
         for dependency in dependencies:
@@ -175,6 +214,9 @@ def run_forced_candidate_validation(
                 raise RuntimeError(
                     f"Dépendance incomplète pour {stage_key}: {dependency_id}"
                 )
+            frozen = _stage(manifest, dependency).get("artifact_digests") or {}
+            if frozen and frozen != artifact_digests(repository, dependency_id, dependency):
+                raise ValueError(f"Forced source artifacts changed: {dependency}")
         child_run_id, child_spec = _materialize_stage(
             repository, run_id, spec, stage_key, stage_index
         )
@@ -185,10 +227,24 @@ def run_forced_candidate_validation(
             child_run_id=child_run_id,
             job_type=job_type.value,
             stage_index=stage_index + 1,
-            stage_count=len(FORCED_VALIDATION_STAGES),
+            stage_count=len(stages),
         )
         execute_reserved_child(repository, child_run_id)
         check_cancellation(cancellation_check)
+        if stage_key == "fixed_candidate_evaluation" and spec.forced_period_lock is not None:
+            configuration = repository.read_json(child_run_id, "results/run_configuration.json")
+            lock = spec.forced_period_lock
+            for field, expected in (
+                ("development_end", lock["development_end"]),
+                ("final_holdout_start", lock["holdout_first_session"]),
+                ("final_holdout_size", lock["final_holdout_size"]),
+            ):
+                actual = configuration.get(field)
+                if field.endswith(("end", "start")) and actual is not None:
+                    from pandas import Timestamp
+                    actual = Timestamp(actual).date().isoformat()
+                if actual != expected:
+                    raise ValueError(f"Fixed evaluation period differs: {field}")
         digests = artifact_digests(repository, child_run_id, stage_key)
         persisted = _stage(
             load_forced_validation_manifest(repository, run_id) or manifest, stage_key
@@ -205,7 +261,7 @@ def run_forced_candidate_validation(
             job_type=child_spec.job_type.value,
             artifact_count=len(digests),
             stage_index=stage_index + 1,
-            stage_count=len(FORCED_VALIDATION_STAGES),
+            stage_count=len(stages),
         )
         completed.append(
             {
@@ -217,11 +273,16 @@ def run_forced_candidate_validation(
         )
         manifest = load_forced_validation_manifest(repository, run_id) or manifest
     return {
-        "schema_version": FORCED_VALIDATION_SCHEMA_VERSION,
+        "schema_version": manifest["schema_version"],
         "job_type": spec.job_type.value,
         "root_run_id": run_id,
         "candidate_count": len(spec.forced_symbol_sets),
         "historical_backfill": spec.historical_forced_validation_backfill,
         "stages": completed,
+        "period_lock": spec.forced_period_lock,
+        "promotion_qualification_run_id": (
+            str(_stage(manifest, "promotion_qualification")["child_run_id"])
+            if spec.forced_period_lock is not None else None
+        ),
         "promotion": {"requested": False, "executed": False},
     }

@@ -208,16 +208,32 @@ def load_end_to_end_comparison(project_root: Path, run_id: str) -> EndToEndCompa
     wf = _json(runs / stages["walk_forward"] / "summary.json") if "walk_forward" in stages else {}
     threshold = (_json(runs / stages["threshold_calibration"] / "summary.json")
                  if "threshold_calibration" in stages else {})
-    up = threshold.get("holdout_combination_counts", {}).get("Up", {})
+    holdout = (_json(runs / stages["holdout_evaluation"] / "summary.json")
+               if "holdout_evaluation" in stages else threshold)
+    up = holdout.get("run_configuration", {}).get("holdout_combination_counts", {}).get("Up", {})
+    if not up:
+        up = threshold.get("holdout_combination_counts", {}).get("Up", {})
     snapshot = _json(parent / "results" / "forward_model_snapshot.json")
     threshold_results = (
         runs / stages["threshold_calibration"] / "results"
         if "threshold_calibration" in stages else None
     )
-    candidates, sets, targets = _final_candidate_sets(parent, threshold_results, config)
+    if "promotion_qualification" in stages:
+        qualification = _json(runs / stages["promotion_qualification"] / "results" / "qualification.json")
+        decisions = qualification.get("decisions", [])
+        accepted = [row for row in decisions if isinstance(row, dict) and row.get("candidate")]
+        sets = {str(row["Combinaison"]) for row in accepted if row.get("Combinaison")}
+        targets = {str(row["Cible"]) for row in accepted if row.get("Cible")}
+        candidate_sets = qualification.get("candidate_sets")
+        candidates = (len(candidate_sets) if isinstance(candidate_sets, list)
+                      else len(accepted)) if qualification else None
+    else:
+        candidates, sets, targets = _final_candidate_sets(parent, threshold_results, config)
+    holdout_results = (runs / stages["holdout_evaluation"] / "results"
+                       if "holdout_evaluation" in stages else threshold_results)
     quality = _candidate_quality(
-        threshold_results / "holdout_metrics.csv", sets
-    ) if threshold_results is not None else (None, None, None, None)
+        holdout_results / "holdout_metrics.csv", sets
+    ) if holdout_results is not None else (None, None, None, None)
     forward_status, forward = _forward_state(
         runs, config.get("forward_simulation_enabled") is True, pipeline, root_summary
     )

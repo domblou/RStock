@@ -11,7 +11,7 @@ import pytest
 from rstock.application.derived_experiments import build_derived_spec
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType, RunMetadata, RunRole
 from rstock.application.end_to_end import (
-    PIPELINE_MANIFEST, SCIENTIFIC_STAGES, artifact_digests,
+    PIPELINE_MANIFEST, SCIENTIFIC_STAGES, SPLIT_SCIENTIFIC_STAGES, artifact_digests,
     build_pipeline_manifest, persist_or_validate_pipeline_manifest,
     run_end_to_end, validate_pipeline_manifest,
 )
@@ -33,13 +33,14 @@ def _completed(repository, run_id):
     repository.transition(run_id, JobStatus.COMPLETED)
 
 
-def _source(tmp_path, *, temporal=False, legacy_manifest=False):
+def _source(tmp_path, *, temporal=False, legacy_manifest=False, split=False):
     repository = RunRepository(tmp_path / "runs")
     config = replace(DEFAULT_CONFIG, project_root=tmp_path)
     source = ExperimentSpec(
         job_type=JobType.END_TO_END, config=config, symbols=("AAA", "BBB"),
         historical_data_cutoff=None if temporal else "2026-09-26",
         temporal_validation_enabled=temporal,
+        pipeline_version=3 if split else 2,
     )
     root_id = repository.create(source)
     manifest = build_pipeline_manifest(repository, root_id, source)
@@ -50,7 +51,9 @@ def _source(tmp_path, *, temporal=False, legacy_manifest=False):
     prepared.attrs["effective_end_date"] = "2026-09-26T00:00:00"
     prepared.attrs["symbols_used"] = 2
     digest = prepared_dataset_hash(prepared)
-    for index, (key, job_type, _) in enumerate(SCIENTIFIC_STAGES):
+    for index, (key, job_type, _) in enumerate(
+        SPLIT_SCIENTIFIC_STAGES if split else SCIENTIFIC_STAGES
+    ):
         child_id = manifest["stages"][index]["child_run_id"]
         child_spec = replace(source, job_type=job_type, temporal_validation_enabled=False)
         repository.create(
@@ -68,6 +71,9 @@ def _source(tmp_path, *, temporal=False, legacy_manifest=False):
             path = repository.run_directory(child_id) / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}" if path.suffix == ".json" else "x\n", encoding="utf-8")
+        if split and key == "threshold_calibration":
+            for filename in ("threshold_metrics_by_set.csv", "sampled_combinations.csv"):
+                (results / filename).write_text("Set\n", encoding="utf-8")
         if key == "walk_forward":
             repository.write_json(child_id, "summary.json", {
                 "traceability": {
@@ -115,6 +121,88 @@ def _source(tmp_path, *, temporal=False, legacy_manifest=False):
     repository.write_json(root_id, PIPELINE_MANIFEST, manifest)
     _completed(repository, root_id)
     return repository, root_id, manifest, digest
+
+
+@pytest.mark.parametrize(("fork", "field", "expected_recomputed"), [
+    ("threshold_calibration", "threshold_calibration_min_robust_signals",
+     ("threshold_calibration", "holdout_evaluation", "promotion_qualification")),
+    ("threshold_calibration", "final_holdout_size",
+     ("threshold_calibration", "holdout_evaluation", "promotion_qualification")),
+    ("holdout_evaluation", "evaluate_final_holdout",
+     ("holdout_evaluation", "promotion_qualification")),
+    ("promotion_qualification", "promotion_min_holdout_signals",
+     ("promotion_qualification",)),
+])
+def test_split_derivation_reserves_only_downstream_jobs(
+    tmp_path, fork, field, expected_recomputed,
+):
+    repository, source_id, _, _ = _source(tmp_path, split=True)
+    source = repository.load_spec(source_id)
+    old = (20 if field.startswith("threshold_calibration_") else
+           source.evaluate_final_holdout if field == "evaluate_final_holdout" else
+           getattr(source.config, field))
+    changes = {field: not old if field == "evaluate_final_holdout" else old + 1}
+    forward_enabled = False
+    spec = build_derived_spec(repository, source_id, fork, changes,
+                              forward_enabled=forward_enabled)
+    assert spec.derivation.schema_version == 2
+    root_id = repository.create(spec)
+    manifest = persist_or_validate_pipeline_manifest(repository, root_id, spec)
+    assert manifest["schema_version"] == 4
+    assert tuple(stage["stage_key"] for stage in manifest["stages"]
+                 if stage["mode"] == "recomputed" and stage["stage_key"] in {
+                     key for key, _, _ in SPLIT_SCIENTIFIC_STAGES
+                 }) == expected_recomputed
+    assert persist_or_validate_pipeline_manifest(repository, root_id, spec) == manifest
+
+
+@pytest.mark.parametrize(("fork", "changes", "expected"), [
+    ("threshold_calibration", {"threshold_calibration_min_robust_signals": 21},
+     ("threshold_calibration", "holdout_evaluation", "promotion_qualification")),
+    ("promotion_qualification", {"promotion_min_holdout_signals": 2},
+     ("promotion_qualification",)),
+])
+def test_split_derivation_executes_downstream_once_and_reuses_completed_children(
+    tmp_path, monkeypatch, fork, changes, expected,
+):
+    from rstock.application import end_to_end as pipeline
+    repository, source_id, _, _ = _source(tmp_path, split=True)
+    source = repository.load_spec(source_id)
+    if fork == "promotion_qualification":
+        changes = {"promotion_min_holdout_signals":
+                   source.config.promotion_min_holdout_signals + 1}
+    spec = build_derived_spec(repository, source_id, fork, changes)
+    root_id = repository.create(spec)
+    monkeypatch.setattr(pipeline, "build_forward_model_snapshot", lambda *a, **k: {})
+    called = []
+
+    def execute(repo, child_id):
+        child = repo.load_spec(child_id)
+        called.append(child.job_type.value)
+        key = child.job_type.value
+        result_dir = repo.run_directory(child_id) / "results"
+        result_dir.mkdir(exist_ok=True)
+        for relative in pipeline.REQUIRED_ARTIFACTS[key]:
+            path = repo.run_directory(child_id) / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}" if path.suffix == ".json" else "Set\n", encoding="utf-8")
+        if key == "threshold_calibration":
+            for name in ("threshold_metrics_by_set.csv", "sampled_combinations.csv"):
+                (result_dir / name).write_text("Set\n", encoding="utf-8")
+        _completed(repo, child_id)
+
+    output = repository.run_directory(root_id) / "results"
+    pipeline.run_end_to_end(spec, output, None, None,
+                            execute_reserved_child=execute,
+                            phase_callback=lambda *a, **k: None)
+    assert tuple(called) == expected
+    pipeline.run_end_to_end(spec, output, None, None,
+                            execute_reserved_child=lambda repo, child_id: (
+                                None if repo.status(child_id)["status"] == "completed"
+                                else pytest.fail("unfinished child on resume")
+                            ),
+                            phase_callback=lambda *a, **k: None)
+    assert tuple(called) == expected
 
 
 def test_temporal_source_creates_scientific_only_derivation_from_verified_legacy_snapshot(tmp_path):

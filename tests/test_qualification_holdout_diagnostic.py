@@ -95,6 +95,9 @@ def test_selection_uses_only_persisted_wf_rejects(tmp_path):
 
 def test_materialization_is_idempotent_and_freezes_diagnostic_contract(tmp_path):
     repository, forced_id, wf_id, set_a, _ = _source(tmp_path)
+    repository.write_json(wf_id, "summary.json", {
+        "traceability": {"prepared_dataset_sha256": "wf-prepared-digest"}
+    })
     first, spec, created = materialize_diagnostic(repository, forced_id)
     second, repeated, created_again = materialize_diagnostic(repository, forced_id)
     assert (first, created) == (second, True)
@@ -103,6 +106,8 @@ def test_materialization_is_idempotent_and_freezes_diagnostic_contract(tmp_path)
     assert spec.job_type is JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC
     assert spec.forced_candidate_identities == ((set_a, "Up"),)
     assert spec.source_walk_forward_run == wf_id
+    assert spec.source_prepared_dataset_sha256 == "wf-prepared-digest"
+    assert spec.prepared_dataset_digest_required is True
     assert spec.source_forced_candidate_validation_run == forced_id
     assert spec.source_end_to_end_run == forced_id
     assert spec.diagnostic_protocol == PROTOCOL

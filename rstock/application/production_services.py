@@ -90,6 +90,7 @@ class PromotionService:
         *,
         xgboost_calibration_run: str | None = None,
         threshold_calibration_run: str | None = None,
+        holdout_evaluation_run: str | None = None,
         selected_threshold_direction: str | None = None,
         promotion_provenance: Mapping[str, object] | None = None,
     ) -> tuple[ProductionModel, bool]:
@@ -226,7 +227,19 @@ class PromotionService:
             )
             sample_size = calibrated["Up"].get("calibration_sample_size")
             calibration_sample_size = None if sample_size is None else int(sample_size)
-            holdout_path = calibration_results / "holdout_metrics.csv"
+            if holdout_evaluation_run:
+                self._require_completed_run(
+                    holdout_evaluation_run, JobType.HOLDOUT_EVALUATION
+                )
+                holdout_spec = self.runs.load_spec(holdout_evaluation_run)
+                if holdout_spec.source_threshold_calibration_run != threshold_calibration_run:
+                    raise ValueError("Holdout source differs from threshold calibration")
+                holdout_path = (
+                    self.runs.run_directory(holdout_evaluation_run)
+                    / "results" / "holdout_metrics.csv"
+                )
+            else:
+                holdout_path = calibration_results / "holdout_metrics.csv"
             if holdout_path.exists():
                 signal_holdout = pd.read_csv(holdout_path)
                 matched_holdout = signal_holdout[
@@ -284,6 +297,7 @@ class PromotionService:
                 "calendar": spec.calendar,
                 "validation_provenance": dict(promotion_provenance or {}),
                 "calibration_source_configurations": calibration_sources,
+                "source_holdout_evaluation_run": holdout_evaluation_run,
                 "universe_roles": {
                     "primary_universe_id": spec.primary_universe_id,
                     "context_universe_ids": list(spec.context_universe_ids),

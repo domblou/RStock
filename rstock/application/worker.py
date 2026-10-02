@@ -60,6 +60,13 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("walk_forward", 65), ("final_holdout", 8), ("metrics", 4),
         ("result_writing", 3), ("publishing", 2),
     ],
+    JobType.HOLDOUT_EVALUATION: [
+        ("data_preparation", 25), ("final_holdout", 65),
+        ("result_writing", 8), ("publishing", 2),
+    ],
+    JobType.PROMOTION_QUALIFICATION: [
+        ("qualification", 95), ("publishing", 5),
+    ],
     JobType.FIXED_CANDIDATE_EVALUATION: [
         ("data_preparation", 25),
         ("combination_generation", 5),
@@ -96,10 +103,12 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("production_quality_rebuild", 98), ("publishing", 2),
     ],
     JobType.END_TO_END: [
-        ("walk_forward", 22.5),
-        ("xgboost_calibration", 22.5),
-        ("threshold_parameter_calibration", 22.5),
-        ("threshold_calibration", 22.5),
+        ("walk_forward", 18),
+        ("xgboost_calibration", 18),
+        ("threshold_parameter_calibration", 18),
+        ("threshold_calibration", 18),
+        ("holdout_evaluation", 9),
+        ("promotion_qualification", 9),
         ("promotion", 9),
         ("publishing", 1),
     ],
@@ -695,6 +704,14 @@ def execute_run(
                 or int(checkpoint.manifest.get("attempt_count", 0)) > 0
             )
         phases = WORKFLOW_PHASES[spec.job_type]
+        if (spec.job_type is JobType.FORCED_CANDIDATE_VALIDATION
+                and spec.forced_period_lock is not None):
+            phases = [
+                ("walk_forward", 55),
+                ("fixed_candidate_evaluation", 35),
+                ("promotion_qualification", 8),
+                ("publishing", 2),
+            ]
         if spec.job_type is JobType.WALK_FORWARD and spec.forced_symbol_sets is not None:
             phases = [
                 ("data_preparation", 8),

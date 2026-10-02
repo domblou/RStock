@@ -274,11 +274,17 @@ def test_prefilter_and_walk_forward_receive_the_same_cutoff_data(monkeypatch, tm
     sessions = xcals.get_calendar("XNYS").sessions_in_range("2021-01-01", "2026-01-30")
     _install_market_loader(monkeypatch, sessions, [])
     cutoff = pd.Timestamp(sessions[-100])
-    spec = replace(
+    baseline = replace(
         _spec(tmp_path, 0),
         historical_data_cutoff=cutoff.isoformat(),
-        source_prepared_dataset_sha256="source-hash",
         config=replace(_spec(tmp_path, 0).config, predictor_prefilter_enabled=True),
+    )
+    source_prepared, _, _ = _prepared_experiment(baseline, None, None)
+    source_hash = prepared_dataset_hash(source_prepared)
+    spec = replace(
+        baseline,
+        source_prepared_dataset_sha256=source_hash,
+        prepared_dataset_digest_required=True,
     )
     received = []
 
@@ -327,7 +333,8 @@ def test_prefilter_and_walk_forward_receive_the_same_cutoff_data(monkeypatch, tm
     assert len(received) == 2
     assert received[0] is received[1]
     assert received[0].index.max() == cutoff
-    assert summary["traceability"]["source_prepared_dataset_sha256"] == "source-hash"
+    assert summary["traceability"]["source_prepared_dataset_sha256"] == source_hash
+    assert summary["traceability"]["prepared_dataset_digest_verified"] is True
     assert persisted["traceability"] == summary["traceability"]
 
 

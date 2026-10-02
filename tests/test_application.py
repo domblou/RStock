@@ -79,7 +79,7 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     assert restored.config.xgb_seed == 987
     snapshot = repository.read_json(run_id, "config.json")
     assert snapshot["schema_version"] == 1
-    assert snapshot["pipeline_version"] == 2
+    assert snapshot["pipeline_version"] == 3
     assert snapshot["calibration_sampling_policy_version"] == 2
 
 

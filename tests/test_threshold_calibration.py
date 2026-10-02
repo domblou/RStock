@@ -504,6 +504,145 @@ def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch
     assert result.run_configuration["holdout_evaluated"] is True
 
 
+def test_pre_split_reference_thresholds_and_holdout_metrics(monkeypatch):
+    """Numerical contract of the composite calibration job before the split."""
+    predictions = _economically_viable_predictions().assign(Set="AAA<-BBB")
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: predictions.copy(),
+    )
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_holdout_probabilities",
+        lambda *args, **kwargs: predictions.copy(),
+    )
+    prepared = pd.DataFrame(
+        {"placeholder": np.arange(12)},
+        index=pd.bdate_range("2025-01-01", periods=12),
+    )
+
+    result = run_controlled_threshold_calibration(
+        prepared,
+        generate_symbol_sets(["AAA", "BBB"], 1),
+        _config(),
+        combinations_per_target=1,
+        min_train_size=2,
+        test_size=2,
+        step_size=2,
+        final_holdout_size=3,
+        evaluate_final_holdout=True,
+    )
+
+    selected = result.run_configuration["selected_thresholds_by_set"]["AAA<-BBB"]
+    assert {direction: item["threshold"] for direction, item in selected.items()} == {
+        "Up": 0.7125,
+        "Down": 0.7125,
+    }
+    assert result.run_configuration["holdout_used_for_selection"] is False
+    assert result.run_configuration["holdout_evaluated"] is True
+    actual = result.holdout_metrics.set_index("Direction")
+    assert set(actual.index) == {"Up", "Down"}
+    for direction in ("Up", "Down"):
+        row = actual.loc[direction]
+        assert row["Threshold"] == pytest.approx(0.7125)
+        assert row["Observations"] == 8
+        assert row["SignalCount"] == 2
+        assert row["ROCAUC"] == pytest.approx(1.0)
+        assert row["Precision"] == pytest.approx(1.0)
+        assert row["DirectionalReturnMean"] == pytest.approx(0.02)
+        assert row["OppositeMoveFrequency"] == pytest.approx(0.0)
+    assert result.holdout_predictions.groupby("Direction")["Prediction"].sum().to_dict() == {
+        "Up": 2,
+        "Down": 2,
+    }
+
+
+def test_split_job_handlers_match_composite_numerical_results(tmp_path, monkeypatch):
+    """The holdout job must apply the calibration job's frozen selection."""
+    import json
+
+    from rstock.application import workflows
+    from rstock.application.repository import RunRepository
+    from rstock.application.worker import execute_run
+    from rstock.application.workflows import WorkflowRegistry
+
+    prepared = pd.DataFrame(
+        {"placeholder": np.arange(12)},
+        index=pd.bdate_range("2025-01-01", periods=12),
+    )
+    generated = generate_symbol_sets(["AAA", "BBB"], 1)
+    predictions = _economically_viable_predictions().assign(Set="AAA<-BBB")
+    monkeypatch.setattr(
+        workflows, "_prepared_calibration_population",
+        lambda *args, **kwargs: (prepared, generated, False),
+    )
+    monkeypatch.setattr(
+        workflows, "_prepared_inputs",
+        lambda *args, **kwargs: (prepared, ["AAA", "BBB"], ["AAA"], {}),
+    )
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_development_probabilities",
+        lambda *args, **kwargs: predictions.copy(),
+    )
+    monkeypatch.setattr(
+        "rstock.threshold_calibration.generate_holdout_probabilities",
+        lambda *args, **kwargs: predictions.copy(),
+    )
+    monkeypatch.setattr(
+        workflows, "generate_holdout_probabilities",
+        lambda *args, **kwargs: predictions.copy(),
+    )
+    config = replace(
+        _config(final_holdout_size=3, walk_forward_min_train_size=2,
+                walk_forward_test_size=2, walk_forward_step_size=2),
+        project_root=tmp_path,
+    )
+    repository = RunRepository(tmp_path / "runs")
+    registry = WorkflowRegistry({
+        JobType.THRESHOLD_CALIBRATION: workflows._threshold_calibration,
+        JobType.HOLDOUT_EVALUATION: workflows._holdout_evaluation,
+    })
+    common = dict(config=config, symbols=("AAA", "BBB"), combinations_per_target=1)
+    composite_id = repository.create(ExperimentSpec(
+        job_type=JobType.THRESHOLD_CALIBRATION,
+        evaluate_final_holdout=True, **common,
+    ))
+    execute_run(repository, composite_id, 1, registry=registry)
+    assert repository.status(composite_id)["status"] == JobStatus.COMPLETED.value
+
+    calibration_id = repository.create(ExperimentSpec(
+        job_type=JobType.THRESHOLD_CALIBRATION,
+        evaluate_final_holdout=False, **common,
+    ))
+    execute_run(repository, calibration_id, 1, registry=registry)
+    assert repository.status(calibration_id)["status"] == JobStatus.COMPLETED.value
+    calibration_results = repository.run_directory(calibration_id) / "results"
+    selected = json.loads(
+        (calibration_results / "selected_thresholds_by_set.json").read_text(encoding="utf-8")
+    )
+    holdout_id = repository.create(ExperimentSpec(
+        job_type=JobType.HOLDOUT_EVALUATION,
+        source_threshold_calibration_run=calibration_id,
+        frozen_selected_thresholds_by_set=selected,
+        evaluate_final_holdout=True, **common,
+    ))
+    execute_run(repository, holdout_id, 1, registry=registry)
+    assert repository.status(holdout_id)["status"] == JobStatus.COMPLETED.value, repository.status(holdout_id).get("error")
+    composite_results = repository.run_directory(composite_id) / "results"
+    holdout_results = repository.run_directory(holdout_id) / "results"
+    assert not (calibration_results / "holdout_metrics.csv").exists()
+    assert selected == json.loads(
+        (composite_results / "selected_thresholds_by_set.json").read_text(encoding="utf-8")
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(holdout_results / "holdout_metrics.csv"),
+        pd.read_csv(composite_results / "holdout_metrics.csv"),
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(holdout_results / "holdout_predictions.csv"),
+        pd.read_csv(composite_results / "holdout_predictions.csv"),
+    )
+
+
 def test_controlled_runner_persists_effective_xgboost_provenance(monkeypatch):
     directional = {
         "Up": XGBoostParameters(2, 0.04, 60),
