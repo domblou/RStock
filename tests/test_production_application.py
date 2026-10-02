@@ -582,6 +582,57 @@ def test_daily_prediction_threshold_screening_and_realized_result_are_separate(m
     assert displayed["down_target_hit"] == "Non"
 
 
+@pytest.mark.parametrize("status", [ProductionModelStatus.ACTIVE, ProductionModelStatus.WATCHING])
+def test_daily_prediction_targets_next_session_after_latest_observation_for_tracked_models(
+    monkeypatch, tmp_path, status,
+):
+    repository = ProductionRepository(tmp_path)
+    model = replace(_model(), status=status, artifact_version=1)
+    repository.add(model)
+    directory = repository.artifact_directory(model.model_id)
+    directory.mkdir(parents=True)
+    (directory / "production.metadata.json").write_text(json.dumps({
+        "model_id": model.model_id, "artifact_version": 1,
+        "feature_version": model.feature_version,
+        "predictor_columns": ["BBB_intraday_J-1"],
+    }), encoding="utf-8")
+    for name in ("up.ubj", "down.ubj"):
+        (directory / name).write_bytes(b"x")
+    monkeypatch.setattr(production_services_module, "load_booster", lambda path: path.stem)
+    monkeypatch.setattr(
+        production_services_module, "predict_probabilities",
+        lambda booster, *args: np.array([0.8 if booster == "up" else 0.2]),
+    )
+    prepared = pd.DataFrame({
+        "AAA.intraday_return": [0.01, 0.02, 0.03],
+        "BBB.intraday_return": [0.01, 0.02, 0.03],
+    }, index=pd.to_datetime(["2026-09-23", "2026-09-24", "2026-09-25"]))
+    service = DailyPredictionService(repository)
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path, lag_depth=1)
+
+    thursday_data = prepared.iloc[:2]
+    first = service.generate(thursday_data, config)
+    repeated = service.generate(thursday_data, config)
+    assert first.iloc[0]["as_of_date"] == "2026-09-24"
+    assert first.iloc[0]["prediction_date"] == "2026-09-25"
+    assert repeated.iloc[0]["prediction_id"] == first.iloc[0]["prediction_id"]
+    assert len(repository.read_table("predictions")) == 1
+    ProductionSignalService(repository).screen(first, restrict_to_active_models=False)
+
+    after_friday_data = service.generate(prepared, config)
+    assert after_friday_data.iloc[0]["as_of_date"] == "2026-09-25"
+    assert after_friday_data.iloc[0]["prediction_date"] == "2026-09-28"
+    ProductionSignalService(repository).screen(
+        after_friday_data, restrict_to_active_models=False
+    )
+    assert len(repository.read_table("predictions")) == 2
+    history = (
+        repository.read_active_model_table("signals") if status == ProductionModelStatus.ACTIVE
+        else repository.read_watching_model_table("signals")
+    )
+    assert set(history["prediction_date"]) == {"2026-09-25", "2026-09-28"}
+
+
 def test_training_cancellation_between_directions_leaves_no_partial_artifacts(
     monkeypatch, tmp_path
 ):

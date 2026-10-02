@@ -66,6 +66,8 @@ def test_watching_status_filter_actions_and_distinct_surveillance_section():
     assert model_status_label("watching") == "En observation"
     assert "status_options" in models and "format_func=model_status_label" in models
     assert "service.watch(selected_id)" in models
+    assert "Passer en observation" in models
+    assert 'selected.status.value not in {"trained", "active"}' in models
     assert "service.activate(selected_id)" in models
     assert "service.deactivate(selected_id)" in models
     assert "model_phase_comparison_table(detail.observations, detail.series)" in detail
@@ -74,4 +76,8 @@ def test_watching_status_filter_actions_and_distinct_surveillance_section():
     assert "_render_watching_surveillance_section(" in surveillance
     assert "watching_history()" in watching
     assert "watching_realized_results()" in watching
+    assert "surveillance_target_session(" in watching
+    assert "next_session_signals_view(" in watching
+    assert "surveillance_target_session(" in surveillance
+    assert "_render_surveillance_model_history(project_root)" in surveillance
     assert "_render_real_trade_from_prediction" not in watching

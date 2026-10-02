@@ -298,8 +298,12 @@ class ExperimentSpec:
         if self.derivation is not None:
             if self.job_type is not JobType.END_TO_END:
                 raise ValueError("Only an End-to-End can be derived")
-            if self.temporal_validation_enabled or self.forced_symbol_sets is not None:
-                raise ValueError("Temporal and forced End-to-End derivation is not supported")
+            if self.temporal_validation_enabled:
+                raise ValueError(
+                    "A derived End-to-End cannot inherit or replay temporal validation"
+                )
+            if self.forced_symbol_sets is not None:
+                raise ValueError("Forced End-to-End derivation is not supported")
             self.derivation.validate_plan(
                 promotion_enabled=self.auto_promote_candidates,
                 forward_enabled=self.forward_simulation_enabled,

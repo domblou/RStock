@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from rstock.application.surveillance import (
     PREDICTION_MAIN_COLUMNS,
@@ -16,6 +17,7 @@ from rstock.application.surveillance import (
     latest_session_results_view,
     next_session_signals_view,
     next_surveillance_session,
+    surveillance_target_session,
     prediction_feature_tables,
     prediction_features_table,
     evaluated_predictions_main_table,
@@ -86,6 +88,42 @@ def test_next_surveillance_session_skips_weekend_and_uses_french_label():
     assert surveillance_session_label(session) == "Lundi 2026-09-28"
     assert session_crosses_weekend("2026-09-25", session) is True
     assert session_crosses_weekend("2026-09-24", "2026-09-25") is False
+
+
+@pytest.mark.parametrize("reference,expected", [
+    ("2026-09-24", "2026-09-25"),  # Thursday evening
+    ("2026-09-25", "2026-09-25"),  # Friday before and after close, before update
+    ("2026-09-26", "2026-09-28"),  # Weekend
+    ("2026-09-28", "2026-09-28"),  # Monday morning
+])
+def test_surveillance_keeps_current_batch_then_selects_next_available(reference, expected):
+    signals = pd.DataFrame([
+        {**_prediction("friday", "2026-09-25"), **_signal("friday")},
+        {**_prediction("monday", "2026-09-28"), **_signal("monday")},
+    ])
+    view = build_signals_view(signals)
+    target = surveillance_target_session(view, pd.DataFrame(), reference, "XNYS")
+
+    assert target == pd.Timestamp(expected)
+    assert next_session_signals_view(view, pd.DataFrame(), target).table["Date"].tolist() == [expected]
+
+
+def test_surveillance_uses_prediction_as_of_when_no_bullish_batch_exists():
+    predictions = pd.DataFrame([{**_prediction("quiet", "2026-09-25", "no_signal"),
+                                 "as_of_date": "2026-09-24"}])
+    view = build_signals_view(pd.DataFrame(), predictions)
+
+    assert surveillance_target_session(view, predictions, "2026-09-25") == pd.Timestamp("2026-09-25")
+    assert surveillance_target_session(view, predictions, "2026-09-26") == pd.Timestamp("2026-09-28")
+
+
+def test_surveillance_uses_xnys_holiday_for_next_available_batch():
+    # Labor Day 2026 is Monday September 7.
+    signals = pd.DataFrame([{**_prediction("tuesday", "2026-09-08"), **_signal("tuesday")}])
+    view = build_signals_view(signals)
+
+    for reference in ("2026-09-04", "2026-09-05", "2026-09-07", "2026-09-08"):
+        assert surveillance_target_session(view, pd.DataFrame(), reference, "XNYS") == pd.Timestamp("2026-09-08")
 
 
 def test_operational_surveillance_tables_use_exact_sessions_and_quality_values():

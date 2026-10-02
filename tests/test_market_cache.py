@@ -132,6 +132,26 @@ def test_post_close_retry_is_not_blocked_by_a_morning_cache_attempt(tmp_path):
     assert store.read("AAPL").index.max() == pd.Timestamp("2024-01-08")
 
 
+def test_premarket_refresh_excludes_an_incomplete_cached_session_even_on_failure(tmp_path):
+    provider = FakeProvider({"AAPL": _prices(["2026-09-24", "2026-09-25"])})
+    current_time = [datetime(2026, 9, 25, 13, tzinfo=timezone.utc)]
+    service, store = _service(tmp_path, provider, clock=lambda: current_time[0])
+    store.write("AAPL", _prices(["2026-09-24", "2026-09-25"]))
+
+    first = service.get_market_data(_universe("AAPL"), 10, as_of=date(2026, 9, 25))
+    assert first.prices.index.max() == pd.Timestamp("2026-09-24")
+
+    provider.failures.add("AAPL")
+    repeated = service.get_market_data(_universe("AAPL"), 10, as_of=date(2026, 9, 25))
+    assert repeated.events[0].status == "failed_using_cache"
+    assert repeated.prices.index.max() == pd.Timestamp("2026-09-24")
+
+    provider.failures.clear()
+    current_time[0] = datetime(2026, 9, 25, 20, 15, tzinfo=timezone.utc)
+    updated = service.get_market_data(_universe("AAPL"), 10, as_of=date(2026, 9, 25))
+    assert updated.prices.index.max() == pd.Timestamp("2026-09-25")
+
+
 def test_incremental_request_fetches_after_last_date_and_merges_without_duplicates(tmp_path):
     provider = FakeProvider({"AAPL": _prices(["2024-01-03", "2024-01-04"])})
     service, store = _service(tmp_path, provider)

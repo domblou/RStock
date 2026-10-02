@@ -123,7 +123,8 @@ from rstock.application.surveillance import (
     filter_signal_results_view,
     latest_session_results_view,
     next_session_signals_view,
-    next_surveillance_session,
+    surveillance_target_session,
+    surveillance_model_history_table,
     prioritize_signals_view,
     signal_priority_model_lookup,
     prediction_feature_tables,
@@ -161,6 +162,7 @@ from rstock.application.production_quality_ui import (
     performance_windows_display_table,
     sort_quality_models,
     style_directional_columns,
+    winning_trades_display_style,
 )
 from rstock.application.real_trades import (
     RealTradeService,
@@ -2773,12 +2775,22 @@ def _render_derived_creation(
     derivation = configuration.get("derivation")
     if isinstance(derivation, Mapping):
         st.caption(f"Dérivé de {derivation.get('source_end_to_end_run_id', '—')}")
+        if derivation.get("source_temporal_validation_enabled") is True:
+            st.warning(
+                "La validation temporelle du run source n’a été ni héritée ni "
+                "rejouée : ce dérivé n’est pas temporellement revalidé."
+            )
         return
     status = detail.get("status", {})
     if not isinstance(status, Mapping) or status.get("status") != "completed":
         return
-    if configuration.get("temporal_validation_enabled") or configuration.get("forced_symbol_sets") is not None:
+    if configuration.get("forced_symbol_sets") is not None:
         return
+    if configuration.get("temporal_validation_enabled"):
+        st.warning(
+            "La validation temporelle de ce run ne sera ni héritée ni rejouée "
+            "dans le dérivé. Le nouveau run ne sera pas temporellement revalidé."
+        )
     key = f"derive-open-{run_id}"
     if st.button("Créer une expérience dérivée", key=f"derive-button-{run_id}"):
         st.session_state[key] = True
@@ -3199,7 +3211,14 @@ def _render_temporal_validation(
         detail.get("pipeline_stages"), "temporal_validation_end_to_end"
     )
     if stage is None:
-        st.info("Temporal validation was not enabled for this End-to-end.")
+        derivation = detail.get("configuration", {}).get("derivation")
+        if isinstance(derivation, Mapping) and derivation.get("source_temporal_validation_enabled") is True:
+            st.info(
+                "La validation temporelle du run source n’a été ni héritée ni "
+                "rejouée pour ce dérivé."
+            )
+        else:
+            st.info("La validation temporelle n’a pas été activée pour cet End-to-end.")
         return
     child_run_id = str(stage["child_run_id"])
     st.caption(
@@ -4618,6 +4637,7 @@ def _render_surveillance_header(
 def _render_surveillance_kpis(
     *,
     next_session: pd.Timestamp,
+    reference_date: pd.Timestamp,
     crosses_weekend: bool,
     next_signals: OperationalTableView,
     latest_results: OperationalTableView,
@@ -4630,10 +4650,14 @@ def _render_surveillance_kpis(
         columns = st.columns(6, gap="small")
         _render_models_kpi_card(
             columns[0],
-            "Prochaine séance",
+            "Séance d’aujourd’hui" if next_session == reference_date else "Prochaine séance",
             f"{next_session:%Y-%m-%d}",
             "calendar_month",
-            caption="Week-end détecté" if crosses_weekend else "Séance ouvrable suivante",
+            caption=(
+                "Séance en cours" if next_session == reference_date
+                else "Week-end détecté" if crosses_weekend
+                else "Séance ouvrable suivante"
+            ),
         )
         _render_models_kpi_card(
             columns[1],
@@ -4650,7 +4674,10 @@ def _render_surveillance_kpis(
             "Rendement moyen signaux",
             _models_percent(values["mean_expected_return"]),
             "monitoring",
-            caption="Prochaine séance",
+            caption=(
+                "Séance d’aujourd’hui" if next_session == reference_date
+                else "Prochaine séance"
+            ),
             directional=True,
         )
         _render_models_kpi_card(
@@ -4908,10 +4935,15 @@ def _surveillance_column_config(columns: pd.Index) -> dict[str, object]:
     }
 
 
-def _render_next_session_signals(view: OperationalTableView) -> None:
+def _render_next_session_signals(
+    view: OperationalTableView, target_session: pd.Timestamp, today: pd.Timestamp,
+) -> None:
     with st.container(border=True):
-        st.subheader("Signaux haussiers — prochaine séance")
-        st.caption("Occasions à considérer pour la prochaine séance ouvrable.")
+        session_label = (
+            "séance d’aujourd’hui" if target_session == today else "prochaine séance"
+        )
+        st.subheader(f"Signaux haussiers — {session_label}")
+        st.caption(f"Occasions à considérer pour la {session_label}.")
         controls = st.columns([1, 1.5, 3], gap="small")
         order = controls[0].selectbox(
             "Tri",
@@ -4946,7 +4978,7 @@ def _render_next_session_signals(view: OperationalTableView) -> None:
                 ).index
             table = table.iloc[positions].reset_index(drop=True)
         if table.empty:
-            st.info("Aucun signal haussier pour la prochaine séance ouvrable.")
+            st.info(f"Aucun signal haussier pour la {session_label}.")
         else:
             st.dataframe(
                 _styled_surveillance_table(
@@ -5466,7 +5498,7 @@ def _evaluated_predictions_panel(
 def _render_watching_surveillance_section(
     *, project_root: Path, models: ModelService,
     signal_service: SignalService, quality: pd.DataFrame,
-    next_session: pd.Timestamp,
+    reference_date: pd.Timestamp, calendar_name: str,
 ) -> None:
     """Read only observation events; never expose a production trade action."""
 
@@ -5483,8 +5515,14 @@ def _render_watching_surveillance_section(
         signals = signal_service.watching_history()
         realized = signal_service.watching_realized_results()
         watching_quality = quality[quality["status"].astype(str).eq("watching")]
+        watching_view = build_signals_view(
+            signals, predictions, limit=max(50, len(signals))
+        )
+        target_session = surveillance_target_session(
+            watching_view, predictions, reference_date, calendar_name
+        )
         upcoming = next_session_signals_view(
-            build_signals_view(signals, predictions), watching_quality, next_session
+            watching_view, watching_quality, target_session
         )
         freshness = MarketDataService().freshness(
             models.tracked_universe().symbols, st.session_state.lab_config
@@ -5493,9 +5531,13 @@ def _render_watching_surveillance_section(
             predictions, signals, realized, freshness
         )
         latest = latest_session_results_view(evaluated, watching_quality)
-        st.markdown("**Signaux à venir**")
+        session_label = (
+            "séance d’aujourd’hui" if target_session == reference_date
+            else "prochaine séance"
+        )
+        st.markdown(f"**Signaux haussiers — {session_label}**")
         if upcoming.table.empty:
-            st.caption("Aucun signal en observation pour la prochaine séance.")
+            st.caption(f"Aucun signal en observation pour la {session_label}.")
         else:
             st.dataframe(
                 _styled_surveillance_table(
@@ -5517,6 +5559,26 @@ def _render_watching_surveillance_section(
             )
 
 
+def _render_surveillance_model_history(project_root: Path) -> None:
+    """Expose prior ACTIVE and WATCHING events for today's tracked models."""
+
+    repository = ProductionRepository(project_root)
+    history = surveillance_model_history_table(
+        repository.read_tracked_model_table("predictions"),
+        repository.read_tracked_model_table("signals"),
+        repository.read_tracked_model_table("realized_results"),
+    )
+    with st.expander(f"Historique complet des modèles suivis ({len(history)})"):
+        st.caption(
+            "La période de chaque événement correspond au statut du modèle lors de sa prédiction. "
+            "Le P&L historique inclut les périodes actives et en observation."
+        )
+        if history.empty:
+            st.info("Aucun événement historique pour les modèles suivis.")
+        else:
+            st.dataframe(history, hide_index=True, width="stretch")
+
+
 def _render_surveillance_page(*, polling: bool) -> None:
     _surveillance_styles()
     project_root = st.session_state.lab_config.project_root
@@ -5529,16 +5591,16 @@ def _render_surveillance_page(*, polling: bool) -> None:
     freshness = MarketDataService().freshness(universe.symbols, st.session_state.lab_config)
     runs = _service().runs()
     quality = load_models_master(project_root)
-    signal_view = build_signals_view(signals, predictions)
+    signal_view = build_signals_view(signals, predictions, limit=max(50, len(signals)))
     evaluated_view = _load_evaluated_predictions_view(
         predictions,
         signals,
         project_root=project_root,
     )
     reference_date = pd.Timestamp.now(tz="America/Toronto").normalize().tz_localize(None)
-    next_session = next_surveillance_session(
-        reference_date,
-        getattr(st.session_state, "lab_calendar", "XNYS"),
+    calendar_name = getattr(st.session_state, "lab_calendar", "XNYS")
+    next_session = surveillance_target_session(
+        signal_view, predictions, reference_date, calendar_name,
     )
     next_signals = next_session_signals_view(signal_view, quality, next_session)
     latest_results = latest_session_results_view(evaluated_view, quality)
@@ -5565,6 +5627,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
     )
     _render_surveillance_kpis(
         next_session=next_session,
+        reference_date=reference_date,
         crosses_weekend=session_crosses_weekend(reference_date, next_session),
         next_signals=next_signals,
         latest_results=latest_results,
@@ -5575,12 +5638,14 @@ def _render_surveillance_page(*, polling: bool) -> None:
         runs, tracked_model_count=len(models.tracked_models())
     )
     st.subheader("Production")
-    _render_next_session_signals(next_signals)
+    _render_next_session_signals(next_signals, next_session, reference_date)
     _render_latest_session_results(latest_results)
     _render_watching_surveillance_section(
         project_root=project_root, models=models, signal_service=signal_service,
-        quality=quality, next_session=next_session,
+        quality=quality, reference_date=reference_date,
+        calendar_name=calendar_name,
     )
+    _render_surveillance_model_history(project_root)
     if surveillance_refresh_decision(runs, polling=polling).final_rerun:
         st.rerun(scope="app")
 
@@ -6432,8 +6497,8 @@ def _models_page() -> None:
     event = st.dataframe(
         style_directional_columns(
             table,
-            ("Rendement moyen", "Trades gagnants", "P&L cumulé", "Drawdown"),
-        ),
+            ("Rendement moyen", "P&L cumulé", "Drawdown"),
+        ).map(winning_trades_display_style, subset=["Trades gagnants"]),
         hide_index=True,
         width="stretch",
         on_select="rerun",
@@ -6465,7 +6530,11 @@ def _models_page() -> None:
     )
     if controls[1].button("Entraîner", disabled=selected.status.value in {"active", "watching", "retired"}):
         _submit_operational_job(JobType.PRODUCTION_TRAINING, model_id=selected_id)
-    if controls[2].button("Démarrer le suivi", disabled=selected.status.value != "trained"):
+    watch_label = (
+        "Passer en observation" if selected.status.value == "active"
+        else "Démarrer le suivi"
+    )
+    if controls[2].button(watch_label, disabled=selected.status.value not in {"trained", "active"}):
         service.watch(selected_id); _invalidate_surveillance_selection_state(); st.rerun()
     if controls[3].button("Activer", disabled=selected.status.value not in {"trained", "watching", "inactive"}):
         service.activate(selected_id); _invalidate_surveillance_selection_state(); st.rerun()

@@ -152,6 +152,12 @@ def _build_derived_pipeline_manifest(
     )
     if source_manifest is None or source_manifest["schema_version"] != PIPELINE_SCHEMA_VERSION:
         raise ValueError("Derived sources are not supported in this pipeline version")
+    if (
+        derivation.source_temporal_validation_enabled is not None
+        and derivation.source_temporal_validation_enabled
+        is not source_manifest.get("temporal_validation_enabled")
+    ):
+        raise ValueError("Source temporal validation provenance changed")
     modes = derivation.validate_plan(
         promotion_enabled=spec.auto_promote_candidates,
         forward_enabled=spec.forward_simulation_enabled,
@@ -221,12 +227,23 @@ def _build_derived_pipeline_manifest(
             ),
             "not_executed_reason": "disabled" if mode == "not_executed" else None,
         })
-    return {
+    anchor = spec.historical_data_cutoff
+    if not anchor:
+        raise ValueError("Derived dataset session is missing")
+    source_anchor = source_manifest.get("prepared_dataset_as_of")
+    if source_anchor is not None and str(source_anchor) != str(anchor):
+        raise ValueError("Derived dataset session differs from its source manifest")
+    if source_anchor is None:
+        walk_forward_id = derivation.inherited_stages["walk_forward"].source_run_id
+        traced_date, _ = _walk_forward_traceability(repository, walk_forward_id)
+        if pd.Timestamp(traced_date).date().isoformat() != anchor:
+            raise ValueError("Derived dataset session differs from Walk-forward traceability")
+    result = {
         "schema_version": DERIVED_PIPELINE_SCHEMA_VERSION,
         "root_run_id": root_run_id,
         "pipeline_version": spec.pipeline_version,
         "child_id_policy_version": CHILD_ID_POLICY_RESERVED,
-        "prepared_dataset_as_of": source_manifest["prepared_dataset_as_of"],
+        "prepared_dataset_as_of": str(anchor),
         "auto_promote_candidates": spec.auto_promote_candidates,
         "forward_simulation_enabled": spec.forward_simulation_enabled,
         "temporal_validation_enabled": False,
@@ -234,6 +251,13 @@ def _build_derived_pipeline_manifest(
         "derivation": derivation.to_dict(),
         "stages": stages,
     }
+    if derivation.source_temporal_validation_enabled is not None:
+        result["temporal_validation_provenance"] = {
+            "source_enabled": derivation.source_temporal_validation_enabled,
+            "inherited": False,
+            "replayed": False,
+        }
+    return result
 
 
 def build_pipeline_manifest(
@@ -493,8 +517,21 @@ def _validate_derived_pipeline_manifest(
     )
     if manifest.get("child_id_policy_version") != CHILD_ID_POLICY_RESERVED:
         raise ValueError("Derived child ID policy is invalid")
-    if manifest.get("temporal_validation_enabled") or manifest.get("forced_candidate_validation"):
+    if (
+        manifest.get("temporal_validation_enabled") is not False
+        or manifest.get("forced_candidate_validation") is not False
+    ):
         raise ValueError("Derived temporal or forced pipeline is not supported")
+    temporal_provenance = manifest.get("temporal_validation_provenance")
+    if derivation.source_temporal_validation_enabled is not None:
+        if temporal_provenance != {
+            "source_enabled": derivation.source_temporal_validation_enabled,
+            "inherited": False,
+            "replayed": False,
+        }:
+            raise ValueError("Derived temporal validation provenance is invalid")
+    elif temporal_provenance is not None:
+        raise ValueError("Historic derivation has unexpected temporal provenance")
     job_types = {stage: job for stage, job, _ in SCIENTIFIC_STAGES}
     job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
     effective_ids: dict[str, str | None] = {}
@@ -571,6 +608,7 @@ def persist_or_validate_pipeline_manifest(
             "schema_version", "root_run_id", "pipeline_version",
             "prepared_dataset_as_of", "auto_promote_candidates",
             "forward_simulation_enabled",
+            "temporal_validation_provenance",
             "derivation",
         ):
             if persisted.get(key) != expected.get(key):

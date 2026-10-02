@@ -318,6 +318,22 @@ def directional_display_style(value: object) -> str:
     )
 
 
+def winning_trades_display_style(value: object) -> str:
+    """Color the Models grid win rate relative to its 50% reference."""
+
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).replace(" ", "").replace("%", "").replace(",", ".")
+    numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return ""
+    return (
+        "color: #198754; font-weight: 600"
+        if numeric >= 50
+        else "color: #dc3545; font-weight: 600"
+    )
+
+
 def style_directional_columns(
     frame: pd.DataFrame, columns: Iterable[str]
 ) -> pd.io.formats.style.Styler:

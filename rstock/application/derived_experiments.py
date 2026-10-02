@@ -7,6 +7,8 @@ import json
 from dataclasses import replace
 from typing import Any, Mapping
 
+import pandas as pd
+
 from .derivation import (
     Derivation, InheritedStage, ParameterOverride, PARAMETER_OWNER,
     SCIENTIFIC_STAGE_KEYS, stage_modes,
@@ -57,8 +59,8 @@ def build_derived_spec(
         raise ValueError("Derivation requires an End-to-End source")
     if source_spec.derivation is not None:
         raise ValueError("Derivation of a derived End-to-End is deferred")
-    if source_spec.temporal_validation_enabled or source_spec.forced_symbol_sets is not None:
-        raise ValueError("Temporal and forced End-to-End derivation is deferred")
+    if source_spec.forced_symbol_sets is not None:
+        raise ValueError("Forced End-to-End derivation is deferred")
     if repository.status(source_end_to_end_run_id).get("status") != "completed":
         raise ValueError("Source End-to-End must be completed")
     if repository.storage(source_end_to_end_run_id)["state"] != "full":
@@ -66,6 +68,8 @@ def build_derived_spec(
     manifest = load_pipeline_manifest(repository, source_end_to_end_run_id)
     if manifest is None or manifest["schema_version"] != 1:
         raise ValueError("Source End-to-End manifest is unavailable")
+    if manifest.get("temporal_validation_enabled") is not source_spec.temporal_validation_enabled:
+        raise ValueError("Source temporal validation provenance is inconsistent")
     modes = stage_modes(fork_stage)
     inherited: dict[str, InheritedStage] = {}
     for stage in manifest["stages"]:
@@ -91,12 +95,33 @@ def build_derived_spec(
     expected_digest = str(traceability["prepared_dataset_sha256"])
     snapshot_spec = replace(
         source_spec, job_type=JobType.XGBOOST_CALIBRATION,
+        temporal_validation_enabled=False,
         source_walk_forward_run=walk_forward_id,
         source_prepared_dataset_sha256=expected_digest,
         prepared_dataset_digest_required=True,
         prepared_snapshot_required=True,
     )
-    load_source_prepared_snapshot(repository, snapshot_spec)
+    prepared, _, _, _ = load_source_prepared_snapshot(repository, snapshot_spec)
+    source_as_of = manifest.get("prepared_dataset_as_of")
+    if source_as_of is None:
+        # Historic manifests may predate this field. The verified Walk-forward
+        # snapshot and its persisted traceability must agree on the session.
+        try:
+            traced = pd.Timestamp(traceability["prepared_market_last_date"])
+            observed = pd.Timestamp(prepared.index.max())
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Source Walk-forward session is unavailable") from error
+        if (
+            pd.isna(traced) or pd.isna(observed)
+            or traced.tzinfo is not None or observed.tzinfo is not None
+            or traced != observed or traced != traced.normalize()
+        ):
+            raise ValueError("Source Walk-forward session is ambiguous")
+        anchor = traced.date().isoformat()
+    else:
+        anchor = str(source_as_of)
+        if not anchor.strip():
+            raise ValueError("Source dataset session is missing")
     overrides = []
     config_changes: dict[str, Any] = {}
     other_changes: dict[str, Any] = {}
@@ -128,13 +153,14 @@ def build_derived_spec(
             repository.run_directory(walk_forward_id)
             / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
         ).read_bytes()).hexdigest(),
+        source_temporal_validation_enabled=source_spec.temporal_validation_enabled,
     )
-    anchor = str(manifest["prepared_dataset_as_of"])
     derived = replace(
         source_spec,
         config=replace(source_spec.config, **config_changes),
         historical_data_cutoff=anchor,
         derivation=derivation,
+        temporal_validation_enabled=False,
         auto_promote_candidates=False,
         forward_simulation_enabled=forward_enabled,
         **other_changes,

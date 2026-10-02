@@ -177,6 +177,36 @@ def next_surveillance_session(
     return next_market_session(reference, calendar_name)
 
 
+def surveillance_target_session(
+    view: SignalResultsView,
+    predictions: pd.DataFrame,
+    reference: date | str | pd.Timestamp,
+    calendar_name: str = US_EQUITIES_CALENDAR,
+) -> pd.Timestamp:
+    """Select today's signal batch, then the earliest future batch available.
+
+    When there is no bullish batch, use the latest completed observation
+    recorded by predictions to describe the target of the current run.
+    """
+
+    today = pd.Timestamp(reference).normalize().tz_localize(None)
+    signals = view.signals.technical
+    if "prediction_date" in signals:
+        targets = pd.to_datetime(signals["prediction_date"], errors="coerce", utc=True)
+        targets = targets.dt.tz_convert(None).dt.normalize()
+        available = targets[targets.ge(today)].dropna()
+        if not available.empty:
+            return pd.Timestamp(available.min())
+    if "as_of_date" in predictions:
+        as_of = pd.to_datetime(predictions["as_of_date"], errors="coerce", utc=True)
+        as_of = as_of.dropna()
+        if not as_of.empty:
+            target = next_market_session(as_of.max(), calendar_name)
+            if target >= today:
+                return target
+    return next_market_session(today, calendar_name)
+
+
 def surveillance_session_label(value: object) -> str:
     """Format one market session with its French weekday name."""
 
@@ -333,6 +363,46 @@ def surveillance_kpi_values(
         "winning_signal_count": int(realized_returns.gt(0).sum()),
         "latest_session_pnl": None if pnl.empty else float(pnl.sum()),
     }
+
+
+def surveillance_model_history_table(
+    predictions: pd.DataFrame,
+    signals: pd.DataFrame,
+    realized: pd.DataFrame,
+) -> pd.DataFrame:
+    """Show every tracked model event under its frozen historical status."""
+
+    columns = ("Date", "Modèle", "Cible", "Période", "Signal", "Rendement", "P&L")
+    if predictions.empty or "prediction_id" not in predictions:
+        return pd.DataFrame(columns=columns)
+    rows = predictions.drop_duplicates("prediction_id", keep="first").copy()
+    if not signals.empty and {"prediction_id", "category"} <= set(signals):
+        rows = rows.merge(
+            signals[["prediction_id", "category"]].drop_duplicates("prediction_id"),
+            on="prediction_id", how="left", suffixes=("", "_signal"),
+        )
+    if not realized.empty and {"prediction_id", "intraday_return"} <= set(realized):
+        rows = rows.merge(
+            realized[["prediction_id", "intraday_return"]].drop_duplicates("prediction_id"),
+            on="prediction_id", how="left", suffixes=("", "_result"),
+        )
+    context = rows.get("model_status_at_prediction", pd.Series(index=rows.index, dtype=object))
+    period = context.map({
+        "active": "Production active", "watching": "En observation",
+        "legacy_unknown": "Historique sans contexte",
+    }).fillna("Historique sans contexte")
+    returns = pd.to_numeric(rows.get("intraday_return", pd.Series(index=rows.index)), errors="coerce")
+    category = rows.get("category", rows.get("signal_status", pd.Series(index=rows.index)))
+    table = pd.DataFrame({
+        "Date": rows["prediction_date"], "Modèle": rows["model_id"],
+        "Cible": rows["target"], "Période": period,
+        "Signal": category.map(lambda value: SIGNAL_LABELS.get(str(value), str(value))),
+        "Rendement": returns.map(_display_percentage),
+        "P&L": (returns * 10_000.0).map(_display_currency),
+    })
+    bullish = category.astype(str).eq("bullish_signal")
+    table.loc[~bullish, "P&L"] = "—"
+    return table.loc[:, list(columns)].sort_values("Date", ascending=False).reset_index(drop=True)
 
 
 def _yes_no(value: object) -> str:

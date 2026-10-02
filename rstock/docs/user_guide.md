@@ -1016,6 +1016,14 @@ La synthèse permet de repérer une étape échouée ou en attente; une reprise
 conserve les identifiants réservés, réutilise les checkpoints disponibles et ne
 recalcule pas les étapes déjà terminées.
 
+Depuis le résumé d’un End-to-end terminé, **Créer une expérience dérivée** permet
+de modifier les paramètres d’une étape scientifique et de recalculer cette étape
+et ses suivantes. Si le run source possède une validation temporelle, celle-ci
+n’est ni héritée ni rejouée : le dérivé scientifique n’est pas temporellement
+revalidé. Son manifest conserve explicitement cette provenance. Pour un ancien
+run, la date du dataset est reprise du snapshot et de la traçabilité du
+Walk-forward uniquement si ces deux sources concordent.
+
 La validation temporelle optionnelle utilise trois passes. Après la chaîne de
 référence offset 0, un second End-to-end autonome offset 63 redécouvre les
 candidats avec son préfiltre normal. Un troisième child, **Revalidation des
@@ -1406,8 +1414,14 @@ dans la section **En observation** de la vue **Surveillance** et exclus des KPI
 globaux et de la simulation de production.
 
 Depuis la vue **Modèles**, **Activer** passe un modèle en observation en
-production; **Arrêter le suivi** le rend inactif. Le parcours
-`Candidate → Trained → Watching → Active → Inactive` conserve le même modèle.
+production; **Arrêter le suivi** le rend inactif. Un modèle `Active` peut aussi
+passer directement **En observation** avec **Passer en observation**, sans
+réentraînement ni changement d’identifiant ou de version d’artefact. Le parcours
+`Candidate → Trained → Watching → Active → Watching` conserve le même modèle.
+Les nouvelles observations prennent le statut `Watching` ; les événements et le
+P&L des périodes `Active` gardent leur statut historique. La vue **Surveillance**
+donne accès à l’historique complet des modèles suivis, tandis que ses KPI de
+production concernent les modèles actuellement actifs.
 L’activation directe depuis `Trained` reste possible. La promotion automatique
 crée toujours un `Candidate` : le suivi commence seulement après une action
 explicite. Le réentraînement d’un modèle en observation est refusé; il faut

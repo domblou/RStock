@@ -14,6 +14,22 @@ APP = (
 LOGO = APP.parents[1] / "assets" / "rstock_logo.png"
 
 
+def test_temporally_validated_source_offers_scientific_derivation_with_clear_status():
+    source = APP.read_text(encoding="utf-8")
+    creation = source.split("def _render_derived_creation", 1)[1].split(
+        "def _render_pipeline_summary", 1
+    )[0]
+    temporal_tab = source.split("def _render_temporal_validation", 1)[1].split(
+        "def _render_end_to_end_tabs", 1
+    )[0]
+
+    assert 'configuration.get("forced_symbol_sets") is not None' in creation
+    assert 'configuration.get("temporal_validation_enabled"):' in creation
+    assert 'st.button("Créer une expérience dérivée"' in creation
+    assert "ne sera ni héritée ni rejouée" in creation
+    assert "La validation temporelle du run source n’a été ni héritée ni " in temporal_tab
+
+
 def test_laboratory_uses_native_top_navigation_without_sidebar_radio():
     source = APP.read_text(encoding="utf-8")
 
@@ -721,11 +737,11 @@ def test_surveillance_is_a_short_two_session_operational_view():
 
     assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' not in source
     assert "_render_predictions_tab" not in source
-    assert "next_surveillance_session(" in surveillance
+    assert "surveillance_target_session(" in surveillance
     assert "next_session_signals_view(" in surveillance
     assert "latest_session_results_view(" in surveillance
     assert "_render_daily_update_card(" in surveillance
-    assert "_render_next_session_signals(next_signals)" in surveillance
+    assert "_render_next_session_signals(next_signals, next_session, reference_date)" in surveillance
     assert "_render_latest_session_results(latest_results)" in surveillance
     for removed in (
         "_render_signals_followup(",

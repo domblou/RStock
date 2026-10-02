@@ -22,7 +22,23 @@ from rstock.application.production_quality_ui import (
     performance_windows_display_table,
     sort_quality_models,
     style_directional_columns,
+    winning_trades_display_style,
 )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0,00 %", "#dc3545"),
+        ("37,50 %", "#dc3545"),
+        ("49,99 %", "#dc3545"),
+        ("50,00 %", "#198754"),
+        ("66,67 %", "#198754"),
+        ("—", ""),
+    ],
+)
+def test_models_grid_winning_trades_color_uses_fifty_percent(value, expected):
+    assert expected in winning_trades_display_style(value)
 
 
 def _production_model(

@@ -333,7 +333,7 @@ class MarketDataService:
             if existing is not None and not existing.empty:
                 selected = existing.loc[
                     (existing.index.date >= requested_start)
-                    & (existing.index.date <= as_of)
+                    & (existing.index.date <= available_as_of)
                 ]
                 event = CacheEvent(
                     symbol,
@@ -356,7 +356,11 @@ class MarketDataService:
         merged = _merge_prices(None if force else existing, non_empty)
         if merged is None or merged.empty:
             event = CacheEvent(symbol, "failed", 0, "no market data available")
-            return _SymbolResult(symbol, existing, event, previous_metadata, True)
+            selected = None if existing is None else existing.loc[
+                (existing.index.date >= requested_start)
+                & (existing.index.date <= available_as_of)
+            ]
+            return _SymbolResult(symbol, selected, event, previous_metadata, True)
 
         invalid_rows_repaired = 0
         invalid_rows_still_missing = 0
@@ -386,7 +390,8 @@ class MarketDataService:
             row, merged, refreshed_at, as_of, coverage_start
         )
         selected = merged.loc[
-            (merged.index.date >= requested_start) & (merged.index.date <= as_of)
+            (merged.index.date >= requested_start)
+            & (merged.index.date <= available_as_of)
         ]
         if force:
             status, message = "refreshed", "cache fully refreshed"

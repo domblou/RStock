@@ -90,11 +90,13 @@ def test_watching_lifecycle_preserves_identity_version_and_dates(tmp_path):
     assert active.watching_started_at == watched.watching_started_at
     assert active.activated_at is not None
     assert [event["to"] for event in active.status_history] == ["watching", "active"]
-    with pytest.raises(ValueError, match="trained"):
-        lifecycle.watch(model.model_id)
+    assert lifecycle.watch(model.model_id).status == ProductionModelStatus.WATCHING
+    assert lifecycle.activate(model.model_id).status == ProductionModelStatus.ACTIVE
     inactive = lifecycle.deactivate(model.model_id)
     assert inactive.deactivated_at is not None
-    assert [event["to"] for event in inactive.status_history] == ["watching", "active", "inactive"]
+    assert [event["to"] for event in inactive.status_history] == [
+        "watching", "active", "watching", "active", "inactive"
+    ]
     assert lifecycle.activate(model.model_id).activated_at == active.activated_at
 
 

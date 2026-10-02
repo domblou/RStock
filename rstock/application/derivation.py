@@ -213,6 +213,7 @@ class Derivation:
     overrides: tuple[ParameterOverride, ...]
     created_at: str
     prepared_snapshot_sha256: str | None = None
+    source_temporal_validation_enabled: bool | None = None
     schema_version: int = DERIVATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -222,6 +223,10 @@ class Derivation:
         _digest(self.source_manifest_sha256, "source_manifest_sha256")
         if self.prepared_snapshot_sha256 is not None:
             _digest(self.prepared_snapshot_sha256, "prepared_snapshot_sha256")
+        if self.source_temporal_validation_enabled is not None and not isinstance(
+            self.source_temporal_validation_enabled, bool
+        ):
+            raise ValueError("Source temporal validation provenance must be boolean")
         if self.fork_stage not in FORK_STAGE_KEYS:
             raise ValueError(f"Unsupported derivation point: {self.fork_stage}")
         try:
@@ -271,6 +276,8 @@ class Derivation:
         }
         if self.prepared_snapshot_sha256 is not None:
             values["prepared_snapshot_sha256"] = self.prepared_snapshot_sha256
+        if self.source_temporal_validation_enabled is not None:
+            values["source_temporal_validation_enabled"] = self.source_temporal_validation_enabled
         return values
 
     @classmethod
@@ -302,4 +309,5 @@ class Derivation:
                 None if values.get("prepared_snapshot_sha256") is None
                 else _digest(values["prepared_snapshot_sha256"], "prepared_snapshot_sha256")
             ),
+            source_temporal_validation_enabled=values.get("source_temporal_validation_enabled"),
         )

@@ -12,8 +12,10 @@ from rstock.application.derived_experiments import build_derived_spec
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType, RunMetadata, RunRole
 from rstock.application.end_to_end import (
     PIPELINE_MANIFEST, SCIENTIFIC_STAGES, artifact_digests,
-    build_pipeline_manifest, run_end_to_end,
+    build_pipeline_manifest, persist_or_validate_pipeline_manifest,
+    run_end_to_end, validate_pipeline_manifest,
 )
+from rstock.application.derivation import Derivation
 from rstock.application.repository import RunRepository
 from rstock.application.run_storage import RunStorageService
 from rstock.application.runner import RunService
@@ -31,12 +33,13 @@ def _completed(repository, run_id):
     repository.transition(run_id, JobStatus.COMPLETED)
 
 
-def _source(tmp_path):
+def _source(tmp_path, *, temporal=False, legacy_manifest=False):
     repository = RunRepository(tmp_path / "runs")
     config = replace(DEFAULT_CONFIG, project_root=tmp_path)
     source = ExperimentSpec(
         job_type=JobType.END_TO_END, config=config, symbols=("AAA", "BBB"),
-        historical_data_cutoff="2026-09-26",
+        historical_data_cutoff=None if temporal else "2026-09-26",
+        temporal_validation_enabled=temporal,
     )
     root_id = repository.create(source)
     manifest = build_pipeline_manifest(repository, root_id, source)
@@ -49,7 +52,7 @@ def _source(tmp_path):
     digest = prepared_dataset_hash(prepared)
     for index, (key, job_type, _) in enumerate(SCIENTIFIC_STAGES):
         child_id = manifest["stages"][index]["child_run_id"]
-        child_spec = replace(source, job_type=job_type)
+        child_spec = replace(source, job_type=job_type, temporal_validation_enabled=False)
         repository.create(
             child_spec, run_id=child_id,
             metadata=RunMetadata(
@@ -107,9 +110,88 @@ def _source(tmp_path):
         )
         _completed(repository, child_id)
     repository.run_directory(root_id).joinpath("orchestration").mkdir()
+    if legacy_manifest:
+        manifest.pop("prepared_dataset_as_of")
     repository.write_json(root_id, PIPELINE_MANIFEST, manifest)
     _completed(repository, root_id)
     return repository, root_id, manifest, digest
+
+
+def test_temporal_source_creates_scientific_only_derivation_from_verified_legacy_snapshot(tmp_path):
+    repository, source_id, source_manifest, _ = _source(
+        tmp_path, temporal=True, legacy_manifest=True
+    )
+    spec = build_derived_spec(
+        repository, source_id, "threshold_calibration",
+        {"threshold_calibration_min_robust_signals": 15},
+    )
+
+    assert spec.historical_data_cutoff == "2026-09-25"
+    assert spec.temporal_validation_enabled is False
+    assert spec.derivation.source_temporal_validation_enabled is True
+    assert [stage["stage_key"] for stage in source_manifest["stages"] if "temporal" in stage["stage_key"]]
+
+    derived_id = repository.create(spec)
+    manifest = build_pipeline_manifest(repository, derived_id, spec)
+    validate_pipeline_manifest(manifest, root_run_id=derived_id)
+    assert manifest["prepared_dataset_as_of"] == "2026-09-25"
+    assert manifest["temporal_validation_enabled"] is False
+    assert manifest["temporal_validation_provenance"] == {
+        "source_enabled": True, "inherited": False, "replayed": False,
+    }
+    assert all("temporal_validation" not in stage["stage_key"] for stage in manifest["stages"])
+    manifest["temporal_validation_provenance"]["inherited"] = True
+    with pytest.raises(ValueError, match="temporal validation provenance"):
+        validate_pipeline_manifest(manifest, root_run_id=derived_id)
+    persisted = persist_or_validate_pipeline_manifest(repository, derived_id, spec)
+    assert persist_or_validate_pipeline_manifest(repository, derived_id, spec) == persisted
+
+
+def test_legacy_derivation_without_temporal_provenance_keeps_its_serialized_contract(tmp_path):
+    repository, source_id, _, _ = _source(tmp_path)
+    spec = build_derived_spec(
+        repository, source_id, "threshold_calibration",
+        {"threshold_calibration_min_robust_signals": 15},
+    )
+    previous = spec.derivation.to_dict()
+    previous.pop("source_temporal_validation_enabled")
+
+    restored = Derivation.from_dict(previous)
+    assert restored.source_temporal_validation_enabled is None
+    assert restored.to_dict() == previous
+    old_spec = replace(spec, derivation=restored)
+    old_id = repository.create(old_spec)
+    old_manifest = build_pipeline_manifest(repository, old_id, old_spec)
+    assert "temporal_validation_provenance" not in old_manifest
+    validate_pipeline_manifest(old_manifest, root_run_id=old_id)
+
+
+def test_legacy_source_without_unambiguous_walk_forward_session_is_rejected(tmp_path):
+    repository, source_id, manifest, _ = _source(tmp_path, temporal=True, legacy_manifest=True)
+    walk_forward_id = manifest["stages"][0]["child_run_id"]
+    summary = repository.summary(walk_forward_id)
+    summary["traceability"]["prepared_market_last_date"] = "2026-09-24T00:00:00"
+    repository.write_json(walk_forward_id, "summary.json", summary)
+    manifest["stages"][0]["artifact_digests"] = artifact_digests(
+        repository, walk_forward_id, "walk_forward"
+    )
+    repository.write_json(source_id, PIPELINE_MANIFEST, manifest)
+
+    with pytest.raises(ValueError, match="prepared dates differ|session is ambiguous"):
+        build_derived_spec(
+            repository, source_id, "threshold_calibration",
+            {"threshold_calibration_min_robust_signals": 15},
+        )
+
+
+def test_domain_rejects_replaying_temporal_validation_on_a_derivative(tmp_path):
+    repository, source_id, _, _ = _source(tmp_path)
+    spec = build_derived_spec(
+        repository, source_id, "threshold_calibration",
+        {"threshold_calibration_min_robust_signals": 15},
+    )
+    with pytest.raises(ValueError, match="cannot inherit or replay temporal validation"):
+        replace(spec, temporal_validation_enabled=True, historical_data_cutoff=None)
 
 
 def _threshold_selection(set_name):

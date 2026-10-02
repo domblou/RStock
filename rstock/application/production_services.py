@@ -524,8 +524,8 @@ class ProductionLifecycleService:
 
     def watch(self, model_id: str) -> ProductionModel:
         def transition(model: ProductionModel) -> ProductionModel:
-            if model.status != ProductionModelStatus.TRAINED:
-                raise ValueError("Only a trained model can start observation")
+            if model.status not in {ProductionModelStatus.TRAINED, ProductionModelStatus.ACTIVE}:
+                raise ValueError("Only a trained or active model can start observation")
             self._validate_artifacts(model)
             return self._transition(model, ProductionModelStatus.WATCHING)
 
@@ -598,6 +598,44 @@ class DailyPredictionService:
             raise ValueError("Operational predictions require a watching or active model")
         return model.status.value
 
+    @staticmethod
+    def _status_for_session(model: ProductionModel, target_date: Any) -> str | None:
+        """Resolve the historical operational status at the target session open.
+
+        A missing transition log cannot establish an earlier status. The first
+        recorded `from` status is the baseline for older sessions, bounded by
+        model creation. An artifact version change makes old gaps unrecoverable
+        with the current boosters.
+        """
+        session_open = pd.Timestamp(target_date).normalize().tz_localize(
+            "America/New_York"
+        ) + pd.Timedelta(hours=9, minutes=30)
+        history = model.status_history
+        if history:
+            created = pd.to_datetime(model.created_at, errors="coerce", utc=True)
+            if not pd.isna(created) and session_open.tz_convert("UTC") < created:
+                return None
+            first = history[0]
+            status = str(first.get("from") or "")
+            version = first.get("artifact_version")
+            for event in history:
+                changed = pd.to_datetime(event.get("at"), errors="coerce", utc=True)
+                if pd.isna(changed):
+                    return None
+                if changed > session_open.tz_convert("UTC"):
+                    break
+                status = str(event.get("to") or "")
+                version = event.get("artifact_version")
+            if version != model.artifact_version:
+                return None
+        else:
+            status = model.status.value
+            if model.status == ProductionModelStatus.WATCHING and model.watching_started_at:
+                started = pd.to_datetime(model.watching_started_at, errors="coerce", utc=True)
+                if pd.isna(started) or session_open.tz_convert("UTC") < started:
+                    return None
+        return status if status in {"active", "watching"} else None
+
     def generate(
         self,
         prepared: pd.DataFrame,
@@ -666,12 +704,8 @@ class DailyPredictionService:
         rows: list[dict[str, Any]] = []
         for model in selected_models:
             for target_date in target_dates:
-                if (
-                    model.status == ProductionModelStatus.WATCHING
-                    and model.watching_started_at is not None
-                    and pd.Timestamp(target_date).date()
-                    < pd.Timestamp(model.watching_started_at).date()
-                ):
+                status_context = self._status_for_session(model, target_date)
+                if status_context is None:
                     continue
                 prediction_id = self._prediction_id(model, target_date)
                 if prediction_id in existing:
@@ -683,6 +717,7 @@ class DailyPredictionService:
                             prepared,
                             target_date=target_date,
                             market_data=market_data,
+                            status_context=status_context,
                         )
                     )
                 except Exception:
@@ -981,6 +1016,7 @@ class DailyPredictionService:
         *,
         target_date: Any,
         market_data: pd.DataFrame | None = None,
+        status_context: str | None = None,
     ) -> dict[str, Any]:
         directory = self.repository.artifact_directory(model.model_id)
         metadata = json.loads(
@@ -1034,7 +1070,7 @@ class DailyPredictionService:
             "down_threshold": model.down_threshold,
             "signal_status": signal_status,
             "prediction_origin": PredictionOrigin.OPERATIONAL_BACKFILL.value,
-            "model_status_at_prediction": self._model_status_context(model),
+            "model_status_at_prediction": status_context or self._model_status_context(model),
             "status": "predicted",
             "error": None,
             "created_at": utc_now(),

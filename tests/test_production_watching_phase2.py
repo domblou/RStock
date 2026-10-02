@@ -13,6 +13,7 @@ from rstock.application.domain import ExperimentSpec, JobType
 from rstock.application.production_domain import ProductionModel, ProductionModelStatus
 from rstock.application.production_quality_repository import ProductionQualityRepository
 from rstock.application.production_quality_ui import global_quality_kpis, load_models_master
+from rstock.application.production_quality_ui import load_model_quality_detail, model_phase_metrics
 from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_services import (
     DailyPredictionService,
@@ -21,6 +22,7 @@ from rstock.application.production_services import (
     ProductionSignalService,
 )
 from rstock.application.simulation import SimulationService
+from rstock.application.surveillance import surveillance_model_history_table
 from rstock.application.workflows import _daily_screening, _operational_run
 import rstock.application.workflows as workflows_module
 from rstock.config import DEFAULT_CONFIG
@@ -285,3 +287,129 @@ def test_lifecycle_change_during_prediction_rejects_atomic_publication(tmp_path)
             key="prediction_id", expected_models=selected,
         )
     assert repository.read_table("predictions").empty
+
+
+def test_active_to_watching_preserves_identity_artifacts_history_and_quality(monkeypatch, tmp_path):
+    repository = ProductionRepository(tmp_path)
+    model = repository.add(_model("cycle", "AAA", ProductionModelStatus.ACTIVE))
+    _artifacts(repository, model)
+    artifact_bytes = {
+        path.name: path.read_bytes()
+        for path in repository.artifact_directory(model.model_id).iterdir()
+    }
+    repository.append_table("predictions", pd.DataFrame([{
+        "prediction_id": "old", "prediction_date": "2026-09-22", "model_id": "cycle",
+        "target": "AAA", "model_status_at_prediction": "active",
+    }]), key="prediction_id")
+    repository.append_table("signals", pd.DataFrame([{
+        "signal_id": "old", "prediction_id": "old", "model_id": "cycle",
+        "category": "bullish_signal", "model_status_at_prediction": "active",
+    }]), key="signal_id")
+    repository.append_table("realized_results", pd.DataFrame([{
+        "result_id": "old", "prediction_id": "old", "model_id": "cycle",
+        "intraday_return": 0.02,
+    }]), key="result_id")
+    quality = ProductionQualityRepository(tmp_path)
+    quality.write_model_snapshot("cycle", {
+        "model_id": "cycle", "identity": {"model_version": 1},
+    })
+    quality.write_model_series("cycle", pd.DataFrame({"session_date": ["2026-09-22"]}))
+    quality.upsert_observations("cycle", pd.DataFrame([{
+        "observation_schema_version": 1,
+        "prediction_id": "old", "model_id": "cycle", "model_version": 1,
+        "session_date": "2026-09-22", "prediction_origin": "scheduled_live",
+        "model_status_at_prediction": "active", "evaluation_status": "evaluated",
+        "is_bullish_signal": True, "intraday_return": 0.02,
+    }]))
+    monkeypatch.setattr(
+        "rstock.application.production_services.utc_now",
+        lambda: "2026-09-23T12:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        "rstock.application.production_services.ProductionTrainingService.train",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected training")),
+    )
+
+    watched = ProductionLifecycleService(repository).watch("cycle")
+
+    assert watched.model_id == model.model_id
+    assert watched.artifact_version == model.artifact_version
+    assert watched.source_walk_forward_run == model.source_walk_forward_run
+    assert watched.training_metadata == model.training_metadata
+    assert watched.status_history == [{
+        "from": "active", "to": "watching", "at": "2026-09-23T12:00:00+00:00",
+        "artifact_version": 1,
+    }]
+    assert {path.name: path.read_bytes() for path in repository.artifact_directory("cycle").iterdir()} == artifact_bytes
+    assert repository.read_table("predictions").iloc[0]["model_status_at_prediction"] == "active"
+    assert repository.read_watching_model_table("predictions").empty
+    history = surveillance_model_history_table(
+        repository.read_tracked_model_table("predictions"),
+        repository.read_tracked_model_table("signals"),
+        repository.read_tracked_model_table("realized_results"),
+    )
+    assert history.iloc[0]["Période"] == "Production active"
+    assert history.iloc[0]["P&L"] == "200,00 $"
+    detail = load_model_quality_detail(tmp_path, "cycle", model_version=watched.artifact_version)
+    assert detail.quality_state == "current"
+    phases = model_phase_metrics(detail.observations, detail.series)
+    assert phases["Production active"]["pnl"] == pytest.approx(200)
+    assert phases["Historique complet"]["pnl"] == pytest.approx(200)
+    assert global_quality_kpis(load_models_master(tmp_path))["active_models"] == 0
+    monkeypatch.setattr("rstock.application.production_services.load_booster", lambda path: path.stem)
+    monkeypatch.setattr(
+        "rstock.application.production_services.predict_probabilities",
+        lambda booster, *args: np.array([0.8 if booster == "up" else 0.2]),
+    )
+    fresh = DailyPredictionService(repository).generate(
+        _prepared(pd.bdate_range("2026-09-21", periods=4)),
+        replace(DEFAULT_CONFIG, project_root=tmp_path),
+    )
+    assert fresh.iloc[0]["model_status_at_prediction"] == "watching"
+    assert set(repository.read_table("predictions")["model_status_at_prediction"]) == {
+        "active", "watching"
+    }
+    assert repository.read_watching_model_table("predictions")["prediction_id"].tolist() == [
+        fresh.iloc[0]["prediction_id"]
+    ]
+
+
+def test_backfill_uses_each_status_interval_across_multiple_cycles(monkeypatch, tmp_path):
+    repository = ProductionRepository(tmp_path)
+    model = repository.add(_model("cycle", "AAA", ProductionModelStatus.ACTIVE))
+    _artifacts(repository, model)
+    clock = iter([
+        "2026-09-23T12:00:00+00:00",  # ACTIVE -> WATCHING before the open
+        "2026-09-25T12:00:00+00:00",  # WATCHING -> ACTIVE
+        "2026-09-29T12:00:00+00:00",  # ACTIVE -> WATCHING
+    ])
+    monkeypatch.setattr("rstock.application.production_services.utc_now", lambda: next(clock))
+    lifecycle = ProductionLifecycleService(repository)
+    lifecycle.watch("cycle")
+    lifecycle.activate("cycle")
+    lifecycle.watch("cycle")
+    assert repository.get("cycle").watching_started_at == "2026-09-23T12:00:00+00:00"
+    monkeypatch.setattr(
+        "rstock.application.production_services.utc_now",
+        lambda: "2026-09-30T20:00:00+00:00",
+    )
+    monkeypatch.setattr("rstock.application.production_services.load_booster", lambda path: path.stem)
+    monkeypatch.setattr(
+        "rstock.application.production_services.predict_probabilities",
+        lambda booster, *args: np.array([0.8 if booster == "up" else 0.2]),
+    )
+    dates = pd.bdate_range("2026-09-21", "2026-09-30")
+    backfilled = DailyPredictionService(repository).backfill(_prepared(dates), max_days=20)
+    contexts = backfilled.set_index("prediction_date")["model_status_at_prediction"]
+    assert contexts.loc["2026-09-22"] == "active"
+    assert contexts.loc["2026-09-23"] == "watching"
+    assert contexts.loc["2026-09-24"] == "watching"
+    assert contexts.loc["2026-09-25"] == "active"
+    assert contexts.loc["2026-09-28"] == "active"
+    assert contexts.loc["2026-09-29"] == "watching"
+    assert repository.read_table("predictions").set_index("prediction_date").loc[
+        "2026-09-28", "model_status_at_prediction"
+    ] == "active"
+    before = repository.read_table("predictions")
+    assert DailyPredictionService(repository).backfill(_prepared(dates), max_days=20).empty
+    assert repository.read_table("predictions").equals(before)
