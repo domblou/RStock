@@ -76,6 +76,9 @@ def _base_payload(model: ProductionModel) -> dict[str, Any]:
         "source_end_to_end_run_id": _source_end_to_end_run_id(model),
         "source_walk_forward_run_id": model.source_walk_forward_run,
         "source_threshold_calibration_run_id": model.source_threshold_calibration_run,
+        "source_holdout_evaluation_run_id": _safe_mapping(model.training_metadata).get(
+            "source_holdout_evaluation_run"
+        ),
         "source_holdout_file": None,
         "source_holdout_sha256": None,
         "set_id": _set_id(model),
@@ -122,10 +125,11 @@ def build_promotion_baseline(
 ) -> dict[str, Any]:
     """Build the immutable baseline from the exact paired holdout predictions."""
 
-    threshold_run = model.source_threshold_calibration_run
-    if not threshold_run:
+    holdout_run = _safe_mapping(model.training_metadata).get("source_holdout_evaluation_run")
+    source_run = holdout_run or model.source_threshold_calibration_run
+    if not source_run:
         return _unavailable(model, UNAVAILABLE_LEGACY)
-    path = runs.run_directory(threshold_run) / "results" / "holdout_predictions.csv"
+    path = runs.run_directory(str(source_run)) / "results" / "holdout_predictions.csv"
     if not path.exists():
         return _unavailable(model, UNAVAILABLE_MISSING_ARTIFACT)
     try:

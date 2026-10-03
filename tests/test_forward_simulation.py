@@ -43,6 +43,7 @@ def test_historical_snapshot_without_forward_fields_keeps_legacy_semantics():
         "requested_historical_cutoff",
         "resolved_market_session_cutoff",
         "forward_simulation_enabled",
+        "forward_policy",
         "forward_simulation_mode",
         "forward_simulation_start_date",
         "forward_simulation_end_date",
@@ -52,6 +53,7 @@ def test_historical_snapshot_without_forward_fields_keeps_legacy_semantics():
     restored = ExperimentSpec.from_dict(values)
     assert restored.historical_data_cutoff == "2026-03-24"
     assert restored.forward_simulation_enabled is False
+    assert restored.forward_policy == "FROZEN"
     assert restored.resolved_market_session_cutoff is None
 
 
@@ -73,3 +75,14 @@ def test_forward_spec_requires_source_and_resolved_dates():
 
 def test_forward_execution_contains_no_booster_fit_path():
     assert "fit_booster(" not in inspect.getsource(run_forward_simulation)
+
+
+def test_new_forward_policy_is_persisted_and_unknown_policy_rejected():
+    spec = _spec()
+    assert spec.to_dict()["forward_policy"] == "FROZEN"
+    try:
+        replace(spec, forward_policy="DAILY_RETRAIN")
+    except ValueError as error:
+        assert "Unsupported forward policy" in str(error)
+    else:
+        raise AssertionError("Only FROZEN is executable in this version")

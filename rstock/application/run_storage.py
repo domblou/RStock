@@ -159,6 +159,28 @@ _OWNED_EXTRA_RELATIONS: dict[JobType, dict[str, frozenset[JobType]]] = {
     },
 }
 
+_DELETE_OWNED_RELATIONS: dict[JobType, dict[str, frozenset[JobType]]] = {
+    JobType.END_TO_END: {
+        "pipeline_stage": frozenset({
+            JobType.WALK_FORWARD, JobType.XGBOOST_CALIBRATION,
+            JobType.THRESHOLD_PARAMETER_CALIBRATION,
+            JobType.THRESHOLD_CALIBRATION, JobType.HOLDOUT_EVALUATION,
+            JobType.PROMOTION_QUALIFICATION, JobType.FIXED_CANDIDATE_EVALUATION,
+        }),
+        "temporal_validation_end_to_end": frozenset({JobType.END_TO_END}),
+        "forced_candidate_validation": frozenset({JobType.FORCED_CANDIDATE_VALIDATION}),
+        **_OWNED_EXTRA_RELATIONS[JobType.END_TO_END],
+    },
+    JobType.FORCED_CANDIDATE_VALIDATION: {
+        "forced_candidate_validation_stage": frozenset({
+            JobType.WALK_FORWARD, JobType.FIXED_CANDIDATE_EVALUATION,
+            JobType.PROMOTION_QUALIFICATION,
+        }),
+        **_OWNED_EXTRA_RELATIONS[JobType.FORCED_CANDIDATE_VALIDATION],
+    },
+    JobType.WALK_FORWARD: _OWNED_EXTRA_RELATIONS[JobType.WALK_FORWARD],
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PurgeEligibility:
@@ -390,7 +412,7 @@ class RunStorageService:
         return final
 
     def _related_runs(
-        self, run_id: str, job_type: JobType
+        self, run_id: str, job_type: JobType, *, for_delete: bool = False
     ) -> tuple[tuple[str, ...], str | None]:
         related: list[str] = []
         visited: set[str] = set()
@@ -411,7 +433,9 @@ class RunStorageService:
                 except (OSError, ValueError) as error:
                     return f"Manifest du run {parent_id} invalide : {error}"
                 if manifest is None:
-                    return f"Le manifest du run {parent_id} est absent."
+                    if not for_delete:
+                        return f"Le manifest du run {parent_id} est absent."
+                    manifest = {"stages": ()}
                 for stage in manifest.get("stages", ()):
                     if not isinstance(stage, Mapping) or stage.get("mode") == "inherited":
                         continue
@@ -429,7 +453,9 @@ class RunStorageService:
                         return f"Type d'enfant invalide dans le manifest du run {parent_id}."
                     manifest_children.append((child_id, expected_type))
 
-            extra_relations = _OWNED_EXTRA_RELATIONS.get(parent_type, {})
+            extra_relations = (
+                _DELETE_OWNED_RELATIONS if for_delete else _OWNED_EXTRA_RELATIONS
+            ).get(parent_type, {})
             children = list(manifest_children)
             manifest_ids = {child_id for child_id, _ in manifest_children}
             for child_id in (
@@ -453,6 +479,8 @@ class RunStorageService:
                 if child_id in visited or child_id == run_id:
                     return "Cycle de dépendances de purge détecté."
                 if not self.repository.run_directory(child_id).exists():
+                    if for_delete:
+                        continue  # An unmaterialized reservation or a deleted child.
                     related.append(child_id)  # Existing eligibility reports the missing child.
                     continue
                 metadata = self.repository.run_metadata(child_id)

@@ -949,6 +949,19 @@ Les expériences peuvent être dupliquées afin de comparer différentes méthod
 
 Cette approche est préférable à la reconstruction manuelle d’une expérience.
 
+### Purge et suppression définitive
+
+**Purger les données lourdes** libère les artefacts volumineux d’un run terminé
+en conservant sa configuration, sa provenance et sa ligne dans l’Historique.
+
+**Supprimer définitivement** efface le dossier entier d’un run `failed` ou
+`cancelled`, individuellement ou avec une sélection multiple. La confirmation
+indique le nombre de runs concernés par type. Les enfants propriétaires sont
+inclus récursivement, même lorsqu’ils sont `completed`; une simple source
+référencée ne l’est jamais. La suppression est refusée si un worker est encore
+actif ou si un run conservé ou un modèle Production dépend du périmètre.
+Après confirmation, les runs supprimés disparaissent de l’Historique.
+
 ---
 
 ## Duplication et paramètres XGBoost
@@ -1479,3 +1492,35 @@ les nouvelles prédictions, mais conserve les données et leur contexte d’orig
 Lorsqu’une mesure de santé existe, elle reste « Données insuffisantes » tant
 qu’aucune politique de santé versionnée ne définit un autre verdict. Sans
 mesure disponible, l’interface indique « Non calculé ».
+
+# 29. Analyse temporelle de la Forward Simulation
+
+Un End-to-End historique terminé avec cutoff fige un snapshot des modèles
+candidats. Une Forward Simulation en mode **Figé** utilise ces mêmes boosters
+et seuils sur les séances XNYS postérieures au cutoff, sans réentraînement.
+Le cutoff constitue **T0**, origine de l’âge du modèle ; il ne représente pas
+une référence de performance issue du holdout.
+
+Le détail d’un run Forward conserve les onglets **Résultats**, **Configuration**,
+**Fichiers** et **Logs**. Sous Résultats, **Synthèse**, **Modèles** et
+**Évolution population** présentent des mesures descriptives. Les checkpoints
+standards sont +21, +42, +63, +84 et +126 séances, uniquement lorsqu’ils sont
+entièrement couverts. Chaque checkpoint présente le cumul depuis T0 et son
+intervalle propre : 1–21, 22–42, 43–63, 64–84 ou 85–126. Une date de fin
+personnalisée entre deux checkpoints conserve son résultat global à la date
+réelle sans créer de checkpoint partiel.
+
+La précision et le rendement moyen portent sur les **signaux évaluables**.
+Sans signal, ces pourcentages sont indisponibles ; le P&L théorique vaut 0 $.
+Chaque signal contribue `rendement directionnel × 10 000 $` au P&L. Le
+drawdown est calculé sur le P&L agrégé par séance, avec un départ à 0 pour
+chaque période. Les observations exclues pour données manquantes sont comptées
+séparément des observations évaluables sans signal. L’évolution de population
+affiche les médianes par modèle contributeur ainsi que les mesures pondérées
+par signal, avec leurs effectifs. Aucune mesure ne qualifie automatiquement
+un modèle ni ne fixe sa durée de vie.
+
+Les nouveaux agrégats sont persistés avec leurs digests dans le run Forward.
+Les anciens runs restent consultables avec leur résumé existant ; si leurs
+artefacts ne permettent pas une analyse temporelle exacte, la vue détaillée
+indique qu’elle est indisponible, sans recalcul à l’ouverture de l’Historique.

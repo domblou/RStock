@@ -15,6 +15,7 @@ from .production_quality import (
     PredictionModelStatus, compute_quality_metrics,
 )
 from .production_quality_repository import ProductionQualityRepository
+from .production_domain import ProductionModel
 from .production_repository import ProductionRepository
 from .model_ui import model_status_label
 
@@ -530,6 +531,15 @@ def baseline_comparison_rows(
     ])
 
 
+def baseline_unavailability_reason(
+    snapshot: Mapping[str, Any] | None, baseline: Mapping[str, Any] | None
+) -> str:
+    if not baseline:
+        return "baseline_absente"
+    status = str(baseline.get("availability_status") or "statut_baseline_absent")
+    return "snapshot_qualité_indisponible" if status == "available" and not snapshot else status
+
+
 def baseline_comparison_display_table(table: pd.DataFrame) -> pd.DataFrame:
     """Format already-computed baseline metrics for the model detail UI."""
 
@@ -539,6 +549,52 @@ def baseline_comparison_display_table(table: pd.DataFrame) -> pd.DataFrame:
     for column in ("À la promotion", "Actuel", "Écart"):
         result[column] = result[column].map(_display_percent).astype("string")
     return result
+
+
+def initial_qualification_metrics(model: ProductionModel) -> dict[str, dict[str, Any]]:
+    """Expose only the qualification values frozen in the Production registry."""
+
+    development = model.development_metrics or {}
+    final = model.holdout_metrics or {}
+    signals = model.holdout_signal_metrics or {}
+    holdout_run = (model.training_metadata or {}).get("source_holdout_evaluation_run")
+    return {
+        "walk_forward": {
+            "median_auc": development.get("ROCAUCMedian"),
+            "worst_auc": development.get("ROCAUCWorst"),
+            "auc_std": development.get("ROCAUCStd"),
+            "windows_evaluated": development.get("WindowsEvaluated"),
+            "auc_windows": development.get("AUCWindows"),
+            "windows_above_random": development.get("PctWindowsAboveRandom"),
+            "positive_observations": development.get("PositiveObservations"),
+            "source_run_id": model.source_walk_forward_run,
+        },
+        "holdout_final_wf": {
+            "auc": final.get("FinalUpROCAUC"),
+            "precision": final.get("FinalUpPrecision"),
+            "recall": final.get("FinalUpRecall"),
+            "f1": final.get("FinalUpF1"),
+            "source_run_id": model.source_walk_forward_run,
+        },
+        "holdout_signals": {
+            "threshold": signals.get("Threshold", model.calibrated_signal_threshold),
+            "signal_count": signals.get("SignalCount"),
+            "precision": signals.get("Precision"),
+            "recall": signals.get("Recall"),
+            "f1": signals.get("F1"),
+            "auc": signals.get("ROCAUC"),
+            "directional_return_mean": signals.get("DirectionalReturnMean"),
+            "intraday_return_median": signals.get("IntradayReturnMedian"),
+            "opposite_move_frequency": signals.get("OppositeMoveFrequency"),
+            "mfe_mean": signals.get("MFEMean"),
+            "mae_mean": signals.get("MAEMean"),
+            "source_run_id": holdout_run or model.source_threshold_calibration_run,
+            "source_job_type": (
+                "holdout_evaluation" if holdout_run else
+                "threshold_calibration" if model.source_threshold_calibration_run else None
+            ),
+        },
+    }
 
 
 def evaluated_bullish_signals_display_table(signals: pd.DataFrame) -> pd.DataFrame:

@@ -12,6 +12,7 @@ import pandas as pd
 
 from rstock.evaluation import classification_metrics
 from rstock.config import RStockConfig
+from .promotion_qualification_ui import DEFAULT_PROMOTION_SORT, sort_promotion_decisions
 
 
 COMBINATION_COLUMNS = (
@@ -1027,7 +1028,7 @@ def filter_threshold_calibration_results(
     max_opposite_move_frequency: float | None = None,
     min_directional_return: float | None = None,
     promotion_status: str = "Tous",
-    sort_by: str = "Précision holdout",
+    sort_by: str = DEFAULT_PROMOTION_SORT,
 ) -> pd.DataFrame:
     """Apply display-only threshold result filters with deterministic sorting."""
 
@@ -1056,6 +1057,8 @@ def filter_threshold_calibration_results(
     for column, limit, predicate in criteria:
         if limit is not None and column in table:
             table = table[predicate(pd.to_numeric(table[column], errors="coerce"), limit)]
+    if sort_by == DEFAULT_PROMOTION_SORT:
+        return sort_promotion_decisions(table)
     if sort_by not in table:
         sort_by = "Précision holdout"
     return table.sort_values(

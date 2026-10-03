@@ -24,6 +24,7 @@ from .production_services import (
 )
 from .repository import RunRepository
 from .run_storage import PurgeEligibility, PurgePlan, RunStorageService
+from .run_delete import DeleteEligibility, DeletePlan, RunDeletionService
 from .runner import HistoryRunSummary, RunService, SubmissionResult
 
 
@@ -285,6 +286,17 @@ class ExperimentService:
 
     def purge(self, run_id: str) -> dict[str, object]:
         return RunStorageService(self.run_service.repository).purge(run_id)
+
+    def delete_eligibility(self, run_id: str) -> DeleteEligibility:
+        return RunDeletionService(self.run_service.repository).eligibility(run_id)
+
+    def delete_preview(self, run_id: str) -> DeletePlan:
+        return RunDeletionService(self.run_service.repository).preview(run_id)
+
+    def delete_run(self, run_id: str, *, expected_run_ids: tuple[str, ...]) -> DeletePlan:
+        return RunDeletionService(self.run_service.repository).delete(
+            run_id, expected_run_ids=expected_run_ids
+        )
 
     def runs(self) -> list[dict[str, object]]:
         return self.run_service.list()

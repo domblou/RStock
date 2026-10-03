@@ -301,4 +301,4 @@ def test_temporal_and_split_result_technical_blocks_follow_scientific_content():
         "elif (", 1
     )[0]
     assert holdout.index("st.dataframe(") < holdout.index("st.json(configuration)")
-    assert qualification.index("st.dataframe(") < qualification.index("st.json(")
+    assert qualification.index("_render_qualification_decision_grid(") < qualification.index("st.json(")

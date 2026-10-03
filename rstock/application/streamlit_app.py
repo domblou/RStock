@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
 import json
 import logging
@@ -25,6 +26,16 @@ from rstock.application.batch_purge import (
     BatchPurgeReview,
     execute_batch_purge,
     preview_batch_purge,
+)
+from rstock.application.batch_delete import (
+    BatchDeleteOutcome,
+    BatchDeleteReview,
+    execute_batch_delete,
+    preview_batch_delete,
+)
+from rstock.application.run_delete import DeletePlan
+from rstock.application.promotion_qualification_ui import (
+    DEFAULT_PROMOTION_SORT, sort_promotion_decisions, upstream_diagnostic,
 )
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from rstock.application.production_domain import ProductionModel
@@ -154,6 +165,7 @@ from rstock.application.production_repository import ProductionRepository
 from rstock.application.production_quality_ui import (
     baseline_comparison_display_table,
     baseline_comparison_rows,
+    baseline_unavailability_reason,
     directional_display_style,
     evaluated_bullish_signals_display_table,
     evaluated_bullish_signals,
@@ -162,6 +174,7 @@ from rstock.application.production_quality_ui import (
     filter_quality_models,
     global_quality_kpis,
     health_label,
+    initial_qualification_metrics,
     load_model_quality_detail,
     load_models_master,
     models_grid,
@@ -1850,7 +1863,7 @@ def _render_threshold_calibration_promotion(
             "promotion_min_mean_directional_return"
         ],
         f"threshold-promotion-status-{run_id}": "Tous",
-        f"threshold-sort-{run_id}": "Précision holdout",
+        f"threshold-sort-{run_id}": DEFAULT_PROMOTION_SORT,
     }
     for key, value in filter_defaults.items():
         st.session_state.setdefault(key, value)
@@ -1864,7 +1877,8 @@ def _render_threshold_calibration_promotion(
         key=f"threshold-min-signals-{run_id}",
     )
     sort_options = [
-        "Précision holdout", "AUC holdout", "Rendement directionnel moyen"
+        DEFAULT_PROMOTION_SORT, "Précision holdout", "AUC holdout",
+        "Rendement directionnel moyen",
     ]
     if "Score" in results:
         sort_options.append("Score")
@@ -1914,9 +1928,11 @@ def _render_threshold_calibration_promotion(
         promotion_status=promotion_status,
         sort_by=sort_by,
     )
-    selection = st.dataframe(
-        filtered, hide_index=True, width="stretch", on_select="rerun",
-        selection_mode="single-row", key=f"threshold-results-{run_id}",
+    chosen = _render_qualification_decision_grid(
+        filtered, key=f"threshold-results-{run_id}", project_root=project_root,
+        threshold_run_id=run_id,
+        walk_forward_run_id=configuration.get("source_walk_forward_run"),
+        pre_sorted=True,
         column_config=_grid_column_help_config(filtered.columns, _THRESHOLD_RESULT_COLUMN_HELP),
     )
     st.subheader("Synthèse de sensibilité des seuils")
@@ -1958,13 +1974,6 @@ def _render_threshold_calibration_promotion(
                 "Fréquence mouvement opposé au meilleur seuil robuste": st.column_config.NumberColumn(format="percent"),
             }),
         )
-    selected_rows = _selected_rows(selection, len(filtered))
-    selected_key = f"selected-threshold-result-{run_id}"
-    if selected_rows:
-        st.session_state[selected_key] = filtered.iloc[selected_rows[0]].to_dict()
-    elif selected_key in st.session_state:
-        st.session_state.pop(selected_key, None)
-    chosen = st.session_state.get(selected_key)
     if not isinstance(chosen, dict):
         st.caption("Sélectionnez une combinaison pour la promouvoir.")
         return
@@ -2271,6 +2280,67 @@ def _format_metric(value: object, *, percent: bool = False) -> str:
     return f"{float(value):.2%}" if percent else f"{float(value):.2f}"
 
 
+def _render_upstream_qualification_diagnostic(
+    decision: Mapping[str, object], *, project_root: Path,
+    threshold_run_id: str | None, walk_forward_run_id: str | None,
+) -> None:
+    evidence = upstream_diagnostic(
+        project_root, decision,
+        threshold_run_id=threshold_run_id,
+        walk_forward_run_id=walk_forward_run_id,
+    )
+    counts = evidence["signal_counts_by_window"]
+    count_text = "—" if counts is None else json.dumps(counts, ensure_ascii=False)
+    with st.container(border=True):
+        st.markdown("**Qualité amont — Walk-forward / calibration**")
+        fields = (
+            ("AUC médiane WF", _format_metric(evidence["wf_median_auc"]), None),
+            ("Pire AUC WF", _format_metric(evidence["wf_worst_auc"]),
+             "Plus faible AUC observée parmi les fenêtres Walk-forward."),
+            ("Dispersion AUC", _format_metric(evidence["wf_auc_std"]),
+             "Écart-type des AUC entre les fenêtres Walk-forward; plus faible indique une meilleure stabilité."),
+            ("Signaux par fenêtre", count_text, None),
+            ("Total signaux calibration", _model_detail_integer(evidence["calibration_total_signals"]), None),
+            ("Précision calibration", _format_metric(evidence["calibration_precision"], percent=True),
+             "Précision du seuil sélectionné sur les fenêtres de calibration."),
+            ("Rendement directionnel moyen calibration",
+             _format_metric(evidence["calibration_directional_return_mean"], percent=True),
+             "Rendement moyen des signaux de calibration dans la direction prédite."),
+        )
+        for offset in (0, 4):
+            columns = st.columns((1, 1, 1, 2) if offset == 0 else 3, gap="small")
+            for column, (label, value, help_text) in zip(columns, fields[offset:offset + 4]):
+                column.metric(label, value, help=help_text)
+
+
+def _render_qualification_decision_grid(
+    rows: pd.DataFrame, *, key: str, project_root: Path,
+    qualification: Mapping[str, object] | None = None,
+    threshold_run_id: str | None = None,
+    walk_forward_run_id: str | None = None,
+    pre_sorted: bool = False,
+    column_config: Mapping[str, object] | None = None,
+) -> dict[str, object] | None:
+    """Shared decision grid for standalone, pipeline and legacy promotion views."""
+
+    table = rows if pre_sorted else sort_promotion_decisions(rows)
+    selection = st.dataframe(
+        table, hide_index=True, width="stretch", on_select="rerun",
+        selection_mode="single-row", key=key, column_config=column_config,
+    )
+    selected_rows = _selected_rows(selection, len(table))
+    if not selected_rows:
+        return None
+    chosen = table.iloc[selected_rows[0]].to_dict()
+    source = qualification or {}
+    _render_upstream_qualification_diagnostic(
+        chosen, project_root=project_root,
+        threshold_run_id=(threshold_run_id or source.get("source_threshold_calibration_run")),
+        walk_forward_run_id=(walk_forward_run_id or source.get("source_walk_forward_run")),
+    )
+    return chosen
+
+
 def _render_xgboost_calibration_selection(run_id: str) -> None:
     development, holdout, selected = load_xgboost_calibration_artifacts(
         st.session_state.lab_config.project_root, run_id
@@ -2481,6 +2551,7 @@ def _render_standard_results(
         summary = detail.get("summary", {})
         if summary.get("result") == "skipped_no_models":
             st.info("Aucun modèle admissible — Forward Simulation non exécutée.")
+            st.metric("Modèles à T0", 0, help=_FORWARD_COLUMN_HELP["Modèles à T0"])
             st.json(summary)
             return
         has_quality_counters = "evaluated_observations" in summary
@@ -2521,6 +2592,8 @@ def _render_standard_results(
                     if len(exclusions) > 500 else "Observations exclues"
                 )
                 st.dataframe(exclusions.loc[:, columns].head(500), hide_index=True, width="stretch")
+        _render_forward_temporal_results(run_id, summary)
+        return
     if job_type is JobType.XGBOOST_CALIBRATION:
         _render_xgboost_calibration_selection(run_id)
     elif job_type is JobType.THRESHOLD_PARAMETER_CALIBRATION:
@@ -2542,8 +2615,12 @@ def _render_standard_results(
         qualification = _read_light_json(result_dir / "qualification.json")
         if qualification is not None:
             st.subheader("Décision de qualification")
-            st.dataframe(pd.DataFrame(qualification.get("decisions", [])),
-                         hide_index=True, width="stretch")
+            _render_qualification_decision_grid(
+                pd.DataFrame(qualification.get("decisions", [])),
+                key=f"qualification-decisions-{run_id}",
+                project_root=st.session_state.lab_config.project_root,
+                qualification=qualification,
+            )
             with st.expander("Protocole et provenance de qualification"):
                 st.json({key: value for key, value in qualification.items() if key != "decisions"})
     elif (
@@ -2570,6 +2647,268 @@ def _render_standard_results(
             if selected is not None:
                 st.json(selected)
     st.json(detail["summary"])
+
+
+_FORWARD_COLUMN_HELP = {
+    "Modèle": "Identifiant du modèle figé dans le snapshot de l’End-to-End source.",
+    "Target": "Symbole cible prédit par ce modèle.",
+    "Horizon": "Nombre de séances XNYS écoulées depuis le cutoff T0.",
+    "Période": "Depuis T0 : de la première séance Forward au checkpoint. Intervalle : uniquement les séances indiquées.",
+    "Séances": "Première et dernière séances XNYS incluses dans cette mesure.",
+    "Évaluables": "Observations modèle × séance avec prédiction et résultat exploitables, avec ou sans signal.",
+    "Exclues": "Observations modèle × séance non évaluables pour données manquantes ou invalides ; elles ne contribuent pas aux performances.",
+    "Signaux": "Nombre de signaux évaluables produits sur la période indiquée ; zéro est distinct de données exclues.",
+    "Signaux cumulés": "Nombre de signaux évaluables depuis T0 jusqu’au checkpoint.",
+    "Signaux intervalle": "Nombre de signaux évaluables uniquement dans l’intervalle indiqué.",
+    "Précision": "Part des signaux évaluables corrects sur la période indiquée, en %. Sans signal : indisponible.",
+    "Précision cumulative": "Part des signaux évaluables corrects depuis T0 jusqu’au checkpoint, en %. Sans signal : indisponible.",
+    "Précision intervalle": "Part des signaux évaluables corrects uniquement dans l’intervalle, en %. Sans signal : indisponible.",
+    "Rendement moyen": "Moyenne des rendements directionnels par signal évaluable sur la période, en %. Sans signal : indisponible.",
+    "Rendement moyen intervalle": "Moyenne des rendements directionnels par signal évaluable dans cet intervalle, en %. Sans signal : indisponible.",
+    "P&L": "Somme des rendements directionnels des signaux × 10 000 $ par signal sur la période ; valeur théorique, sans frais.",
+    "P&L cumulatif": "Somme depuis T0 des rendements directionnels des signaux × 10 000 $ par signal ; valeur théorique, sans frais.",
+    "Drawdown": "Plus forte baisse du P&L agrégé par séance depuis un sommet antérieur, en $, sur la période indiquée.",
+    "Modèles à T0": "Nombre de modèles présents dans le snapshot figé de l’E2E source ; ce dénominateur reste constant.",
+    "Modèles observables": "Modèles avec au moins une observation évaluable dans cet intervalle.",
+    "Modèles contributeurs": "Modèles avec au moins un signal évaluable dans cet intervalle ; eux seuls entrent dans les statistiques par modèle.",
+    "Précision médiane": "Médiane des précisions par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
+    "Rendement médian": "Médiane des rendements moyens par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
+    "Précision pondérée": "Part correcte de tous les signaux évaluables de la population dans l’intervalle, en %. Les modèles actifs pèsent davantage.",
+    "Rendement pondéré": "Rendement directionnel moyen de tous les signaux évaluables de la population dans l’intervalle, en %.",
+    "Précision Q25": "Premier quartile des précisions par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
+    "Précision Q75": "Troisième quartile des précisions par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
+    "Rendement Q25": "Premier quartile des rendements moyens par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
+    "Rendement Q75": "Troisième quartile des rendements moyens par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
+    "P&L cumulatif modèle": "P&L théorique de ce modèle depuis T0 : somme des rendements de ses signaux × 10 000 $, en dollars.",
+}
+
+
+def _forward_column_config(columns: pd.Index) -> dict[str, Any]:
+    percentages = {
+        "Précision", "Précision cumulative", "Précision intervalle",
+        "Rendement moyen", "Rendement moyen intervalle", "Précision médiane",
+        "Rendement médian", "Précision pondérée", "Rendement pondéré",
+        "Précision Q25", "Précision Q75", "Rendement Q25", "Rendement Q75",
+    }
+    currency = {"P&L", "P&L cumulatif", "P&L cumulatif modèle", "Drawdown"}
+    formats = {
+        name: st.column_config.NumberColumn(format="percent")
+        for name in columns if name in percentages
+    }
+    formats.update({
+        name: st.column_config.NumberColumn(format="%.2f $")
+        for name in columns if name in currency
+    })
+    return _grid_column_help_config(columns, _FORWARD_COLUMN_HELP, formats)
+
+
+def _forward_metric_table(rows: pd.DataFrame, *, label: str) -> pd.DataFrame:
+    table = rows.copy()
+    table["Horizon"] = table["horizon"].map(lambda value: f"+{int(value)}")
+    table["Séances"] = table["session_start"].astype(str) + " → " + table["session_end"].astype(str)
+    table = table.rename(columns={
+        "evaluated_observations": "Évaluables", "excluded_observations": "Exclues",
+        "signals": "Signaux", "precision": "Précision", "mean_return": "Rendement moyen",
+        "pnl": "P&L", "drawdown": "Drawdown",
+    })
+    st.subheader(label)
+    return table[["Horizon", "Séances", "Évaluables", "Exclues", "Signaux",
+                  "Précision", "Rendement moyen", "P&L", "Drawdown"]]
+
+
+def _forward_line_chart(
+    frame: pd.DataFrame, *, x: str, y: str, title: str,
+    percent: bool = False, checkpoints: Sequence[int] = (),
+) -> None:
+    chart = alt.Chart(frame).mark_line(point=True).encode(
+        x=alt.X(x, title="Séances depuis T0"),
+        y=alt.Y(y, title=title, axis=alt.Axis(format="%" if percent else ",.0f")),
+        tooltip=[x, alt.Tooltip(y, format=".1%" if percent else ",.2f")],
+    )
+    if checkpoints:
+        marks = alt.Chart(pd.DataFrame({x: list(checkpoints)})).mark_rule(
+            color="#aaaaaa", strokeDash=[3, 3]
+        ).encode(x=x)
+        chart = chart + marks
+    st.altair_chart(chart, width="stretch")
+
+
+def _forward_precision_chart(rows: pd.DataFrame, checkpoints: Sequence[int]) -> None:
+    values = rows.loc[rows["precision"].notna(),
+                      ["horizon", "period_kind", "precision", "signals"]].copy()
+    if values.empty:
+        return
+    values["Lecture"] = values["period_kind"].map({
+        "cumulative": "Depuis T0", "interval": "Intervalle",
+    })
+    chart = alt.Chart(values).mark_line(point=True).encode(
+        x=alt.X("horizon:Q", title="Séances depuis T0"),
+        y=alt.Y("precision:Q", title="Précision", axis=alt.Axis(format="%")),
+        color=alt.Color("Lecture:N"),
+        tooltip=["horizon:Q", "Lecture:N", alt.Tooltip("precision:Q", format=".1%"), "signals:Q"],
+    )
+    marks = alt.Chart(pd.DataFrame({"horizon": list(checkpoints)})).mark_rule(
+        color="#aaaaaa", strokeDash=[3, 3]
+    ).encode(x="horizon:Q")
+    st.altair_chart(chart + marks, width="stretch")
+
+
+def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object]) -> None:
+    root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    manifest = _read_light_json(root / "forward_analysis_manifest.json")
+    if manifest is None:
+        st.info("Analyse temporelle détaillée indisponible pour ce run.")
+        return
+    required = (
+        "forward_period_metrics.csv", "forward_population_metrics.csv",
+        "forward_daily_metrics.csv",
+    )
+    if manifest.get("forward_run_id") != run_id or any(
+        not (root / name).is_file()
+        or hashlib.sha256((root / name).read_bytes()).hexdigest()
+        != manifest.get("artifact_digests", {}).get(name)
+        for name in required
+    ):
+        st.error("Les artefacts d’analyse Forward sont absents ou ont changé.")
+        return
+    periods = pd.read_csv(root / required[0]).fillna({"source_model_id": ""})
+    population = pd.read_csv(root / required[1])
+    daily = pd.read_csv(root / required[2]).fillna({"source_model_id": ""})
+    view = st.radio(
+        "Analyse Forward", ("Synthèse", "Modèles", "Évolution population"),
+        horizontal=True, key=f"forward-view-{run_id}",
+    )
+    checkpoints = tuple(manifest.get("checkpoints", ()))
+    if view == "Synthèse":
+        st.metric("Modèles à T0", int(manifest.get("model_count_t0", 0)),
+                  help=_FORWARD_COLUMN_HELP["Modèles à T0"])
+        st.metric("Signaux évaluables", int(summary.get("total_signals", 0) or 0),
+                  help=_FORWARD_COLUMN_HELP["Signaux"])
+        full_run = periods.loc[(periods["scope"] == "run") &
+                               (periods["period_kind"] == "full_run")]
+        if not full_run.empty:
+            final_table = _forward_metric_table(full_run, label="Résultat à la date réelle de fin")
+            st.dataframe(final_table, hide_index=True, width="stretch",
+                         column_config=_forward_column_config(final_table.columns))
+        run_daily = daily.loc[daily["scope"] == "run"]
+        if not run_daily.empty:
+            _forward_line_chart(run_daily, x="horizon", y="cumulative_pnl",
+                                title="P&L cumulatif ($)", checkpoints=checkpoints)
+        _forward_precision_chart(periods.loc[periods["scope"] == "run"], checkpoints)
+        intervals = periods.loc[(periods["scope"] == "run") & (periods["period_kind"] == "interval")]
+        if not intervals.empty:
+            _forward_line_chart(intervals.dropna(subset=["mean_return"]), x="horizon",
+                                y="mean_return", title="Rendement moyen par intervalle",
+                                percent=True, checkpoints=checkpoints)
+        kind = st.radio("Lecture des checkpoints", ("Depuis T0", "Par intervalle"),
+                        horizontal=True, key=f"forward-period-{run_id}")
+        selected = periods.loc[(periods["scope"] == "run") &
+                               (periods["period_kind"] == ("cumulative" if kind == "Depuis T0" else "interval"))]
+        if selected.empty:
+            st.info("Aucun checkpoint standard entièrement atteint ; le résultat global reste disponible dans le résumé du run.")
+        else:
+            table = _forward_metric_table(selected, label="Métriques aux checkpoints")
+            st.dataframe(table, hide_index=True, width="stretch",
+                         column_config=_forward_column_config(table.columns))
+    elif view == "Modèles":
+        latest = periods.loc[(periods["scope"] == "model") &
+                             (periods["period_kind"] == "interval")]
+        full_run = periods.loc[(periods["scope"] == "model") &
+                               (periods["period_kind"] == "full_run")]
+        if full_run.empty:
+            st.info("Aucun modèle dans le snapshot source.")
+            return
+        latest = latest.sort_values("horizon").groupby("source_model_id", as_index=False).tail(1)
+        if not latest.empty:
+            last_horizon = int(latest["horizon"].max())
+            last_start = int(latest.loc[latest["horizon"] == last_horizon, "interval_start"].iloc[0])
+            st.caption(f"Colonnes « intervalle » : séances +{last_start} à +{last_horizon}. Les totaux couvrent toute la Forward.")
+        pnl = dict(zip(full_run["source_model_id"], full_run["pnl"]))
+        signal_totals = dict(zip(full_run["source_model_id"], full_run["signals"]))
+        last_precision = dict(zip(latest["source_model_id"], latest["precision"]))
+        last_return = dict(zip(latest["source_model_id"], latest["mean_return"]))
+        grid = pd.DataFrame({
+            "Modèle": full_run["source_model_id"], "Target": full_run["target"],
+            "Signaux cumulés": full_run["source_model_id"].map(signal_totals),
+            "Précision intervalle": full_run["source_model_id"].map(last_precision),
+            "Rendement moyen intervalle": full_run["source_model_id"].map(last_return),
+            "P&L cumulatif modèle": full_run["source_model_id"].map(pnl),
+        }).reset_index(drop=True)
+        event = st.dataframe(
+            grid, hide_index=True, width="stretch", on_select="rerun",
+            selection_mode="single-row", key=f"forward-model-select-{run_id}",
+            column_config=_forward_column_config(grid.columns),
+        )
+        selected_rows = event.selection.rows if event is not None else []
+        if not selected_rows:
+            st.caption("Sélectionnez un modèle pour voir son évolution.")
+            return
+        model_id = str(grid.iloc[selected_rows[0]]["Modèle"])
+        model_periods = periods.loc[(periods["scope"] == "model") &
+                                    (periods["source_model_id"] == model_id)]
+        model_daily = daily.loc[(daily["scope"] == "model") &
+                                (daily["source_model_id"] == model_id)]
+        st.subheader(f"Modèle {model_id}")
+        source_file = (st.session_state.lab_config.project_root / "runs" /
+                       str(manifest["source_e2e_run_id"]) / "results" /
+                       "forward_model_snapshot.json")
+        source_identity = ""
+        if source_file.is_file() and hashlib.sha256(source_file.read_bytes()).hexdigest() == manifest.get("source_snapshot_sha256"):
+            source_snapshot = _read_light_json(source_file) or {}
+            matching = [item for item in source_snapshot.get("models", [])
+                        if str(item.get("source_model_id")) == model_id]
+            if len(matching) == 1:
+                model = matching[0]
+                source_identity = f" · Combinaison : {model.get('set')} · Direction : {model.get('direction')}"
+        policy = "Figé" if manifest.get("forward_policy") == "FROZEN" else str(manifest.get("forward_policy"))
+        st.caption(f"Target : {grid.iloc[selected_rows[0]]['Target']} · Mode : {policy} · Horizon maximal : +{manifest['horizon_max']} séances · E2E source : {manifest['source_e2e_run_id']}{source_identity}")
+        _forward_line_chart(model_daily, x="horizon", y="cumulative_pnl",
+                            title="P&L cumulatif ($)", checkpoints=checkpoints)
+        _forward_line_chart(model_periods.loc[model_periods["period_kind"] == "interval"].dropna(subset=["precision"]),
+                            x="horizon", y="precision", title="Précision par intervalle",
+                            percent=True, checkpoints=checkpoints)
+        kind = st.radio("Lecture du modèle", ("Par intervalle", "Depuis T0"),
+                        horizontal=True, key=f"forward-model-period-{run_id}")
+        chosen = model_periods.loc[model_periods["period_kind"] ==
+                                   ("interval" if kind == "Par intervalle" else "cumulative")]
+        if chosen.empty:
+            st.info("Aucun checkpoint standard entièrement atteint ; le résultat global du modèle reste disponible dans la grille.")
+        else:
+            table = _forward_metric_table(chosen, label="Métriques par horizon")
+            st.dataframe(table, hide_index=True, width="stretch",
+                         column_config=_forward_column_config(table.columns))
+    else:
+        if population.empty:
+            st.info("Aucun intervalle standard entièrement atteint.")
+            return
+        table = population.rename(columns={
+            "models_t0": "Modèles à T0", "models_with_observations": "Modèles observables",
+            "models_with_signals": "Modèles contributeurs", "signals": "Signaux intervalle",
+            "median_model_precision": "Précision médiane",
+            "median_model_return": "Rendement médian",
+            "weighted_precision": "Précision pondérée",
+            "weighted_return": "Rendement pondéré",
+            "precision_q25": "Précision Q25", "precision_q75": "Précision Q75",
+            "return_q25": "Rendement Q25", "return_q75": "Rendement Q75",
+        })
+        table["Horizon"] = table["horizon"].map(lambda value: f"+{int(value)}")
+        table["Séances"] = table["session_start"].astype(str) + " → " + table["session_end"].astype(str)
+        columns = ["Horizon", "Séances", "Modèles à T0", "Modèles observables",
+                   "Modèles contributeurs", "Signaux intervalle", "Précision médiane",
+                   "Précision Q25", "Précision Q75", "Rendement médian",
+                   "Rendement Q25", "Rendement Q75",
+                   "Précision pondérée", "Rendement pondéré"]
+        st.dataframe(table[columns], hide_index=True, width="stretch",
+                     column_config=_forward_column_config(pd.Index(columns)))
+        _forward_line_chart(population.dropna(subset=["median_model_precision"]),
+                            x="horizon", y="median_model_precision",
+                            title="Précision médiane des modèles par intervalle",
+                            percent=True, checkpoints=checkpoints)
+        _forward_line_chart(population.dropna(subset=["median_model_return"]),
+                            x="horizon", y="median_model_return",
+                            title="Rendement médian des modèles par intervalle",
+                            percent=True, checkpoints=checkpoints)
+        st.caption("Les médianes comptent chaque modèle contributeur une fois ; les valeurs pondérées comptent chaque signal. Les modèles sans signal restent dans la population T0.")
 
 
 def _render_standard_job_tabs(
@@ -3184,9 +3523,14 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
         st.info("L'étape Promotion n'est pas encore disponible.")
         return
     trigger = stage.get("promotion_trigger")
+    qualification_source: dict[str, object] = {}
     if isinstance(trigger, dict):
         qualification_id = trigger.get("promotion_qualification_run_id")
         if qualification_id:
+            qualification_source = _read_light_json(
+                st.session_state.lab_config.project_root / "runs" / str(qualification_id)
+                / "results" / "qualification.json"
+            ) or {}
             st.caption(
                 f"Qualification retenue : {qualification_id} "
                 f"({trigger.get('source_selection_reason')})"
@@ -3260,7 +3604,14 @@ def _render_pipeline_promotion(detail: dict[str, object]) -> None:
             on="Combinaison",
             how="left",
         )
-    st.dataframe(diagnostic_table, hide_index=True, width="stretch")
+    _render_qualification_decision_grid(
+        diagnostic_table,
+        key=f"promotion-decisions-{stage.get('child_run_id') or detail.get('status', {}).get('run_id', 'root')}",
+        project_root=st.session_state.lab_config.project_root,
+        qualification=qualification_source,
+        threshold_run_id=promotion.get("source_threshold_calibration_run"),
+        walk_forward_run_id=promotion.get("source_walk_forward_run"),
+    )
 
 
 def _render_candidate_identity_stability(
@@ -3862,6 +4213,9 @@ def _render_run_detail_view(
     else:
         st.subheader(history.summary if history.summary != "-" else "Detail du run")
         st.caption(f"ID technique : {run_id}")
+        if status["job_type"] == JobType.FORWARD_SIMULATION.value:
+            policy = detail.get("configuration", {}).get("forward_policy") or "FROZEN"
+            st.caption("Mode : Figé" if policy == "FROZEN" else f"Mode : {policy}")
     _render_resume_controls(run_id, status, detail)
     _render_job_detail_tabs(service, run_id, status=status, detail=detail)
     return
@@ -4099,6 +4453,9 @@ def _history_runs_panel(
     batch_result = st.session_state.pop(batch_result_key, None)
     if isinstance(batch_result, BatchPurgeOutcome):
         _render_batch_purge_outcome(batch_result)
+    delete_result = st.session_state.pop(f"{key_prefix}-batch-delete-result", None)
+    if isinstance(delete_result, BatchDeleteOutcome):
+        _render_batch_delete_outcome(delete_result)
     history_runs = service.history_runs(job_types=allowed_types)
     runs = [record.status for record in history_runs]
     details_by_run_id = {
@@ -4159,14 +4516,24 @@ def _history_runs_panel(
     if isinstance(pending_batch, BatchPurgeReview):
         _render_batch_purge_confirmation(service, pending_batch, key_prefix=key_prefix)
         return
+    pending_delete = st.session_state.get(f"{key_prefix}-pending-batch-delete")
+    if isinstance(pending_delete, BatchDeleteReview):
+        _render_batch_delete_confirmation(service, pending_delete, key_prefix=key_prefix)
+        return
     if not selected:
-        st.caption("Sélectionnez un run pour l’ouvrir, ou plusieurs runs pour les comparer ou purger leurs données lourdes.")
+        st.caption("Sélectionnez des runs pour les ouvrir, comparer, purger ou supprimer définitivement ceux en échec ou annulés.")
         return
     if len(selected) > 1 and st.button(
         "Purger les données lourdes des runs sélectionnés",
         key=f"purge-selected-{key_prefix}",
     ):
         st.session_state[batch_pending_key] = preview_batch_purge(service, selected)
+        st.rerun()
+    if len(selected) > 1 and st.button(
+        "Supprimer définitivement les runs sélectionnés",
+        key=f"delete-selected-{key_prefix}",
+    ):
+        st.session_state[f"{key_prefix}-pending-batch-delete"] = preview_batch_delete(service, selected)
         st.rerun()
     action = selected_run_action(selected)
     if action == "detail":
@@ -4212,6 +4579,18 @@ def _history_runs_panel(
                 selected_run_id,
                 int(pending_purge.get("reclaimable_bytes", 0)),
             )
+        if str(selected_run.get("status")) in {"failed", "cancelled"} and actions[3].button(
+            "Supprimer définitivement", key=f"delete-history-{key_prefix}",
+        ):
+            try:
+                st.session_state["pending-run-delete"] = service.delete_preview(selected_run_id)
+            except (OSError, ValueError, RuntimeError) as error:
+                st.error(f"Suppression impossible : {error}")
+            else:
+                st.rerun()
+        pending_run_delete = st.session_state.get("pending-run-delete")
+        if isinstance(pending_run_delete, DeletePlan) and pending_run_delete.run_id == selected_run_id:
+            _render_run_delete_confirmation(service, pending_run_delete)
         return
     if action == "comparison":
         selected_types = {
@@ -4326,6 +4705,93 @@ def _render_run_purge_confirmation(
                 st.rerun()
         if cancel.button("Annuler", key=f"cancel-run-purge-{run_id}"):
             st.session_state.pop("pending-run-purge", None)
+            st.rerun()
+
+
+def _render_batch_delete_outcome(outcome: BatchDeleteOutcome) -> None:
+    message = (
+        "Suppression groupée terminée : "
+        f"{len(outcome.succeeded)} succès, {len(outcome.skipped)} ignorés, "
+        f"{len(outcome.errors)} erreurs; {len(outcome.deleted_run_ids)} runs supprimés."
+    )
+    if outcome.errors and not outcome.succeeded:
+        st.error(message)
+    elif outcome.errors or outcome.skipped:
+        st.warning(message)
+    else:
+        st.success(message)
+    if outcome.skipped:
+        st.info("Runs ignorés : " + "; ".join(
+            f"{run_id} : {reason}" for run_id, reason in outcome.skipped
+        ))
+    if outcome.errors:
+        st.error("Erreurs : " + "; ".join(
+            f"{run_id} : {reason}" for run_id, reason in outcome.errors
+        ))
+
+
+def _render_batch_delete_confirmation(
+    service: ExperimentService, review: BatchDeleteReview, *, key_prefix: str
+) -> None:
+    pending_key = f"{key_prefix}-pending-batch-delete"
+    with st.container(border=True):
+        st.warning(
+            "Suppression définitive et irréversible : "
+            f"{len(review.requested_run_ids)} runs sélectionnés, "
+            f"{len(review.plans)} racines admissibles, "
+            f"{len(review.affected_run_ids)} runs à supprimer, enfants propriétaires inclus. "
+            "Leurs dossiers, logs, manifests, checkpoints, résultats et métadonnées disparaîtront."
+        )
+        st.caption("Par type : " + ", ".join(
+            f"{JOB_LABELS.get(kind, kind)} : {count}"
+            for kind, count in review.affected_by_type
+        ))
+        if review.skipped:
+            st.info("Runs ignorés : " + "; ".join(
+                f"{run_id} : {reason}" for run_id, reason in review.skipped
+            ))
+        if review.errors:
+            st.error("Erreurs de préparation : " + "; ".join(
+                f"{run_id} : {reason}" for run_id, reason in review.errors
+            ))
+        confirm, cancel, _ = st.columns([2.5, 1, 5])
+        if confirm.button(
+            "Confirmer la suppression définitive groupée", type="primary",
+            disabled=not review.plans, key=f"confirm-batch-delete-{key_prefix}",
+        ):
+            st.session_state[f"{key_prefix}-batch-delete-result"] = execute_batch_delete(service, review)
+            st.session_state.pop(pending_key, None)
+            st.rerun()
+        if cancel.button("Annuler", key=f"cancel-batch-delete-{key_prefix}"):
+            st.session_state.pop(pending_key, None)
+            st.rerun()
+
+
+def _render_run_delete_confirmation(service: ExperimentService, plan: DeletePlan) -> None:
+    with st.container(border=True):
+        st.warning(
+            "Suppression définitive et irréversible : "
+            f"{len(plan.run_ids)} runs, enfants propriétaires inclus "
+            f"({_format_storage_size(plan.size_bytes)}). "
+            "Tous leurs fichiers et métadonnées disparaîtront de l’Historique."
+        )
+        st.caption("Par type : " + ", ".join(
+            f"{JOB_LABELS.get(kind, kind)} : {count}" for kind, count in plan.by_type
+        ))
+        confirm, cancel, _ = st.columns([2.5, 1, 5])
+        if confirm.button(
+            "Confirmer la suppression définitive", type="primary",
+            key=f"confirm-run-delete-{plan.run_id}",
+        ):
+            try:
+                service.delete_run(plan.run_id, expected_run_ids=plan.run_ids)
+            except (OSError, ValueError, RuntimeError) as error:
+                st.error(f"Suppression impossible : {error}")
+            else:
+                st.session_state.pop("pending-run-delete", None)
+                st.rerun()
+        if cancel.button("Annuler", key=f"cancel-run-delete-{plan.run_id}"):
+            st.session_state.pop("pending-run-delete", None)
             st.rerun()
 
 
@@ -6420,6 +6886,69 @@ def _model_detail_currency(value: object) -> str:
     return f"{float(value):+,.2f}".replace(",", " ").replace(".", ",") + " $"
 
 
+def _render_qualification_metric_group(
+    values: dict[str, object], fields: tuple[tuple[str, str, str, str | None], ...],
+) -> None:
+    formatters = {
+        "auc": _model_detail_auc,
+        "count": _model_detail_integer,
+        "percent": _models_percent,
+    }
+    for offset in range(0, len(fields), 4):
+        columns = st.columns(4, gap="small")
+        for column, (label, key, format_name, help_text) in zip(columns, fields[offset:offset + 4]):
+            with column:
+                st.metric(label, formatters[format_name](values.get(key)), help=help_text)
+
+
+def _render_initial_qualification(model: Any) -> None:
+    groups = initial_qualification_metrics(model)
+    wf = groups["walk_forward"]
+    st.markdown("##### Walk-forward")
+    _render_qualification_metric_group(wf, (
+        ("AUC WF médiane", "median_auc", "auc", "Médiane des AUC des fenêtres Walk-forward valides."),
+        ("Pire AUC WF", "worst_auc", "auc", None),
+        ("Écart-type AUC WF", "auc_std", "auc", None),
+        ("Fenêtres évaluées", "windows_evaluated", "count", None),
+        ("Fenêtres AUC valides", "auc_windows", "count", None),
+        ("Fenêtres AUC > 0,50", "windows_above_random", "percent", None),
+        ("Observations positives", "positive_observations", "count", "Exemples réellement positifs utilisés pour qualifier le modèle, et non nombre de signaux."),
+    ))
+    st.caption(f"Run WF source : {wf['source_run_id'] or '—'}")
+
+    st.markdown("##### Holdout")
+    final = groups["holdout_final_wf"]
+    st.caption("Holdout final WF")
+    _render_qualification_metric_group(final, (
+        ("AUC holdout final WF", "auc", "auc", "AUC du holdout final évalué par le Walk-forward, sans seuil de signal figé."),
+        ("Précision finale WF", "precision", "percent", None),
+        ("Recall final WF", "recall", "percent", None),
+        ("F1 final WF", "f1", "auc", None),
+    ))
+    st.caption(f"Run WF source : {final['source_run_id'] or '—'}")
+
+    signals = groups["holdout_signals"]
+    st.caption("Signaux holdout avec seuil figé")
+    _render_qualification_metric_group(signals, (
+        ("Seuil calibré Up", "threshold", "percent", None),
+        ("Signaux holdout", "signal_count", "count", None),
+        ("Précision signaux", "precision", "percent", None),
+        ("Recall signaux", "recall", "percent", None),
+        ("F1 signaux", "f1", "auc", None),
+        ("AUC signaux holdout", "auc", "auc", "AUC des probabilités du lot holdout associé aux seuils figés; distincte de l'AUC finale WF."),
+        ("Rendement directionnel moyen", "directional_return_mean", "percent", None),
+        ("Rendement médian", "intraday_return_median", "percent", "Médiane Open→Close des signaux Up; pour Up, elle est aussi directionnelle."),
+        ("Mouvement opposé", "opposite_move_frequency", "percent", None),
+        ("MFE moyenne", "mfe_mean", "percent", "Excursion favorable maximale moyenne durant la séance."),
+        ("MAE moyenne", "mae_mean", "percent", "Excursion défavorable maximale moyenne durant la séance."),
+    ))
+    source_label = (
+        "Run évaluation holdout" if signals["source_job_type"] == "holdout_evaluation"
+        else "Run calibration des seuils (historique)"
+    )
+    st.caption(f"{source_label} : {signals['source_run_id'] or '—'}")
+
+
 def _render_model_quality_detail(model_id: str) -> None:
     project_root = st.session_state.lab_config.project_root
     try:
@@ -6603,7 +7132,12 @@ def _render_model_quality_detail(model_id: str) -> None:
             baseline_comparison_rows(snapshot, detail.baseline)
         )
         if comparison_table.empty:
-            st.info("Baseline indisponible")
+            reason = (
+                detail.quality_state
+                if detail.quality_state != "current"
+                else baseline_unavailability_reason(snapshot, detail.baseline)
+            )
+            st.info(f"Baseline indisponible : {reason}")
         else:
             st.dataframe(
                 style_directional_columns(
@@ -6615,14 +7149,7 @@ def _render_model_quality_detail(model_id: str) -> None:
                 ),
             )
         with st.expander("Qualification initiale"):
-            qualification = st.columns(3, gap="small")
-            qualification[0].metric("AUC WF médiane", _model_detail_auc(
-                lineage.get("wf_median_auc") or model.development_metrics.get("ROCAUCMedian")
-            ))
-            qualification[1].metric("AUC Holdout", _model_detail_auc(
-                lineage.get("holdout_auc") or model.holdout_metrics.get("FinalUpROCAUC")
-            ))
-            qualification[2].metric("Run WF", _model_detail_short_id(source_wf))
+            _render_initial_qualification(model)
     with signals_tab:
         st.caption("Derniers signaux évalués")
         signals = evaluated_bullish_signals(detail.observations)

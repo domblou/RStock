@@ -22,10 +22,14 @@ from rstock.application.production_quality_repository import (
     ProductionQualityRepository,
     reconcile_quality_observations,
 )
+from rstock.application.production_quality_ui import (
+    baseline_unavailability_reason, initial_qualification_metrics,
+)
 import rstock.application.production_quality_repository as quality_repository_module
 from rstock.application.production_quality_baseline import (
     AVAILABLE,
     UNAVAILABLE_MISSING_ARTIFACT,
+    UNAVAILABLE_AMBIGUOUS_SOURCE,
     PromotionQualityService,
     build_model_lineage,
     build_promotion_baseline,
@@ -374,11 +378,16 @@ def test_baseline_pairs_up_down_and_applies_combined_rule(tmp_path):
     results.mkdir(parents=True)
     source = results / "holdout_predictions.csv"
     _holdout_predictions(source)
-    model = replace(_model(), source_threshold_calibration_run=run_id)
+    model = replace(
+        _model(), source_threshold_calibration_run=run_id,
+        training_metadata={"source_holdout_evaluation_run": None},
+    )
 
     baseline = build_promotion_baseline(model, runs)
 
     assert baseline["availability_status"] == AVAILABLE
+    assert baseline["source_holdout_evaluation_run_id"] is None
+    assert baseline["source_holdout_file"] == "threshold-source/results/holdout_predictions.csv"
     assert baseline["source_holdout_sha256"]
     assert baseline["holdout_start"] == "2026-06-01"
     assert baseline["holdout_end"] == "2026-06-03"
@@ -394,6 +403,129 @@ def test_baseline_pairs_up_down_and_applies_combined_rule(tmp_path):
     assert metrics["cumulative_return_sum"] == pytest.approx(0.01)
     assert metrics["mean_mfe"] == pytest.approx(0.02)
     assert metrics["mean_mae"] == pytest.approx(-0.015)
+
+
+def test_baseline_uses_explicit_holdout_evaluation_source(tmp_path):
+    runs = RunRepository(tmp_path / "runs")
+    threshold = runs.run_directory("threshold") / "results"
+    holdout = runs.run_directory("holdout") / "results"
+    threshold.mkdir(parents=True)
+    holdout.mkdir(parents=True)
+    _holdout_predictions(threshold / "holdout_predictions.csv")
+    _holdout_predictions(holdout / "holdout_predictions.csv")
+    changed = pd.read_csv(holdout / "holdout_predictions.csv")
+    changed.loc[0, "IntradayReturn"] = 0.08
+    changed.to_csv(holdout / "holdout_predictions.csv", index=False)
+    model = replace(
+        _model(), source_threshold_calibration_run="threshold",
+        training_metadata={"source_holdout_evaluation_run": "holdout"},
+    )
+
+    baseline = build_promotion_baseline(model, runs)
+
+    assert baseline["availability_status"] == AVAILABLE
+    assert baseline["source_holdout_evaluation_run_id"] == "holdout"
+    assert baseline["source_holdout_file"] == "holdout/results/holdout_predictions.csv"
+    assert baseline["source_holdout_sha256"] != build_promotion_baseline(
+        replace(model, training_metadata={}), runs
+    )["source_holdout_sha256"]
+    assert baseline["metrics"]["mean_intraday_return"] == pytest.approx(0.035)
+
+
+def test_baseline_does_not_fall_back_when_explicit_holdout_is_missing(tmp_path):
+    runs = RunRepository(tmp_path / "runs")
+    threshold = runs.run_directory("threshold") / "results"
+    threshold.mkdir(parents=True)
+    _holdout_predictions(threshold / "holdout_predictions.csv")
+    model = replace(
+        _model(), source_threshold_calibration_run="threshold",
+        training_metadata={"source_holdout_evaluation_run": "missing-holdout"},
+    )
+
+    baseline = build_promotion_baseline(model, runs)
+
+    assert baseline["availability_status"] == UNAVAILABLE_MISSING_ARTIFACT
+    assert baseline["source_holdout_evaluation_run_id"] == "missing-holdout"
+    assert baseline["source_holdout_file"] is None
+
+
+def test_baseline_rejects_ambiguous_explicit_holdout(tmp_path):
+    runs = RunRepository(tmp_path / "runs")
+    results = runs.run_directory("holdout") / "results"
+    results.mkdir(parents=True)
+    _holdout_predictions(results / "holdout_predictions.csv")
+    frame = pd.read_csv(results / "holdout_predictions.csv")
+    pd.concat([frame, frame.iloc[[0]]]).to_csv(
+        results / "holdout_predictions.csv", index=False
+    )
+    model = replace(
+        _model(), training_metadata={"source_holdout_evaluation_run": "holdout"}
+    )
+
+    assert build_promotion_baseline(model, runs)["availability_status"] == UNAVAILABLE_AMBIGUOUS_SOURCE
+
+
+def test_initial_qualification_keeps_wf_and_both_holdout_auc_sources_distinct():
+    model = replace(
+        _model(),
+        development_metrics={
+            "ROCAUCMedian": 0.62, "ROCAUCWorst": 0.51, "ROCAUCStd": 0.04,
+            "WindowsEvaluated": 7, "AUCWindows": 6,
+            "PctWindowsAboveRandom": 5 / 7, "PositiveObservations": 120,
+        },
+        holdout_metrics={
+            "FinalUpROCAUC": 0.71, "FinalUpPrecision": 0.64,
+            "FinalUpRecall": 0.58, "FinalUpF1": 0.61,
+        },
+        holdout_signal_metrics={
+            "Threshold": 0.37, "SignalCount": 12, "Precision": 0.75,
+            "Recall": 0.50, "F1": 0.60, "ROCAUC": 0.66,
+            "DirectionalReturnMean": 0.014, "IntradayReturnMedian": 0.011,
+            "OppositeMoveFrequency": 0.08, "MFEMean": 0.025,
+            "MAEMean": -0.009,
+        },
+        training_metadata={"source_holdout_evaluation_run": "holdout"},
+    )
+
+    groups = initial_qualification_metrics(model)
+
+    assert groups["walk_forward"] == {
+        "median_auc": 0.62, "worst_auc": 0.51, "auc_std": 0.04,
+        "windows_evaluated": 7, "auc_windows": 6,
+        "windows_above_random": 5 / 7, "positive_observations": 120,
+        "source_run_id": "wf",
+    }
+    assert groups["holdout_final_wf"]["auc"] == 0.71
+    assert groups["holdout_signals"]["auc"] == 0.66
+    assert groups["holdout_signals"]["source_run_id"] == "holdout"
+    assert groups["holdout_signals"]["source_job_type"] == "holdout_evaluation"
+    assert groups["holdout_signals"]["intraday_return_median"] == 0.011
+    assert groups["holdout_signals"]["mae_mean"] == -0.009
+
+
+def test_historical_model_without_signal_metrics_shows_missing_values():
+    model = replace(
+        _model(), source_threshold_calibration_run="legacy-threshold",
+        holdout_metrics={"FinalUpROCAUC": 0.69},
+        holdout_signal_metrics={},
+    )
+
+    groups = initial_qualification_metrics(model)
+
+    assert groups["holdout_final_wf"]["auc"] == 0.69
+    assert groups["holdout_signals"]["auc"] is None
+    assert groups["holdout_signals"]["signal_count"] is None
+    assert groups["holdout_signals"]["source_run_id"] == "legacy-threshold"
+    assert groups["holdout_signals"]["source_job_type"] == "threshold_calibration"
+    assert groups["walk_forward"]["windows_evaluated"] is None
+
+
+def test_baseline_unavailability_reason_preserves_persisted_status():
+    snapshot = {"since_promotion": {}}
+    for status in ("unavailable_legacy", "unavailable_missing_artifact", "unavailable_ambiguous_source"):
+        assert baseline_unavailability_reason(snapshot, {"availability_status": status}) == status
+    assert baseline_unavailability_reason(snapshot, None) == "baseline_absente"
+    assert baseline_unavailability_reason(None, {"availability_status": AVAILABLE}) == "snapshot_qualité_indisponible"
 
 
 def test_missing_holdout_persists_unavailable_baseline_and_is_not_overwritten(tmp_path):

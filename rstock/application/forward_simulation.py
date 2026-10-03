@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import exchange_calendars as xcals
 
 from rstock.features import (
     intraday_down_target_column, intraday_return_column, intraday_target_column, mae_column, mfe_column,
@@ -25,6 +26,7 @@ from .auto_promotion import _promotion_guidance
 from .domain import ExperimentSpec, JobType
 from .repository import RunRepository
 from .services import MarketDataService
+from .forward_temporal_analysis import analyze_forward_periods, CHECKPOINTS
 
 
 SNAPSHOT_FILENAME = "forward_model_snapshot.json"
@@ -453,6 +455,7 @@ def run_forward_simulation(
     if not snapshot.get("models"):
         summary = {
             "job_type": "forward_simulation",
+            "forward_policy": spec.forward_policy,
             "source_end_to_end_run_id": spec.source_end_to_end_run,
             "result": "skipped_no_models",
             "candidate_count": 0,
@@ -480,17 +483,27 @@ def run_forward_simulation(
     prepared = prepare_dataset(downloaded.prices, downloaded.symbols, spec.config.intraday_target_threshold, spec.config.lag_depth, spec.config.intraday_down_threshold)
     if prepared.empty or prepared.index.max() < end:
         raise ValueError("insufficient_forward_market_data")
+    calendar = xcals.get_calendar(spec.calendar)
+    sessions = pd.DatetimeIndex(calendar.sessions_in_range(start, end))
+    if sessions.tz is not None:
+        sessions = sessions.tz_localize(None)
+    if not len(sessions) or sessions[0] != start or sessions[-1] != end:
+        raise ValueError("forward_period_not_xnys_sessions")
+    input_digest = hashlib.sha256(
+        (prepared_dataset_hash(prepared) + prepared_dataset_hash(downloaded.prices)).encode()
+    ).hexdigest()
     checkpoint_path = output / OBSERVATION_CHECKPOINT_FILENAME
     validate_forward_checkpoint_bundle(output, spec, snapshot, run_id=output.parent.name)
     rows = _read_checkpoint_rows(checkpoint_path, OBSERVATION_COLUMNS)
     exclusion_checkpoint_path = output / EXCLUSION_CHECKPOINT_FILENAME
     exclusions = _read_checkpoint_rows(exclusion_checkpoint_path, EXCLUSION_COLUMNS)
-    completed_models = {str(row["source_model_id"]) for row in rows} | {
-        str(row["source_model_id"]) for row in exclusions
-    }
+    completed_models: set[str] = set()
     checkpoint_manifest_path = output / CHECKPOINT_MANIFEST_FILENAME
     if checkpoint_manifest_path.is_file():
         checkpoint_manifest = _read_json(checkpoint_manifest_path)
+        recorded_digest = checkpoint_manifest.get("market_input_sha256")
+        if recorded_digest is not None and recorded_digest != input_digest:
+            raise ValueError("forward_market_input_changed_on_resume")
         snapshot_model_ids = {str(item["source_model_id"]) for item in snapshot["models"]}
         restored_models = {str(item) for item in checkpoint_manifest.get("completed_model_ids", [])}
         if (
@@ -500,7 +513,13 @@ def run_forward_simulation(
             or not restored_models.issubset(snapshot_model_ids)
         ):
             raise ValueError("forward_checkpoint_manifest_mismatch")
+        if recorded_digest is None and restored_models:
+            raise ValueError("forward_legacy_checkpoint_market_input_unverifiable")
         completed_models = restored_models
+    # A crash may occur after writing rows but before committing the model ID.
+    # Only the persisted manifest can authorize reuse of those rows.
+    rows = [row for row in rows if str(row["source_model_id"]) in completed_models]
+    exclusions = [row for row in exclusions if str(row["source_model_id"]) in completed_models]
     for model in snapshot["models"]:
         if str(model["source_model_id"]) in completed_models:
             continue
@@ -508,18 +527,30 @@ def run_forward_simulation(
         directory = root / "results" / SNAPSHOT_DIRECTORY / str(model["source_model_id"])
         up, down = load_booster(directory / "up.ubj"), load_booster(directory / "down.ubj")
         target = str(model["target"])
-        for session in prepared.index[(prepared.index >= start) & (prepared.index <= end)]:
+        for session in sessions:
             check_cancellation(cancellation_check)
             previous = prepared.index[prepared.index < session]
-            if previous.empty:
-                continue
-            current = prepare_prediction_row(prepared, as_of_date=previous.max(), target_date=session, lag_depth=int(model["lag_depth"]))
-            if any(name not in current or current[name].isna().any() for name in names):
-                continue
-            returns = prepared.loc[session]
-            exclusion_reason, invalid_fields = _target_evaluation_validity(
-                downloaded.prices.loc[session], returns, target
-            )
+            as_of = previous.max().date().isoformat() if not previous.empty else ""
+            exclusion_reason = None
+            invalid_fields: list[str] = []
+            if session not in prepared.index or session not in downloaded.prices.index:
+                exclusion_reason = "missing_market_session"
+            elif previous.empty:
+                exclusion_reason = "missing_predictor_history"
+            else:
+                current = prepare_prediction_row(prepared, as_of_date=previous.max(), target_date=session, lag_depth=int(model["lag_depth"]))
+                invalid_fields = [
+                    name for name in names
+                    if name not in current
+                    or not np.isfinite(pd.to_numeric(current[name], errors="coerce").to_numpy()).all()
+                ]
+                if invalid_fields:
+                    exclusion_reason = "missing_predictor_features"
+                else:
+                    returns = prepared.loc[session]
+                    exclusion_reason, invalid_fields = _target_evaluation_validity(
+                        downloaded.prices.loc[session], returns, target
+                    )
             if exclusion_reason is not None:
                 exclusions.append({
                     "forward_simulation_run_id": output.parent.name,
@@ -527,7 +558,7 @@ def run_forward_simulation(
                     "source_model_id": model["source_model_id"],
                     "target": target, "Set": model["set"], "direction": model["direction"],
                     "session_date": session.date().isoformat(),
-                    "as_of_date": previous.max().date().isoformat(),
+                    "as_of_date": as_of,
                     "exclusion_reason": exclusion_reason,
                     "invalid_fields": ", ".join(invalid_fields),
                 })
@@ -544,6 +575,7 @@ def run_forward_simulation(
             "schema_version": 1, "forward_simulation_run_id": output.parent.name,
             "source_end_to_end_run_id": spec.source_end_to_end_run,
             "resolved_source_cutoff": cutoff.date().isoformat(),
+            "market_input_sha256": input_digest,
             "completed_model_ids": sorted(completed_models),
         }, checkpoint_manifest_path)
     frame = pd.DataFrame(rows, columns=OBSERVATION_COLUMNS)
@@ -551,6 +583,36 @@ def run_forward_simulation(
     output.mkdir(parents=True, exist_ok=True)
     _write_csv_atomic(frame, output / "forward_observations.csv")
     _write_csv_atomic(exclusion_frame, output / EXCLUSIONS_FILENAME)
+    period_metrics, population_metrics, daily_metrics = analyze_forward_periods(
+        frame, exclusion_frame, snapshot["models"], sessions
+    )
+    analysis_files = {
+        "forward_period_metrics.csv": period_metrics,
+        "forward_population_metrics.csv": population_metrics,
+        "forward_daily_metrics.csv": daily_metrics,
+    }
+    for filename, values in analysis_files.items():
+        _write_csv_atomic(values, output / filename)
+    _write_json_atomic({
+        "schema_version": 1,
+        "forward_run_id": output.parent.name,
+        "source_e2e_run_id": spec.source_end_to_end_run,
+        "source_snapshot_sha256": spec.source_forward_model_snapshot_sha256,
+        "forward_policy": spec.forward_policy,
+        "cutoff_t0": cutoff.date().isoformat(),
+        "horizon_max": len(sessions),
+        "first_session": sessions[0].date().isoformat(),
+        "last_session": sessions[-1].date().isoformat(),
+        "sessions": [session.date().isoformat() for session in sessions],
+        "checkpoints": [h for h in CHECKPOINTS if h <= len(sessions)],
+        "model_count_t0": len(snapshot["models"]),
+        "market_input_sha256": input_digest,
+        "artifact_digests": {
+            name: _sha256(output / name) for name in (
+                "forward_observations.csv", EXCLUSIONS_FILENAME, *analysis_files
+            )
+        },
+    }, output / "forward_analysis_manifest.json")
     signals = frame[frame.get("signal", pd.Series(dtype=bool)).astype(bool)] if not frame.empty else frame
     notional_per_signal = 10_000.0
     unique_issues = exclusion_frame.drop_duplicates(
@@ -558,5 +620,8 @@ def run_forward_simulation(
     )
     population = len(frame) + len(exclusion_frame)
     summary = {"job_type": "forward_simulation", "source_end_to_end_run_id": spec.source_end_to_end_run, "source_model_count": len(snapshot["models"]), "models_with_signals": int(signals["source_model_id"].nunique()) if not signals.empty else 0, "total_signals": len(signals), "evaluated_observations": len(frame), "skipped_observations": len(exclusion_frame), "evaluability_rate": None if population == 0 else len(frame) / population, "unique_data_quality_issues": len(unique_issues), "skipped_missing_target_ohlc": int(exclusion_frame["exclusion_reason"].eq("missing_target_ohlc").sum()), "precision": float(signals["correct_direction"].mean()) if not signals.empty else None, "directional_return_mean": float(signals["directional_return"].mean()) if not signals.empty else None, "opposite_movement_frequency": float(signals["opposite_movement"].mean()) if not signals.empty else None, "notional_per_signal": notional_per_signal, "cumulative_profit_loss": float((signals["directional_return"] * notional_per_signal).sum()) if not signals.empty else 0.0, "first_session": None if frame.empty else str(frame["session_date"].min()), "last_session": None if frame.empty else str(frame["session_date"].max()), "sessions": int(frame["session_date"].nunique()) if not frame.empty else 0}
+    summary["forward_policy"] = spec.forward_policy
+    summary["horizon_max"] = len(sessions)
+    summary["model_count_t0"] = len(snapshot["models"])
     (output / "forward_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary

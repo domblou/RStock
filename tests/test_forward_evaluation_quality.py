@@ -172,3 +172,51 @@ def test_checkpoint_reuses_exclusions_without_duplication(tmp_path, monkeypatch)
 
     assert first == second
     assert len(pd.read_csv(output / EXCLUSIONS_FILENAME)) == 1
+
+
+def test_missing_predictor_feature_is_counted_and_analysis_is_persisted(tmp_path, monkeypatch):
+    _repository, _run_id, spec, output = _forward_fixture(
+        tmp_path, monkeypatch, _prices()
+    )
+    monkeypatch.setattr(
+        forward, "prepare_prediction_row",
+        lambda *_args, **_kwargs: pd.DataFrame({"P_intraday_J-1": [np.nan]}),
+    )
+    summary = run_forward_simulation(spec, output)
+    exclusions = pd.read_csv(output / EXCLUSIONS_FILENAME)
+    manifest = json.loads((output / "forward_analysis_manifest.json").read_text())
+    assert summary["evaluated_observations"] == 0
+    assert summary["skipped_observations"] == 1
+    assert exclusions.loc[0, "exclusion_reason"] == "missing_predictor_features"
+    assert manifest["forward_policy"] == "FROZEN"
+    assert manifest["horizon_max"] == 1
+    assert manifest["checkpoints"] == []
+    assert (output / "forward_period_metrics.csv").is_file()
+
+
+def test_recovery_refuses_changed_forward_market_input(tmp_path, monkeypatch):
+    _repository, _run_id, spec, output = _forward_fixture(
+        tmp_path, monkeypatch, _prices()
+    )
+    run_forward_simulation(spec, output)
+    changed = _prices(target_close=102.0)
+    class ChangedMarket:
+        def load(self, *_args, **_kwargs):
+            return SimpleNamespace(prices=changed, symbols=["ADM", "P"]), {}
+    monkeypatch.setattr(forward, "MarketDataService", ChangedMarket)
+    with pytest.raises(ValueError, match="forward_market_input_changed_on_resume"):
+        run_forward_simulation(spec, output)
+
+
+def test_recovery_reconciles_uncommitted_model_rows(tmp_path, monkeypatch):
+    _repository, _run_id, spec, output = _forward_fixture(
+        tmp_path, monkeypatch, _prices()
+    )
+    first = run_forward_simulation(spec, output)
+    manifest_path = output / "forward_checkpoint.json"
+    checkpoint = json.loads(manifest_path.read_text(encoding="utf-8"))
+    checkpoint["completed_model_ids"] = []
+    manifest_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    second = run_forward_simulation(spec, output)
+    assert first == second
+    assert len(pd.read_csv(output / "forward_observations.csv")) == 1

@@ -263,6 +263,7 @@ class ExperimentSpec:
     # Runtime-only worker context; deliberately excluded from persisted snapshots.
     execution_run_id: str | None = None
     forward_simulation_enabled: bool = False
+    forward_policy: str = "FROZEN"
     forward_simulation_mode: str | None = None
     forward_simulation_start_date: str | None = None
     forward_simulation_end_date: str | None = None
@@ -302,6 +303,8 @@ class ExperimentSpec:
     )
 
     def __post_init__(self) -> None:
+        if self.forward_policy != "FROZEN":
+            raise ValueError("Unsupported forward policy")
         if self.forced_period_lock is not None and (
             not isinstance(self.forced_period_lock, dict)
             or self.forced_period_lock.get("schema_version") != 1
@@ -585,6 +588,7 @@ class ExperimentSpec:
             prefilter_rerun=self.prefilter_rerun,
             promotion_enabled=self.promotion_enabled,
             forward_simulation_enabled=self.forward_simulation_enabled,
+            forward_policy=self.forward_policy,
             forward_simulation_mode=self.forward_simulation_mode,
             forward_simulation_start_date=self.forward_simulation_start_date,
             forward_simulation_end_date=self.forward_simulation_end_date,
@@ -714,6 +718,9 @@ class ExperimentSpec:
             forward_simulation_enabled=bool(
                 values.get("forward_simulation_enabled", False)
             ),
+            # Historical Forward runs were always frozen. Preserve that contract
+            # explicitly instead of inheriting a future policy default.
+            forward_policy=str(values.get("forward_policy", "FROZEN")),
             forward_simulation_mode=_optional_string(
                 values.get("forward_simulation_mode")
             ),

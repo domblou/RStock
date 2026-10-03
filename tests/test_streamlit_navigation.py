@@ -650,6 +650,28 @@ def test_model_detail_uses_compact_cards_and_existing_detail_sources():
     assert "RunService" not in detail
 
 
+def test_model_detail_qualification_groups_and_baseline_reason_are_visible():
+    source = APP.read_text(encoding="utf-8")
+    detail = source.split("def _render_model_quality_detail", 1)[1].split(
+        "def _models_page", 1
+    )[0]
+    qualification = source.split("def _render_initial_qualification", 1)[1].split(
+        "def _render_model_quality_detail", 1
+    )[0]
+
+    assert 'st.tabs(["Baseline", "Signaux", "Technique"])' in detail
+    assert "baseline_comparison_rows(snapshot, detail.baseline)" in detail
+    assert "baseline_unavailability_reason(" in detail
+    assert "_render_initial_qualification(model)" in detail
+    assert 'st.markdown("##### Walk-forward")' in qualification
+    assert 'st.markdown("##### Holdout")' in qualification
+    assert '"AUC holdout final WF"' in qualification
+    assert '"AUC signaux holdout"' in qualification
+    assert '"MFE moyenne"' in qualification and '"MAE moyenne"' in qualification
+    assert "evaluated_bullish_signals(detail.observations)" in detail
+    assert 'with technical_tab:' in detail
+
+
 def test_settings_and_run_detail_expose_predictor_prefilter_controls_and_summary():
     source = APP.read_text(encoding="utf-8")
     walk_forward_views = source.split("def _render_walk_forward_summary", 1)[1].split(
