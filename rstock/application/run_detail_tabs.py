@@ -32,6 +32,10 @@ _SCIENTIFIC_RESULT_TYPES = frozenset(
 
 TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
     RunTabDefinition(
+        "resources", "Ressources", frozenset(JobType), "resources",
+        "telemetry/resource_summary.json",
+    ),
+    RunTabDefinition(
         "summary",
         "Résumé",
         frozenset({
@@ -228,6 +232,17 @@ def tabs_for_job(
     """Return applicable tabs in their stable visual order."""
 
     keys = _ORDER.get(job_type, ("results", "configuration", "files", "logs"))
+    resource_types = {
+        JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION,
+        JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH,
+        JobType.XGBOOST_CALIBRATION, JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        JobType.THRESHOLD_CALIBRATION, JobType.HOLDOUT_EVALUATION,
+        JobType.FIXED_CANDIDATE_EVALUATION, JobType.FORWARD_SIMULATION,
+        JobType.PRODUCTION_TRAINING, JobType.MARKET_UPDATE,
+        JobType.PRODUCTION_QUALITY_REBUILD, JobType.OPERATIONAL_RUN,
+    }
+    if job_type in resource_types:
+        keys = (keys[0], "resources", *keys[1:])
     definitions = {item.key: item for item in TAB_REGISTRY}
     return tuple(
         definitions[key]

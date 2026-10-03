@@ -2530,12 +2530,189 @@ def _render_run_technical_tabs(run_id: str, detail: dict[str, object]) -> None:
         st,
         technical_tabs,
         {
+            "resources": lambda: _render_run_resources(run_id),
             "configuration": lambda: _render_run_configuration(detail),
             "files": lambda: _render_run_files(detail),
             "logs": lambda: _render_run_logs(detail),
         },
         key=f"run-technical-{run_id}",
     )
+
+
+def _render_run_resources(run_id: str) -> None:
+    """Display observed resource counters from the versioned run artifact."""
+    root = st.session_state.lab_config.project_root / "runs" / run_id / "telemetry"
+    document = _read_light_json(root / "resource_summary.json")
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        st.info("Télémétrie indisponible pour ce run")
+        return
+    attempts = document.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
+        st.info("Télémétrie indisponible pour ce run")
+        return
+    attempt_number = len(attempts)
+    if len(attempts) > 1:
+        attempt_number = st.selectbox(
+            "Tentative", range(1, len(attempts) + 1), index=len(attempts) - 1,
+            key=f"resources-attempt-{run_id}",
+        )
+    attempt = attempts[attempt_number - 1]
+    if not isinstance(attempt, dict):
+        st.info("Télémétrie indisponible pour ce run")
+        return
+
+    def cpu_text(cores: object) -> str:
+        logical = attempt.get("logical_processors")
+        if not isinstance(cores, (int, float)) or not isinstance(logical, int) or logical < 1:
+            return "—"
+        return f"{cores:.1f} / {logical} cœurs — {100 * cores / logical:.0f} %"
+
+    def memory_text(value: object) -> str:
+        return "—" if not isinstance(value, (int, float)) else f"{value / 2**30:.2f} Gio"
+
+    waits = attempt.get("wait_seconds") or {}
+    wait_total = sum(float(value) for value in waits.values()) if isinstance(waits, dict) else 0.0
+    st.caption(
+        f"Tentative {attempt_number} / {len(attempts)} · {attempt.get('status', '—')} · "
+        "CPU et mémoire mesurés sur le processus du run et ses enfants observés. "
+        "La durée inclut l’attente initiale des verrous. "
+        "Le RSS additionné peut inclure des pages partagées."
+    )
+    summary = st.columns(7)
+    summary[0].metric("Durée", _duration(attempt.get("elapsed_seconds")))
+    summary[1].metric("CPU moyen", cpu_text(attempt.get("cpu_mean_cores")))
+    summary[2].metric("CPU max échantillonné", cpu_text(attempt.get("cpu_max_sampled_cores")))
+    summary[3].metric("Pic RSS simultané", memory_text(attempt.get("rss_peak_sampled_bytes")))
+    summary[4].metric("Processus enfants max", attempt.get("max_child_processes_observed")
+                      if attempt.get("max_child_processes_observed") is not None else "—")
+    summary[5].metric("Workers CPU actifs max",
+                      attempt.get("max_cpu_active_children_observed")
+                      if attempt.get("max_cpu_active_children_observed") is not None else "—")
+    summary[6].metric("Attente verrous", f"{wait_total:.1f} s")
+    configuration = attempt.get("configuration") or {}
+    if isinstance(configuration, dict):
+        st.caption(
+            "Configuré : " + " · ".join(
+                f"{name}={configuration[name]}" for name in (
+                    "combination_workers", "market_cache_workers", "xgb_nthread",
+                    "walk_forward_batch_size", "walk_forward_max_combinations_per_batch",
+                ) if name in configuration
+            )
+        )
+    st.caption(f"Couverture CPU mesurée : {attempt.get('cpu_covered_seconds', 0):.1f} s. "
+               f"Enfants sortis entre relevés : {attempt.get('exited_children_between_samples', 0)}. "
+               "Un tiret signifie que la mesure n’est pas disponible.")
+    checkpoint = attempt.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        st.caption(
+            f"Checkpoints : {checkpoint.get('attempt_count', '—')} essai(s), "
+            f"{checkpoint.get('resume_count', '—')} reprise(s)."
+        )
+    if attempt.get("error"):
+        st.caption(f"Erreur : {attempt['error']}")
+
+    execution_seconds = max(0.0, float(attempt.get("elapsed_seconds") or 0) - wait_total)
+    phase_rows = []
+    for phase in attempt.get("phase_rows", []):
+        if not isinstance(phase, dict):
+            continue
+        duration = phase.get("duration_seconds")
+        count = phase.get("completed_items")
+        throughput = (
+            f"{count / duration:.2f} {phase.get('item_kind')}/s"
+            if isinstance(count, int) and isinstance(duration, (int, float)) and duration > 0
+            else "—"
+        )
+        phase_rows.append({
+            "Phase": phase.get("name"),
+            "Durée (s)": duration,
+            "% du run": None if duration is None or execution_seconds <= 0 else 100 * duration / execution_seconds,
+            "CPU moyen": cpu_text(phase.get("cpu_mean_cores")),
+            "CPU max": cpu_text(phase.get("cpu_max_sampled_cores")),
+            "Pic RSS": memory_text(phase.get("rss_peak_sampled_bytes")),
+            "Processus enfants": phase.get("max_child_processes_observed"),
+            "Workers CPU actifs": phase.get("max_cpu_active_children_observed"),
+            "Débit": throughput,
+            "Attente (s)": None,
+        })
+    selected_phase = None
+    if phase_rows:
+        phase_table = st.dataframe(
+            pd.DataFrame(phase_rows), hide_index=True, width="stretch",
+            key=f"resources-phases-{run_id}", on_select="rerun",
+            selection_mode="single-row",
+            column_config={
+                "Phase": st.column_config.TextColumn(help="Phase du workflow persistée par le run."),
+                "Durée (s)": st.column_config.NumberColumn(help="Temps monotone réel entre début et fin de la phase."),
+                "% du run": st.column_config.NumberColumn(help="Durée de la phase divisée par la durée d’exécution hors attente initiale."),
+                "CPU moyen": st.column_config.TextColumn(help="Temps CPU mesuré par seconde couverte, en cœurs et en pourcentage des processeurs logiques."),
+                "CPU max": st.column_config.TextColumn(help="Maximum parmi les intervalles CPU échantillonnés; ce n’est pas un pic continu."),
+                "Pic RSS": st.column_config.TextColumn(help="Maximum échantillonné de la somme simultanée des RSS parent et enfants observés."),
+                "Processus enfants": st.column_config.NumberColumn(help="Maximum de processus enfants présents; ce n’est pas un nombre de tâches occupées."),
+                "Workers CPU actifs": st.column_config.NumberColumn(help="Maximum échantillonné d’enfants dont le compteur CPU a progressé. Un worker en attente I/O n’est pas compté."),
+                "Débit": st.column_config.TextColumn(help="Items réellement terminés divisés par la durée de la phase; l’unité est indiquée."),
+                "Attente (s)": st.column_config.NumberColumn(help="Attente mesurée dans cette phase, si disponible; le heavy slot initial figure dans le résumé."),
+            },
+        )
+        selected_rows = getattr(getattr(phase_table, "selection", None), "rows", [])
+        if selected_rows:
+            selected_phase = phase_rows[selected_rows[0]]["Phase"]
+            selected_data = attempt["phase_rows"][selected_rows[0]]
+            st.caption(f"Phase sélectionnée : {selected_phase}")
+            if selected_data.get("details"):
+                with st.expander("Paramètres et compteurs de la phase"):
+                    st.json(selected_data["details"])
+    else:
+        st.caption("Aucune phase terminée mesurée pour cette tentative.")
+
+    samples = []
+    path = root / "samples.jsonl"
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                sample = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # A crash may leave one final, incomplete JSONL line.
+            if sample.get("attempt_id") == attempt.get("attempt_id"):
+                samples.append(sample)
+    if samples:
+        timeline = pd.DataFrame(samples)
+        if len(timeline) > 600:
+            timeline = timeline.iloc[::max(1, len(timeline) // 600)]
+        timeline = timeline.set_index("elapsed_seconds")
+        if timeline["cpu_cores"].notna().any():
+            st.subheader("CPU dans le temps")
+            st.line_chart(timeline[["cpu_cores"]], x_label="Secondes", y_label="Cœurs occupés")
+        if timeline["total_rss_bytes"].notna().any():
+            st.subheader("Mémoire dans le temps")
+            st.line_chart(timeline[["total_rss_bytes"]] / 2**30,
+                          x_label="Secondes", y_label="RSS parent + enfants (Gio)")
+
+    batch_path = root / "batches.jsonl"
+    if batch_path.is_file():
+        batches = []
+        for line in batch_path.read_text(encoding="utf-8").splitlines():
+            try:
+                batch = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if batch.get("attempt_id") == attempt.get("attempt_id"):
+                batches.append(batch)
+        if selected_phase is not None:
+            batches = [batch for batch in batches if batch.get("phase") == selected_phase]
+        if batches:
+            with st.expander(f"Détail des batchs ({len(batches)})"):
+                batch_frame = pd.DataFrame(batches)
+                durations = pd.to_numeric(batch_frame["duration_seconds"], errors="coerce").dropna()
+                if not durations.empty:
+                    st.caption(
+                        f"Durée par batch : médiane {durations.median():.2f} s · "
+                        f"P95 {durations.quantile(0.95):.2f} s"
+                    )
+                st.dataframe(batch_frame[[
+                    "phase", "batch_id", "completed_items", "duration_seconds",
+                    "calculation_seconds", "rows",
+                ]], hide_index=True, width="stretch")
 
 
 def _render_standard_results(
@@ -2921,6 +3098,7 @@ def _render_standard_job_tabs(
             "results": lambda: _render_standard_results(
                 run_id, job_type, status, detail
             ),
+            "resources": lambda: _render_run_resources(run_id),
             "configuration": lambda: _render_run_configuration(detail),
             "files": lambda: _render_run_files(detail),
             "logs": lambda: _render_run_logs(detail),
@@ -3212,6 +3390,7 @@ def _render_walk_forward_tabs(
         tabs_for_job(JobType.WALK_FORWARD, has_walk_forward_batches=has_batches),
         {
             "summary": lambda: _render_walk_forward_summary(run_id, status, detail),
+            "resources": lambda: _render_run_resources(run_id),
             "analysis": lambda: _render_walk_forward_analysis(run_id, status, detail),
             "combinations": lambda: _render_walk_forward_combinations(
                 run_id, status, detail
@@ -3386,7 +3565,18 @@ def _render_pipeline_summary(
     protocol = summary.get("walk_forward_protocol") if isinstance(summary, Mapping) else None
     if isinstance(protocol, str) and protocol:
         st.caption(protocol)
-    snapshot = summary.get("forward_model_snapshot") if isinstance(summary, Mapping) else None
+    pipeline_summary = (
+        _read_light_json(
+            service.run_service.repository.run_directory(run_id)
+            / "results" / "pipeline_summary.json"
+        )
+        if service is not None else None
+    )
+    snapshot_source = pipeline_summary if pipeline_summary is not None else summary
+    snapshot = (
+        snapshot_source.get("forward_model_snapshot")
+        if isinstance(snapshot_source, Mapping) else None
+    )
     if isinstance(snapshot, Mapping):
         st.caption(
             "Cutoff historique demandé : "
@@ -4025,6 +4215,7 @@ def _render_end_to_end_tabs(
               ) is not None),
         {
             "summary": lambda: _render_pipeline_summary(run_id, detail, service),
+            "resources": lambda: _render_run_resources(run_id),
             **child_renderers,
             "promotion": lambda: _render_pipeline_promotion(detail),
             "temporal_validation": lambda: _render_temporal_validation(
@@ -4059,6 +4250,7 @@ def _render_forced_candidate_validation_tabs(
                                        "promotion_qualification") is not None),
         {
             "summary": lambda: _render_pipeline_summary(run_id, detail),
+            "resources": lambda: _render_run_resources(run_id),
             **child_renderers,
             "technical": lambda: _render_pipeline_technical(run_id, detail),
         },

@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -19,7 +20,7 @@ from rstock.features import (
 )
 from rstock.modeling import fit_booster, predict_probabilities, selected_xgboost_parameters
 from rstock.persistence import load_booster
-from rstock.progress import CancellationCheck, check_cancellation
+from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from rstock.traceability import prepared_dataset_hash
 
 from .auto_promotion import _promotion_guidance
@@ -442,7 +443,9 @@ def build_forward_model_snapshot(
 
 
 def run_forward_simulation(
-    spec: ExperimentSpec, output: Path, *, cancellation_check: CancellationCheck | None = None
+    spec: ExperimentSpec, output: Path, *,
+    cancellation_check: CancellationCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Evaluate only persisted boosters; this function never fits a model."""
 
@@ -520,9 +523,11 @@ def run_forward_simulation(
     # Only the persisted manifest can authorize reuse of those rows.
     rows = [row for row in rows if str(row["source_model_id"]) in completed_models]
     exclusions = [row for row in exclusions if str(row["source_model_id"]) in completed_models]
-    for model in snapshot["models"]:
+    for model_index, model in enumerate(snapshot["models"], start=1):
         if str(model["source_model_id"]) in completed_models:
             continue
+        model_started = perf_counter()
+        row_start = len(rows)
         names = list(model["feature_names"])
         directory = root / "results" / SNAPSHOT_DIRECTORY / str(model["source_model_id"])
         up, down = load_booster(directory / "up.ubj"), load_booster(directory / "down.ubj")
@@ -578,6 +583,17 @@ def run_forward_simulation(
             "market_input_sha256": input_digest,
             "completed_model_ids": sorted(completed_models),
         }, checkpoint_manifest_path)
+        report_progress(
+            progress_callback, "forward_simulation",
+            substage=f"modèle {model_index}/{len(snapshot['models'])}",
+            completed_units=model_index, total_units=len(snapshot["models"]),
+            details={
+                "batch_id": str(model["source_model_id"]),
+                "models": 1, "rows": len(rows) - row_start,
+                "elapsed_seconds": perf_counter() - model_started,
+                "checkpoint_written": True,
+            },
+        )
     frame = pd.DataFrame(rows, columns=OBSERVATION_COLUMNS)
     exclusion_frame = pd.DataFrame(exclusions, columns=EXCLUSION_COLUMNS)
     output.mkdir(parents=True, exist_ok=True)

@@ -1137,6 +1137,7 @@ def run_controlled_threshold_calibration(
     available_threshold_pairs = (
         len(selected_by_set) * 2 - len(missing_thresholds)
     )
+    report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     if evaluate_final_holdout and available_threshold_pairs == 0:
         holdout_skipped_reason = "no_eligible_frozen_threshold"
         report_progress(
@@ -1250,7 +1251,6 @@ def run_controlled_threshold_calibration(
         "threshold_diagnostics": diagnostics,
         "threshold_diagnostics_by_set": diagnostics_by_set,
     }
-    report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     return ControlledThresholdCalibrationResult(
         development_predictions=development_predictions,
         calibration=calibration,

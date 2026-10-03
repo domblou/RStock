@@ -24,6 +24,7 @@ from .orchestration_runtime import child_executor_context
 from .processes import process_alive
 from .repository import RunRepository
 from .runner import LocalProcessBackend, ProgressReporter, RunService
+from .resource_telemetry import ResourceRecorder
 from .workflows import WorkflowRegistry
 
 
@@ -52,7 +53,7 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
     ],
     JobType.THRESHOLD_PARAMETER_CALIBRATION: [
         ("data_preparation", 12), ("combination_generation", 6),
-        ("walk_forward", 57), ("metrics", 20),
+        ("walk_forward", 47), ("threshold_grid", 10), ("metrics", 20),
         ("result_writing", 3), ("publishing", 2),
     ],
     JobType.THRESHOLD_CALIBRATION: [
@@ -657,6 +658,7 @@ def execute_run(
     lease = SlotLease(repository, run_id, max_concurrent_jobs)
     run_lease = RunLease(repository, run_id)
     checkpoint: CheckpointManager | None = None
+    resources: ResourceRecorder | None = None
     log_handler = logging.FileHandler(
         repository.run_directory(run_id) / "run.log", encoding="utf-8"
     )
@@ -665,13 +667,40 @@ def execute_run(
     root_logger.addHandler(log_handler)
     root_logger.setLevel(logging.INFO)
     try:
+        run_lock_started = time.monotonic()
+        run_lock_started_at = datetime.now(timezone.utc).isoformat()
         run_lease.acquire()
+        spec = replace(repository.load_spec(run_id), execution_run_id=run_id)
+        try:
+            resources = ResourceRecorder(
+                repository.run_directory(run_id), run_id,
+                {
+                    key: getattr(spec.config, key)
+                    for key in (
+                        "market_cache_workers", "combination_workers", "xgb_nthread",
+                        "predictor_prefilter_batch_size", "walk_forward_batch_size",
+                        "final_holdout_batch_size", "walk_forward_max_combinations_per_batch",
+                    )
+                },
+                started_monotonic=run_lock_started,
+                started_at=run_lock_started_at,
+            )
+            resources.wait_completed("run_lock", time.monotonic() - run_lock_started)
+        except (OSError, ValueError) as error:
+            LOGGER.warning("Resource telemetry unavailable run_id=%s: %s", run_id, error)
+            resources = None
+        slot_started = time.monotonic()
         lease.acquire()
+        if resources is not None:
+            try:
+                resources.wait_completed("heavy_slot", time.monotonic() - slot_started)
+            except (OSError, ValueError) as error:
+                LOGGER.warning("Resource wait telemetry unavailable run_id=%s: %s", run_id, error)
         check_cancellation(lambda: _cancellation_requested(repository, run_id))
         repository.transition(run_id, JobStatus.RUNNING, pid=os.getpid())
         repository.append_log(run_id, "Worker started")
         reporter = ProgressReporter(repository, run_id)
-        spec = replace(repository.load_spec(run_id), execution_run_id=run_id)
+        reporter.resources = resources
         if spec.job_type in {
             JobType.WALK_FORWARD,
             JobType.WALK_FORWARD_BATCH,
@@ -771,7 +800,15 @@ def execute_run(
                     registry=active_registry,
                 )
             finally:
+                reacquire_started = time.monotonic()
                 lease.acquire()
+                if resources is not None:
+                    try:
+                        resources.wait_completed(
+                            "heavy_slot", time.monotonic() - reacquire_started
+                        )
+                    except (OSError, ValueError) as error:
+                        LOGGER.warning("Resource wait telemetry unavailable run_id=%s: %s", run_id, error)
 
         with child_executor_context(execute_child):
             summary = active_registry.execute(
@@ -853,6 +890,16 @@ def execute_run(
             checkpoint.finish_attempt("failed", str(error))
     finally:
         lease.release()
+        if resources is not None:
+            try:
+                final_status = repository.status(run_id)
+                resources.close(
+                    final_status.get("status", "interrupted"),
+                    checkpoint.manifest if checkpoint is not None else None,
+                    final_status.get("error"),
+                )
+            except (OSError, ValueError) as error:
+                LOGGER.warning("Resource telemetry finalization failed run_id=%s: %s", run_id, error)
         run_lease.release()
         root_logger.removeHandler(log_handler)
         log_handler.close()

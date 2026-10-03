@@ -457,6 +457,7 @@ def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch
     prepared = pd.DataFrame({"placeholder": np.arange(12)}, index=index)
     generated = generate_symbol_sets(["AAA", "BBB"], 1)
     events = []
+    phases = []
     development_predictions = _economically_viable_predictions()
 
     def fake_development(development, *args, **kwargs):
@@ -497,9 +498,15 @@ def test_controlled_runner_freezes_selection_before_optional_holdout(monkeypatch
         step_size=2,
         final_holdout_size=3,
         evaluate_final_holdout=True,
+        progress_callback=lambda event: phases.append(
+            (event.stage, event.details.get("phase_event"))
+        ),
     )
 
     assert events == ["development", "selection_frozen", "holdout"]
+    assert phases.index(("metrics", "completed")) < phases.index(
+        ("final_holdout", "started")
+    )
     assert result.run_configuration["holdout_used_for_selection"] is False
     assert result.run_configuration["holdout_evaluated"] is True
 

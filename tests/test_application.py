@@ -818,6 +818,9 @@ def test_worker_failure_marks_failed_and_does_not_publish_results(tmp_path):
     assert status["error"] == "simulated worker failure"
     assert repository.result_files(run_id) == []
     assert "simulated worker failure" in "\n".join(repository.log_tail(run_id))
+    telemetry = repository.read_json(run_id, "telemetry/resource_summary.json")
+    assert telemetry["schema_version"] == 1
+    assert telemetry["attempts"][-1]["status"] == "failed"
 
 
 def test_worker_cooperative_cancellation_keeps_partial_results_unpublished(tmp_path):
@@ -836,6 +839,7 @@ def test_worker_cooperative_cancellation_keeps_partial_results_unpublished(tmp_p
     assert repository.status(run_id)["status"] == "cancelled"
     assert repository.result_files(run_id) == []
     assert (repository.run_directory(run_id) / "run.log").exists()
+    assert repository.read_json(run_id, "telemetry/resource_summary.json")["attempts"][-1]["status"] == "cancelled"
 
 
 def test_completed_workers_publish_results_in_isolated_run_directories(tmp_path):

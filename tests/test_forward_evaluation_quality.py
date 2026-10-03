@@ -174,6 +174,18 @@ def test_checkpoint_reuses_exclusions_without_duplication(tmp_path, monkeypatch)
     assert len(pd.read_csv(output / EXCLUSIONS_FILENAME)) == 1
 
 
+def test_forward_emits_one_immediate_checkpoint_event_per_model(tmp_path, monkeypatch):
+    _repository, _run_id, spec, output = _forward_fixture(
+        tmp_path, monkeypatch, _prices(), model_count=2
+    )
+    events = []
+    run_forward_simulation(spec, output, progress_callback=events.append)
+    checkpoints = [event for event in events if event.details.get("checkpoint_written")]
+    assert [event.details["batch_id"] for event in checkpoints] == ["model-0", "model-1"]
+    assert [event.completed_units for event in checkpoints] == [1, 2]
+    assert all(event.details["models"] == 1 for event in checkpoints)
+
+
 def test_missing_predictor_feature_is_counted_and_analysis_is_persisted(tmp_path, monkeypatch):
     _repository, _run_id, spec, output = _forward_fixture(
         tmp_path, monkeypatch, _prices()

@@ -1038,6 +1038,8 @@ class ProgressReporter:
         self._phase_history: list[dict[str, Any]] = []
         self._current_phase: str | None = None
         self._phase_started = self.started
+        self._phase_starts: dict[str, float] = {}
+        self.resources: Any = None
 
     def configure_phases(self, phases: list[tuple[str, float]]) -> None:
         """Configure an ordered, weighted plan used only for global progress."""
@@ -1101,6 +1103,15 @@ class ProgressReporter:
             },
         )
 
+    def _resource_event(self, method: str, *args: object) -> None:
+        if self.resources is None:
+            return
+        try:
+            getattr(self.resources, method)(*args)
+        except (OSError, ValueError) as error:
+            LOGGER.warning("Resource telemetry unavailable for %s: %s", self.run_id, error)
+            self.resources = None
+
     def phase_started(self, name: str, *, details: dict[str, object] | None = None) -> None:
         with self._lock:
             if self._current_phase == name:
@@ -1108,8 +1119,10 @@ class ProgressReporter:
             now = utc_now()
             self._current_phase = name
             self._phase_started = time.monotonic()
+            self._phase_starts[name] = self._phase_started
             self._phase_history.append({"name": name, "status": "started", "started_at": now, "finished_at": None, "duration_seconds": None})
             phase_details = {key: value for key, value in (details or {}).items() if key != "phase_event"}
+            self._resource_event("phase_started", name, phase_details)
             suffix = f" details={phase_details}" if phase_details else ""
             self.repository.append_log(self.run_id, f"Phase started: {name}{suffix}")
             self._persist(stage=name, substage="started", completed=None, total=None, stage_percent=None, eta=None, details=phase_details)
@@ -1125,8 +1138,10 @@ class ProgressReporter:
                 current = self._phase_history[-1]
             current["status"] = "completed"
             current["finished_at"] = utc_now()
-            current["duration_seconds"] = max(0.0, time.monotonic() - self._phase_started)
+            started = self._phase_starts.pop(name, self._phase_started)
+            current["duration_seconds"] = max(0.0, time.monotonic() - started)
             phase_details = {key: value for key, value in (details or {}).items() if key != "phase_event"}
+            self._resource_event("phase_completed", name, phase_details)
             suffix = f" details={phase_details}" if phase_details else ""
             self.repository.append_log(self.run_id, f"Phase completed: {name} ({current['duration_seconds']:.2f}s){suffix}")
             self._persist(stage=name, substage="completed", completed=None, total=None, stage_percent=100.0, eta=None, details=phase_details)
@@ -1154,6 +1169,7 @@ class ProgressReporter:
             elapsed = max(0.0, time.monotonic() - phase_start)
             completed = event.completed_units
             total = event.total_units
+            self._resource_event("batch_completed", event.stage, dict(event.details), completed)
             percent = None
             eta = None
             if completed is not None and total is not None and total > 0:

@@ -88,3 +88,39 @@ def test_legacy_forward_does_not_recompute_when_analysis_missing(tmp_path, monke
     monkeypatch.setattr(app, "st", fake)
     app._render_forward_temporal_results("old-forward", {})
     assert messages == ["Analyse temporelle détaillée indisponible pour ce run."]
+
+
+def test_end_to_end_summary_offers_forward_from_persisted_pipeline_snapshot(
+    tmp_path, monkeypatch,
+):
+    run_id = "historical-e2e"
+    results = tmp_path / "runs" / run_id / "results"
+    results.mkdir(parents=True)
+    (results / "pipeline_summary.json").write_text(json.dumps({
+        "forward_model_snapshot": {
+            "candidate_count": 1,
+            "resolved_market_session_cutoff": "2026-07-06",
+        },
+    }), encoding="utf-8")
+    buttons = []
+    captions = []
+    fake = SimpleNamespace(
+        session_state=SimpleNamespace(lab_calendar="XNYS"),
+        caption=captions.append,
+        radio=lambda _label, choices, **_kwargs: choices[0],
+        button=lambda label, **_kwargs: buttons.append(label) or False,
+        info=lambda *_args: None,
+    )
+    repository = SimpleNamespace(run_directory=lambda _run_id: tmp_path / "runs" / _run_id)
+    service = SimpleNamespace(run_service=SimpleNamespace(repository=repository))
+    monkeypatch.setattr(app, "st", fake)
+    monkeypatch.setattr(app, "_render_derived_creation", lambda *_args: None)
+
+    app._render_pipeline_summary(run_id, {
+        "summary": {"job_type": "end_to_end", "forward_simulation": None},
+        "configuration": {"requested_historical_cutoff": "2026-07-06"},
+        "pipeline_stages": None,
+    }, service)
+
+    assert "Lancer cette Forward Simulation" in buttons
+    assert any("séance résolue : 2026-07-06" in caption for caption in captions)

@@ -35,6 +35,7 @@ def test_walk_forward_batches_are_hidden_from_history_and_parent_tab_is_conditio
     assert "walk_forward_batches" not in _keys(JobType.WALK_FORWARD)
     assert _keys(JobType.WALK_FORWARD, batched=True) == [
         "summary",
+        "resources",
         "analysis",
         "combinations",
         "validation",
@@ -47,6 +48,7 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
     assert JobType.END_TO_END.value in EXPERIMENT_JOB_TYPES
     assert _keys(JobType.END_TO_END) == [
         "summary",
+        "resources",
         "walk_forward",
         "xgboost",
         "threshold_parameters",
@@ -60,11 +62,16 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
 
 
 def test_split_jobs_have_standalone_history_and_results_tabs():
-    for job_type in (JobType.HOLDOUT_EVALUATION, JobType.PROMOTION_QUALIFICATION):
-        assert job_type.value in EXPERIMENT_JOB_TYPES
-        assert _keys(job_type) == ["results", "configuration", "files", "logs"]
+    assert JobType.HOLDOUT_EVALUATION.value in EXPERIMENT_JOB_TYPES
+    assert _keys(JobType.HOLDOUT_EVALUATION) == [
+        "results", "resources", "configuration", "files", "logs",
+    ]
+    assert JobType.PROMOTION_QUALIFICATION.value in EXPERIMENT_JOB_TYPES
+    assert _keys(JobType.PROMOTION_QUALIFICATION) == [
+        "results", "configuration", "files", "logs",
+    ]
     assert _keys(JobType.FORCED_CANDIDATE_VALIDATION) == [
-        "summary", "walk_forward", "fixed_candidate_evaluation",
+        "summary", "resources", "walk_forward", "fixed_candidate_evaluation",
         "promotion_qualification", "technical",
     ]
 
@@ -148,7 +155,7 @@ class _FakeStreamlit:
 
 
 def test_lazy_tabs_executes_only_the_visible_renderer():
-    ui = _FakeStreamlit(active_index=2)
+    ui = _FakeStreamlit(active_index=3)
     called: list[str] = []
     tabs = tabs_for_job(JobType.END_TO_END)
     renderers = {
@@ -182,7 +189,7 @@ def test_summary_open_does_not_run_scientific_renderers():
 
 
 def test_individual_scientific_tabs_keep_their_existing_layout():
-    expected = ["results", "configuration", "files", "logs"]
+    expected = ["results", "resources", "configuration", "files", "logs"]
     assert _keys(JobType.XGBOOST_CALIBRATION) == expected
     assert _keys(JobType.THRESHOLD_PARAMETER_CALIBRATION) == expected
     assert _keys(JobType.THRESHOLD_CALIBRATION) == expected
@@ -226,6 +233,7 @@ def test_pipeline_children_and_individual_runs_use_the_same_tab_registry():
     xgboost = tabs_for_job(JobType.XGBOOST_CALIBRATION)
     assert [item.renderer_key for item in xgboost] == [
         "results",
+        "resources",
         "configuration",
         "files",
         "logs",

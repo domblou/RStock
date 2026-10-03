@@ -1133,6 +1133,7 @@ def _holdout_evaluation(
         "Set", "Observation", "Direction", "Threshold", "SignalCount",
         "ROCAUC", "Precision", "DirectionalReturnMean", "OppositeMoveFrequency",
     ])
+    _phase(progress_callback, "final_holdout", "started")
     if spec.evaluate_final_holdout and eligible:
         directional = _resolve_threshold_xgboost_parameters(spec)
         raw = generate_holdout_probabilities(
@@ -1145,6 +1146,10 @@ def _holdout_evaluation(
         metrics = evaluate_applied_thresholds(predictions, spec.config)
     missing = list(calibration_config["missing_frozen_thresholds"])
     counts = holdout_combination_counts(selected, predictions)
+    _phase(progress_callback, "final_holdout", "completed",
+           models=len(sampled) if spec.evaluate_final_holdout and eligible else 0,
+           rows=len(predictions))
+    _phase(progress_callback, "result_writing", "started")
     output.mkdir(parents=True, exist_ok=True)
     metrics.to_csv(output / "holdout_metrics.csv", index=False)
     if not predictions.empty:
@@ -1181,6 +1186,7 @@ def _holdout_evaluation(
     (output / "run_configuration.json").write_text(
         json.dumps(configuration, indent=2) + "\n", encoding="utf-8"
     )
+    _phase(progress_callback, "result_writing", "completed")
     return {
         "job_type": spec.job_type.value,
         "holdout_metrics": _json_value(metrics.to_dict("records")),
@@ -2825,7 +2831,10 @@ def _forward_simulation(
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
     _phase(progress_callback, "forward_simulation", "started")
-    result = run_forward_simulation(spec, output, cancellation_check=cancellation_check)
+    result = run_forward_simulation(
+        spec, output, cancellation_check=cancellation_check,
+        progress_callback=progress_callback,
+    )
     _phase(progress_callback, "forward_simulation", "completed", **result)
     return result
 

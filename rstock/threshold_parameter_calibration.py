@@ -401,6 +401,7 @@ def run_threshold_parameter_calibration(
     )
     probability_elapsed_seconds = perf_counter() - probability_started_at
     grid_started_at = perf_counter()
+    report_progress(progress_callback, "threshold_grid", substage="started", details={"phase_event": "started"})
     invariants_by_grid: dict[str, Mapping[str, object]] = {}
     grid_reused = 0
     grid_timings: dict[str, float] = {}
@@ -428,6 +429,7 @@ def run_threshold_parameter_calibration(
                 artifact, {"prediction_key": prediction_key, "invariant": invariant}
             )
     grid_elapsed_seconds = perf_counter() - grid_started_at
+    report_progress(progress_callback, "threshold_grid", substage="completed", details={"phase_event": "completed", "grids": len(invariants_by_grid)})
     rows: list[dict[str, object]] = []
     window_frames: list[pd.DataFrame] = []
     reused_candidates = 0
