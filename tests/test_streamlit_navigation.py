@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -195,17 +196,79 @@ def test_settings_sections_follow_the_experiment_pipeline_order():
         "Préparation des données et génération",
         "Pré-filtrage des prédicteurs",
         "Walk-forward",
-        "Qualification et exécution",
+        "Qualification",
         "Classement des modèles",
         "XGBoost",
         "Calibration des seuils",
+        "Échantillonnage et reproductibilité",
         "Validation temporelle",
         "Promotion",
+        "Exécution",
     )
 
     positions = [settings.index(label) for label in labels]
     assert positions == sorted(positions)
     assert "La promotion automatique se choisit au lancement" in settings
+
+
+def test_settings_separate_scientific_qualification_sampling_and_execution():
+    source = APP.read_text(encoding="utf-8")
+    settings = source.split("def _settings", 1)[1].split("def _render_qualification", 1)[0]
+    qualification = settings.split('st.subheader("Qualification")', 1)[1].split(
+        'st.subheader("Classement des modèles")', 1
+    )[0]
+    sampling = settings.split('st.subheader("Échantillonnage et reproductibilité")', 1)[1].split(
+        'st.subheader("Validation temporelle")', 1
+    )[0]
+    execution = settings.split('st.subheader("Exécution")', 1)[1].split(
+        'if st.button("Enregistrer les paramètres"', 1
+    )[0]
+
+    for label in (
+        "Fenêtres minimales", "ROC-AUC médian minimal", "Part fenêtres > hasard",
+        "Pire ROC-AUC minimal", "Observations positives minimales",
+        "Écart-type ROC-AUC maximal", "ROC-AUC confirmation finale",
+        "Seuil de décision standard", "Évaluer le holdout final",
+    ):
+        assert label in qualification
+    for label in ("Combinaisons par cible (calibrations)", "Seed"):
+        assert label in sampling
+        assert label not in execution
+    for label in (
+        "Workers marché", "Workers combinaisons", "Threads XGBoost",
+        "Jobs lourds concurrents",
+    ):
+        assert label in execution
+        assert label not in qualification
+
+
+def test_robust_signal_minimum_help_explains_eligibility_and_window_coverage():
+    tree = ast.parse(APP.read_text(encoding="utf-8"))
+    controls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "number_input"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "Signaux totaux minimum pour un seuil robuste"
+    ]
+    assert len(controls) == 1
+    help_text = ast.literal_eval(next(
+        keyword.value for keyword in controls[0].keywords if keyword.arg == "help"
+    ))
+    assert help_text == (
+        "Nombre minimal de signaux générés au total, toutes fenêtres de calibration "
+        "confondues, pour qu’un seuil admissible soit considéré comme suffisamment robuste. "
+        "Ce critère ne remplace pas la règle « Signaux minimaux par fenêtre × Fraction "
+        "minimale de fenêtres » : un seuil doit d’abord respecter la couverture temporelle "
+        "requise. `RobustSample` sert ensuite à privilégier les seuils disposant d’un "
+        "échantillon global suffisant parmi ceux déjà admissibles. "
+        "Exemple : avec 7 fenêtres, 5 signaux minimum par fenêtre et 60 % de fenêtres "
+        "requises, il faut au moins 5 fenêtres conformes, donc au moins 25 signaux "
+        "répartis dans le temps. Un seuil avec 25+ signaux au total mais mal répartis "
+        "peut quand même être rejeté."
+    )
 
 
 def test_existing_promotion_settings_section_exposes_the_five_frozen_policy_fields():
@@ -737,7 +800,7 @@ def test_surveillance_is_a_short_two_session_operational_view():
 
     assert 'st.tabs(["Prédictions", "Signaux", "Prédictions évaluées"])' not in source
     assert "_render_predictions_tab" not in source
-    assert "surveillance_target_session(" in surveillance
+    assert "surveillance_display_session(" in surveillance
     assert "next_session_signals_view(" in surveillance
     assert "latest_session_results_view(" in surveillance
     assert "_render_daily_update_card(" in surveillance
@@ -891,7 +954,7 @@ def test_surveillance_uses_six_operational_kpis_and_a_header_status():
         "Signaux haussiers",
         "Rendement moyen signaux",
         "Dernière séance",
-        "P&L veille",
+        "P&L dernière séance",
         "Modèles actifs",
     ):
         assert label in kpis
@@ -912,10 +975,11 @@ def test_surveillance_session_tables_have_expected_columns_and_no_result_kpis():
 
     for label in (
         "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
-        "Rendement", "Trades gagnants", "Dernier signal",
+        "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
     ):
         assert label in source
-    assert '"P&L cumulé"' in latest
+    assert '"P&L séance (10 000 $)"' in latest
+    assert "Résultats des signaux de la dernière séance évaluée." in latest
     assert "_styled_surveillance_table(" in upcoming
     assert "_styled_surveillance_table(" in latest
     assert "st.metric(" not in latest
@@ -936,7 +1000,8 @@ def test_surveillance_session_tables_share_column_tooltips():
 
     for label in (
         "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
-        "Rendement", "Trades gagnants", "Dernier signal", "P&L cumulé",
+        "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
+        "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)",
     ):
         assert f'"{label}":' in tooltips
     assert 'descriptions=_SURVEILLANCE_COLUMN_HELP' in tooltips

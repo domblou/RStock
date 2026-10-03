@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from typing import Iterable, Mapping
 
 import pandas as pd
+import exchange_calendars as xcals
 
 from rstock.calendars import US_EQUITIES_CALENDAR, next_market_session
 
@@ -50,11 +51,12 @@ SIGNAL_MAIN_COLUMNS = (
 )
 NEXT_SESSION_SIGNAL_COLUMNS = (
     "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
-    "Rendement", "Trades gagnants", "Dernier signal",
+    "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
 )
 LAST_SESSION_RESULT_COLUMNS = (
-    "Date", "Cible", "Prédicteurs", "P(Up)", "Rendement",
-    "P&L cumulé", "Dernier signal",
+    "Date", "Cible", "Prédicteurs", "P(Up)",
+    "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)",
+    "Dernier signal",
 )
 EVALUATED_PREDICTIONS_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "Statut initial", "P(Up)", "P(Down)", "Open", "Close",
@@ -207,6 +209,48 @@ def surveillance_target_session(
     return next_market_session(today, calendar_name)
 
 
+def surveillance_display_session(
+    view: SignalResultsView,
+    predictions: pd.DataFrame,
+    evaluated: EvaluatedPredictionsView,
+    now: pd.Timestamp,
+    calendar_name: str = US_EQUITIES_CALENDAR,
+) -> pd.Timestamp:
+    """Keep today's batch until the exchange closes and every signal is evaluated."""
+
+    instant = pd.Timestamp(now)
+    if instant.tzinfo is None:
+        instant = instant.tz_localize("America/Toronto")
+    else:
+        instant = instant.tz_convert("America/Toronto")
+    today = instant.tz_localize(None).normalize()
+    selected = surveillance_target_session(view, predictions, today, calendar_name)
+    if selected != today:
+        return selected
+
+    calendar = xcals.get_calendar(calendar_name)
+    if not calendar.is_session(today):
+        return selected
+    if instant.tz_convert("UTC") < calendar.session_close(today):
+        return selected
+
+    signals = view.signals.technical
+    realized = evaluated.technical
+    if "prediction_id" not in signals or "prediction_id" not in realized:
+        return selected
+    dates = pd.to_datetime(signals["prediction_date"], errors="coerce", utc=True)
+    current_ids = set(signals.loc[
+        dates.dt.tz_convert(None).dt.normalize().eq(today), "prediction_id"
+    ].dropna().astype(str))
+    realized_ids = set(realized["prediction_id"].dropna().astype(str))
+    if not current_ids or not current_ids.issubset(realized_ids):
+        return selected
+
+    future = dates.dt.tz_convert(None).dt.normalize()
+    future = future[future.gt(today)].dropna()
+    return pd.Timestamp(future.min()) if not future.empty else next_market_session(today, calendar_name)
+
+
 def surveillance_session_label(value: object) -> str:
     """Format one market session with its French weekday name."""
 
@@ -282,7 +326,7 @@ def next_session_signals_view(
         "Catégorie": _column(technical, "category").map(
             lambda value: SIGNAL_LABELS.get(str(value), str(value))
         ),
-        "Rendement": technical["quality_mean_return"].map(_display_percentage),
+        "Rendement moyen historique (63 séances)": technical["quality_mean_return"].map(_display_percentage),
         "Trades gagnants": technical["quality_win_rate"].map(_display_percentage),
         "Dernier signal": technical["quality_last_signal"].map(_short_date),
     })
@@ -326,8 +370,8 @@ def latest_session_results_view(
         "Cible": _column(technical, "target"),
         "Prédicteurs": _column(technical, "predictors").map(_predictors),
         "P(Up)": _column(technical, "up_probability").map(_display_percentage),
-        "Rendement": returns.map(_display_percentage),
-        "P&L cumulé": technical["display_pnl"].map(_display_currency),
+        "Rendement de la séance (Open→Close)": returns.map(_display_percentage),
+        "P&L séance (10 000 $)": technical["display_pnl"].map(_display_currency),
         "Dernier signal": technical["quality_last_signal"].map(_short_date),
     })
     return OperationalTableView(table.loc[:, LAST_SESSION_RESULT_COLUMNS], technical)

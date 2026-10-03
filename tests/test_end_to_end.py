@@ -142,6 +142,7 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
     from datetime import date, timedelta
 
     from rstock.application import workflows
+    from rstock.checkpoints import CheckpointManager
     from rstock.data import prefix_symbol_columns
     from rstock.market_cache import MarketDataResult
     from rstock.traceability import prepared_dataset_hash
@@ -178,7 +179,7 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
     monkeypatch.setattr(workflows, "MarketDataService", FakeMarketDataService)
     repository = RunRepository(tmp_path / "runs")
     parent = replace(
-        _spec(tmp_path, historical_data_cutoff=explicit_cutoff),
+        _spec(tmp_path, pipeline_version=3, historical_data_cutoff=explicit_cutoff),
         config=replace(DEFAULT_CONFIG, project_root=tmp_path, model_history_days=10),
     )
     root_id = repository.create(parent)
@@ -201,22 +202,38 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
     prepared_source, *_ = workflows._prepared_inputs(source, None, None)
     digest = prepared_dataset_hash(prepared_source)
     source_id = manifest["stages"][0]["child_run_id"]
-    repository.run_directory(source_id).mkdir()
+    repository.create(source, run_id=source_id)
+    CheckpointManager(
+        repository.run_directory(source_id), run_id=source_id,
+        job_type=JobType.WALK_FORWARD.value,
+        configuration_fingerprint=source.fingerprint, batch_sizes={},
+    ).commit_snapshot(prepared_source, {
+        "predictor_symbols": ["AAA", "BBB"],
+        "target_symbols": ["AAA", "BBB"],
+        "calendars": {"AAA": "XNYS", "BBB": "XNYS"},
+        "effective_end_date": prepared_source.attrs.get("effective_end_date"),
+    })
     repository.write_json(source_id, "summary.json", {
         "traceability": {
             "prepared_market_last_date": prepared_source.index.max().isoformat(),
             "prepared_dataset_sha256": digest,
         }
     })
+    source_status = repository.status(source_id)
+    source_status["status"] = "completed"
+    repository.write_json(source_id, "status.json", source_status)
+    prices.loc[prices.index.max(), "Close"] = -999.0
 
     descendant = end_to_end.build_stage_spec(
         repository, root_id, parent, "xgboost_calibration", manifest
     )
     assert descendant.historical_data_cutoff == expected_as_of
+    assert descendant.prepared_snapshot_required
+    assert descendant.source_prepared_dataset_sha256 == digest
     prepared_descendant, *_ = workflows._prepared_inputs(descendant, None, None)
     assert prepared_descendant.index.equals(prepared_source.index)
     assert prepared_dataset_hash(prepared_descendant) == digest
-    assert calls == [date.fromisoformat(expected_as_of)] * 2
+    assert calls == [date.fromisoformat(expected_as_of)]
 
     xgboost_id = manifest["stages"][1]["child_run_id"]
     (repository.run_directory(xgboost_id) / "results").mkdir(parents=True)
@@ -228,6 +245,9 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
         repository, root_id, parent, "threshold_parameter_calibration", manifest
     )
     assert threshold_parameters.historical_data_cutoff == expected_as_of
+    assert threshold_parameters.prepared_snapshot_required
+    assert threshold_parameters.source_prepared_dataset_sha256 == digest
+    assert prepared_dataset_hash(workflows._prepared_inputs(threshold_parameters, None, None)[0]) == digest
 
     threshold_parameters_id = manifest["stages"][2]["child_run_id"]
     (repository.run_directory(threshold_parameters_id) / "results").mkdir(parents=True)
@@ -240,6 +260,114 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
         repository, root_id, parent, "threshold_calibration", manifest
     )
     assert threshold.historical_data_cutoff == expected_as_of
+    assert threshold.prepared_snapshot_required
+    assert threshold.source_prepared_dataset_sha256 == digest
+    assert prepared_dataset_hash(workflows._prepared_inputs(threshold, None, None)[0]) == digest
+
+    threshold_id = manifest["stages"][3]["child_run_id"]
+    (repository.run_directory(threshold_id) / "results").mkdir(parents=True)
+    repository.write_json(threshold_id, "results/selected_thresholds_by_set.json", {})
+    holdout = end_to_end.build_stage_spec(
+        repository, root_id, parent, "holdout_evaluation", manifest
+    )
+    assert holdout.prepared_snapshot_required
+    assert holdout.source_prepared_dataset_sha256 == digest
+    assert prepared_dataset_hash(workflows._prepared_inputs(holdout, None, None)[0]) == digest
+    assert calls == [date.fromisoformat(expected_as_of)]
+
+
+def test_walk_forward_refuses_incomplete_latest_session_before_snapshot(tmp_path, monkeypatch):
+    from rstock.application import workflows
+    from rstock.data import prefix_symbol_columns
+    from rstock.market_cache import MarketDataResult
+
+    dates = pd.to_datetime(["2026-10-01", "2026-10-02"])
+    prices = pd.DataFrame({
+        "Open": [100.0, 101.0], "High": [101.0, 102.0],
+        "Low": [99.0, 100.0], "Close": [100.5, 101.5],
+    }, index=dates)
+    incomplete = prices.copy()
+    incomplete.loc[dates[-1], "Close"] = float("nan")
+
+    class FakeMarketDataService:
+        def load(self, spec, **kwargs):
+            return MarketDataResult(
+                prices=pd.concat([
+                    prefix_symbol_columns(prices, "AAA"),
+                    prefix_symbol_columns(incomplete, "BBB"),
+                ], axis=1),
+                symbols=["AAA", "BBB"], failed_symbols=[], events=[],
+            ), {"AAA": "XNYS", "BBB": "XNYS"}
+
+    monkeypatch.setattr(workflows, "MarketDataService", FakeMarketDataService)
+    spec = end_to_end._base_child_spec(
+        _spec(tmp_path, historical_data_cutoff="2026-10-02"),
+        root_run_id="root-run", job_type=JobType.WALK_FORWARD,
+    )
+    with pytest.raises(ValueError, match="Dernière séance marché incomplète.*BBB"):
+        workflows._prepared_inputs(spec, None, None)
+
+
+def test_standalone_calibration_still_prepares_market_data(tmp_path, monkeypatch):
+    from rstock.application import workflows
+    from rstock.data import prefix_symbol_columns
+    from rstock.market_cache import MarketDataResult
+
+    calls = []
+    prices = pd.DataFrame({
+        "Open": [100.0, 101.0], "High": [101.0, 102.0],
+        "Low": [99.0, 100.0], "Close": [100.5, 101.5],
+    }, index=pd.to_datetime(["2026-10-01", "2026-10-02"]))
+
+    class FakeMarketDataService:
+        def load(self, spec, **kwargs):
+            calls.append(spec.job_type)
+            return MarketDataResult(
+                prices=pd.concat([
+                    prefix_symbol_columns(prices, symbol)
+                    for symbol in ("AAA", "BBB")
+                ], axis=1),
+                symbols=["AAA", "BBB"], failed_symbols=[], events=[],
+            ), {"AAA": "XNYS", "BBB": "XNYS"}
+
+    monkeypatch.setattr(workflows, "MarketDataService", FakeMarketDataService)
+    spec = ExperimentSpec(
+        job_type=JobType.XGBOOST_CALIBRATION,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path),
+        symbols=("AAA", "BBB"), target_symbols=("AAA", "BBB"), context_symbols=(),
+        combinations_per_target=1, historical_data_cutoff="2026-10-02",
+    )
+    prepared, *_ = workflows._prepared_inputs(spec, None, None)
+    assert calls == [JobType.XGBOOST_CALIBRATION]
+    assert prepared.index.max() == pd.Timestamp("2026-10-02")
+
+
+def test_existing_legacy_child_retains_its_persisted_preparation_contract(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    parent = _spec(tmp_path, pipeline_version=3)
+    root_id = repository.create(parent)
+    manifest = build_pipeline_manifest(repository, root_id, parent)
+    walk_id = manifest["stages"][0]["child_run_id"]
+    repository.run_directory(walk_id).mkdir()
+    repository.write_json(walk_id, "summary.json", {
+        "traceability": {
+            "prepared_market_last_date": "2026-10-02T00:00:00",
+            "prepared_dataset_sha256": "a" * 64,
+        },
+    })
+    new_spec = end_to_end.build_stage_spec(
+        repository, root_id, parent, "xgboost_calibration", manifest
+    )
+    assert new_spec.prepared_snapshot_required
+    old_spec = replace(new_spec, prepared_snapshot_required=False)
+    child_id = manifest["stages"][1]["child_run_id"]
+    repository.create(old_spec, run_id=child_id)
+
+    resumed = end_to_end.build_stage_spec(
+        repository, root_id, parent, "xgboost_calibration", manifest
+    )
+    assert resumed.fingerprint == old_spec.fingerprint
+    assert not resumed.prepared_snapshot_required
 
 
 def _fake_registry(

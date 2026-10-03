@@ -136,6 +136,34 @@ def prepare_dataset(
     return prepared
 
 
+def require_complete_last_session(
+    prepared: pd.DataFrame, symbols: Sequence[str]
+) -> None:
+    """Reject a scientific snapshot with missing final intraday returns."""
+
+    if prepared.empty:
+        raise ValueError("Dernière séance marché absente du dataset préparé")
+    latest = prepared.index.max()
+    incomplete = [
+        symbol for symbol in symbols
+        if (
+            intraday_return_column(symbol) not in prepared
+            or not np.isfinite(
+                pd.to_numeric(
+                    prepared.at[latest, intraday_return_column(symbol)],
+                    errors="coerce",
+                )
+            )
+        )
+    ]
+    if incomplete:
+        raise ValueError(
+            "Dernière séance marché incomplète : "
+            f"{pd.Timestamp(latest).date().isoformat()}; "
+            f"rendements intrajournaliers invalides pour {', '.join(incomplete)}"
+        )
+
+
 def prepare_prediction_row(
     prepared: pd.DataFrame,
     *,

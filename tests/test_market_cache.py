@@ -3,8 +3,9 @@ import logging
 from datetime import date, datetime, timezone
 
 import pandas as pd
+import pytest
 
-from rstock.market_cache import MarketDataService, ParquetMarketDataStore
+from rstock.market_cache import IncompleteMarketDataError, MarketDataService, ParquetMarketDataStore
 
 
 def _universe(*symbols):
@@ -187,13 +188,10 @@ def test_recent_missing_close_is_repaired_by_the_recent_refresh(tmp_path, caplog
     caplog.set_level(logging.INFO, logger="rstock.market_cache")
     partial = _prices(["2024-01-18", "2024-01-19"])
     partial.loc[pd.Timestamp("2024-01-19"), ["Close", "Adjusted"]] = float("nan")
-    provider = FakeProvider({"AAPL": partial})
+    provider = FakeProvider({"AAPL": _prices(["2024-01-18", "2024-01-19"], base=20.0)})
     service, store = _service(tmp_path, provider)
-    universe = _universe("AAPL")
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
-
-    provider.frames["AAPL"] = _prices(["2024-01-18", "2024-01-19"], base=20.0)
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    store.write("AAPL", partial)
+    service.get_market_data(_universe("AAPL"), 30, as_of=date(2024, 1, 19))
 
     cached = store.read("AAPL")
     assert cached.at[pd.Timestamp("2024-01-19"), "Close"] == 21.5
@@ -205,17 +203,13 @@ def test_recent_missing_close_is_repaired_by_the_recent_refresh(tmp_path, caplog
 def test_old_missing_close_is_explicitly_repaired_outside_recent_window(tmp_path):
     partial = _prices(["2024-01-01", "2024-01-19"])
     partial.loc[pd.Timestamp("2024-01-01"), ["Close", "Adjusted"]] = float("nan")
-    provider = FakeProvider({"AAPL": partial})
+    provider = FakeProvider({"AAPL": _prices(["2024-01-01", "2024-01-19"], base=20.0)})
     service, store = _service(tmp_path, provider)
-    universe = _universe("AAPL")
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
-    provider.calls.clear()
-
-    provider.frames["AAPL"] = _prices(["2024-01-01", "2024-01-19"], base=20.0)
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    store.write("AAPL", partial)
+    service.get_market_data(_universe("AAPL"), 30, as_of=date(2024, 1, 19))
 
     assert provider.calls == [
-        ("AAPL", date(2024, 1, 1), date(2024, 1, 2)),
+        ("AAPL", date(2023, 12, 20), date(2024, 1, 2)),
         ("AAPL", date(2024, 1, 6), date(2024, 1, 20)),
     ]
     assert store.read("AAPL").at[pd.Timestamp("2024-01-01"), "Close"] == 20.5
@@ -241,17 +235,13 @@ def test_valid_cached_close_survives_incomplete_provider_refresh(tmp_path):
 def test_adjacent_invalid_dates_share_one_historical_repair_request(tmp_path):
     partial = _prices(["2024-01-01", "2024-01-02", "2024-01-19"])
     partial.loc[pd.to_datetime(["2024-01-01", "2024-01-02"]), "Close"] = float("nan")
-    provider = FakeProvider({"AAPL": partial})
+    provider = FakeProvider({"AAPL": _prices(["2024-01-01", "2024-01-02", "2024-01-19"], base=20.0)})
     service, store = _service(tmp_path, provider)
-    universe = _universe("AAPL")
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
-    provider.calls.clear()
-
-    provider.frames["AAPL"] = _prices(["2024-01-01", "2024-01-02", "2024-01-19"], base=20.0)
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    store.write("AAPL", partial)
+    service.get_market_data(_universe("AAPL"), 30, as_of=date(2024, 1, 19))
 
     assert provider.calls == [
-        ("AAPL", date(2024, 1, 1), date(2024, 1, 3)),
+        ("AAPL", date(2023, 12, 20), date(2024, 1, 3)),
         ("AAPL", date(2024, 1, 6), date(2024, 1, 20)),
     ]
     cached = store.read("AAPL")
@@ -259,27 +249,67 @@ def test_adjacent_invalid_dates_share_one_historical_repair_request(tmp_path):
     assert cached.loc[pd.to_datetime(["2024-01-01", "2024-01-02"]), "Close"].notna().all()
 
 
-def test_unresolved_missing_close_is_retained_and_reported(tmp_path, caplog):
+def test_unresolved_missing_close_is_rejected_and_original_cache_retained(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="rstock.market_cache")
     partial = _prices(["2024-01-01", "2024-01-19"])
     partial.loc[pd.Timestamp("2024-01-01"), ["Close", "Adjusted"]] = float("nan")
     provider = FakeProvider({"AAPL": partial})
     service, store = _service(tmp_path, provider)
-    universe = _universe("AAPL")
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    store.write("AAPL", partial)
     before = store.read("AAPL").loc[pd.Timestamp("2024-01-01")].copy()
-    provider.calls.clear()
 
     still_partial = _prices(["2024-01-01", "2024-01-19"], base=20.0)
     still_partial.loc[pd.Timestamp("2024-01-01"), ["Close", "Adjusted"]] = float("nan")
     provider.frames["AAPL"] = still_partial
 
-    service.get_market_data(universe, 30, as_of=date(2024, 1, 19))
+    with pytest.raises(IncompleteMarketDataError, match="2024-01-01"):
+        service.get_market_data(_universe("AAPL"), 30, as_of=date(2024, 1, 19))
 
     pd.testing.assert_series_equal(
         store.read("AAPL").loc[pd.Timestamp("2024-01-01")], before
     )
     assert "invalid_rows_detected=1" in caplog.text
+    assert "invalid_rows_still_missing=1" in caplog.text
+
+
+def test_new_missing_close_is_repaired_once_before_first_cache_write(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="rstock.market_cache")
+    partial = _prices(["2026-10-01", "2026-10-02"])
+    partial.loc[pd.Timestamp("2026-10-02"), "Close"] = float("nan")
+    complete = _prices(["2026-10-01", "2026-10-02"])
+
+    class RepairingProvider(FakeProvider):
+        def fetch(self, provider_symbol, start, end_exclusive):
+            self.frames[provider_symbol] = partial if not self.calls else complete
+            return super().fetch(provider_symbol, start, end_exclusive)
+
+    provider = RepairingProvider({"AAPL": partial})
+    service, store = _service(tmp_path, provider)
+    result = service.get_market_data(_universe("AAPL"), 10, as_of=date(2026, 10, 2))
+
+    assert len(provider.calls) == 2
+    assert result.prices.loc[pd.Timestamp("2026-10-02"), "AAPL.Close"] == 11.5
+    assert store.read("AAPL").loc[pd.Timestamp("2026-10-02"), "Close"] == 11.5
+    assert "invalid_rows_detected=0" in caplog.text
+    assert "invalid_rows_introduced=1" in caplog.text
+    assert "invalid_rows_repaired_retry=1" in caplog.text
+    assert "invalid_rows_still_missing=0" in caplog.text
+
+
+def test_new_missing_close_after_one_retry_refuses_cache_and_snapshot(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="rstock.market_cache")
+    partial = _prices(["2026-10-01", "2026-10-02"])
+    partial.loc[pd.Timestamp("2026-10-02"), "Close"] = float("nan")
+    provider = FakeProvider({"AAPL": partial})
+    service, store = _service(tmp_path, provider)
+
+    with pytest.raises(IncompleteMarketDataError, match="2026-10-02"):
+        service.get_market_data(_universe("AAPL"), 10, as_of=date(2026, 10, 2))
+
+    assert len(provider.calls) == 2
+    assert store.read("AAPL") is None
+    assert not store.metadata_path.exists()
+    assert "invalid_rows_introduced=1" in caplog.text
     assert "invalid_rows_still_missing=1" in caplog.text
 
 

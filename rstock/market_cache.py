@@ -45,6 +45,10 @@ class CacheEvent:
     message: str
 
 
+class IncompleteMarketDataError(ValueError):
+    """A refreshed cache still contains Close values that cannot be used."""
+
+
 @dataclass(slots=True)
 class MarketDataResult:
     prices: pd.DataFrame
@@ -111,7 +115,7 @@ def _invalid_close_dates(prices: pd.DataFrame) -> list[date]:
     """Return persisted sessions whose Close is absent or non-numeric."""
 
     if "Close" not in prices:
-        return []
+        return [timestamp.date() for timestamp in prices.index]
     close = pd.to_numeric(prices["Close"], errors="coerce")
     return [timestamp.date() for timestamp in prices.index[close.isna()]]
 
@@ -323,6 +327,7 @@ class MarketDataService:
                 ranges.append((invalid_date, invalid_date + timedelta(days=1)))
         ranges = _coalesce_date_ranges(ranges)
 
+        invalid_before = set() if existing is None else set(_invalid_close_dates(existing))
         try:
             additions = [
                 self.provider.fetch(provider_symbol, start, end)
@@ -331,6 +336,11 @@ class MarketDataService:
             ]
         except Exception as error:
             if existing is not None and not existing.empty:
+                if invalid_before:
+                    raise IncompleteMarketDataError(
+                        f"{symbol}: Close invalides non réparés après échec Yahoo : "
+                        f"{', '.join(sorted(item.isoformat() for item in invalid_before))}"
+                    ) from error
                 selected = existing.loc[
                     (existing.index.date >= requested_start)
                     & (existing.index.date <= available_as_of)
@@ -346,9 +356,6 @@ class MarketDataService:
             return _SymbolResult(symbol, None, event, None, True)
 
         non_empty = [_normalise_prices(frame) for frame in additions if not frame.empty]
-        invalid_rows_detected = (
-            0 if existing is None else len(_invalid_close_dates(existing))
-        )
         recent_start = available_as_of - timedelta(days=RECENT_REPAIR_WINDOW_DAYS - 1)
         recent_rows_refreshed = sum(
             int((frame.index.date >= recent_start).sum()) for frame in non_empty
@@ -362,23 +369,56 @@ class MarketDataService:
             ]
             return _SymbolResult(symbol, selected, event, previous_metadata, True)
 
-        invalid_rows_repaired = 0
-        invalid_rows_still_missing = 0
-        if invalid_rows_detected:
-            before = set(_invalid_close_dates(existing)) if existing is not None else set()
-            after = set(_invalid_close_dates(merged))
-            invalid_rows_repaired = len(before - after)
-            invalid_rows_still_missing = len(before & after)
+        invalid_after_first = set(_invalid_close_dates(merged))
+        introduced = invalid_after_first - invalid_before
+        repaired_at_first = invalid_before - invalid_after_first
+        repaired_at_retry: set[date] = set()
+        if invalid_after_first:
+            # One immediate backfill, including newly introduced incomplete rows.
+            retry_ranges = _coalesce_date_ranges([
+                (day, day + timedelta(days=1)) for day in invalid_after_first
+            ])
+            try:
+                retry_rows = [
+                    self.provider.fetch(provider_symbol, start, end)
+                    for start, end in retry_ranges
+                ]
+            except Exception as error:
+                LOGGER.warning(
+                    "market-cache %s repair telemetry: invalid_rows_detected=%d "
+                    "invalid_rows_introduced=%d invalid_rows_repaired=%d "
+                    "invalid_rows_repaired_retry=0 invalid_rows_still_missing=%d; retry failed",
+                    symbol, len(invalid_before), len(introduced),
+                    len(repaired_at_first), len(invalid_after_first),
+                )
+                raise IncompleteMarketDataError(
+                    f"{symbol}: retry Yahoo impossible pour les Close invalides"
+                ) from error
+            merged = _merge_prices(merged, [
+                _normalise_prices(frame) for frame in retry_rows if not frame.empty
+            ])
+            final_invalid = set(_invalid_close_dates(merged))
+            repaired_at_retry = invalid_after_first - final_invalid
+        else:
+            final_invalid = set()
         LOGGER.info(
             "market-cache %s repair telemetry: recent_rows_refreshed=%d "
-            "invalid_rows_detected=%d invalid_rows_repaired=%d "
+            "invalid_rows_detected=%d invalid_rows_introduced=%d "
+            "invalid_rows_repaired=%d invalid_rows_repaired_retry=%d "
             "invalid_rows_still_missing=%d",
             symbol,
             recent_rows_refreshed,
-            invalid_rows_detected,
-            invalid_rows_repaired,
-            invalid_rows_still_missing,
+            len(invalid_before),
+            len(introduced),
+            len(repaired_at_first) + len(repaired_at_retry),
+            len(repaired_at_retry),
+            len(final_invalid),
         )
+        if final_invalid:
+            raise IncompleteMarketDataError(
+                f"{symbol}: Close invalides après un retry Yahoo : "
+                f"{', '.join(sorted(day.isoformat() for day in final_invalid))}"
+            )
 
         changed = existing is None or not _frames_equal(existing, merged)
         if changed:
@@ -397,15 +437,10 @@ class MarketDataService:
             status, message = "refreshed", "cache fully refreshed"
         elif existing is None:
             status, message = "downloaded", "full requested history downloaded"
-        elif invalid_rows_repaired:
+        elif repaired_at_first or repaired_at_retry:
             status, message = (
                 "updated",
-                f"repaired {invalid_rows_repaired} invalid Close rows; recent window refreshed",
-            )
-        elif invalid_rows_detected:
-            status, message = (
-                "updated" if changed else "unchanged",
-                f"recent window refreshed; {invalid_rows_still_missing} invalid Close rows remain",
+                f"repaired {len(repaired_at_first) + len(repaired_at_retry)} invalid Close rows; recent window refreshed",
             )
         elif changed:
             status, message = "updated", "recent window refreshed or missing market dates appended"
@@ -446,6 +481,7 @@ class MarketDataService:
         symbol_metadata = dict(manifest.get("symbols", {}))
         refreshed_at = self._clock()
         results_by_symbol: dict[str, _SymbolResult] = {}
+        incomplete: list[str] = []
         report_progress(
             progress_callback,
             "market_data",
@@ -471,6 +507,12 @@ class MarketDataService:
                 symbol = futures[future]
                 try:
                     result = future.result()
+                except IncompleteMarketDataError as error:
+                    incomplete.append(str(error))
+                    result = _SymbolResult(
+                        symbol, None, CacheEvent(symbol, "invalid_close", 0, str(error)),
+                        symbol_metadata.get(symbol), True,
+                    )
                 except Exception as error:
                     result = _SymbolResult(
                         symbol,
@@ -490,6 +532,11 @@ class MarketDataService:
                     total_units=len(requested),
                     details={"status": result.event.status},
                 )
+
+        if incomplete:
+            raise IncompleteMarketDataError(
+                "Rafraîchissement marché incomplet : " + "; ".join(sorted(incomplete))
+            )
 
         ordered_results = [results_by_symbol[symbol] for symbol in requested["Symbol"]]
         for result in ordered_results:

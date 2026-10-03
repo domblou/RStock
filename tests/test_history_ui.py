@@ -389,8 +389,8 @@ def test_end_to_end_summary_shows_persisted_cutoff_and_forward_mode():
     row = history_row(_run("point-in-time", "end_to_end"), detail, {})
 
     assert row.summary == (
-        "Pipeline terminé - 4 étapes · WF expansive · cutoff 2026-06-22 · "
-        "Forward 63 séances"
+        "Pipeline terminé - 4 étapes · WF expansive · Forward 63 séances"
+        " · Cutoff demandé : 2026-06-22"
     )
 
 
@@ -406,7 +406,8 @@ def test_forward_simulation_uses_the_same_experiment_context_summary():
     row = history_row(_run("forward", "forward_simulation", status="pending"), detail, {})
 
     assert row.summary == (
-        "Profondeur 2 · WF expansive · cutoff 2026-06-22 · Forward 63 séances"
+        "Profondeur 2 · WF expansive · Forward 63 séances"
+        " · Cutoff demandé : 2026-06-22"
     )
 
 
@@ -419,7 +420,71 @@ def test_history_summary_formats_a_legacy_datetime_cutoff_as_a_session_date():
 
     row = history_row(_run("legacy-cutoff", "walk_forward"), detail, {})
 
-    assert row.summary == "Profondeur 2 · WF expansive · cutoff 2026-09-22"
+    assert row.summary == "Profondeur 2 · WF expansive · Cutoff demandé : 2026-09-22"
+
+
+def test_completed_end_to_end_summary_uses_walk_forward_dataset_date_without_cutoff():
+    detail = _detail(summary={
+        "stage_run_ids": {"walk_forward": "wf-child"},
+        "stages": [{}, {}, {}, {}, {}, {}],
+    })
+    related = {"wf-child": _detail(summary={
+        "traceability": {"prepared_market_last_date": "2026-10-02T00:00:00"}
+    })}
+
+    row = history_row(
+        _run("root", "end_to_end"), detail, {}, related_details=related
+    )
+
+    assert row.summary == (
+        "Pipeline terminé - 6 étapes · WF expansive · "
+        "Données jusqu’au : 2026-10-02"
+    )
+
+
+def test_completed_summary_keeps_requested_cutoff_distinct_from_dataset_date():
+    detail = _detail(summary={
+        "traceability": {"prepared_market_last_date": "2026-10-01T00:00:00"}
+    })
+    detail["configuration"].update({
+        "requested_historical_cutoff": "2026-10-02",
+        "resolved_market_session_cutoff": "2026-10-02",
+    })
+
+    row = history_row(_run("wf", "walk_forward"), detail, {})
+
+    assert row.summary.endswith(
+        " · Données jusqu’au : 2026-10-01 · Cutoff demandé : 2026-10-02"
+    )
+
+
+def test_end_to_end_summary_preserves_original_requested_cutoff_and_actual_data_date():
+    detail = _detail(summary={"stage_run_ids": {"walk_forward": "wf-child"}})
+    detail["configuration"].update({
+        "requested_historical_cutoff": "2026-10-03",
+        "resolved_market_session_cutoff": "2026-10-02",
+    })
+    related = {"wf-child": _detail(summary={
+        "traceability": {"prepared_market_last_date": "2026-10-02T00:00:00"}
+    })}
+
+    row = history_row(_run("root", "end_to_end"), detail, {}, related_details=related)
+
+    assert row.summary.endswith(
+        " · Données jusqu’au : 2026-10-02 · Cutoff demandé : 2026-10-03"
+    )
+
+
+def test_history_never_substitutes_cutoff_or_missing_child_for_dataset_date():
+    detail = _detail(summary={"stage_run_ids": {"walk_forward": "missing"}})
+    detail["configuration"]["requested_historical_cutoff"] = "2026-10-02"
+
+    completed = history_row(_run("root", "end_to_end"), detail, {})
+    running = history_row(_run("root", "end_to_end", status="running"), detail, {})
+
+    assert "Données jusqu’au" not in completed.summary
+    assert completed.summary.endswith(" · Cutoff demandé : 2026-10-02")
+    assert "Données jusqu’au" not in running.summary
 
 
 def test_legacy_calibration_without_inherited_depth_has_a_safe_context_fallback():

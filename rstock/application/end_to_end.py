@@ -895,6 +895,15 @@ def build_stage_spec(
             )
         return child
 
+    # A child already materialized by an older pipeline retains its frozen
+    # execution contract and fingerprint on resume. New children consume the
+    # immutable Walk-forward snapshot below.
+    existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
+    if existing.is_file():
+        persisted = repository.load_spec(str(stage["child_run_id"]))
+        if not persisted.prepared_snapshot_required:
+            return persisted
+
     walk_forward_id = effective_stage_run_id(manifest, "walk_forward")
     if walk_forward_id is None:
         raise ValueError("Walk-forward source is unavailable")
@@ -915,7 +924,7 @@ def build_stage_spec(
         ),
         source_prepared_dataset_sha256=dataset_digest,
         prepared_dataset_digest_required=True,
-        prepared_snapshot_required=(parent.derivation is not None or parent.forced_period_lock is not None),
+        prepared_snapshot_required=True,
     )
     if stage_key == "promotion_qualification" and parent.forced_period_lock is not None:
         fixed_id = effective_stage_run_id(manifest, "fixed_candidate_evaluation")

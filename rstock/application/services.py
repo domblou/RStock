@@ -279,6 +279,10 @@ class ExperimentService:
     def purge_preview(self, run_id: str) -> PurgePlan:
         return RunStorageService(self.run_service.repository).preview(run_id)
 
+    def purge_run_type(self, run_id: str) -> str:
+        """Return a lightweight persisted type for the batch confirmation."""
+        return str(self.run_service.repository.status(run_id)["job_type"])
+
     def purge(self, run_id: str) -> dict[str, object]:
         return RunStorageService(self.run_service.repository).purge(run_id)
 

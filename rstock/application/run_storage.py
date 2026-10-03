@@ -140,6 +140,25 @@ _SOURCE_FIELDS = (
     "source_forced_candidate_validation_run",
 )
 
+# These metadata relations declare ownership even when the child was created
+# after the parent's pipeline manifest (for example, a historical backfill).
+_OWNED_EXTRA_RELATIONS: dict[JobType, dict[str, frozenset[JobType]]] = {
+    JobType.END_TO_END: {
+        "historical_forced_candidate_validation": frozenset({
+            JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION,
+        }),
+        "forward_simulation": frozenset({JobType.FORWARD_SIMULATION}),
+    },
+    JobType.FORCED_CANDIDATE_VALIDATION: {
+        "qualification_holdout_diagnostic": frozenset({
+            JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC,
+        }),
+    },
+    JobType.WALK_FORWARD: {
+        "walk_forward_batch": frozenset({JobType.WALK_FORWARD_BATCH}),
+    },
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PurgeEligibility:
@@ -376,69 +395,84 @@ class RunStorageService:
         related: list[str] = []
         visited: set[str] = set()
 
-        def visit_end_to_end(parent_id: str) -> str | None:
+        def visit(parent_id: str, parent_type: JobType) -> str | None:
             if parent_id in visited:
-                return "Cycle de dépendances End-to-end détecté."
+                return "Cycle de dépendances de purge détecté."
             visited.add(parent_id)
-            from .end_to_end import load_pipeline_manifest
-            try:
-                manifest = load_pipeline_manifest(self.repository, parent_id)
-            except (OSError, ValueError) as error:
-                return f"Manifest End-to-end invalide : {error}"
-            if manifest is None:
-                return "Le manifest End-to-end est absent."
-            for stage in manifest.get("stages", ()):
-                if not isinstance(stage, Mapping):
-                    continue
-                child_id = stage.get("child_run_id")
-                if child_id:
+            manifest_children: list[tuple[str, JobType | None]] = []
+            if parent_type in {JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION}:
+                from .end_to_end import load_pipeline_manifest
+                from .forced_candidate_validation import load_forced_validation_manifest
+
+                loader = (load_pipeline_manifest if parent_type is JobType.END_TO_END
+                          else load_forced_validation_manifest)
+                try:
+                    manifest = loader(self.repository, parent_id)
+                except (OSError, ValueError) as error:
+                    return f"Manifest du run {parent_id} invalide : {error}"
+                if manifest is None:
+                    return f"Le manifest du run {parent_id} est absent."
+                for stage in manifest.get("stages", ()):
+                    if not isinstance(stage, Mapping) or stage.get("mode") == "inherited":
+                        continue
+                    child_id = stage.get("child_run_id")
+                    if not child_id:
+                        continue
                     child_id = str(child_id)
-                    if (
-                        stage.get("stage_key") == "forward_simulation"
-                        and not self.repository.run_directory(child_id).exists()
-                    ):
-                        # Forward is best-effort; its reserved ID can remain
-                        # unmaterialized if child creation failed.
-                        continue
-                    related.append(child_id)
+                    if (stage.get("stage_key") == "forward_simulation"
+                            and not self.repository.run_directory(child_id).exists()):
+                        continue  # Reserved best-effort Forward was never materialized.
+                    expected = stage.get("expected_job_type")
                     try:
-                        child_type = JobType(
-                            str(self.repository.status(child_id)["job_type"])
-                        )
-                    except (FileNotFoundError, KeyError, ValueError):
-                        continue
-                    if child_type is JobType.END_TO_END:
-                        error = visit_end_to_end(child_id)
-                        if error is not None:
-                            return error
-                    elif child_type is JobType.WALK_FORWARD:
-                        related.extend(self._technical_children(child_id))
+                        expected_type = JobType(str(expected)) if expected else None
+                    except ValueError:
+                        return f"Type d'enfant invalide dans le manifest du run {parent_id}."
+                    manifest_children.append((child_id, expected_type))
+
+            extra_relations = _OWNED_EXTRA_RELATIONS.get(parent_type, {})
+            children = list(manifest_children)
+            manifest_ids = {child_id for child_id, _ in manifest_children}
+            for child_id in (
+                self.repository.list_children(parent_id) if extra_relations else ()
+            ):
+                if child_id in manifest_ids:
+                    continue
+                metadata = self.repository.run_metadata(child_id)
+                allowed = extra_relations.get(metadata.relation_type or "")
+                if allowed is None:
+                    continue
+                try:
+                    child_type = JobType(str(self.repository.status(child_id)["job_type"]))
+                except (FileNotFoundError, KeyError, ValueError):
+                    return f"Le run enfant propriétaire {child_id} est invalide."
+                if child_type not in allowed:
+                    return f"Type incompatible pour le run enfant propriétaire {child_id}."
+                children.append((child_id, child_type))
+
+            for child_id, expected_type in children:
+                if child_id in visited or child_id == run_id:
+                    return "Cycle de dépendances de purge détecté."
+                if not self.repository.run_directory(child_id).exists():
+                    related.append(child_id)  # Existing eligibility reports the missing child.
+                    continue
+                metadata = self.repository.run_metadata(child_id)
+                if metadata.parent_run_id != parent_id:
+                    return f"Le run {child_id} n'appartient pas au parent {parent_id}."
+                try:
+                    child_type = JobType(str(self.repository.status(child_id)["job_type"]))
+                except (FileNotFoundError, KeyError, ValueError):
+                    related.append(child_id)
+                    continue
+                if expected_type is not None and child_type is not expected_type:
+                    return f"Type incompatible pour le run enfant {child_id}."
+                related.append(child_id)
+                error = visit(child_id, child_type)
+                if error is not None:
+                    return error
             return None
 
-        if job_type is JobType.END_TO_END:
-            error = visit_end_to_end(run_id)
-            if error is not None:
-                return (), error
-        if job_type is JobType.WALK_FORWARD:
-            related.extend(self._technical_children(run_id))
-        for child_id in tuple(related):
-            try:
-                child_type = JobType(
-                    str(self.repository.status(child_id)["job_type"])
-                )
-            except (FileNotFoundError, KeyError, ValueError):
-                continue
-            if child_type is JobType.WALK_FORWARD:
-                related.extend(self._technical_children(child_id))
-        return tuple(dict.fromkeys(related)), None
-
-    def _technical_children(self, run_id: str) -> list[str]:
-        children: list[str] = []
-        for child_id in self.repository.list_children(run_id):
-            metadata = self.repository.run_metadata(child_id)
-            if metadata.relation_type == "walk_forward_batch":
-                children.append(child_id)
-        return children
+        error = visit(run_id, job_type)
+        return ((), error) if error is not None else (tuple(related), None)
 
     def _unfinished_dependent(
         self, run_id: str, included_related: set[str]

@@ -320,13 +320,6 @@ def _temporal_context_summary(
     """Return persisted point-in-time and Forward context for a history row."""
 
     parts: list[str] = []
-    cutoff = (
-        configuration.get("resolved_market_session_cutoff")
-        or configuration.get("historical_data_cutoff")
-    )
-    if isinstance(cutoff, str) and cutoff.strip():
-        parts.append(f"cutoff {_session_date_label(cutoff)}")
-
     mode = (
         configuration.get("forward_simulation_mode")
         if include_forward or configuration.get("forward_simulation_enabled") is True
@@ -349,6 +342,38 @@ def _session_date_label(value: str) -> str:
     text = value.strip()
     parsed = pd.to_datetime(text, errors="coerce")
     return text if pd.isna(parsed) else pd.Timestamp(parsed).date().isoformat()
+
+
+def _prepared_market_last_date(
+    job_type: str,
+    summary: Mapping[str, object],
+    related_details: Mapping[str, Mapping[str, object]],
+) -> str | None:
+    """Read the measured dataset date, including the Walk-forward child of a pipeline."""
+
+    source = summary
+    if job_type == "end_to_end":
+        stage_ids = summary.get("stage_run_ids")
+        walk_forward_id = (
+            stage_ids.get("walk_forward") if isinstance(stage_ids, Mapping) else None
+        )
+        child = related_details.get(str(walk_forward_id)) if walk_forward_id else None
+        source = child.get("summary", {}) if isinstance(child, Mapping) else {}
+    traceability = source.get("traceability") if isinstance(source, Mapping) else None
+    value = (
+        traceability.get("prepared_market_last_date")
+        if isinstance(traceability, Mapping) else None
+    )
+    return _session_date_label(value) if isinstance(value, str) and value.strip() else None
+
+
+def _requested_cutoff(configuration: Mapping[str, object]) -> str | None:
+    value = (
+        configuration.get("requested_historical_cutoff")
+        or configuration.get("resolved_market_session_cutoff")
+        or configuration.get("historical_data_cutoff")
+    )
+    return _session_date_label(value) if isinstance(value, str) and value.strip() else None
 
 
 def _primary_universe_id(configuration: Mapping[str, object]) -> str | None:
@@ -512,6 +537,13 @@ def history_row(
         configuration, metadata, universe_labels or {}, related_details or {},
     )
     summary_text = _summary_text(job_type, summary, configuration, str(status["status"]))
+    if str(status["status"]) == "completed":
+        data_date = _prepared_market_last_date(job_type, summary, related_details or {})
+        if data_date is not None:
+            summary_text += f" · Données jusqu’au : {data_date}"
+    cutoff = _requested_cutoff(configuration)
+    if cutoff is not None:
+        summary_text += f" · Cutoff demandé : {cutoff}"
     return HistoryRow(
         run_id=str(status["run_id"]),
         lineage=_lineage_text(

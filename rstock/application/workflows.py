@@ -21,7 +21,7 @@ from rstock.evaluation import classification_metrics
 from rstock.checkpoints import CheckpointIncompatibleError, CheckpointManager
 from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets, symbol_set_id
 from rstock.combination_planning import CombinationPlan, build_combination_plan
-from rstock.features import prepare_dataset
+from rstock.features import prepare_dataset, require_complete_last_session
 from rstock.market_cache import market_data_service
 from rstock.modeling import (
     DirectionalXGBoostParameters,
@@ -272,6 +272,8 @@ def _prepared_inputs(
         spec.config.lag_depth,
         spec.config.intraday_down_threshold,
     )
+    if spec.job_type is JobType.WALK_FORWARD:
+        require_complete_last_session(prepared, downloaded.symbols)
     if effective_end_date is None and not prepared.empty:
         effective_end_date = pd.Timestamp(prepared.index.max()).normalize()
     if effective_end_date is not None:

@@ -76,8 +76,8 @@ def test_watching_status_filter_actions_and_distinct_surveillance_section():
     assert "_render_watching_surveillance_section(" in surveillance
     assert "watching_history()" in watching
     assert "watching_realized_results()" in watching
-    assert "surveillance_target_session(" in watching
+    assert "surveillance_display_session(" in watching
     assert "next_session_signals_view(" in watching
-    assert "surveillance_target_session(" in surveillance
+    assert "surveillance_display_session(" in surveillance
     assert "_render_surveillance_model_history(project_root)" in surveillance
     assert "_render_real_trade_from_prediction" not in watching

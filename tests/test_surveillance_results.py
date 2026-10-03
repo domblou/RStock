@@ -18,6 +18,7 @@ from rstock.application.surveillance import (
     next_session_signals_view,
     next_surveillance_session,
     surveillance_target_session,
+    surveillance_display_session,
     prediction_feature_tables,
     prediction_features_table,
     evaluated_predictions_main_table,
@@ -126,6 +127,59 @@ def test_surveillance_uses_xnys_holiday_for_next_available_batch():
         assert surveillance_target_session(view, pd.DataFrame(), reference, "XNYS") == pd.Timestamp("2026-09-08")
 
 
+@pytest.mark.parametrize("instant,evaluated,future,expected", [
+    ("2026-10-02 08:00", True, False, "2026-10-02"),  # Before open.
+    ("2026-10-02 11:00", True, False, "2026-10-02"),  # During session.
+    ("2026-10-02 17:00", False, False, "2026-10-02"),  # Closed, not evaluated.
+    ("2026-10-02 17:00", True, False, "2026-10-05"),  # Evaluated, no next batch.
+    ("2026-10-02 17:00", True, True, "2026-10-05"),  # Evaluated, next batch.
+    ("2026-10-03 12:00", True, False, "2026-10-05"),  # Weekend, no batch.
+    ("2026-10-03 12:00", True, True, "2026-10-05"),  # Weekend, next batch.
+])
+def test_display_batch_follows_exchange_close_and_completed_evaluation(
+    instant, evaluated, future, expected,
+):
+    predictions = [_prediction("friday", "2026-10-02")]
+    signals = [{**predictions[0], **_signal("friday"), "category": "bullish_signal"}]
+    if future:
+        predictions.append(_prediction("monday", "2026-10-05"))
+        signals.append({**predictions[-1], **_signal("monday"), "category": "bullish_signal"})
+    predictions_frame = pd.DataFrame(predictions)
+    signals_frame = pd.DataFrame(signals)
+    view = build_signals_view(signals_frame, predictions_frame)
+    realized = pd.DataFrame([_realized("friday", "2026-10-02")]) if evaluated else pd.DataFrame()
+    results = build_evaluated_predictions_view(predictions_frame, signals_frame, realized)
+
+    target = surveillance_display_session(
+        view, predictions_frame, results,
+        pd.Timestamp(instant, tz="America/Toronto"), "XNYS",
+    )
+
+    assert target == pd.Timestamp(expected)
+    displayed = next_session_signals_view(view, pd.DataFrame(), target)
+    assert displayed.table["Date"].tolist() == ([expected] if expected == "2026-10-02" or future else [])
+
+
+def test_display_keeps_partly_evaluated_current_batch():
+    predictions = pd.DataFrame([
+        _prediction("first", "2026-10-02"),
+        _prediction("second", "2026-10-02"),
+    ])
+    signals = pd.DataFrame([
+        {**row, **_signal(row["prediction_id"]), "category": "bullish_signal"}
+        for row in predictions.to_dict("records")
+    ])
+    view = build_signals_view(signals, predictions)
+    results = build_evaluated_predictions_view(
+        predictions, signals, pd.DataFrame([_realized("first", "2026-10-02")])
+    )
+
+    assert surveillance_display_session(
+        view, predictions, results,
+        pd.Timestamp("2026-10-02 17:00", tz="America/Toronto"), "XNYS",
+    ) == pd.Timestamp("2026-10-02")
+
+
 def test_operational_surveillance_tables_use_exact_sessions_and_quality_values():
     predictions = pd.DataFrame([
         _prediction("next", "2026-09-28"),
@@ -161,15 +215,15 @@ def test_operational_surveillance_tables_use_exact_sessions_and_quality_values()
     latest_view = latest_session_results_view(evaluated, quality)
 
     assert next_view.table["Date"].tolist() == ["2026-09-28"]
-    assert next_view.table["Rendement"].tolist() == ["1,25 %"]
+    assert next_view.table["Rendement moyen historique (63 séances)"].tolist() == ["1,25 %"]
     assert next_view.table["Trades gagnants"].tolist() == ["62,50 %"]
     assert tuple(next_view.table.columns) == (
         "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
-        "Rendement", "Trades gagnants", "Dernier signal",
+        "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
     )
     assert latest_view.table["Date"].tolist() == ["2026-09-25"]
-    assert latest_view.table["Rendement"].tolist() == ["-2,00 %"]
-    assert latest_view.table["P&L cumulé"].tolist() == ["-200,00 $"]
+    assert latest_view.table["Rendement de la séance (Open→Close)"].tolist() == ["-2,00 %"]
+    assert latest_view.table["P&L séance (10 000 $)"].tolist() == ["-200,00 $"]
     assert surveillance_kpi_values(next_view, latest_view) == {
         "next_signal_count": 1,
         "mean_up_probability": 0.72,

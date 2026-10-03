@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from rstock.application import streamlit_app
 from rstock.application.domain import JobType
 from rstock.application.history_ui import EXPERIMENT_JOB_TYPES
 from rstock.application.run_detail_tabs import (
@@ -224,3 +230,75 @@ def test_pipeline_children_and_individual_runs_use_the_same_tab_registry():
         "files",
         "logs",
     ]
+
+
+@pytest.mark.parametrize("renderer_key", tuple(PIPELINE_CHILD_TABS))
+def test_pipeline_child_results_precede_technical_block(monkeypatch, renderer_key):
+    events = []
+    stage_key = PIPELINE_CHILD_TABS[renderer_key]
+    stage = {"child_run_id": "child", "status": "completed", "artifact_digests": {}}
+    detail = {"status": {"status": "completed"}, "metadata": {"run_role": "pipeline_stage"}}
+    fake_st = SimpleNamespace(
+        caption=lambda *_: events.append("caption"),
+        expander=lambda *_: (events.append("technical") or nullcontext()),
+        json=lambda *_: events.append("json"),
+        button=lambda *_args, **_kwargs: (events.append("button") or False),
+    )
+    monkeypatch.setattr(streamlit_app, "st", fake_st)
+    monkeypatch.setattr(streamlit_app, "pipeline_stage_by_key", lambda *_: stage)
+    monkeypatch.setattr(
+        streamlit_app, "_render_job_detail_tabs",
+        lambda *_args, **_kwargs: events.append("results"),
+    )
+
+    streamlit_app._render_pipeline_child(
+        SimpleNamespace(run=lambda _: detail), "parent", {}, renderer_key
+    )
+
+    assert events.index("results") < events.index("technical")
+    assert events.index("results") < events.index("json")
+    assert events.index("results") < events.index("button")
+
+
+@pytest.mark.parametrize("inherited", (False, True))
+def test_pipeline_child_standalone_navigation_remains_available_at_bottom(monkeypatch, inherited):
+    events = []
+    stage = {"child_run_id": "child", "status": "completed", "artifact_digests": {}}
+    if inherited:
+        stage.update(mode="inherited", source_run_id="source")
+    detail = {"status": {"status": "completed"}, "metadata": {}}
+    monkeypatch.setattr(streamlit_app, "st", SimpleNamespace(
+        caption=lambda *_: None,
+        expander=lambda *_: nullcontext(),
+        json=lambda *_: None,
+        button=lambda *_args, **_kwargs: (events.append("button") or True),
+    ))
+    monkeypatch.setattr(streamlit_app, "pipeline_stage_by_key", lambda *_: stage)
+    monkeypatch.setattr(streamlit_app, "_render_job_detail_tabs", lambda *_args, **_kwargs: events.append("results"))
+    monkeypatch.setattr(streamlit_app, "_history_navigation", lambda *args: events.append(args))
+
+    streamlit_app._render_pipeline_child(
+        SimpleNamespace(run=lambda _: detail), "parent", {}, "child_walk_forward"
+    )
+
+    assert events == (
+        ["results", "button", ("detail", ["source"]), "button", ("detail", ["source"])]
+        if inherited else ["results", "button", ("detail", ["child"])]
+    )
+
+
+def test_temporal_and_split_result_technical_blocks_follow_scientific_content():
+    source = Path(streamlit_app.__file__).read_text(encoding="utf-8")
+    temporal = source.split("def _render_temporal_validation(", 1)[1].split("def _read_light_json(", 1)[0]
+    assert temporal.index("_render_pipeline_summary(child_run_id, child_detail)") < temporal.rindex(
+        'with st.expander("Provenance technique et navigation")'
+    )
+    standard = source.split("def _render_standard_results(", 1)[1].split("def _render_standard_job_tabs(", 1)[0]
+    holdout = standard.split("elif job_type is JobType.HOLDOUT_EVALUATION", 1)[1].split(
+        "elif job_type is JobType.PROMOTION_QUALIFICATION", 1
+    )[0]
+    qualification = standard.split("elif job_type is JobType.PROMOTION_QUALIFICATION", 1)[1].split(
+        "elif (", 1
+    )[0]
+    assert holdout.index("st.dataframe(") < holdout.index("st.json(configuration)")
+    assert qualification.index("st.dataframe(") < qualification.index("st.json(")

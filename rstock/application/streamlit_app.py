@@ -20,6 +20,12 @@ import streamlit as st
 LOGGER = logging.getLogger(__name__)
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
+from rstock.application.batch_purge import (
+    BatchPurgeOutcome,
+    BatchPurgeReview,
+    execute_batch_purge,
+    preview_batch_purge,
+)
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from rstock.application.production_domain import ProductionModel
 from rstock.application.experiment_duplication import (
@@ -124,7 +130,7 @@ from rstock.application.surveillance import (
     filter_signal_results_view,
     latest_session_results_view,
     next_session_signals_view,
-    surveillance_target_session,
+    surveillance_display_session,
     surveillance_model_history_table,
     prioritize_signals_view,
     signal_priority_model_lookup,
@@ -1266,16 +1272,75 @@ def _settings() -> None:
         )
 
         """
-        st.subheader("Qualification et exécution")
+        st.subheader("Qualification")
         q1, q2, q3 = st.columns(3)
-        min_windows = q1.number_input("Fenêtres minimales", min_value=1, value=current.qualification_min_windows)
-        median_auc = q2.number_input("ROC-AUC médian minimal", min_value=0.0, max_value=1.0, value=current.qualification_min_median_auc)
-        pct_random = q3.number_input("Part fenêtres > hasard", min_value=0.0, max_value=1.0, value=current.qualification_min_pct_windows_above_random)
-        worst_auc = q1.number_input("Pire ROC-AUC minimal", min_value=0.0, max_value=1.0, value=current.qualification_min_worst_window_auc)
-        min_positive = q2.number_input("Observations positives minimales", min_value=0, value=current.qualification_min_positive_observations)
-        max_auc_std = q3.number_input("Écart-type ROC-AUC maximal", min_value=0.0, value=current.qualification_max_auc_std)
-        final_auc = q1.number_input("ROC-AUC confirmation finale", min_value=0.0, max_value=1.0, value=current.final_confirmation_min_auc)
-        prediction_threshold = q2.number_input("Seuil de décision standard", min_value=0.0, max_value=1.0, value=current.prediction_threshold)
+        min_windows = q1.number_input(
+            "Fenêtres minimales", min_value=1, value=current.qualification_min_windows,
+            help="Nombre minimum de fenêtres Walk-forward valides requises pour qu’un modèle puisse être qualifié.",
+        )
+        median_auc = q2.number_input(
+            "ROC-AUC médian minimal", min_value=0.0, max_value=1.0,
+            value=current.qualification_min_median_auc,
+            help=(
+                "Valeur minimale de la médiane des ROC-AUC calculés sur les fenêtres Walk-forward. "
+                "Un seuil supérieur à 0,50 exige une performance globale meilleure que le hasard."
+            ),
+        )
+        pct_random = q3.number_input(
+            "Part fenêtres > hasard", min_value=0.0, max_value=1.0,
+            value=current.qualification_min_pct_windows_above_random,
+            help=(
+                "Proportion minimale de fenêtres Walk-forward dont le ROC-AUC est supérieur à 0,50. "
+                "Par exemple, 0,67 signifie qu’environ deux fenêtres sur trois doivent battre le hasard."
+            ),
+        )
+        worst_auc = q1.number_input(
+            "Pire ROC-AUC minimal", min_value=0.0, max_value=1.0,
+            value=current.qualification_min_worst_window_auc,
+            help=(
+                "Valeur minimale autorisée pour le plus faible ROC-AUC observé parmi les fenêtres Walk-forward. "
+                "Ce critère limite les modèles qui s’effondrent sur une période particulière."
+            ),
+        )
+        min_positive = q2.number_input(
+            "Observations positives minimales", min_value=0,
+            value=current.qualification_min_positive_observations,
+            help=(
+                "Nombre minimum d’observations appartenant réellement à la classe positive requis pour évaluer "
+                "une fenêtre de façon fiable. Il s’agit d’exemples réels de la cible positive utilisés pour "
+                "calculer les métriques, et non du nombre de signaux générés par le modèle."
+            ),
+        )
+        max_auc_std = q3.number_input(
+            "Écart-type ROC-AUC maximal", min_value=0.0, value=current.qualification_max_auc_std,
+            help=(
+                "Écart-type maximal autorisé des ROC-AUC entre les fenêtres Walk-forward. "
+                "Une valeur plus faible exige une performance plus stable dans le temps."
+            ),
+        )
+        final_auc = q1.number_input(
+            "ROC-AUC confirmation finale", min_value=0.0, max_value=1.0,
+            value=current.final_confirmation_min_auc,
+            help=(
+                "ROC-AUC minimal requis lors de la confirmation finale du modèle. "
+                "Ce contrôle sert de barrière supplémentaire avant de poursuivre le pipeline."
+            ),
+        )
+        prediction_threshold = q2.number_input(
+            "Seuil de décision standard", min_value=0.0, max_value=1.0,
+            value=current.prediction_threshold,
+            help=(
+                "Seuil de probabilité utilisé comme référence standard pour convertir une probabilité en "
+                "décision binaire lorsqu’aucun seuil calibré spécifique n’est appliqué."
+            ),
+        )
+        evaluate_holdout = q3.checkbox(
+            "Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout,
+            help=(
+                "Active l’évaluation finale sur le jeu holdout, conservé hors des étapes de sélection "
+                "précédentes afin de mesurer la performance hors échantillon."
+            ),
+        )
 
         st.subheader("Classement des modèles")
         st.caption("Pondérations du score final; les composantes absentes sont exclues puis les poids disponibles sont renormalisés.")
@@ -1305,16 +1370,6 @@ def _settings() -> None:
             value=current.model_selection_sample_adequacy_weight,
             help="Poids du nombre et de la validité des fenêtres et observations.",
         )
-        workers = q1.number_input("Workers marché", min_value=1, value=current.market_cache_workers)
-        combination_workers = q2.number_input(
-            "Workers combinaisons", min_value=1, value=current.combination_workers
-        )
-        nthread = q2.number_input("Threads XGBoost", min_value=1, value=current.xgb_nthread)
-        seed = q3.number_input("Seed", min_value=0, value=current.xgb_seed)
-        combinations = q1.number_input("Combinaisons par cible (calibrations)", min_value=1, value=st.session_state.lab_combinations_per_target)
-        max_jobs = q2.number_input("Jobs lourds concurrents", min_value=1, value=st.session_state.max_concurrent_heavy_jobs)
-        evaluate_holdout = q3.checkbox("Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout)
-
         st.subheader("XGBoost")
         x1, x2, x3 = st.columns(3)
         max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
@@ -1345,8 +1400,16 @@ def _settings() -> None:
             min_value=1,
             value=current.threshold_calibration_min_robust_signals,
             help=(
-                "Nombre total de signaux requis pour préférer un seuil robuste. "
-                "Ce seuil est distinct du minimum de signaux requis par fenêtre."
+                "Nombre minimal de signaux générés au total, toutes fenêtres de calibration "
+                "confondues, pour qu’un seuil admissible soit considéré comme suffisamment robuste. "
+                "Ce critère ne remplace pas la règle « Signaux minimaux par fenêtre × Fraction "
+                "minimale de fenêtres » : un seuil doit d’abord respecter la couverture temporelle "
+                "requise. `RobustSample` sert ensuite à privilégier les seuils disposant d’un "
+                "échantillon global suffisant parmi ceux déjà admissibles. "
+                "Exemple : avec 7 fenêtres, 5 signaux minimum par fenêtre et 60 % de fenêtres "
+                "requises, il faut au moins 5 fenêtres conformes, donc au moins 25 signaux "
+                "répartis dans le temps. Un seuil avec 25+ signaux au total mais mal répartis "
+                "peut quand même être rejeté."
             ),
         )
         unlimited_threshold_parameter_models = st.checkbox(
@@ -1420,6 +1483,14 @@ def _settings() -> None:
             format="%.4f",
         )
 
+        st.subheader("Échantillonnage et reproductibilité")
+        sampling_1, sampling_2 = st.columns(2)
+        combinations = sampling_1.number_input(
+            "Combinaisons par cible (calibrations)", min_value=1,
+            value=st.session_state.lab_combinations_per_target,
+        )
+        seed = sampling_2.number_input("Seed", min_value=0, value=current.xgb_seed)
+
         st.subheader("Validation temporelle")
         st.caption(
             "Ces valeurs sont figées dans le snapshot End-to-end de référence. "
@@ -1490,6 +1561,22 @@ def _settings() -> None:
             "Mouvements opposés maximum", min_value=0.0, max_value=1.0,
             value=current.promotion_max_opposite_movement_frequency,
             help="Fréquence maximale autorisée des mouvements opposés sur le holdout.",
+        )
+
+        st.subheader("Exécution")
+        execution_1, execution_2, execution_3 = st.columns(3)
+        workers = execution_1.number_input(
+            "Workers marché", min_value=1, value=current.market_cache_workers
+        )
+        combination_workers = execution_2.number_input(
+            "Workers combinaisons", min_value=1, value=current.combination_workers
+        )
+        nthread = execution_3.number_input(
+            "Threads XGBoost", min_value=1, value=current.xgb_nthread
+        )
+        max_jobs = execution_1.number_input(
+            "Jobs lourds concurrents", min_value=1,
+            value=st.session_state.max_concurrent_heavy_jobs,
         )
         if st.button("Enregistrer les paramètres", type="primary"):
             parsed_quantiles = tuple(
@@ -2441,23 +2528,24 @@ def _render_standard_results(
     elif job_type is JobType.HOLDOUT_EVALUATION and status.get("status") == "completed":
         result_dir = st.session_state.lab_config.project_root / "runs" / run_id / "results"
         configuration = _read_light_json(result_dir / "run_configuration.json")
-        if configuration is not None:
-            st.subheader("Protocole et provenance holdout")
-            st.json(configuration)
         for filename, label in (("holdout_metrics.csv", "Métriques holdout"),
                                 ("holdout_predictions.csv", "Prédictions et observations holdout")):
             path = result_dir / filename
             if path.is_file():
                 st.subheader(label)
                 st.dataframe(pd.read_csv(path), hide_index=True, width="stretch")
+        if configuration is not None:
+            with st.expander("Protocole et provenance holdout"):
+                st.json(configuration)
     elif job_type is JobType.PROMOTION_QUALIFICATION and status.get("status") == "completed":
         result_dir = st.session_state.lab_config.project_root / "runs" / run_id / "results"
         qualification = _read_light_json(result_dir / "qualification.json")
         if qualification is not None:
             st.subheader("Décision de qualification")
-            st.json({key: value for key, value in qualification.items() if key != "decisions"})
             st.dataframe(pd.DataFrame(qualification.get("decisions", [])),
                          hide_index=True, width="stretch")
+            with st.expander("Protocole et provenance de qualification"):
+                st.json({key: value for key, value in qualification.items() if key != "decisions"})
     elif (
         job_type is JobType.THRESHOLD_CALIBRATION
         and status.get("status") == "completed"
@@ -2474,7 +2562,10 @@ def _render_standard_results(
         metrics_path = result_dir / "threshold_metrics_by_set.csv"
         if metrics_path.is_file() and not (result_dir / "holdout_metrics.csv").is_file():
             st.subheader("Seuils figés et diagnostics de calibration")
-            st.dataframe(pd.read_csv(metrics_path), hide_index=True, width="stretch")
+            metrics = pd.read_csv(metrics_path)
+            if "Set" in metrics:
+                metrics = metrics[["Set", *[column for column in metrics if column != "Set"]]]
+            st.dataframe(metrics, hide_index=True, width="stretch")
             selected = _read_light_json(result_dir / "selected_thresholds_by_set.json")
             if selected is not None:
                 st.json(selected)
@@ -3046,10 +3137,6 @@ def _render_pipeline_child(
     child_run_id = stage.get("child_run_id")
     if stage.get("mode") == "inherited":
         st.caption(f"Héritée du run source : {stage.get('source_run_id')}")
-        if st.button(
-            "Ouvrir le run source", key=f"open-inherited-{parent_run_id}-{stage_key}"
-        ):
-            _history_navigation("detail", [str(stage["source_run_id"])])
     effective_run_id = stage.get("source_run_id") if stage.get("mode") == "inherited" else child_run_id
     if not effective_run_id or (stage.get("status") == "reserved" and stage.get("mode") != "inherited"):
         st.caption(
@@ -3063,16 +3150,32 @@ def _render_pipeline_child(
         f"début : {child_status.get('started_at') or '—'} · "
         f"fin : {child_status.get('finished_at') or '—'}"
     )
-    st.json({"provenance": child_detail.get("metadata"),
-             "artifact_digests": stage.get("artifact_digests")})
-    if st.button("Ouvrir le détail autonome", key=f"open-child-{parent_run_id}-{stage_key}"):
-        _history_navigation("detail", [str(effective_run_id)])
     _render_job_detail_tabs(
         service,
         str(effective_run_id),
         status=child_status,
         detail=child_detail,
     )
+    _render_pipeline_child_technical(
+        parent_run_id, stage_key, stage, child_detail, str(effective_run_id)
+    )
+
+
+def _render_pipeline_child_technical(
+    parent_run_id: str, stage_key: str, stage: dict[str, object],
+    child_detail: dict[str, object], effective_run_id: str,
+) -> None:
+    """Keep provenance and standalone navigation after the stage's results."""
+
+    with st.expander("Provenance technique et navigation"):
+        st.json({"provenance": child_detail.get("metadata"),
+                 "artifact_digests": stage.get("artifact_digests")})
+        if stage.get("mode") == "inherited" and st.button(
+            "Ouvrir le run source", key=f"open-inherited-{parent_run_id}-{stage_key}"
+        ):
+            _history_navigation("detail", [str(stage["source_run_id"])])
+        if st.button("Ouvrir le détail autonome", key=f"open-child-{parent_run_id}-{stage_key}"):
+            _history_navigation("detail", [effective_run_id])
 
 
 def _render_pipeline_promotion(detail: dict[str, object]) -> None:
@@ -3325,11 +3428,6 @@ def _render_temporal_validation(
         _render_candidate_identity_stability(
             comparison, validation_lookup, trace_lookup
         )
-        with st.expander("Comparison parameters and provenance"):
-            st.json({
-                "parameters": comparison.get("parameters", {}),
-                "source_artifact_digests": comparison.get("source_artifact_digests", {}),
-            })
         pipeline_summary = _read_light_json(
             root / parent_run_id / "results" / "pipeline_summary.json"
         ) or {}
@@ -3477,22 +3575,34 @@ def _render_temporal_validation(
         pd.DataFrame(pipeline_stage_rows([stage])), hide_index=True, width="stretch"
     )
     if stage.get("status") == "reserved":
+        if comparison is not None:
+            with st.expander("Provenance technique et navigation"):
+                st.json({
+                    "parameters": comparison.get("parameters", {}),
+                    "source_artifact_digests": comparison.get("source_artifact_digests", {}),
+                })
         return
     child_detail = service.run(child_run_id)
     child_metadata = child_detail.get("metadata", {})
-    st.json(
-        {
-            "reference_run_id": child_metadata.get("reference_run_id"),
-            "run_purpose": child_metadata.get("run_purpose"),
-            "offset": child_detail["configuration"]["rstock_config"].get(
-                "walk_forward_end_offset_sessions"
-            ),
-        }
-    )
     _render_pipeline_summary(child_run_id, child_detail)
-    if st.button("Open validation End-to-end", key=f"open-temporal-{parent_run_id}"):
-        st.session_state["selected-run-id"] = child_run_id
-        st.rerun()
+    with st.expander("Provenance technique et navigation"):
+        if comparison is not None:
+            st.json({
+                "parameters": comparison.get("parameters", {}),
+                "source_artifact_digests": comparison.get("source_artifact_digests", {}),
+            })
+        st.json(
+            {
+                "reference_run_id": child_metadata.get("reference_run_id"),
+                "run_purpose": child_metadata.get("run_purpose"),
+                "offset": child_detail["configuration"]["rstock_config"].get(
+                    "walk_forward_end_offset_sessions"
+                ),
+            }
+        )
+        if st.button("Open validation End-to-end", key=f"open-temporal-{parent_run_id}"):
+            st.session_state["selected-run-id"] = child_run_id
+            st.rerun()
 
 
 def _read_light_json(path: Path) -> dict[str, object] | None:
@@ -3985,6 +4095,10 @@ def _history_runs_panel(
     allowed_types: frozenset[str],
     key_prefix: str,
 ) -> None:
+    batch_result_key = f"{key_prefix}-batch-purge-result"
+    batch_result = st.session_state.pop(batch_result_key, None)
+    if isinstance(batch_result, BatchPurgeOutcome):
+        _render_batch_purge_outcome(batch_result)
     history_runs = service.history_runs(job_types=allowed_types)
     runs = [record.status for record in history_runs]
     details_by_run_id = {
@@ -4040,9 +4154,20 @@ def _history_runs_panel(
     filtered_ids = {str(run["run_id"]) for run in filtered}
     selected = [run_id for run_id in selected if run_id in filtered_ids]
     st.session_state[selected_key] = selected
-    if not selected:
-        st.caption("Sélectionnez un run pour l’ouvrir, ou de 2 à 5 runs du même type pour les comparer.")
+    batch_pending_key = f"{key_prefix}-pending-batch-purge"
+    pending_batch = st.session_state.get(batch_pending_key)
+    if isinstance(pending_batch, BatchPurgeReview):
+        _render_batch_purge_confirmation(service, pending_batch, key_prefix=key_prefix)
         return
+    if not selected:
+        st.caption("Sélectionnez un run pour l’ouvrir, ou plusieurs runs pour les comparer ou purger leurs données lourdes.")
+        return
+    if len(selected) > 1 and st.button(
+        "Purger les données lourdes des runs sélectionnés",
+        key=f"purge-selected-{key_prefix}",
+    ):
+        st.session_state[batch_pending_key] = preview_batch_purge(service, selected)
+        st.rerun()
     action = selected_run_action(selected)
     if action == "detail":
         selected_run_id = selected[0]
@@ -4109,6 +4234,65 @@ def _format_storage_size(size_bytes: int) -> str:
             return f"{value:.0f} {unit}" if unit in {"o", "Ko"} else f"{value:.1f} {unit}"
         value /= 1024.0
     return f"{value:.1f} To"
+
+
+def _render_batch_purge_outcome(outcome: BatchPurgeOutcome) -> None:
+    message = (
+        "Purge groupée terminée : "
+        f"{len(outcome.succeeded)} succès, {len(outcome.skipped)} ignorés, "
+        f"{len(outcome.errors)} erreurs. "
+        f"{_format_storage_size(outcome.reclaimed_bytes)} libérés."
+    )
+    if outcome.errors and not outcome.succeeded:
+        st.error(message)
+    elif outcome.errors or outcome.skipped:
+        st.warning(message)
+    else:
+        st.success(message)
+    if outcome.skipped:
+        st.info("Runs ignorés : " + "; ".join(f"{run_id} : {reason}" for run_id, reason in outcome.skipped))
+    if outcome.errors:
+        st.error("Erreurs : " + "; ".join(f"{run_id} : {reason}" for run_id, reason in outcome.errors))
+
+
+def _render_batch_purge_confirmation(
+    service: ExperimentService, review: BatchPurgeReview, *, key_prefix: str
+) -> None:
+    pending_key = f"{key_prefix}-pending-batch-purge"
+    with st.container(border=True):
+        st.warning(
+            f"{len(review.requested_run_ids)} runs sélectionnés, "
+            f"dont {len(review.eligible_run_ids)} admissibles à la purge "
+            f"({len(review.affected_run_ids)} runs concernés, enfants liés inclus). "
+            f"Environ {_format_storage_size(review.reclaimable_bytes)} de données lourdes "
+            "seront libérées. Les runs et leurs métadonnées légères resteront dans l’Historique."
+        )
+        st.caption("Par type : " + ", ".join(
+            f"{JOB_LABELS.get(job_type, job_type)} : {count}"
+            for job_type, count in review.affected_by_type
+        ))
+        if review.skipped:
+            st.info("Déjà purgés ou non admissibles : " + "; ".join(
+                f"{run_id} : {reason}" for run_id, reason in review.skipped
+            ))
+        if review.errors:
+            st.error("Préparation impossible : " + "; ".join(
+                f"{run_id} : {reason}" for run_id, reason in review.errors
+            ))
+        confirm, cancel, _ = st.columns([2.5, 1, 5])
+        if confirm.button(
+            "Confirmer la purge groupée",
+            type="primary",
+            disabled=not review.eligible_run_ids,
+            key=f"confirm-batch-purge-{key_prefix}",
+        ):
+            outcome = execute_batch_purge(service, review)
+            st.session_state[f"{key_prefix}-batch-purge-result"] = outcome
+            st.session_state.pop(pending_key, None)
+            st.rerun()
+        if cancel.button("Annuler", key=f"cancel-batch-purge-{key_prefix}"):
+            st.session_state.pop(pending_key, None)
+            st.rerun()
 
 
 def _render_run_purge_confirmation(
@@ -4759,10 +4943,10 @@ def _render_surveillance_kpis(
         )
         _render_models_kpi_card(
             columns[4],
-            "P&L veille",
+            "P&L dernière séance",
             _model_detail_currency(values["latest_session_pnl"]),
             "payments",
-            caption="Dernière séance",
+            caption="Dernière séance évaluée",
             directional=True,
         )
         _render_models_kpi_card(
@@ -4795,10 +4979,11 @@ _SURVEILLANCE_COLUMN_HELP = {
     "Prédicteurs": "Titres utilisés par le modèle pour prédire la cible. Plus de prédicteurs n'est pas nécessairement meilleur.",
     "P(Up)": "Probabilité de hausse estimée par le modèle. La force du signal se juge par rapport au seuil sélectionné du modèle, pas à 50 % en absolu.",
     "Catégorie": "Classification du signal selon le seuil de décision du modèle; elle aide à interpréter le signal.",
-    "Rendement": "Rendement Open→Close réalisé au dernier signal évalué. Cible : positif, idéalement de façon répétée.",
+    "Rendement moyen historique (63 séances)": "Moyenne des rendements intrajournaliers des signaux historiques du modèle sur la fenêtre de 63 séances. Ce n’est pas le rendement réalisé du signal affiché.",
+    "Rendement de la séance (Open→Close)": "Rendement réalisé de la cible pendant la séance évaluée : Close / Open − 1.",
     "Trades gagnants": "Proportion des signaux évalués avec un rendement positif. Cible : > 50 %; intéressant ≥ 55 %; solide ≥ 60 % avec un échantillon suffisant.",
     "Dernier signal": "Date du dernier signal déclenché; elle situe la récence de l'évaluation. Aucune cible de performance.",
-    "P&L cumulé": "Gains et pertes cumulés des signaux évalués selon la simulation. Cible : positif et durablement croissant, sans seuil absolu.",
+    "P&L séance (10 000 $)": "P&L théorique de cette ligne pour la séance : rendement Open→Close × 10 000 $. Ce montant n’est pas cumulé.",
 }
 
 
@@ -5052,7 +5237,7 @@ def _render_next_session_signals(
         else:
             st.dataframe(
                 _styled_surveillance_table(
-                    table, ("P(Up)", "Rendement", "Trades gagnants")
+                    table, ("P(Up)", "Rendement moyen historique (63 séances)", "Trades gagnants")
                 ),
                 hide_index=True,
                 width="stretch",
@@ -5063,13 +5248,13 @@ def _render_next_session_signals(
 def _render_latest_session_results(view: OperationalTableView) -> None:
     with st.container(border=True):
         st.subheader("Dernière séance")
-        st.caption("Résultats des signaux évalués sur la séance précédente.")
+        st.caption("Résultats des signaux de la dernière séance évaluée.")
         if view.table.empty:
             st.info("Aucun signal évalué disponible.")
         else:
             st.dataframe(
                 _styled_surveillance_table(
-                    view.table, ("P(Up)", "Rendement", "P&L cumulé")
+                    view.table, ("P(Up)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
                 ),
                 hide_index=True,
                 width="stretch",
@@ -5568,7 +5753,7 @@ def _evaluated_predictions_panel(
 def _render_watching_surveillance_section(
     *, project_root: Path, models: ModelService,
     signal_service: SignalService, quality: pd.DataFrame,
-    reference_date: pd.Timestamp, calendar_name: str,
+    reference_time: pd.Timestamp, calendar_name: str,
 ) -> None:
     """Read only observation events; never expose a production trade action."""
 
@@ -5588,12 +5773,6 @@ def _render_watching_surveillance_section(
         watching_view = build_signals_view(
             signals, predictions, limit=max(50, len(signals))
         )
-        target_session = surveillance_target_session(
-            watching_view, predictions, reference_date, calendar_name
-        )
-        upcoming = next_session_signals_view(
-            watching_view, watching_quality, target_session
-        )
         freshness = MarketDataService().freshness(
             models.tracked_universe().symbols, st.session_state.lab_config
         )
@@ -5601,6 +5780,13 @@ def _render_watching_surveillance_section(
             predictions, signals, realized, freshness
         )
         latest = latest_session_results_view(evaluated, watching_quality)
+        target_session = surveillance_display_session(
+            watching_view, predictions, evaluated, reference_time, calendar_name
+        )
+        upcoming = next_session_signals_view(
+            watching_view, watching_quality, target_session
+        )
+        reference_date = reference_time.tz_localize(None).normalize()
         session_label = (
             "séance d’aujourd’hui" if target_session == reference_date
             else "prochaine séance"
@@ -5611,18 +5797,19 @@ def _render_watching_surveillance_section(
         else:
             st.dataframe(
                 _styled_surveillance_table(
-                    upcoming.table, ("P(Up)", "Rendement", "Trades gagnants")
+                    upcoming.table, ("P(Up)", "Rendement moyen historique (63 séances)", "Trades gagnants")
                 ),
                 hide_index=True, width="stretch",
                 column_config=_surveillance_column_config(upcoming.table.columns),
             )
         st.markdown("**Dernière séance**")
+        st.caption("Résultats des signaux de la dernière séance évaluée.")
         if latest.table.empty:
             st.caption("Aucun signal en observation évalué récemment.")
         else:
             st.dataframe(
                 _styled_surveillance_table(
-                    latest.table, ("P(Up)", "Rendement", "P&L cumulé")
+                    latest.table, ("P(Up)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
                 ),
                 hide_index=True, width="stretch",
                 column_config=_surveillance_column_config(latest.table.columns),
@@ -5667,13 +5854,14 @@ def _render_surveillance_page(*, polling: bool) -> None:
         signals,
         project_root=project_root,
     )
-    reference_date = pd.Timestamp.now(tz="America/Toronto").normalize().tz_localize(None)
+    reference_time = pd.Timestamp.now(tz="America/Toronto")
+    reference_date = reference_time.tz_localize(None).normalize()
     calendar_name = getattr(st.session_state, "lab_calendar", "XNYS")
-    next_session = surveillance_target_session(
-        signal_view, predictions, reference_date, calendar_name,
+    latest_results = latest_session_results_view(evaluated_view, quality)
+    next_session = surveillance_display_session(
+        signal_view, predictions, evaluated_view, reference_time, calendar_name,
     )
     next_signals = next_session_signals_view(signal_view, quality, next_session)
-    latest_results = latest_session_results_view(evaluated_view, quality)
     last_market = next(
         (run.get("finished_at") or run.get("created_at") for run in runs if run["job_type"] in {JobType.MARKET_UPDATE.value, JobType.OPERATIONAL_RUN.value} and run["status"] == "completed"),
         None,
@@ -5712,7 +5900,7 @@ def _render_surveillance_page(*, polling: bool) -> None:
     _render_latest_session_results(latest_results)
     _render_watching_surveillance_section(
         project_root=project_root, models=models, signal_service=signal_service,
-        quality=quality, reference_date=reference_date,
+        quality=quality, reference_time=reference_time,
         calendar_name=calendar_name,
     )
     _render_surveillance_model_history(project_root)
