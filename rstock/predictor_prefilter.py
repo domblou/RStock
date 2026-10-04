@@ -120,6 +120,8 @@ def select_predictors(
     metrics = qualification.copy()
     metrics["Predictor"] = metrics["Predictors"].map(_predictor)
     metrics["PrefilterScore"] = metrics.apply(_score, axis=1)
+    metrics["PrefilterScoreRank"] = pd.Series(pd.NA, index=metrics.index, dtype="Int64")
+    metrics["PrefilterRank"] = pd.Series(pd.NA, index=metrics.index, dtype="Int64")
     metrics["PrefilterStatus"] = "rejected_threshold"
     skip_reason = metrics.get(
         "PrefilterSkipReason", pd.Series(pd.NA, index=metrics.index, dtype="string")
@@ -142,6 +144,15 @@ def select_predictors(
         ).fillna("")
         evaluable = target_rows[target_skip_reason == ""]
         skipped_count = int((target_skip_reason != "").sum())
+        ranked = evaluable.sort_values(
+            [
+                "PrefilterScore", "PctWindowsAboveRandom", "ROCAUCMedian",
+                "ROCAUCWorst", "ROCAUCStd", "Predictor",
+            ],
+            ascending=[False, False, False, False, True, True],
+            kind="stable",
+        )
+        metrics.loc[ranked.index, "PrefilterScoreRank"] = range(1, len(ranked) + 1)
         if target in excluded:
             diagnostics.append({
                 "target": target,
@@ -166,14 +177,8 @@ def select_predictors(
                 "combinations_tested": 0,
             })
             continue
-        qualified = evaluable[evaluable["Eligible"]].sort_values(
-            [
-                "PrefilterScore", "PctWindowsAboveRandom", "ROCAUCMedian",
-                "ROCAUCWorst", "ROCAUCStd", "Predictor",
-            ],
-            ascending=[False, False, False, False, True, True],
-            kind="stable",
-        )
+        qualified = ranked[ranked["Eligible"]]
+        metrics.loc[qualified.index, "PrefilterRank"] = range(1, len(qualified) + 1)
         top = qualified.head(config.predictor_prefilter_top_n)
         metrics.loc[qualified.index, "PrefilterStatus"] = "rejected_top_n"
         metrics.loc[top.index, "PrefilterStatus"] = "retained"

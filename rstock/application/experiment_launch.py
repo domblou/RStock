@@ -11,6 +11,7 @@ from .domain import JobType
 
 _WALK_FORWARD_LAUNCH_JOB_TYPES = frozenset({
     JobType.WALK_FORWARD,
+    JobType.PREDICTOR_PREFILTER,
     JobType.END_TO_END,
 })
 

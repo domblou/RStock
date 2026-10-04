@@ -220,7 +220,7 @@ class RunService:
             time.sleep(0.05)
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
-        if spec.derivation is not None:
+        if spec.derivation is not None or spec.prefilter_derivation is not None:
             raise ValueError("Submit derived experiments through create_derived")
         with self._submission_lock():
             for status in self.repository.list_runs():
@@ -252,16 +252,26 @@ class RunService:
     ) -> SubmissionResult:
         """Atomically preflight shared artifacts and launch a new root run."""
         from .derived_experiments import build_derived_spec
+        from .prefilter_experiments import build_derived_prefilter_spec
         from .end_to_end import persist_or_validate_pipeline_manifest
 
         with self._submission_lock():
-            spec = build_derived_spec(
-                self.repository, source_run_id, fork_stage, changes,
-                forward_enabled=forward_enabled,
-            )
+            source = self.repository.load_spec(source_run_id)
+            if source.job_type is JobType.PREDICTOR_PREFILTER:
+                if fork_stage != "predictor_prefilter" or forward_enabled:
+                    raise ValueError("Invalid Predictor prefilter derivation point")
+                spec = build_derived_prefilter_spec(
+                    self.repository, source_run_id, changes,
+                )
+            else:
+                spec = build_derived_spec(
+                    self.repository, source_run_id, fork_stage, changes,
+                    forward_enabled=forward_enabled,
+                )
             run_id = self.repository.create(spec)
             try:
-                persist_or_validate_pipeline_manifest(self.repository, run_id, spec)
+                if spec.job_type is JobType.END_TO_END:
+                    persist_or_validate_pipeline_manifest(self.repository, run_id, spec)
                 pid = self.backend.launch(
                     self.repository.root, run_id, self.max_concurrent_heavy_jobs
                 )
@@ -635,6 +645,7 @@ class RunService:
             spec = self.repository.load_spec(run_id)
             resumable_types = {
                 JobType.WALK_FORWARD,
+                JobType.PREDICTOR_PREFILTER,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION,
                 JobType.END_TO_END,
                 JobType.FORWARD_SIMULATION,
@@ -647,14 +658,14 @@ class RunService:
                     "Seuls les walk-forward avec checkpoint et les calibrations "
                     "de paramètres de seuils sont reprenables."
                 )
-            if spec.job_type is JobType.WALK_FORWARD and not (
+            if spec.job_type in {JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER} and not (
                 self.repository.run_directory(run_id) / "checkpoints" / "manifest.json"
             ).exists():
                 raise ValueError(
                     "Aucun checkpoint de reprise n’est disponible pour ce run. "
                     "Relancez depuis le début."
                 )
-            if spec.job_type is JobType.WALK_FORWARD:
+            if spec.job_type in {JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER}:
                 CheckpointManager(
                     self.repository.run_directory(run_id),
                     run_id=run_id,
@@ -662,11 +673,14 @@ class RunService:
                     configuration_fingerprint=(
                         self.repository.configuration_fingerprint(run_id)
                     ),
-                    batch_sizes={
-                        "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
-                        "walk_forward": spec.config.walk_forward_batch_size,
-                        "final_holdout": spec.config.final_holdout_batch_size,
-                    },
+                    batch_sizes=(
+                        {"predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size}
+                        if spec.job_type is JobType.PREDICTOR_PREFILTER else {
+                            "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+                            "walk_forward": spec.config.walk_forward_batch_size,
+                            "final_holdout": spec.config.final_holdout_batch_size,
+                        }
+                    ),
                 )
             self.repository.prepare_resume(run_id)
             pid = self.backend.launch(
@@ -684,7 +698,7 @@ class RunService:
         if self.repository.storage(run_id)["state"] != "full":
             raise ValueError("Un run purgé ne peut pas être relancé.")
         spec = self.repository.load_spec(run_id)
-        if spec.derivation is not None:
+        if spec.derivation is not None or spec.prefilter_derivation is not None:
             raise ValueError(
                 "Use Create a derived experiment to start a new branch; "
                 "resume keeps the existing derived run ID"
@@ -1164,6 +1178,14 @@ class ProgressReporter:
                 return
             if lifecycle == "completed":
                 self.phase_completed(event.stage, details=dict(event.details))
+                return
+            subphase = event.details.get("resource_subphase")
+            subphase_event = event.details.get("resource_subphase_event")
+            if isinstance(subphase, str) and subphase_event in {"started", "completed"}:
+                self._resource_event(
+                    "subphase_started" if subphase_event == "started" else "subphase_completed",
+                    event.stage, subphase,
+                )
                 return
             phase_start = self._phase_started if self._current_phase is not None else self.started
             elapsed = max(0.0, time.monotonic() - phase_start)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from itertools import combinations
 from math import comb
 
@@ -114,11 +115,71 @@ def generate_target_symbol_sets(
 
 
 def symbol_set_id(row: pd.Series, symbol_columns: list[str] | None = None) -> str:
-    """Build an unambiguous JSON identifier that supports punctuated tickers."""
+    """Build the ordered execution identifier used by existing artifacts."""
 
     columns = symbol_columns or [name for name in row.index if name.startswith("V")]
     values = [str(row[name]) for name in columns if not pd.isna(row[name])]
     return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def canonical_combination_id(
+    target: str, direction: str, predictors: Sequence[str]
+) -> str:
+    """Identify a scientific combination without changing its feature order.
+
+    This key is for cross-run matching. ``symbol_set_id`` remains the ordered
+    execution key for models, checkpoints, thresholds and historical artifacts.
+    """
+
+    if target is None or direction is None or any(pd.isna(value) for value in predictors):
+        raise ValueError("A combination needs complete target, direction and predictors")
+    target = str(target)
+    direction = str(direction)
+    ordered = tuple(str(value) for value in predictors)
+    if not target or not direction or not ordered:
+        raise ValueError("A combination needs a target, direction and predictors")
+    if any(not value for value in ordered) or target in ordered or len(set(ordered)) != len(ordered):
+        raise ValueError("A combination needs distinct, non-empty predictor symbols")
+    return json.dumps(
+        [target, direction, *sorted(ordered)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def canonical_combination_id_from_set(
+    set_id: object, direction: object, *, target: object = None,
+    predictors: object = None,
+) -> str | None:
+    """Resolve an ordered historical Set at read time, without rewriting it.
+
+    Explicit target/predictors are accepted only when they are structured. An
+    incomplete or ambiguous legacy identity has no canonical key.
+    """
+
+    symbols: object = None
+    if isinstance(set_id, str):
+        try:
+            symbols = json.loads(set_id)
+        except json.JSONDecodeError:
+            if "<-" in set_id:
+                left, right = set_id.split("<-", 1)
+                symbols = [left.strip(), *(part.strip() for part in right.split("+"))]
+    if isinstance(symbols, list) and len(symbols) >= 2:
+        if target is not None and str(target) != str(symbols[0]):
+            return None
+        target, predictors = symbols[0], symbols[1:]
+    elif isinstance(predictors, str):
+        try:
+            predictors = json.loads(predictors)
+        except json.JSONDecodeError:
+            predictors = [part.strip() for part in predictors.split("+")]
+    if not isinstance(predictors, (list, tuple)):
+        return None
+    try:
+        return canonical_combination_id(str(target or ""), str(direction or ""), predictors)
+    except ValueError:
+        return None
 
 
 def symbols_from_set(row: pd.Series) -> tuple[str, list[str]]:

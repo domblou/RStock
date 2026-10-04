@@ -19,8 +19,12 @@ from rstock.calibration_sampling import policy_name
 from rstock.calendars import offset_market_session
 from rstock.evaluation import classification_metrics
 from rstock.checkpoints import CheckpointIncompatibleError, CheckpointManager
-from rstock.combinations import generate_symbol_sets, generate_target_symbol_sets, symbol_set_id
+from rstock.combinations import (
+    canonical_combination_id_from_set, generate_symbol_sets,
+    generate_target_symbol_sets, symbol_set_id,
+)
 from rstock.combination_planning import CombinationPlan, build_combination_plan
+from rstock.config import RStockConfig
 from rstock.features import prepare_dataset, require_complete_last_session
 from rstock.market_cache import market_data_service
 from rstock.modeling import (
@@ -153,6 +157,18 @@ def _prepared_inputs(
     phase_started_at = perf_counter()
     _phase(progress_callback, "data_preparation", "started")
     if spec.prepared_snapshot_required:
+        if spec.job_type is JobType.PREDICTOR_PREFILTER:
+            from .prefilter_experiments import validate_prefilter_source
+
+            prepared, predictor_symbols, target_symbols, calendars = (
+                validate_prefilter_source(
+                    RunRepository(spec.config.project_root / "runs"), spec
+                )
+            )
+            _phase(progress_callback, "data_preparation", "completed",
+                   symbols=len(predictor_symbols), rows=len(prepared),
+                   elapsed_seconds=perf_counter() - phase_started_at)
+            return prepared, predictor_symbols, target_symbols, calendars
         from .derived_snapshot import load_source_prepared_snapshot
 
         if spec.forced_period_lock is not None:
@@ -272,8 +288,13 @@ def _prepared_inputs(
         spec.config.lag_depth,
         spec.config.intraday_down_threshold,
     )
-    if spec.job_type is JobType.WALK_FORWARD:
+    if spec.job_type in {JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER}:
         require_complete_last_session(prepared, downloaded.symbols)
+    if spec.job_type is JobType.PREDICTOR_PREFILTER and (
+        prepared.empty or prepared.index.max().date().isoformat()
+        != spec.historical_data_cutoff
+    ):
+        raise ValueError("Predictor prefilter prepared data misses the requested cutoff")
     if effective_end_date is None and not prepared.empty:
         effective_end_date = pd.Timestamp(prepared.index.max()).normalize()
     if effective_end_date is not None:
@@ -400,6 +421,19 @@ def _require_exploitable_prefilter(univariate: object) -> None:
         )
 
 
+def _prefilter_qualification_config(config: RStockConfig) -> RStockConfig:
+    """Apply the prefilter thresholds to its existing univariate evaluator."""
+    return replace(
+        config,
+        qualification_min_median_auc=config.predictor_prefilter_min_median_auc,
+        qualification_min_pct_windows_above_random=(
+            config.predictor_prefilter_min_pct_above_random
+        ),
+        qualification_min_worst_window_auc=config.predictor_prefilter_min_worst_auc,
+        qualification_max_auc_std=config.predictor_prefilter_max_auc_std,
+    )
+
+
 def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager) -> None:
     """Reject only legacy prefilter work; full WF checkpoints remain compatible."""
 
@@ -519,17 +553,7 @@ def _walk_forward(
             target_symbols=target_symbols,
             max_sets=spec.config.max_generated_sets,
         )
-        prefilter_config = replace(
-            spec.config,
-            qualification_min_median_auc=spec.config.predictor_prefilter_min_median_auc,
-            qualification_min_pct_windows_above_random=(
-                spec.config.predictor_prefilter_min_pct_above_random
-            ),
-            qualification_min_worst_window_auc=(
-                spec.config.predictor_prefilter_min_worst_auc
-            ),
-            qualification_max_auc_std=spec.config.predictor_prefilter_max_auc_std,
-        )
+        prefilter_config = _prefilter_qualification_config(spec.config)
         _phase(
             progress_callback,
             "predictor_prefilter_generation",
@@ -645,6 +669,124 @@ def _walk_forward(
     return summary
 
 
+def _predictor_prefilter(
+    spec: ExperimentSpec,
+    output: Path,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    """Run only the existing univariate prefilter and persist its selection."""
+    repository = RunRepository(output.parent.parent)
+    run_id = output.parent.name
+    if spec.prefilter_derivation is not None:
+        # Check the dependency even if this run already has its own checkpoint.
+        from .prefilter_experiments import validate_prefilter_source
+
+        validate_prefilter_source(repository, spec)
+    checkpoint = CheckpointManager(
+        output.parent, run_id=run_id, job_type=spec.job_type.value,
+        configuration_fingerprint=repository.configuration_fingerprint(
+            run_id, fallback=spec.fingerprint,
+        ),
+        batch_sizes={
+            "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+        },
+    )
+    _ensure_prefilter_checkpoint_protocol(checkpoint)
+    if checkpoint.artifact_exists("prepared_snapshot"):
+        prepared, preparation = checkpoint.load_snapshot()
+        predictor_symbols = list(preparation["predictor_symbols"])
+        target_symbols = list(preparation["target_symbols"])
+        calendars = dict(preparation["calendars"])
+    else:
+        checkpoint.phase_started("data_preparation")
+        prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
+            spec, progress_callback, cancellation_check,
+        )
+        checkpoint.commit_snapshot(prepared, {
+            "predictor_symbols": predictor_symbols,
+            "target_symbols": target_symbols,
+            "calendars": calendars,
+            "effective_end_date": prepared.attrs.get("effective_end_date"),
+        })
+        checkpoint.phase_completed("data_preparation")
+    as_of = prepared.index.max().date().isoformat()
+    if as_of != spec.historical_data_cutoff:
+        raise ValueError("Predictor prefilter snapshot differs from the frozen cutoff")
+    if checkpoint.artifact_exists("prefilter_univariate_sets"):
+        univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
+    else:
+        checkpoint.phase_started("predictor_prefilter_generation")
+        _phase(progress_callback, "predictor_prefilter_generation", "started")
+        univariate_sets = generate_symbol_sets(
+            predictor_symbols, 1, target_symbols=target_symbols,
+            max_sets=spec.config.max_generated_sets,
+        )
+        checkpoint.commit_artifact("prefilter_univariate_sets", univariate_sets)
+        checkpoint.phase_completed("predictor_prefilter_generation")
+        _phase(progress_callback, "predictor_prefilter_generation", "completed",
+               combinations=len(univariate_sets))
+    univariate = evaluate_prefilter_walk_forward(
+        prepared, univariate_sets, _prefilter_qualification_config(spec.config),
+        market_calendars=calendars, progress_callback=progress_callback,
+        cancellation_check=cancellation_check, checkpoint_manager=checkpoint,
+    )
+    checkpoint.commit_artifact("prefilter_qualification", univariate.qualification)
+    checkpoint.phase_completed("predictor_prefilter_walk_forward")
+    _require_exploitable_prefilter(univariate)
+    if checkpoint.artifact_exists("prefilter_selection"):
+        prefilter = checkpoint.load_artifact("prefilter_selection")
+    else:
+        checkpoint.phase_started("predictor_prefilter_selection")
+        _phase(progress_callback, "predictor_prefilter_selection", "started")
+        prefilter = select_predictors(
+            univariate.qualification,
+            prepared.iloc[:-spec.config.final_holdout_size],
+            targets=target_symbols, candidate_symbols=predictor_symbols,
+            config=spec.config,
+            excluded_targets=getattr(univariate, "excluded_targets", {}),
+        )
+        checkpoint.commit_artifact("prefilter_selection", prefilter)
+        checkpoint.phase_completed("predictor_prefilter_selection")
+        _phase(progress_callback, "predictor_prefilter_selection", "completed",
+               retained=sum(len(items) for items in prefilter.predictors_by_target.values()))
+    output.mkdir(parents=True, exist_ok=True)
+    prefilter.metrics.to_csv(output / "predictor_prefilter.csv", index=False)
+    univariate.qualification.to_csv(output / "prefilter_qualification.csv", index=False)
+    traceability = _persist_prepared_traceability({}, prepared, spec)
+    manifest = {
+        "schema_version": 1,
+        "prepared_dataset_as_of": as_of,
+        "prepared_dataset_sha256": traceability["prepared_dataset_sha256"],
+        "snapshot_source": (None if spec.prefilter_derivation is None
+                            else spec.prefilter_derivation["source_run_id"]),
+        "source_snapshot_sha256": (None if spec.prefilter_derivation is None
+                                   else spec.prefilter_derivation["prepared_snapshot_sha256"]),
+        "score_formula": PREFILTER_SCORE_FORMULA,
+        "predictors_by_target": {
+            target: list(items) for target, items in prefilter.predictors_by_target.items()
+        },
+        "targets": prefilter.diagnostics,
+        "telemetry": univariate.telemetry,
+    }
+    (output / "predictor_prefilter.json").write_text(
+        json.dumps(_json_value(manifest), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "job_type": spec.job_type.value,
+        "prepared_dataset_as_of": as_of,
+        "traceability": traceability,
+        "predictor_prefilter": _json_value(prefilter.diagnostics),
+        "retained_predictors": sum(len(items) for items in prefilter.predictors_by_target.values()),
+        "univariate_pairs": len(univariate.qualification),
+        "result_files": sorted(path.name for path in output.iterdir()),
+        "checkpoint_manifest": "checkpoints/manifest.json",
+        **({"prefilter_derivation": spec.prefilter_derivation}
+           if spec.prefilter_derivation is not None else {}),
+    }
+
+
 def _end_to_end_walk_forward_holdout_policy(spec: ExperimentSpec) -> str | None:
     if not spec.source_end_to_end_run or spec.evaluate_final_holdout:
         return None
@@ -757,17 +899,7 @@ def _resumable_walk_forward(
                 combinations=len(univariate_sets),
                 elapsed_seconds=perf_counter() - phase_started_at,
             )
-        prefilter_config = replace(
-            spec.config,
-            qualification_min_median_auc=spec.config.predictor_prefilter_min_median_auc,
-            qualification_min_pct_windows_above_random=(
-                spec.config.predictor_prefilter_min_pct_above_random
-            ),
-            qualification_min_worst_window_auc=(
-                spec.config.predictor_prefilter_min_worst_auc
-            ),
-            qualification_max_auc_std=spec.config.predictor_prefilter_max_auc_std,
-        )
+        prefilter_config = _prefilter_qualification_config(spec.config)
         univariate = evaluate_prefilter_walk_forward(
             prepared,
             univariate_sets,
@@ -1259,6 +1391,7 @@ def _promotion_qualification(
             selection = thresholds.get(direction, {})
             record = {
                 "Combinaison": set_name,
+                "canonical_combination_id": canonical_combination_id_from_set(set_name, direction),
                 "Cible": str(relevant.iloc[0].get("Observation", "")) if len(relevant) == 1 else "",
                 "Direction": direction,
                 "Seuil calibré": selection.get("threshold"),
@@ -1335,6 +1468,9 @@ def _promotion_qualification(
             if choice.get("status") != "selected" or choice.get("threshold") is None:
                 reasons.append(f"Seuil {direction} requis absent")
         values = row.to_dict()
+        values["canonical_combination_id"] = canonical_combination_id_from_set(
+            set_name, str(values.get("Direction", "Up"))
+        )
         values.update(candidate=not reasons, reasons=reasons,
                       **{"Statut promotion": "Candidat" if not reasons else "Non candidat",
                          "Raison": " ; ".join(reasons) if reasons else "Tous les critères passent"})
@@ -2898,6 +3034,7 @@ class WorkflowRegistry:
         return cls(
             {
                 JobType.WALK_FORWARD: _walk_forward,
+                JobType.PREDICTOR_PREFILTER: _predictor_prefilter,
                 JobType.WALK_FORWARD_BATCH: _walk_forward_batch,
                 JobType.XGBOOST_CALIBRATION: _xgboost_calibration,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION: (

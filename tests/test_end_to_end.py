@@ -1177,6 +1177,9 @@ def test_split_pipeline_creates_three_distinct_runs_with_equivalent_decisions(tm
     )
     qualification = repository.read_json(qualification_id, "results/qualification.json")
     assert qualification["candidate_sets"] == legacy_candidates == ["AAA<-BBB"]
+    assert qualification["decisions"][0]["canonical_combination_id"] == (
+        '["AAA","Up","BBB"]'
+    )
     assert qualification["policy_parameters"]["promotion_min_holdout_auc"] == 0.6
     assert all(isinstance(row["reasons"], list) for row in qualification["decisions"])
     assert {row["Combinaison"]: row["Statut promotion"] for row in qualification["decisions"]} == {
@@ -1196,6 +1199,9 @@ def test_split_pipeline_creates_three_distinct_runs_with_equivalent_decisions(tm
     assert len(models) == 1
     assert models[0].source_threshold_calibration_run == threshold_id
     assert models[0].training_metadata["source_holdout_evaluation_run"] == holdout_id
+    assert models[0].training_metadata["canonical_combination_ids"]["Up"] == (
+        '["AAA","Up","BBB"]'
+    )
     stricter = replace(
         repository.load_spec(qualification_id),
         config=replace(

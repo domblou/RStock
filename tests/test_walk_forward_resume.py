@@ -1,4 +1,8 @@
 from dataclasses import replace
+from concurrent.futures import Future
+from concurrent.futures import ProcessPoolExecutor
+from hashlib import sha256
+import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
@@ -74,6 +78,131 @@ def _forbid_walk_forward(monkeypatch):
         raise AssertionError("completed walk-forward batch was recalculated")
 
     monkeypatch.setattr(streaming, "_walk_forward_combination", forbidden)
+
+
+class _InlineRiskExecutor:
+    """Sequential reference for the unchanged local-risk calculation."""
+
+    def __init__(self, **_kwargs):
+        assert _kwargs["max_workers"] == 4
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def shutdown(self, **_kwargs):
+        pass
+
+    def submit(self, task, *args):
+        future = Future()
+        try:
+            future.set_result(task(*args))
+        except Exception as error:
+            future.set_exception(error)
+        return future
+
+
+def test_parallel_local_risk_matches_sequential_artifacts_and_order(tmp_path, monkeypatch):
+    sequential = _fixture(tmp_path / "sequential")
+    with monkeypatch.context() as patch:
+        patch.setattr(streaming, "ProcessPoolExecutor", _InlineRiskExecutor)
+        _run(sequential)
+
+    parallel = _fixture(tmp_path / "parallel")
+    events = []
+    streaming.run_streamed_walk_forward(*parallel, progress_callback=events.append)
+
+    assert parallel[3].completed_batch_ids("walk_forward") == (0, 1)
+    for name in (
+        "aggregate_by_window.csv", "aggregate_by_set.csv", "aggregate_global.csv",
+        "risk_by_window.csv", "risk_by_set.csv", "risk_global.csv",
+    ):
+        expected = (sequential[4] / name).read_bytes()
+        actual = (parallel[4] / name).read_bytes()
+        assert sha256(actual).hexdigest() == sha256(expected).hexdigest()
+        assert actual == expected
+    for name in ("risk_by_window", "risk_by_set", "risk_global"):
+        pd.testing.assert_frame_equal(
+            parallel[3].load_artifact("aggregation")[name],
+            sequential[3].load_artifact("aggregation")[name],
+            check_exact=True,
+        )
+    for name in ("risk_by_window", "risk_by_set"):
+        rows = parallel[3].load_artifact("aggregation")[name]
+        assert rows["Set"].tolist() == sequential[3].load_artifact("aggregation")[name]["Set"].tolist()
+    by_set = parallel[3].load_artifact("aggregation")["risk_by_set"]
+    assert len(by_set) == len(parallel[1])
+    assert by_set["Set"].is_unique
+    completed = [event for event in events if event.stage == "aggregation"
+                 and event.substage and event.substage.startswith("batch ")]
+    assert [event.details["batch_id"] for event in completed] == [0, 1]
+    assert sum(len(parallel[3].load_batch("walk_forward", i)["windows"])
+               for i in (0, 1)) == len(parallel[3].load_artifact("aggregation")["risk_by_window"])
+
+
+def test_local_risk_assembles_batches_in_input_order_when_second_finishes_first(
+    tmp_path, monkeypatch,
+):
+    class ReverseCompletionExecutor(_InlineRiskExecutor):
+        def __init__(self, **kwargs):
+            self.pending = []
+
+        def submit(self, task, *args):
+            future = Future()
+            self.pending.append((future, task(*args)))
+            if len(self.pending) == 2:
+                for item, result in reversed(self.pending):
+                    item.set_result(result)
+            return future
+
+    values = _fixture(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(streaming, "ProcessPoolExecutor", ReverseCompletionExecutor)
+        _run(values)
+    expected = [
+        values[3].load_batch("walk_forward", batch_id)["predictions"]["Set"].iloc[0]
+        for batch_id in (0, 1)
+    ]
+    actual = values[3].load_artifact("aggregation")["risk_by_set"]["Set"].tolist()
+    assert actual == expected
+
+
+def test_local_risk_real_process_propagates_calculation_error():
+    with ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as executor:
+        future = executor.submit(streaming._batch_risk_task, pd.DataFrame(), DEFAULT_CONFIG)
+        with pytest.raises(KeyError):
+            future.result(timeout=30)
+
+
+@pytest.mark.parametrize("error_type, message", [
+    (RuntimeError, "risk worker failed"),
+    (CancellationRequested, "risk aggregation interrupted"),
+])
+def test_local_risk_worker_error_propagates_and_resume_rebuilds(
+    monkeypatch, tmp_path, error_type, message,
+):
+    values = _fixture(tmp_path)
+
+    class FailedRiskExecutor(_InlineRiskExecutor):
+        def submit(self, task, *args):
+            future = Future()
+            future.set_exception(error_type(message))
+            return future
+
+    with monkeypatch.context() as patch:
+        patch.setattr(streaming, "ProcessPoolExecutor", FailedRiskExecutor)
+        with pytest.raises(error_type, match=message):
+            _run(values)
+    assert not values[3].phase_is_completed("aggregation")
+    assert not values[3].artifact_exists("aggregation")
+    assert values[3].completed_batch_ids("walk_forward") == (0, 1)
+
+    _forbid_walk_forward(monkeypatch)
+    _run(values)
+    assert values[3].phase_is_completed("aggregation")
+    assert len(values[3].load_artifact("aggregation")["risk_by_set"]) == 2
 
 
 def test_skipped_final_holdout_persists_absence_without_composite_score(tmp_path, monkeypatch):

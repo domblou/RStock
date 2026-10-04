@@ -21,6 +21,7 @@ class RunTabDefinition:
 
 _SCIENTIFIC_RESULT_TYPES = frozenset(
     {
+        JobType.PREDICTOR_PREFILTER,
         JobType.XGBOOST_CALIBRATION,
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
         JobType.THRESHOLD_CALIBRATION,
@@ -234,7 +235,7 @@ def tabs_for_job(
     keys = _ORDER.get(job_type, ("results", "configuration", "files", "logs"))
     resource_types = {
         JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION,
-        JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH,
+        JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER, JobType.WALK_FORWARD_BATCH,
         JobType.XGBOOST_CALIBRATION, JobType.THRESHOLD_PARAMETER_CALIBRATION,
         JobType.THRESHOLD_CALIBRATION, JobType.HOLDOUT_EVALUATION,
         JobType.FIXED_CANDIDATE_EVALUATION, JobType.FORWARD_SIMULATION,

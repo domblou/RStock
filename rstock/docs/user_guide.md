@@ -1046,6 +1046,23 @@ La synthèse permet de repérer une étape échouée ou en attente; une reprise
 conserve les identifiants réservés, réutilise les checkpoints disponibles et ne
 recalcule pas les étapes déjà terminées.
 
+### Préfiltre prédicteurs autonome
+
+Dans **Expériences**, choisir **Préfiltre prédicteurs**, fixer un cutoff historique
+et saisir le Top N, les quatre seuils AUC et le seuil de corrélation. Le job
+prépare un snapshot figé, évalue les prédicteurs un par un avec le préfiltre du
+Walk-forward, puis enregistre le classement et la sélection dans
+`results/predictor_prefilter.csv`. Il ne génère pas les combinaisons complètes
+et ne lance pas le Walk-forward complet.
+
+Dans l’**Historique** d’un préfiltre terminé, **Créer une expérience dérivée**
+permet de modifier ces six paramètres. Le dérivé vérifie et réutilise le
+snapshot préparé du parent, son cutoff et son digest. Si le snapshot manque ou
+a changé, le dérivé échoue; il ne télécharge pas de nouvelles données marché.
+Le parent et le SHA du snapshot source sont conservés dans la provenance du
+dérivé. Les deux classements CSV peuvent servir à comparer les rangs et les
+entrées ou sorties du Top N.
+
 Depuis le résumé d’un End-to-end terminé, **Créer une expérience dérivée** permet
 de modifier les paramètres d’une étape scientifique et de recalculer cette étape
 et ses suivantes. Si le run source possède une validation temporelle, celle-ci

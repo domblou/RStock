@@ -20,6 +20,10 @@ _COMMON_PURGE_DIRECTORIES = ("checkpoints", "_working")
 
 # Only these produced artifacts are removable. Unknown files in results/ stay.
 _PURGE_FILES: dict[JobType, tuple[str, ...]] = {
+    JobType.PREDICTOR_PREFILTER: (
+        "results/prefilter_qualification.csv",
+        "results/predictor_prefilter.csv",
+    ),
     JobType.WALK_FORWARD: (
         "results/predictions.csv",
         "results/windows.csv",

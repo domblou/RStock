@@ -31,6 +31,18 @@ def test_temporally_validated_source_offers_scientific_derivation_with_clear_sta
     assert "La validation temporelle du run source n’a été ni héritée ni " in temporal_tab
 
 
+def test_derived_ui_offers_frozen_walk_forward_prefilter_first():
+    from rstock.application.derivation import FORK_STAGE_KEYS, SPLIT_FORK_STAGE_KEYS
+
+    assert FORK_STAGE_KEYS[0] == SPLIT_FORK_STAGE_KEYS[0] == "walk_forward"
+    creation = APP.read_text(encoding="utf-8").split(
+        "def _render_derived_creation", 1
+    )[1].split("def _render_pipeline_summary", 1)[0]
+    assert '"walk_forward": "Walk-forward / préfiltre"' in creation
+    assert '"Point de dérivation", fork_keys' in creation
+    assert "Snapshot préparé et cutoff hérités et figés" in creation
+
+
 def test_laboratory_uses_native_top_navigation_without_sidebar_radio():
     source = APP.read_text(encoding="utf-8")
 
@@ -1153,24 +1165,19 @@ def test_history_run_grid_tooltips_cover_actual_columns_and_keep_formats():
         "_grid_column_help_config(sensitivity_summary.columns, _THRESHOLD_SUMMARY_COLUMN_HELP",
         "_grid_column_help_config(sensitivity.columns, {",
         "_grid_column_help_config(choice_diagnostics.columns, _THRESHOLD_CHOICE_COLUMN_HELP",
-        "_grid_column_help_config(pd.Index(columns), helps)",
     ):
         assert expression in source
     assert "sensitivity.columns[-1]:" in source
 
-    comparison = next(
-        node for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef) and node.name == "_render_end_to_end_comparison"
+    comparison = source.split("def _render_end_to_end_comparison", 1)[1].split(
+        "def _render_run_comparison_view", 1
+    )[0]
+    sections = ("Comparabilité", "Funnel scientifique", "Analyse des rejets de qualification",
+                "Holdout E2E — population évaluable", "Candidats finaux")
+    assert [comparison.index(f'st.subheader("{section}")') for section in sections] == sorted(
+        comparison.index(f'st.subheader("{section}")') for section in sections
     )
-    column_keys = help_keys = None
-    for node in ast.walk(comparison):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id == "columns":
-                column_keys = tuple(ast.literal_eval(key) for key in node.value.keys)
-            elif node.targets[0].id == "helps":
-                help_keys = tuple(ast.literal_eval(key) for key in node.value.keys)
-    assert column_keys is not None and len(column_keys) == 23
-    assert set(column_keys) == set(help_keys)
+    assert "Statut Forward" not in comparison
 
 
 def test_surveillance_compact_kpi_labels_and_daily_update_alignment():

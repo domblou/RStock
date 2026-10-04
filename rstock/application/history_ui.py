@@ -9,9 +9,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 import pandas as pd
 
+from rstock.combinations import (
+    canonical_combination_id, canonical_combination_id_from_set,
+)
+
 
 EXPERIMENT_JOB_TYPES = frozenset({
-    "walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
+    "walk_forward", "predictor_prefilter", "xgboost_calibration", "threshold_parameter_calibration",
     "threshold_calibration", "holdout_evaluation", "promotion_qualification", "end_to_end",
     "forward_simulation",
     "fixed_candidate_evaluation",
@@ -24,6 +28,7 @@ PRODUCTION_JOB_TYPES = frozenset({
 })
 JOB_LABELS = {
     "end_to_end": "End-to-end",
+    "predictor_prefilter": "Préfiltre prédicteurs",
     "forward_simulation": "Forward Simulation",
     "walk_forward": "Walk-forward",
     "xgboost_calibration": "Calibration XGBoost",
@@ -478,6 +483,11 @@ def _lineage_text(
         source_id = derivation.get("source_end_to_end_run_id")
         if source_id:
             return f"Dérivé de {source_id}"
+    prefilter_derivation = configuration.get("prefilter_derivation")
+    if job_type == "predictor_prefilter" and isinstance(prefilter_derivation, Mapping):
+        source_id = prefilter_derivation.get("source_run_id")
+        if source_id:
+            return f"Dérivé de {source_id}"
     parent = metadata.get("parent_run_id")
     reference = metadata.get("reference_run_id")
     root = metadata.get("root_run_id")
@@ -626,16 +636,18 @@ def already_promoted(
 ) -> object | None:
     """Find an existing candidate without changing registry promotion semantics."""
 
-    try:
-        target, predictors = set_name.split("<-", maxsplit=1)
-        predictor_values = tuple(part.strip() for part in predictors.split("+"))
-    except ValueError:
+    scientific_id = canonical_combination_id_from_set(set_name, "Up")
+    if scientific_id is None:
         return None
     for model in models:
-        if (
-            getattr(model, "source_walk_forward_run", None) == walk_forward_run
-            and getattr(model, "target", None) == target.strip()
-            and tuple(getattr(model, "predictors", ())) == predictor_values
-        ):
+        if getattr(model, "source_walk_forward_run", None) != walk_forward_run:
+            continue
+        try:
+            model_id = canonical_combination_id(
+                getattr(model, "target", ""), "Up", getattr(model, "predictors", ())
+            )
+        except ValueError:
+            continue
+        if model_id == scientific_id:
             return model
     return None

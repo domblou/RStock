@@ -7,6 +7,7 @@ import pytest
 
 from rstock.application import resource_telemetry, streamlit_app
 from rstock.application.runner import ProgressReporter
+from rstock.progress import ProgressEvent
 from rstock.telemetry import ProcessSample, process_rss_bytes
 
 
@@ -90,6 +91,68 @@ def test_aggregation_subphases_persist_in_resource_summary(tmp_path):
         {"name": "load_batch", "duration_seconds": 1.2}
     ]
     assert phase["details"]["prediction_rows"] == 100
+
+
+def test_local_risk_subphase_samples_include_process_tree(tmp_path, monkeypatch):
+    counters = {1: 0.0, 2: 0.0}
+
+    def sample(pid):
+        counters[pid] += 0.1
+        return ProcessSample(pid, pid, counters[pid], 100 * pid, None)
+
+    monkeypatch.setattr(resource_telemetry.os, "getpid", lambda: 1)
+    monkeypatch.setattr(resource_telemetry, "descendant_pids", lambda _pid: {2})
+    monkeypatch.setattr(resource_telemetry, "process_sample", sample)
+    run = tmp_path / "run"
+    recorder = resource_telemetry.ResourceRecorder(run, "run", {})
+    recorder.phase_started("aggregation")
+    recorder.subphase_started("aggregation", "aggregate_risk")
+    time.sleep(0.02)
+    recorder.subphase_completed("aggregation", "aggregate_risk")
+    recorder.phase_completed("aggregation", {
+        "subphases": [{"name": "aggregate_risk", "duration_seconds": 1.0}],
+    })
+    recorder.close("completed")
+    document = json.loads((run / "telemetry/resource_summary.json").read_text(encoding="utf-8"))
+    row = document["attempts"][0]["phase_rows"][0]["details"]["subphases"][0]
+    assert row["cpu_mean_sampled_cores"] is not None
+    assert row["cpu_max_sampled_cores"] is not None
+    assert row["rss_peak_sampled_bytes"] is not None
+
+
+def test_progress_reporter_routes_local_risk_sampling_events():
+    class Repository:
+        def write_json(self, *_args):
+            pass
+
+        def append_log(self, *_args):
+            pass
+
+    class Resources:
+        def __init__(self):
+            self.calls = []
+
+        def phase_started(self, *_args):
+            pass
+
+        def subphase_started(self, *args):
+            self.calls.append(("started", *args))
+
+        def subphase_completed(self, *args):
+            self.calls.append(("completed", *args))
+
+    reporter = ProgressReporter(Repository(), "run")
+    reporter.resources = Resources()
+    reporter(ProgressEvent("aggregation", details={"phase_event": "started"}))
+    for event in ("started", "completed"):
+        reporter(ProgressEvent("aggregation", details={
+            "resource_subphase": "aggregate_risk",
+            "resource_subphase_event": event,
+        }))
+    assert reporter.resources.calls == [
+        ("started", "aggregation", "aggregate_risk"),
+        ("completed", "aggregation", "aggregate_risk"),
+    ]
 
 
 def test_phase_duration_uses_its_own_start_after_another_phase_starts(tmp_path, monkeypatch):
@@ -196,6 +259,12 @@ def test_resource_view_shows_aggregation_subphases(tmp_path, monkeypatch):
                     "cpu_seconds_parent": 1,
                     "rss_peak_observed_parent_bytes": 2**30,
                     "batches": 2, "estimated_read_bytes": 2**20,
+                }, {
+                    "name": "aggregate_risk", "duration_seconds": 5,
+                    "cpu_seconds_parent": 0.1,
+                    "cpu_mean_sampled_cores": 3.0,
+                    "cpu_max_sampled_cores": 4.0,
+                    "rss_peak_sampled_bytes": 2**30,
                 }]},
             }],
         }],
@@ -216,6 +285,8 @@ def test_resource_view_shows_aggregation_subphases(tmp_path, monkeypatch):
     streamlit_app._render_run_resources("run")
     assert headings == ["Détail de la phase aggregation"]
     assert len(frames) == 2
+    assert frames[1].iloc[1]["CPU moyen total échantillonné"].startswith("3.00")
+    assert frames[1].iloc[1]["CPU max échantillonné"].startswith("4.00")
     assert frames[1].iloc[0]["Durée (s)"] == 2
     assert frames[1].iloc[0]["CPU moyen parent"] == "0.50 cœur"
     assert frames[1].iloc[0]["Débit"] == "1.0 lots/s"

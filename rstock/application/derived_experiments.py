@@ -149,6 +149,17 @@ def build_derived_spec(
             )
     if not overrides:
         raise ValueError("At least one parameter must change")
+    if fork_stage == "walk_forward":
+        top_n = config_changes.get("predictor_prefilter_top_n",
+                                   source_spec.config.predictor_prefilter_top_n)
+        enabled = config_changes.get("predictor_prefilter_enabled",
+                                     source_spec.config.predictor_prefilter_enabled)
+        if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
+            raise ValueError("predictor_prefilter_top_n must be a positive integer")
+        if not isinstance(enabled, bool):
+            raise ValueError("predictor_prefilter_enabled must be boolean")
+        if not enabled:
+            raise ValueError("Walk-forward / préfiltre requires an enabled prefilter")
     source_path = repository.run_directory(source_end_to_end_run_id) / PIPELINE_MANIFEST
     derivation = Derivation(
         schema_version=schema_version,
@@ -162,12 +173,17 @@ def build_derived_spec(
             repository.run_directory(walk_forward_id)
             / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
         ).read_bytes()).hexdigest(),
+        prepared_snapshot_source_run_id=walk_forward_id,
         source_temporal_validation_enabled=source_spec.temporal_validation_enabled,
     )
     derived = replace(
         source_spec,
         config=replace(source_spec.config, **config_changes),
         historical_data_cutoff=anchor,
+        source_prepared_dataset_sha256=(
+            expected_digest if fork_stage == "walk_forward"
+            else source_spec.source_prepared_dataset_sha256
+        ),
         derivation=derivation,
         temporal_validation_enabled=False,
         auto_promote_candidates=False,

@@ -228,7 +228,12 @@ def _build_derived_pipeline_manifest(
         ):
             raise ValueError(f"Inherited configuration fingerprint mismatch: {stage_key}")
     if derivation.prepared_snapshot_sha256 is not None:
-        walk_forward_id = derivation.inherited_stages["walk_forward"].source_run_id
+        walk_forward_id = (
+            derivation.prepared_snapshot_source_run_id
+            or derivation.inherited_stages["walk_forward"].source_run_id
+        )
+        if walk_forward_id != str(_stage(source_manifest, "walk_forward")["child_run_id"]):
+            raise ValueError("Derived prepared snapshot source differs from parent")
         snapshot_path = (
             repository.run_directory(walk_forward_id)
             / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
@@ -237,6 +242,10 @@ def _build_derived_pipeline_manifest(
             derivation.prepared_snapshot_sha256
         ):
             raise ValueError("Inherited prepared snapshot has changed")
+        if derivation.fork_stage == "walk_forward":
+            _, source_digest = _walk_forward_traceability(repository, walk_forward_id)
+            if source_digest != spec.source_prepared_dataset_sha256:
+                raise ValueError("Source Walk-forward dataset digest has changed")
     recomputed = {
         stage for stage, mode in modes.items()
         if mode == "recomputed" and stage != "promotion"
@@ -295,7 +304,10 @@ def _build_derived_pipeline_manifest(
     if source_anchor is not None and str(source_anchor) != str(anchor):
         raise ValueError("Derived dataset session differs from its source manifest")
     if source_anchor is None:
-        walk_forward_id = derivation.inherited_stages["walk_forward"].source_run_id
+        walk_forward_id = (
+            derivation.prepared_snapshot_source_run_id
+            or derivation.inherited_stages["walk_forward"].source_run_id
+        )
         traced_date, _ = _walk_forward_traceability(repository, walk_forward_id)
         if pd.Timestamp(traced_date).date().isoformat() != anchor:
             raise ValueError("Derived dataset session differs from Walk-forward traceability")
@@ -873,6 +885,28 @@ def build_stage_spec(
         existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
         if existing.is_file():
             return repository.load_spec(str(stage["child_run_id"]))
+        if parent.derivation is not None and parent.derivation.fork_stage == "walk_forward":
+            source_id = parent.derivation.prepared_snapshot_source_run_id
+            snapshot_path = (
+                repository.run_directory(str(source_id))
+                / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
+            )
+            if not snapshot_path.is_file() or _sha256(snapshot_path) != (
+                parent.derivation.prepared_snapshot_sha256
+            ):
+                raise ValueError("Source Walk-forward prepared snapshot is missing or changed")
+            cutoff, dataset_digest = _walk_forward_traceability(repository, str(source_id))
+            if dataset_digest != parent.source_prepared_dataset_sha256:
+                raise ValueError("Source Walk-forward dataset digest has changed")
+            return replace(
+                child,
+                evaluate_final_holdout=False,
+                source_walk_forward_run=str(source_id),
+                source_prepared_dataset_sha256=parent.source_prepared_dataset_sha256,
+                prepared_dataset_digest_required=True,
+                prepared_snapshot_required=True,
+                historical_data_cutoff=str(manifest["prepared_dataset_as_of"]),
+            )
         if parent.forced_period_lock is not None:
             lock = parent.forced_period_lock
             return replace(

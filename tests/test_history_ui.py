@@ -650,3 +650,9 @@ def test_existing_promotion_is_detected_without_changing_registry_logic():
     )
 
     assert existing is model
+
+    assert already_promoted(
+        walk_forward_run="wf-run",
+        set_name='["DIS","WMT","PFE"]',
+        models=[model],
+    ) is model

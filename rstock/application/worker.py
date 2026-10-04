@@ -35,6 +35,11 @@ HEAVY_QUEUE_GUARD = "queue.guard"
 
 
 WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
+    JobType.PREDICTOR_PREFILTER: [
+        ("data_preparation", 12), ("predictor_prefilter_generation", 5),
+        ("predictor_prefilter_walk_forward", 72),
+        ("predictor_prefilter_selection", 8), ("publishing", 3),
+    ],
     JobType.WALK_FORWARD: [
         ("data_preparation", 8), ("predictor_prefilter_generation", 2),
         ("predictor_prefilter_walk_forward", 18),
@@ -703,6 +708,7 @@ def execute_run(
         reporter.resources = resources
         if spec.job_type in {
             JobType.WALK_FORWARD,
+            JobType.PREDICTOR_PREFILTER,
             JobType.WALK_FORWARD_BATCH,
             JobType.THRESHOLD_PARAMETER_CALIBRATION,
             JobType.XGBOOST_CALIBRATION,
@@ -720,7 +726,8 @@ def execute_run(
                         "walk_forward": spec.config.walk_forward_batch_size,
                         "final_holdout": spec.config.final_holdout_batch_size,
                     }
-                    if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH}
+                    if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH,
+                                         JobType.PREDICTOR_PREFILTER}
                     else (
                         {"xgboost_calibration": spec.config.walk_forward_batch_size}
                         if spec.job_type is JobType.XGBOOST_CALIBRATION

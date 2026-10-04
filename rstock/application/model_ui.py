@@ -20,6 +20,7 @@ JOB_DOMAIN_TYPES = {
     }),
     "experiment": frozenset({
         "walk_forward",
+        "predictor_prefilter",
         "xgboost_calibration",
         "threshold_parameter_calibration",
         "threshold_calibration",

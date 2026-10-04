@@ -47,6 +47,8 @@ class ResourceRecorder:
         self.previous: dict[tuple[int, int], float] = {}
         self.previous_at: float | None = None
         self.active_phase: str | None = None
+        self.active_subphase: str | None = None
+        self.subphase_measurements: dict[str, dict[str, Any]] = {}
         self.phase_starts: dict[str, float] = {}
         self.last_units: dict[str, int] = {}
         self.started = time.monotonic() if started_monotonic is None else started_monotonic
@@ -146,6 +148,15 @@ class ResourceRecorder:
                     phase["cpu_max_sampled_cores"] = max(
                         phase["cpu_max_sampled_cores"] or 0.0, cpu_cores
                     )
+            if self.active_subphase is not None:
+                subphase = self.subphase_measurements[self.active_subphase]
+                subphase["cpu_seconds_sampled"] = (
+                    subphase["cpu_seconds_sampled"] or 0.0
+                ) + cpu_delta
+                subphase["cpu_covered_seconds"] += elapsed
+                subphase["cpu_max_sampled_cores"] = max(
+                    subphase["cpu_max_sampled_cores"] or 0.0, cpu_cores
+                )
         if root is not None:
             old = self.attempt["parent_rss_peak_sampled_bytes"]
             self.attempt["parent_rss_peak_sampled_bytes"] = max(old or 0, root.rss_bytes)
@@ -162,6 +173,11 @@ class ResourceRecorder:
                     phase["rss_peak_sampled_bytes"] = max(
                         phase["rss_peak_sampled_bytes"] or 0, total_rss
                     )
+            if self.active_subphase is not None:
+                subphase = self.subphase_measurements[self.active_subphase]
+                subphase["rss_peak_sampled_bytes"] = max(
+                    subphase["rss_peak_sampled_bytes"] or 0, total_rss
+                )
         if root is not None:
             old = self.attempt["max_child_processes_observed"]
             self.attempt["max_child_processes_observed"] = max(old or 0, len(children))
@@ -223,6 +239,31 @@ class ResourceRecorder:
             })
             self._persist_locked()
 
+    def subphase_started(self, phase: str, name: str) -> None:
+        with self.lock:
+            if self.active_phase != phase:
+                return
+            self._sample_locked()
+            self.active_subphase = name
+            self.subphase_measurements[name] = {
+                "cpu_seconds_sampled": None,
+                "cpu_covered_seconds": 0.0,
+                "cpu_max_sampled_cores": None,
+                "rss_peak_sampled_bytes": None,
+            }
+
+    def subphase_completed(self, phase: str, name: str) -> None:
+        with self.lock:
+            if self.active_phase != phase or self.active_subphase != name:
+                return
+            self._sample_locked()
+            self.active_subphase = None
+            row = self.subphase_measurements[name]
+            cpu, covered = row["cpu_seconds_sampled"], row["cpu_covered_seconds"]
+            row["cpu_mean_sampled_cores"] = (
+                None if cpu is None or covered <= 0 else cpu / covered
+            )
+
     def phase_completed(self, name: str, details: dict[str, object] | None = None) -> None:
         with self.lock:
             self._sample_locked()
@@ -233,6 +274,9 @@ class ResourceRecorder:
             phase["duration_seconds"] = max(0.0, time.monotonic() - self.phase_starts.pop(name))
             if details:
                 phase["details"].update(details)
+            for row in phase["details"].get("subphases", []):
+                if isinstance(row, dict) and row.get("name") in self.subphase_measurements:
+                    row.update(self.subphase_measurements[row["name"]])
             for key, kind in (
                 ("combinations_processed", "combinaisons"),
                 ("combinations", "combinaisons"),
@@ -248,6 +292,8 @@ class ResourceRecorder:
             phase["cpu_mean_cores"] = None if cpu is None or covered <= 0 else cpu / covered
             if self.active_phase == name:
                 self.active_phase = None
+                self.active_subphase = None
+                self.subphase_measurements.clear()
             self._persist_locked()
 
     def batch_completed(self, phase: str, details: dict[str, object],

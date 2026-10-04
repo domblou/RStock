@@ -37,6 +37,7 @@ from rstock.application.run_delete import DeletePlan
 from rstock.application.promotion_qualification_ui import (
     DEFAULT_PROMOTION_SORT, sort_promotion_decisions, upstream_diagnostic,
 )
+from rstock.application.temporal_validation import read_time_candidate_identity_stability
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from rstock.application.production_domain import ProductionModel
 from rstock.application.experiment_duplication import (
@@ -105,6 +106,7 @@ from rstock.application.derivation import (
     SPLIT_STAGE_PARAMETER_FIELDS, stage_modes,
 )
 from rstock.application.derived_experiments import source_parameter_value
+from rstock.application.prefilter_experiments import PREFILTER_DERIVATION_FIELDS
 from rstock.application.end_to_end import load_pipeline_manifest
 from rstock.application.qualification_holdout_diagnostic import diagnostic_state
 from rstock.application.temporal_validation_ui import (
@@ -735,30 +737,39 @@ def _render_experiment_submission_confirmation(
 
     maximum = getattr(preview, "max_combinations_after_prefilter", None)
     maximum_text = "—" if maximum is None else f"{maximum:,}"
-    temporal_text = ""
-    if spec.temporal_validation_enabled:
-        promotion_text = (
-            "promotion automatique uniquement si la comparaison réussit"
-            if spec.auto_promote_candidates
-            else "sans promotion automatique"
+    if spec.job_type is JobType.PREDICTOR_PREFILTER:
+        st.success(
+            f"Soumettre le préfiltre prédicteurs ? {len(spec.target_symbols):,} cibles · "
+            f"{len(spec.predictor_symbols):,} prédicteurs · "
+            f"cutoff {spec.historical_data_cutoff} · "
+            f"Top {spec.config.predictor_prefilter_top_n}. "
+            "Le job s'arrête après le classement et la sélection."
         )
-        temporal_text = (
-            " · validation temporelle activée "
-            "(référence offset 0, validation offset 63) · "
-            f"{promotion_text}"
+    else:
+        temporal_text = ""
+        if spec.temporal_validation_enabled:
+            promotion_text = (
+                "promotion automatique uniquement si la comparaison réussit"
+                if spec.auto_promote_candidates
+                else "sans promotion automatique"
+            )
+            temporal_text = (
+                " · validation temporelle activée "
+                "(référence offset 0, validation offset 63) · "
+                f"{promotion_text}"
+            )
+        walk_forward_text = ""
+        if walk_forward_launch_controls_visible(spec.job_type):
+            walk_forward_text = f" · {walk_forward_confirmation_text(spec.config)}"
+        st.success(
+            f"Soumettre l’expérience {label} ? "
+            f"{len(spec.target_symbols):,} cibles · "
+            f"{len(spec.context_symbols):,} contexte · "
+            f"offset {spec.config.walk_forward_end_offset_sessions} · "
+            f"max {maximum_text} combinaisons après préfiltrage"
+            f"{walk_forward_text}"
+            f"{temporal_text}"
         )
-    walk_forward_text = ""
-    if walk_forward_launch_controls_visible(spec.job_type):
-        walk_forward_text = f" · {walk_forward_confirmation_text(spec.config)}"
-    st.success(
-        f"Soumettre l’expérience {label} ? "
-        f"{len(spec.target_symbols):,} cibles · "
-        f"{len(spec.context_symbols):,} contexte · "
-        f"offset {spec.config.walk_forward_end_offset_sessions} · "
-        f"max {maximum_text} combinaisons après préfiltrage"
-        f"{walk_forward_text}"
-        f"{temporal_text}"
-    )
     confirm, cancel, _ = st.columns([0.2, 0.2, 1])
     if confirm.button(
         "Confirmer",
@@ -956,6 +967,7 @@ def _experiments(service: ExperimentService) -> None:
         return
     labels = {
         "Walk-forward": JobType.WALK_FORWARD,
+        "Préfiltre prédicteurs": JobType.PREDICTOR_PREFILTER,
         "Calibration XGBoost": JobType.XGBOOST_CALIBRATION,
         "Calibration des paramètres de seuils": (
             JobType.THRESHOLD_PARAMETER_CALIBRATION
@@ -966,6 +978,52 @@ def _experiments(service: ExperimentService) -> None:
     choice = st.selectbox("Type de job", list(labels))
     selected_job_type = labels[choice]
     run_config = st.session_state.lab_config
+    if selected_job_type is JobType.PREDICTOR_PREFILTER:
+        st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet.")
+        with st.container(border=True):
+            st.markdown("**Paramètres du préfiltre pour ce run**")
+            p1, p2, p3 = st.columns(3)
+            prefilter_values = {
+                "predictor_prefilter_top_n": int(p1.number_input(
+                    "Top N prédicteurs", min_value=1,
+                    value=run_config.predictor_prefilter_top_n,
+                    key="launch-prefilter-top-n",
+                )),
+                "predictor_prefilter_min_median_auc": float(p2.number_input(
+                    "AUC médiane minimale", min_value=0.0, max_value=1.0,
+                    value=run_config.predictor_prefilter_min_median_auc,
+                    format="%.4f",
+                    key="launch-prefilter-median",
+                )),
+                "predictor_prefilter_min_pct_above_random": float(p3.number_input(
+                    "Part minimale des fenêtres > 0,50", min_value=0.0, max_value=1.0,
+                    value=run_config.predictor_prefilter_min_pct_above_random,
+                    format="%.4f",
+                    key="launch-prefilter-pct",
+                )),
+                "predictor_prefilter_min_worst_auc": float(p1.number_input(
+                    "Pire AUC minimale", min_value=0.0, max_value=1.0,
+                    value=run_config.predictor_prefilter_min_worst_auc,
+                    format="%.4f",
+                    key="launch-prefilter-worst",
+                )),
+                "predictor_prefilter_max_auc_std": float(p2.number_input(
+                    "Std AUC maximale", min_value=0.0, max_value=1.0,
+                    value=run_config.predictor_prefilter_max_auc_std,
+                    format="%.4f",
+                    key="launch-prefilter-std",
+                )),
+                "predictor_prefilter_correlation_threshold": float(p3.number_input(
+                    "Seuil de corrélation", min_value=0.0, max_value=1.0,
+                    value=run_config.predictor_prefilter_correlation_threshold,
+                    format="%.4f",
+                    key="launch-prefilter-correlation",
+                )),
+            }
+        run_config = replace(
+            run_config, predictor_prefilter_enabled=True,
+            walk_forward_end_offset_sessions=0, **prefilter_values,
+        )
     auto_promote_candidates = False
     temporal_validation_enabled = False
     requested_historical_cutoff = None
@@ -973,7 +1031,7 @@ def _experiments(service: ExperimentService) -> None:
     forward_simulation_enabled = False
     forward_simulation_mode = None
     forward_simulation_end_date = None
-    if selected_job_type is JobType.END_TO_END:
+    if selected_job_type in {JobType.END_TO_END, JobType.PREDICTOR_PREFILTER}:
         requested_historical_cutoff = st.date_input(
             "Cutoff historique", value=None,
             help="Dernière séance XNYS disponible pour la découverte scientifique.",
@@ -983,6 +1041,8 @@ def _experiments(service: ExperimentService) -> None:
                 requested_historical_cutoff, st.session_state.lab_calendar
             ).date().isoformat()
             st.caption(f"Séance XNYS résolue : {resolved_historical_cutoff}")
+    if selected_job_type is JobType.END_TO_END:
+        if requested_historical_cutoff is not None:
             forward_simulation_enabled = st.checkbox(
                 "Lancer une Forward Simulation après succès", value=False
             )
@@ -1046,7 +1106,7 @@ def _experiments(service: ExperimentService) -> None:
                 f"{st.session_state.lab_config.walk_forward_train_size}."
             )
         run_config = launch_walk_forward_config(
-            st.session_state.lab_config,
+            run_config,
             window_mode,
         )
     valid_universe = _experiment_universe_selector()
@@ -1055,6 +1115,8 @@ def _experiments(service: ExperimentService) -> None:
     )
     submit_disabled = not (valid_universe and valid_plan) or (
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
+    ) or (selected_job_type is JobType.PREDICTOR_PREFILTER
+          and resolved_historical_cutoff is None
     ) or (temporal_validation_enabled and (
         st.session_state.lab_config.walk_forward_end_offset_sessions != 0
     )) or (temporal_validation_enabled and resolved_historical_cutoff is not None)
@@ -1073,7 +1135,10 @@ def _experiments(service: ExperimentService) -> None:
             symbols=tuple(st.session_state.lab_symbols),
             calendar=st.session_state.lab_calendar,
             combinations_per_target=st.session_state.lab_combinations_per_target,
-            evaluate_final_holdout=st.session_state.lab_evaluate_holdout,
+            evaluate_final_holdout=(
+                selected_job_type is not JobType.PREDICTOR_PREFILTER
+                and st.session_state.lab_evaluate_holdout
+            ),
             universe_selection=st.session_state.lab_universe_selection,
             primary_universe_id=st.session_state.lab_universe_selection.universe,
             market_benchmark_symbol=st.session_state.lab_market_benchmark_symbol,
@@ -1099,7 +1164,8 @@ def _experiments(service: ExperimentService) -> None:
                 else forward_simulation_end_date.isoformat()
             ),
             run_description=(
-                f"profondeur {st.session_state.lab_config.permutation_depth}"
+                "Préfiltre prédicteurs" if selected_job_type is JobType.PREDICTOR_PREFILTER
+                else f"profondeur {st.session_state.lab_config.permutation_depth}"
             ),
         )
         st.session_state["pending-experiment-submission"] = spec
@@ -2186,6 +2252,7 @@ def _render_resume_controls(
         return
     resumable_types = {
         JobType.WALK_FORWARD.value,
+        JobType.PREDICTOR_PREFILTER.value,
         JobType.THRESHOLD_PARAMETER_CALIBRATION.value,
         JobType.END_TO_END.value,
         JobType.OPERATIONAL_RUN.value,
@@ -2196,7 +2263,9 @@ def _render_resume_controls(
         return
     manifest = detail.get("checkpoint")
     error = detail.get("checkpoint_error")
-    checkpointed_resume = status.get("job_type") == JobType.WALK_FORWARD.value
+    checkpointed_resume = status.get("job_type") in {
+        JobType.WALK_FORWARD.value, JobType.PREDICTOR_PREFILTER.value,
+    }
     if checkpointed_resume and isinstance(manifest, dict):
         completed_phases = list(manifest.get("phases_completed", []))
         current_phase = str(manifest.get("current_phase") or "—")
@@ -2725,7 +2794,16 @@ def _render_run_resources(run_id: str) -> None:
                 "Sous-phase": labels[row["name"]],
                 "Durée (s)": duration,
                 "CPU moyen parent": "—" if cpu_mean is None else f"{cpu_mean:.2f} cœur",
+                "CPU moyen total échantillonné": (
+                    "—" if not isinstance(row.get("cpu_mean_sampled_cores"), (int, float))
+                    else f"{row['cpu_mean_sampled_cores']:.2f} cœurs"
+                ),
+                "CPU max échantillonné": (
+                    "—" if not isinstance(row.get("cpu_max_sampled_cores"), (int, float))
+                    else f"{row['cpu_max_sampled_cores']:.2f} cœurs"
+                ),
                 "RSS parent observé": memory_text(row.get("rss_peak_observed_parent_bytes")),
+                "RSS total max échantillonné": memory_text(row.get("rss_peak_sampled_bytes")),
                 "Traités": f"{count} {unit}" if unit else "—",
                 "Débit": throughput,
                 "Volume lu estimé": volume_text(row.get("estimated_read_bytes")),
@@ -2741,6 +2819,8 @@ def _render_run_resources(run_id: str) -> None:
                 f"{details.get('window_evaluations', '—')} évaluations de fenêtres · "
                 f"{details.get('prediction_rows', '—')} lignes de prédictions. "
                 "CPU et RSS des sous-phases : processus parent seulement. "
+                "Pour Risque local, CPU moyen/max et RSS total échantillonnés incluent les workers et le parent pendant leur activité. "
+                "Risque local chevauche le chargement, les métriques locales et l'insertion SQLite; les durées des sous-phases ne s'additionnent donc pas. "
                 "RSS relevé à la fin des opérations; les pics intermédiaires peuvent échapper à la mesure. "
                 "Lecture estimée : deux passages du payload par lot (vérification puis chargement). "
                 "La taille des fichiers ne mesure pas les octets physiques écrits sur disque. "
@@ -2801,6 +2881,19 @@ def _render_run_resources(run_id: str) -> None:
 def _render_standard_results(
     run_id: str, job_type: JobType, status: dict[str, object], detail: dict[str, object]
 ) -> None:
+    if job_type is JobType.PREDICTOR_PREFILTER:
+        result_dir = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+        result_path = result_dir / "predictor_prefilter.csv"
+        if result_path.is_file():
+            st.subheader("Classement et sélection des prédicteurs")
+            st.dataframe(pd.read_csv(result_path), hide_index=True, width="stretch")
+        else:
+            st.info("Classement indisponible tant que le préfiltre n'est pas terminé.")
+        manifest = _read_light_json(result_dir / "predictor_prefilter.json")
+        if manifest is not None:
+            with st.expander("Provenance et diagnostic"):
+                st.json(manifest)
+        return
     if job_type is JobType.FORWARD_SIMULATION:
         source = detail.get("configuration", {}).get("source_end_to_end_run")
         if source:
@@ -3530,12 +3623,12 @@ def _render_derived_creation(
         st.error("Le manifest source ne permet pas cette dérivation.")
         return
     labels = {
+        "walk_forward": "Walk-forward / préfiltre",
         "xgboost_calibration": "Calibration XGBoost",
         "threshold_parameter_calibration": "Calibration paramètres de seuil",
         "threshold_calibration": "Calibration des seuils",
     }
-    labels.update({"walk_forward": "Walk-forward",
-                   "holdout_evaluation": "Évaluation holdout",
+    labels.update({"holdout_evaluation": "Évaluation holdout",
                    "promotion_qualification": "Qualification promotion"})
     split = source_manifest["schema_version"] == 3
     fork_keys = SPLIT_FORK_STAGE_KEYS if split else FORK_STAGE_KEYS
@@ -3544,6 +3637,12 @@ def _render_derived_creation(
         "Point de dérivation", fork_keys,
         format_func=lambda value: labels[value], key=f"derive-fork-{run_id}",
     )
+    if fork == "walk_forward":
+        st.caption(
+            "Snapshot préparé et cutoff hérités et figés depuis le child "
+            "Walk-forward parent. Aucun téléchargement ni nouvelle préparation marché. "
+            f"Session source : {source_manifest.get('prepared_dataset_as_of') or 'vérifiée dans le snapshot'}."
+        )
     forward_enabled = st.checkbox(
         "Lancer une Forward Simulation pour cette expérience dérivée",
         value=False, key=f"derive-forward-{run_id}",
@@ -3640,6 +3739,77 @@ def _render_derived_creation(
         else:
             st.session_state[key] = False
             st.success(f"End-to-End dérivé créé : {result.run_id}")
+
+
+def _render_prefilter_derived_creation(
+    run_id: str, detail: dict[str, object], service: ExperimentService,
+) -> None:
+    configuration = detail.get("configuration", {})
+    if not isinstance(configuration, Mapping):
+        return
+    provenance = configuration.get("prefilter_derivation")
+    if isinstance(provenance, Mapping):
+        st.caption(
+            "Dérivé du préfiltre " + str(provenance.get("source_run_id", "—"))
+            + " · snapshot SHA-256 "
+            + str(provenance.get("prepared_snapshot_sha256", "—"))
+        )
+    status = detail.get("status", {})
+    if not isinstance(status, Mapping) or status.get("status") != "completed":
+        return
+    key = f"prefilter-derive-open-{run_id}"
+    if st.button("Créer une expérience dérivée", key=f"prefilter-derive-button-{run_id}"):
+        st.session_state[key] = True
+    if not st.session_state.get(key):
+        return
+    source = service.run_service.repository.load_spec(run_id)
+    summary = detail.get("summary", {})
+    cutoff = summary.get("prepared_dataset_as_of", "—") if isinstance(summary, Mapping) else "—"
+    digest = (
+        summary.get("traceability", {}).get("prepared_dataset_sha256", "—")
+        if isinstance(summary, Mapping) else "—"
+    )
+    st.caption(
+        f"Snapshot préparé, cutoff {cutoff} et digest {digest} hérités et figés "
+        "depuis ce run. Aucune nouvelle préparation ni actualisation marché."
+    )
+    labels = {
+        "predictor_prefilter_top_n": "Nombre de prédicteurs retenus (Top-N)",
+        "predictor_prefilter_min_median_auc": "Médiane AUC minimale",
+        "predictor_prefilter_min_pct_above_random": "Proportion minimale de fenêtres AUC > 0,50",
+        "predictor_prefilter_min_worst_auc": "Pire AUC minimale",
+        "predictor_prefilter_max_auc_std": "Écart-type AUC maximal",
+        "predictor_prefilter_correlation_threshold": "Seuil de corrélation / redondance",
+    }
+    changes: dict[str, object] = {}
+    with st.container(border=True):
+        for field in sorted(PREFILTER_DERIVATION_FIELDS):
+            original = getattr(source.config, field)
+            if field == "predictor_prefilter_top_n":
+                value = int(st.number_input(
+                    labels[field], min_value=1, value=int(original), step=1,
+                    key=f"prefilter-derive-{run_id}-{field}",
+                ))
+            else:
+                value = float(st.number_input(
+                    labels[field], min_value=0.0, max_value=1.0,
+                    value=float(original), format="%.4f",
+                    key=f"prefilter-derive-{run_id}-{field}",
+                ))
+            if value != original:
+                changes[field] = value
+        submitted = st.button(
+            "Lancer le préfiltre dérivé", disabled=not changes,
+            key=f"prefilter-derive-submit-{run_id}",
+        )
+    if submitted:
+        try:
+            result = service.create_derived(run_id, "predictor_prefilter", changes)
+        except (OSError, ValueError, RuntimeError, TypeError) as error:
+            st.error(f"Dérivation impossible : {error}")
+        else:
+            st.session_state[key] = False
+            st.success(f"Préfiltre dérivé créé : {result.run_id}")
 
 
 def _render_pipeline_summary(
@@ -3905,6 +4075,12 @@ def _render_candidate_identity_stability(
     if not isinstance(stability, dict):
         st.info("Analyse de stabilité des candidats indisponible pour ce run.")
         return
+    if any(
+        isinstance(item, Mapping) and item.get("canonical_combination_id") is None
+        for group in ("common_candidates", "lost_candidates", "new_candidates")
+        for item in stability.get(group, ())
+    ):
+        st.caption("Identité canonique historique indisponible pour certains candidats incomplets.")
 
     counts = st.columns(5)
     for column, label, key in zip(
@@ -4022,6 +4198,12 @@ def _render_temporal_validation(
     if comparison is None:
         st.info("Quality comparison is pending until both chains complete.")
     else:
+        stability = comparison.get("candidate_identity_stability")
+        if isinstance(stability, dict):
+            comparison = dict(comparison)
+            comparison["candidate_identity_stability"] = read_time_candidate_identity_stability(
+                stability
+            )
         st.subheader(f"Decision: {comparison.get('final_status', 'unknown')}")
         gates = comparison.get("gates", {})
         if isinstance(gates, dict):
@@ -4447,6 +4629,9 @@ def _render_job_detail_tabs(
         _render_qualification_holdout_diagnostic(run_id, detail)
     elif job_type is JobType.WALK_FORWARD:
         _render_walk_forward_tabs(service, run_id, status, detail)
+    elif job_type is JobType.PREDICTOR_PREFILTER:
+        _render_prefilter_derived_creation(run_id, detail, service)
+        _render_standard_job_tabs(run_id, job_type, status, detail)
     else:
         _render_standard_job_tabs(run_id, job_type, status, detail)
 
@@ -4503,81 +4688,183 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
         for run_id in run_ids
     ]
 
-    def value(item: object) -> str:
-        return "—" if item is None or pd.isna(item) else str(item)
+    def count(value: object) -> str:
+        return "—" if value is None else str(value)
 
-    def percent(item: float | None, *, digits: int = 1) -> str:
-        return "—" if item is None else f"{item:.{digits}%}"
+    def number(value: object, digits: int = 3) -> str:
+        return "—" if value is None else f"{float(value):.{digits}f}"
 
-    columns = {
-        "A · Run": [item.run_id for item in analyses],
-        "A · Cutoff résolu": [value(item.cutoff) for item in analyses],
-        "A · Statut": [item.status for item in analyses],
-        "B · Brutes planifiées": [value(item.raw) for item in analyses],
-        "B · Évaluées WF": [value(item.evaluated) for item in analyses],
-        "B · Qualifiées WF": [value(item.qualified) for item in analyses],
-        "B · Taux qualifiées": [percent(item.qualification_rate) for item in analyses],
-        "B · Confirmées holdout WF": [value(item.confirmed) for item in analyses],
-        "B · Taux confirmées": [percent(item.confirmation_rate) for item in analyses],
-        "C · Up évaluables": [value(item.up_evaluable) for item in analyses],
-        "C · Candidats finaux": [value(item.candidates) for item in analyses],
-        "C · Candidate yield": [
-            "—" if item.candidate_yield is None else
-            f"{item.candidates} / {item.evaluated} ({percent(item.candidate_yield, digits=3)})"
-            for item in analyses
-        ],
-        "C · Cibles distinctes": [value(item.targets) for item in analyses],
-        "D · AUC holdout médiane / modèle": [value(round(item.holdout_auc, 3)) if item.holdout_auc is not None else "—" for item in analyses],
-        "D · Précision holdout médiane / modèle": [percent(item.holdout_precision) for item in analyses],
-        "D · Rendement holdout médian / modèle": [percent(item.holdout_return, digits=2) for item in analyses],
-        "D · Signaux holdout (somme)": [value(item.holdout_signals) for item in analyses],
-        "E · Statut Forward": [item.forward_status for item in analyses],
-        "E · Modèles entrants": [value(item.forward_models) for item in analyses],
-        "E · Signaux Forward": [value(item.forward_signals) for item in analyses],
-        "E · Précision Forward / signal": [percent(item.forward_precision) for item in analyses],
-        "E · Rendement Forward / signal": [percent(item.forward_return, digits=2) for item in analyses],
-        "E · Période Forward": [
-            f"{item.forward_first} → {item.forward_last} ({item.forward_sessions} séances)"
-            if item.forward_first and item.forward_last and item.forward_sessions else "—"
-            for item in analyses
-        ],
-    }
-    helps = {
-        "A · Run": "Identifiant du run End-to-End comparé; sert à la traçabilité. Aucune cible idéale.",
-        "A · Cutoff résolu": "Date utilisée pour figer l’information disponible au moment de l’expérience. Elle permet de comparer la redécouverte de modèles à différents moments historiques.",
-        "A · Statut": "État d'exécution du run. Cible : completed pour considérer ses résultats comme complets.",
-        "B · Brutes planifiées": "Combinaisons prévues avant le préfiltrage et l'évaluation Walk-forward; mesure la taille brute de la recherche. Aucune cible idéale.",
-        "B · Évaluées WF": "Combinaisons effectivement évaluées en Walk-forward; mesure la couverture réelle après les étapes précédentes. Elles ne doivent pas nécessairement égaler les brutes planifiées.",
-        "B · Qualifiées WF": "Combinaisons ayant franchi les critères Walk-forward. Aucune cible absolue : la qualité prime sur le volume.",
-        "B · Taux qualifiées": "Part des combinaisons évaluées qui sont qualifiées Walk-forward; compare la sélectivité entre runs. Aucune cible universelle.",
-        "B · Confirmées holdout WF": "Diagnostic de robustesse du Walk-forward. Les calibrations End-to-End repartent des combinaisons qualifiées WF, pas des confirmées holdout. Les colonnes suivantes ne sont pas une simple soustraction des confirmées.",
-        "B · Taux confirmées": "Part des combinaisons qualifiées ensuite confirmées sur le holdout WF. Cible : plus élevée, avec assez de candidats conservés.",
-        "C · Up évaluables": "Combinaisons Up avec seuil sélectionné et évaluation holdout. Distingue une perte pendant la calibration d’un rejet par les règles finales d’admissibilité.",
-        "C · Candidats finaux": "Modèles (combinaison, Up) du snapshot final ayant franchi les règles d’admissibilité du run : signaux, AUC, précision, rendement, mouvements opposés et seuil sélectionné.",
-        "C · Candidate yield": "Candidats finaux divisés par les combinaisons réellement évaluées au Walk-forward, et non par les qualifiées ou les Up évaluables.",
-        "C · Cibles distinctes": "Titres cibles distincts parmi les candidats finaux. Plusieurs candidats peuvent viser la même cible.",
-        "D · AUC holdout médiane / modèle": "Médiane entre modèles candidats finaux de leur AUC holdout. Mesure de discrimination avant Forward.",
-        "D · Précision holdout médiane / modèle": "Médiane entre modèles candidats finaux de leur précision holdout. Voir aussi le nombre de signaux : un faible effectif limite l’interprétation.",
-        "D · Rendement holdout médian / modèle": "Médiane entre modèles candidats finaux du rendement directionnel moyen de chacun. Mesure avant Forward, distincte d’un rendement de portefeuille.",
-        "D · Signaux holdout (somme)": "Somme des signaux holdout des modèles candidats finaux. Des modèles peuvent produire des signaux sur les mêmes séances.",
-        "E · Statut Forward": "État réel de l’enfant Forward s’il existe. L’absence de Forward ne vaut pas 0 % : elle peut être désactivée, non lancée ou sans modèle candidat.",
-        "E · Modèles entrants": "Nombre de candidats figés au départ de Forward; affiché même si Forward n’a pas été lancée.",
-        "E · Signaux Forward": "Nombre de signaux produits pendant la période Forward et disponibles pour mesurer la performance hors sélection.",
-        "E · Précision Forward / signal": "Précision sur les signaux Forward, distincte de la médiane entre modèles calculée sur le holdout.",
-        "E · Rendement Forward / signal": "Rendement directionnel moyen des signaux Forward. Ce n’est pas nécessairement un rendement de portefeuille.",
-        "E · Période Forward": "Séances réellement évaluées hors sélection. La durée couverte donne du contexte aux métriques Forward.",
-    }
-    st.caption("A · Identité  |  B · Walk-forward  |  C · Calibration et candidats  |  D · Qualité des candidats  |  E · Forward Simulation")
-    st.dataframe(
-        pd.DataFrame(columns), hide_index=True, width="stretch",
-        column_config=_grid_column_help_config(pd.Index(columns), helps),
+    def percent(value: float | None, digits: int = 1) -> str:
+        return "—" if value is None else f"{value:.{digits}%}"
+
+    def passage(current: int | None, previous: int | None) -> str:
+        if current is None:
+            return "—"
+        return f"{current} ({percent(current / previous)})" if previous else str(current)
+
+    st.subheader("Comparabilité")
+    profiles = [item.scientific_profile or {} for item in analyses]
+    protocol_groups = ("Univers", "Profondeur", "WF scientifique", "Qualification",
+                       "Holdout", "Calibration et seuils", "Version scientifique")
+    differing = [
+        group for group in protocol_groups
+        if any(profile.get(group) != profiles[0].get(group) for profile in profiles[1:])
+    ]
+    mixed_wf_holdout = len({item.wf_final_holdout_evaluated for item in analyses}) > 1
+    if differing:
+        st.warning("Protocoles scientifiques différents : " + ", ".join(differing) + ".")
+    elif not all(item.comparability_complete for item in analyses):
+        st.warning("Comparabilité scientifique partielle : une configuration historique ou le contrat holdout WF est indisponible.")
+    else:
+        st.success("Protocoles scientifiques comparables; les cutoffs PIT diffèrent selon les runs.")
+    if mixed_wf_holdout:
+        st.warning("Holdout final WF : contrats mixtes. « Confirmées holdout WF » et « Taux confirmées » ne sont pas comparables entre tous les runs.")
+    comparison_rows = []
+    for item, profile in zip(analyses, profiles):
+        universe = profile.get("Univers") or {}
+        version = profile.get("Version scientifique") or {}
+        comparison_rows.append({
+            "Run": item.run_id,
+            "Cutoff": count(item.cutoff),
+            "Univers": count(universe.get("primary_universe_id") if isinstance(universe, dict) else universe),
+            "Profondeur": count(profile.get("Profondeur")),
+            "WF / qualification / holdout / seuils": "Identiques" if not differing else
+                ", ".join(group for group in differing if group not in ("Univers", "Profondeur", "Version scientifique")) or "Identiques",
+            "Final holdout WF": ("Activé" if item.wf_final_holdout_evaluated else "Désactivé"
+                                  if item.wf_final_holdout_evaluated is False else "—"),
+            "Version": str(version.get("pipeline_version") or "—") if isinstance(version, dict) else "—",
+            "Commit scientifique": item.scientific_commit[:10] if item.scientific_commit else "—",
+            "Digest dataset": item.dataset_digest[:12] if item.dataset_digest else "—",
+        })
+    st.dataframe(pd.DataFrame(comparison_rows), hide_index=True, width="stretch")
+    with st.expander("Paramètres scientifiques comparés"):
+        details = []
+        for group in protocol_groups:
+            details.append({"Groupe": group, **{
+                item.run_id: str(profile.get(group, "—"))
+                for item, profile in zip(analyses, profiles)
+            }})
+        st.dataframe(pd.DataFrame(details), hide_index=True, width="stretch")
+        st.caption("Les workers, tailles de lots et autres réglages d’exécution sont exclus de la comparabilité scientifique.")
+
+    st.subheader("Funnel scientifique")
+    funnel = [
+        ("Brutes planifiées", lambda item: count(item.raw)),
+        ("Évaluées WF", lambda item: passage(item.evaluated, item.raw)),
+        ("Qualifiées WF", lambda item: passage(item.qualified, item.evaluated)),
+        ("Entrées calibration / seuils", lambda item: count(item.calibration_entries)),
+        ("Up évaluables holdout", lambda item: passage(item.up_evaluable, item.calibration_entries)),
+        ("Passent qualification / promotion", lambda item: passage(item.qualification_passed, item.up_evaluable)),
+        ("Passent validation temporelle (individuel)", lambda item:
+            passage(item.temporal_passed, item.temporal_entering) if item.temporal_entering is not None else
+            "Non calculé" if item.temporal_requested else "Non requise"),
+        ("Candidats finaux", lambda item: count(item.final_candidates)),
+    ]
+    st.dataframe(pd.DataFrame([
+        {"Étape": label, **{item.run_id: render(item) for item in analyses}}
+        for label, render in funnel
+    ]), hide_index=True, width="stretch")
+    st.caption("Taux affichés uniquement quand le dénominateur représente la population de l’étape précédente. La validation temporelle globale peut bloquer le déclenchement opérationnel sans remplacer la qualification individuelle forcée.")
+    st.dataframe(pd.DataFrame([{
+        "Run": item.run_id,
+        "Validation globale": item.temporal_status or ("Non calculé" if item.temporal_requested else "Non requise"),
+        "Confirmées holdout WF": "Non calculé" if item.wf_final_holdout_evaluated is False else count(item.confirmed),
+        "Taux confirmées": "Non calculé" if item.wf_final_holdout_evaluated is False else percent(item.confirmation_rate),
+    } for item in analyses]), hide_index=True, width="stretch")
+
+    st.subheader("Analyse des rejets de qualification")
+    st.caption("Chaque combinaison rejetée compte une fois dans le total et dans 1 / 2 / 3+ critères. « Seul » signifie qu’aucun autre critère n’a échoué; ses bandes de proximité sont cumulatives et utilisent la politique du run. « Impliqué » inclut aussi les rejets multi-critères. Pour le rendement, pb signifie point de base (0,01 point de pourcentage). Une distance indisponible ne vaut pas zéro. La qualification inclut les combinaisons sans seuil ou métrique holdout, donc son total peut dépasser les Up évaluables.")
+    core_reasons = (
+        ("Précision", "Précision seule", "Précision impliquée"),
+        ("AUC", "AUC seule", "AUC impliquée"),
+        ("Signaux", "Signaux seuls", "Signaux impliqués"),
+        ("Rendement", "Rendement seul", "Rendement impliqué"),
+        ("Mouvement opposé", "Mouvement opposé seul", "Mouvement opposé impliqué"),
     )
-    counts = st.columns(3)
-    counts[0].metric("Runs avec candidat", f"{sum(bool(item.candidates) for item in analyses)} / {len(analyses)}")
-    yields = [item.candidate_yield for item in analyses if item.candidate_yield is not None]
-    counts[1].metric("Candidate yield médian", "—" if not yields else percent(float(pd.Series(yields).median()), digits=3),
-                     help="Médiane des candidate yields calculables des runs sélectionnés; ce n’est pas un ratio regroupant toutes leurs combinaisons.")
-    counts[2].metric("Forward terminées avec signaux", f"{sum(item.forward_status == 'terminée avec signaux' for item in analyses)} / {len(analyses)}")
+    other_labels = {
+        "Seuil": ("Seuil seul", "Seuil impliqué"),
+        "Direction": ("Direction seule", "Direction impliquée"),
+        "Walk-forward forcé": ("Walk-forward forcé seul", "Walk-forward forcé impliqué"),
+        "Évaluation forcée": ("Évaluation forcée seule", "Évaluation forcée impliquée"),
+        "Autre": ("Autre seul", "Autre impliqué"),
+    }
+    extra_reasons = sorted({
+        category for item in analyses if item.rejection_analysis
+        for category in item.rejection_analysis.involved
+        if category not in {name for name, _, _ in core_reasons}
+    })
+    def single_with_distance(item: EndToEndComparison, category: str) -> str:
+        analysis = item.rejection_analysis
+        if analysis is None:
+            return "—"
+        total = analysis.single.get(category, 0)
+        bands = analysis.proximity.get(category)
+        if bands is None:
+            return f"{total} (distance indisponible)" if total and category in {
+                "Précision", "AUC", "Signaux", "Rendement", "Mouvement opposé"
+            } else str(total)
+        details = [f"{label}: {value}" for label, value in zip(bands.labels, bands.counts, strict=True)]
+        if bands.unavailable:
+            details.append(f"distance indisponible: {bands.unavailable}")
+        return f"{total} ({' · '.join(details)})"
+
+    rejection_rows = [
+        ("Combinaisons rejetées", lambda item: count(item.rejection_analysis.rejected)
+         if item.rejection_analysis else "—"),
+        ("1 seul critère", lambda item: count(item.rejection_analysis.one_criterion)
+         if item.rejection_analysis else "—"),
+        ("2 critères", lambda item: count(item.rejection_analysis.two_criteria)
+         if item.rejection_analysis else "—"),
+        ("3 critères ou plus", lambda item: count(item.rejection_analysis.three_or_more_criteria)
+         if item.rejection_analysis else "—"),
+    ]
+    reason_labels = (
+        *core_reasons,
+        *((name, *other_labels.get(name, (f"{name} seul", f"{name} impliqué")))
+          for name in extra_reasons),
+    )
+    for category, alone_label, _ in reason_labels:
+        rejection_rows.append((alone_label, lambda item, name=category: single_with_distance(item, name)))
+    for category, _, involved_label in reason_labels:
+        rejection_rows.append((involved_label, lambda item, name=category: count(
+            item.rejection_analysis.involved.get(name, 0)) if item.rejection_analysis else "—"))
+    st.dataframe(pd.DataFrame([{
+        "Mesure": "Qualification source",
+        **{item.run_id: item.rejection_qualification_source or "—" for item in analyses},
+    }, *[
+        {"Mesure": label, **{
+            item.run_id: render(item)
+            for item in analyses
+        }} for label, render in rejection_rows
+    ]]), hide_index=True, width="stretch")
+
+    st.subheader("Holdout E2E — population évaluable")
+    st.caption("Toutes les combinaisons Up évaluées avant la qualification. Rendements : moyenne et médiane des rendements directionnels moyens par modèle; n indique le nombre de modèles renseignés.")
+    st.dataframe(pd.DataFrame([{
+        "Run": item.run_id,
+        "Up évaluables": count((item.holdout_population or {}).get("count")),
+        "AUC médiane": number((item.holdout_population or {}).get("auc_median")),
+        "Précision médiane": percent((item.holdout_population or {}).get("precision_median")),
+        "Rendement directionnel moyen": (
+            f"{percent(item.holdout_population['return_mean'], 2)} (n={item.holdout_population['return_models']})"
+            if item.holdout_population and item.holdout_population.get("return_mean") is not None else "—"),
+        "Rendement directionnel médian": percent((item.holdout_population or {}).get("return_median"), 2),
+        "Signaux médians / modèle": number((item.holdout_population or {}).get("signals_median"), 1),
+    } for item in analyses]), hide_index=True, width="stretch")
+
+    st.subheader("Candidats finaux")
+    st.caption("Qualité des candidats individuellement qualifiés; après revalidation forcée lorsqu’elle existe.")
+    st.dataframe(pd.DataFrame([{
+        "Run": item.run_id,
+        "Candidats": count(item.final_candidates),
+        "Candidate yield / WF évaluées": percent(
+            item.final_candidates / item.evaluated if item.final_candidates is not None and item.evaluated else None, 3),
+        "AUC médiane": number((item.candidate_population or {}).get("auc_median")),
+        "Précision médiane": percent((item.candidate_population or {}).get("precision_median")),
+        "Rendement médian": percent((item.candidate_population or {}).get("return_median"), 2),
+        "Signaux candidats": count((item.candidate_population or {}).get("signals_total")),
+    } for item in analyses]), hide_index=True, width="stretch")
+
     chosen = st.selectbox("Ouvrir le détail d’un run", run_ids, key="comparison-open-run")
     if st.button("Ouvrir le run sélectionné", key="comparison-open-detail"):
         _history_navigation("detail", [chosen])

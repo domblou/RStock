@@ -183,6 +183,53 @@ def test_candidate_identity_stability_for_identical_candidates():
     assert stability["jaccard_index"] == 1.0
 
 
+def test_candidate_identity_stability_matches_historical_predictor_reordering():
+    reference_set = '["VLO","TMO","MMM"]'
+    validation_set = '["VLO","MMM","TMO"]'
+    reference = _identity_population(reference_set)
+    validation = _identity_population(validation_set)
+    validation[(validation_set, "Up")] = _identity_candidate(validation_set, metric=0.7)
+
+    stability = candidate_identity_stability(reference, validation)
+
+    assert stability["common_candidate_count"] == 1
+    assert stability["lost_candidate_count"] == 0
+    assert stability["new_candidate_count"] == 0
+    common = stability["common_candidates"][0]
+    assert common["symbol_set_id"] == reference_set
+    assert common["validation_symbol_set_id"] == validation_set
+    assert common["canonical_combination_id"] == '["VLO","Up","MMM","TMO"]'
+    assert common["reference"]["holdout_precision"] == 0.6
+    assert common["validation"]["holdout_precision"] == 0.7
+
+
+def test_persisted_v1_stability_is_projected_at_read_time_without_rewrite():
+    original = {
+        "policy_version": "candidate_identity_stability_v1",
+        "reference_candidate_count": 1,
+        "validation_candidate_count": 1,
+        "common_candidates": [],
+        "lost_candidates": [_identity_candidate('["VLO","TMO","MMM"]')],
+        "new_candidates": [_identity_candidate('["VLO","MMM","TMO"]', metric=0.7)],
+    }
+    unchanged = json.dumps(original, sort_keys=True)
+    projected = temporal_validation.read_time_candidate_identity_stability(original)
+    assert projected["historical_read_time_projection"] is True
+    assert projected["common_candidate_count"] == 1
+    assert projected["lost_candidate_count"] == 0
+    assert projected["new_candidate_count"] == 0
+    assert json.dumps(original, sort_keys=True) == unchanged
+
+
+def test_candidate_identity_stability_keeps_incomplete_legacy_identity():
+    reference = {("unparseable", "Up"): {"target": "", "predictors": [], "holdout_precision": 0.6}}
+    validation = {("other", "Up"): {"target": "", "predictors": [], "holdout_precision": 0.7}}
+    stability = candidate_identity_stability(reference, validation)
+    assert stability["common_candidate_count"] == 0
+    assert stability["lost_candidate_count"] == 1
+    assert stability["new_candidate_count"] == 1
+
+
 def test_candidate_identity_stability_for_disjoint_candidates():
     reference = _identity_population(
         "[\"AAA\",\"BBB\"]", "[\"CCC\",\"DDD\"]"

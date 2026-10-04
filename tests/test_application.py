@@ -595,7 +595,7 @@ def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
         spec.config.predictor_prefilter_min_median_auc
     )
     assert "evaluate_holdout" not in evaluated_options[0]
-    assert "evaluate_holdout" not in evaluated_options[1]
+    assert evaluated_options[1]["evaluate_holdout"] is True
     assert summary["total_combinations"] == 1
     assert summary["predictor_prefilter"][0]["retained_predictors"] == ["A"]
     assert {

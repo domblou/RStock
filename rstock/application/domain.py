@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path
@@ -17,6 +18,7 @@ from .derivation import Derivation
 
 class JobType(str, Enum):
     WALK_FORWARD = "walk_forward"
+    PREDICTOR_PREFILTER = "predictor_prefilter"
     WALK_FORWARD_BATCH = "walk_forward_batch"
     XGBOOST_CALIBRATION = "xgboost_calibration"
     THRESHOLD_PARAMETER_CALIBRATION = "threshold_parameter_calibration"
@@ -42,6 +44,7 @@ class JobType(str, Enum):
     def implemented(self) -> bool:
         return self in {
             JobType.WALK_FORWARD,
+            JobType.PREDICTOR_PREFILTER,
             JobType.WALK_FORWARD_BATCH,
             JobType.XGBOOST_CALIBRATION,
             JobType.THRESHOLD_PARAMETER_CALIBRATION,
@@ -272,6 +275,7 @@ class ExperimentSpec:
     source_threshold_calibration_run: str | None = None
     source_holdout_evaluation_run: str | None = None
     derivation: Derivation | None = None
+    prefilter_derivation: dict[str, Any] | None = None
     experimental_overrides: tuple[dict[str, Any], ...] = ()
     auto_promote_candidates: bool = False
     temporal_validation_enabled: bool = False
@@ -338,6 +342,16 @@ class ExperimentSpec:
                     raise ValueError(
                         f"Effective value does not match override {override.field}"
                     )
+        if self.prefilter_derivation is not None:
+            if self.job_type is not JobType.PREDICTOR_PREFILTER or self.derivation is not None:
+                raise ValueError("Prefilter derivation requires a Predictor prefilter job")
+            if not isinstance(self.prefilter_derivation, dict) or self.prefilter_derivation.get("schema_version") != 1:
+                raise ValueError("Invalid prefilter derivation contract")
+        if self.job_type is JobType.PREDICTOR_PREFILTER:
+            if not self.config.predictor_prefilter_enabled:
+                raise ValueError("Predictor prefilter must be enabled")
+            if self.historical_data_cutoff is None or self.config.walk_forward_end_offset_sessions != 0:
+                raise ValueError("Predictor prefilter requires an explicit cutoff and zero end offset")
         if self.historical_forced_validation_backfill and self.auto_promote_candidates:
             raise ValueError(
                 "Historical forced validation backfill cannot promote candidates"
@@ -598,6 +612,8 @@ class ExperimentSpec:
         )
         if self.derivation is not None:
             values["derivation"] = self.derivation.to_dict()
+        if self.prefilter_derivation is not None:
+            values["prefilter_derivation"] = deepcopy(self.prefilter_derivation)
         if self.prepared_snapshot_required:
             values["prepared_snapshot_required"] = True
         if self.experimental_overrides:
@@ -746,6 +762,10 @@ class ExperimentSpec:
                 None
                 if values.get("derivation") is None
                 else Derivation.from_dict(values["derivation"])
+            ),
+            prefilter_derivation=(
+                None if values.get("prefilter_derivation") is None
+                else dict(values["prefilter_derivation"])
             ),
             experimental_overrides=tuple(values.get("experimental_overrides") or ()),
             auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),

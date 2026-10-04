@@ -41,15 +41,18 @@ SPLIT_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "forward_simulation": ("promotion_qualification",),
 }
 SCIENTIFIC_STAGE_KEYS = tuple(STAGE_DEPENDENCIES)[:4]
-FORK_STAGE_KEYS = SCIENTIFIC_STAGE_KEYS[1:]
+FORK_STAGE_KEYS = SCIENTIFIC_STAGE_KEYS
 SPLIT_SCIENTIFIC_STAGE_KEYS = tuple(SPLIT_STAGE_DEPENDENCIES)[:6]
-SPLIT_FORK_STAGE_KEYS = SPLIT_SCIENTIFIC_STAGE_KEYS[1:]
+SPLIT_FORK_STAGE_KEYS = SPLIT_SCIENTIFIC_STAGE_KEYS
 STAGE_MODES = frozenset({"inherited", "recomputed", "not_executed"})
 
 # An owner is the earliest stage from which changing this field is permitted.
 # Fields used by the Walk-forward remain locked for every supported fork.
 # Other fields are added here only after their effective consumer is verified.
 STAGE_PARAMETER_FIELDS: dict[str, frozenset[str]] = {
+    "walk_forward": frozenset({
+        "predictor_prefilter_enabled", "predictor_prefilter_top_n",
+    }),
     "xgboost_calibration": frozenset({
         "xgboost_global_max_qualified_combinations",
         "combinations_per_target",
@@ -246,6 +249,7 @@ class Derivation:
     overrides: tuple[ParameterOverride, ...]
     created_at: str
     prepared_snapshot_sha256: str | None = None
+    prepared_snapshot_source_run_id: str | None = None
     source_temporal_validation_enabled: bool | None = None
     schema_version: int = DERIVATION_SCHEMA_VERSION
 
@@ -255,6 +259,13 @@ class Derivation:
         _digest(self.source_manifest_sha256, "source_manifest_sha256")
         if self.prepared_snapshot_sha256 is not None:
             _digest(self.prepared_snapshot_sha256, "prepared_snapshot_sha256")
+        if self.prepared_snapshot_source_run_id is not None:
+            _nonempty(self.prepared_snapshot_source_run_id, "prepared_snapshot_source_run_id")
+        if self.fork_stage == "walk_forward" and (
+            self.prepared_snapshot_sha256 is None
+            or self.prepared_snapshot_source_run_id is None
+        ):
+            raise ValueError("Walk-forward derivation requires a frozen source snapshot")
         if self.source_temporal_validation_enabled is not None and not isinstance(
             self.source_temporal_validation_enabled, bool
         ):
@@ -265,7 +276,7 @@ class Derivation:
             datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
         except (TypeError, ValueError) as error:
             raise ValueError("created_at must be an ISO timestamp") from error
-        if not self.inherited_stages:
+        if not self.inherited_stages and self.fork_stage != "walk_forward":
             raise ValueError("A derivation must inherit at least the Walk-forward")
         if not all(isinstance(ref, InheritedStage) for ref in self.inherited_stages.values()):
             raise ValueError("Invalid inherited stage reference")
@@ -310,6 +321,8 @@ class Derivation:
         }
         if self.prepared_snapshot_sha256 is not None:
             values["prepared_snapshot_sha256"] = self.prepared_snapshot_sha256
+        if self.prepared_snapshot_source_run_id is not None:
+            values["prepared_snapshot_source_run_id"] = self.prepared_snapshot_source_run_id
         if self.source_temporal_validation_enabled is not None:
             values["source_temporal_validation_enabled"] = self.source_temporal_validation_enabled
         return values
@@ -342,6 +355,11 @@ class Derivation:
             prepared_snapshot_sha256=(
                 None if values.get("prepared_snapshot_sha256") is None
                 else _digest(values["prepared_snapshot_sha256"], "prepared_snapshot_sha256")
+            ),
+            prepared_snapshot_source_run_id=(
+                None if values.get("prepared_snapshot_source_run_id") is None
+                else _nonempty(values["prepared_snapshot_source_run_id"],
+                               "prepared_snapshot_source_run_id")
             ),
             source_temporal_validation_enabled=values.get("source_temporal_validation_enabled"),
         )

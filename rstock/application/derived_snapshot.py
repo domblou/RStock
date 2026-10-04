@@ -17,16 +17,21 @@ from .repository import RunRepository
 
 def load_source_prepared_snapshot(
     repository: RunRepository, spec: ExperimentSpec,
+    *, source_run_id: str | None = None,
+    source_job_type: JobType = JobType.WALK_FORWARD,
+    expected_snapshot_sha256: str | None = None,
 ) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
-    source_id = spec.source_walk_forward_run
+    source_id = source_run_id or spec.source_walk_forward_run
+    label = ("Walk-forward" if source_job_type is JobType.WALK_FORWARD
+             else "Predictor prefilter")
     if not source_id or not spec.source_prepared_dataset_sha256:
-        raise ValueError("Snapshot Walk-forward source or expected digest is missing")
+        raise ValueError(f"Snapshot {label} source or expected digest is missing")
     if repository.storage(source_id)["state"] != "full":
-        raise ValueError("Source Walk-forward snapshot has been purged")
+        raise ValueError(f"Source {label} snapshot has been purged")
     if repository.status(source_id).get("status") != "completed":
-        raise ValueError("Source Walk-forward is not completed")
-    if repository.load_spec(source_id).job_type is not JobType.WALK_FORWARD:
-        raise ValueError("Prepared snapshot source is not a Walk-forward")
+        raise ValueError(f"Source {label} is not completed")
+    if repository.load_spec(source_id).job_type is not source_job_type:
+        raise ValueError(f"Prepared snapshot source is not a {label}")
     source_config = repository.load_spec(source_id).config
     for field in (
         "model_history_days", "lag_depth", "intraday_target_threshold",
@@ -41,24 +46,26 @@ def load_source_prepared_snapshot(
         raw = path.read_bytes()
         metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError("Source Walk-forward prepared snapshot is missing or unreadable") from error
+        raise ValueError(f"Source {label} prepared snapshot is missing or unreadable") from error
     if (
         metadata.get("name") != "prepared_snapshot"
         or metadata.get("sha256") != hashlib.sha256(raw).hexdigest()
+        or (expected_snapshot_sha256 is not None
+            and hashlib.sha256(raw).hexdigest() != expected_snapshot_sha256)
         or metadata.get("configuration_fingerprint")
         != repository.configuration_fingerprint(source_id)
     ):
-        raise ValueError("Source Walk-forward prepared snapshot is corrupt")
+        raise ValueError(f"Source {label} prepared snapshot is corrupt or changed")
     try:
         payload = pickle.loads(raw)
     except (pickle.UnpicklingError, EOFError, AttributeError, ImportError) as error:
-        raise ValueError("Source Walk-forward prepared snapshot is corrupt") from error
+        raise ValueError(f"Source {label} prepared snapshot is corrupt") from error
     if not isinstance(payload, dict) or not isinstance(payload.get("prepared"), pd.DataFrame):
-        raise ValueError("Source Walk-forward prepared snapshot has an invalid contract")
+        raise ValueError(f"Source {label} prepared snapshot has an invalid contract")
     prepared = payload["prepared"]
     info = payload.get("metadata")
     if not isinstance(info, dict) or prepared.empty:
-        raise ValueError("Source Walk-forward prepared snapshot has an invalid contract")
+        raise ValueError(f"Source {label} prepared snapshot has an invalid contract")
     predictors = info.get("predictor_symbols")
     targets = info.get("target_symbols")
     calendars = info.get("calendars")
@@ -74,14 +81,14 @@ def load_source_prepared_snapshot(
         or not set(targets).issubset(spec.target_symbols)
         or info.get("effective_end_date") != prepared.attrs.get("effective_end_date")
     ):
-        raise ValueError("Source Walk-forward prepared snapshot has an invalid contract")
+        raise ValueError(f"Source {label} prepared snapshot has an invalid contract")
     source_traceability = repository.summary(source_id).get("traceability")
     if not isinstance(source_traceability, dict):
-        raise ValueError("Source Walk-forward traceability is missing")
+        raise ValueError(f"Source {label} traceability is missing")
     if source_traceability.get("prepared_dataset_sha256") != spec.source_prepared_dataset_sha256:
-        raise ValueError("Source Walk-forward digest differs from the frozen reference")
+        raise ValueError(f"Source {label} digest differs from the frozen reference")
     if str(prepared.index.max().isoformat()) != source_traceability.get("prepared_market_last_date"):
-        raise ValueError("Source Walk-forward prepared dates differ from traceability")
+        raise ValueError(f"Source {label} prepared dates differ from traceability")
     verification = verify_prepared_dataset_digest(
         prepared,
         expected_digest=spec.source_prepared_dataset_sha256,

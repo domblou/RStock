@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import exchange_calendars as xcals
 
+from rstock.combinations import canonical_combination_id
 from rstock.features import (
     intraday_down_target_column, intraday_return_column, intraday_target_column, mae_column, mfe_column,
     predictor_columns,
@@ -252,11 +253,16 @@ def _derived_discovery_data(
 
     stages = _stage_ids(repository, root_run_id)
     walk_forward_id = stages["walk_forward"]
+    snapshot_source_id = (
+        spec.derivation.prepared_snapshot_source_run_id
+        if spec.derivation is not None and spec.derivation.fork_stage == "walk_forward"
+        else walk_forward_id
+    )
     traceability = repository.summary(walk_forward_id).get("traceability")
     if not isinstance(traceability, dict) or not traceability.get("prepared_dataset_sha256"):
         raise ValueError("Source Walk-forward prepared digest is missing")
     snapshot_path = (
-        repository.run_directory(walk_forward_id)
+        repository.run_directory(str(snapshot_source_id))
         / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
     )
     if (
@@ -268,7 +274,7 @@ def _derived_discovery_data(
         raise ValueError("Derived prepared snapshot has changed")
     child_spec = replace(
         spec, job_type=JobType.XGBOOST_CALIBRATION, derivation=None,
-        source_walk_forward_run=walk_forward_id,
+        source_walk_forward_run=str(snapshot_source_id),
         source_prepared_dataset_sha256=str(traceability["prepared_dataset_sha256"]),
         prepared_dataset_digest_required=True,
         prepared_snapshot_required=True,
@@ -388,6 +394,8 @@ def build_forward_model_snapshot(
         training = prepared.loc[prepared.index <= cutoff, [*names, up_name, down_name]].dropna()
         if training.empty:
             raise ValueError(f"No complete discovery training data for {set_name}")
+        # Preserve the execution ID and its booster paths; the scientific key
+        # below is independent of feature order and serves cross-run matching.
         identity = f"{root_run_id}:{set_name}:{direction}"
         model_id = hashlib.sha256(identity.encode()).hexdigest()[:20]
         directory = model_root / model_id
@@ -406,6 +414,7 @@ def build_forward_model_snapshot(
         entry = {
             "source_model_id": model_id, "set": set_name, "target": target,
             "predictors": list(predictors), "direction": direction,
+            "canonical_combination_id": canonical_combination_id(target, direction, predictors),
             "feature_names": list(names), "lag_depth": spec.config.lag_depth,
             "xgboost_parameters": selected_xgb,
             "up_threshold": up_threshold,

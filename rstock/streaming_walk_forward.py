@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import os
 import sqlite3
 import tempfile
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +67,8 @@ FINAL_ARTIFACT_NAMES = {
     "run_configuration.json",
 }
 
+_LOCAL_RISK_WORKERS = 4
+
 
 class _AggregationMeasurements:
     """Attempt-local timings; never enter scientific checkpoints or results."""
@@ -108,6 +113,15 @@ def _observed_file_bytes(path: Path) -> int | None:
         return path.stat().st_size
     except OSError:
         return None
+
+
+def _batch_risk_task(
+    predictions: pd.DataFrame, config: RStockConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, float, int | None]:
+    """Calculate one batch's local risk without writing shared state."""
+    cpu_started = process_time()
+    risk_by_window, risk_by_set, _ = _aggregate_risk(predictions, config)
+    return risk_by_window, risk_by_set, process_time() - cpu_started, process_rss_bytes()
 
 
 def validate_final_artifacts(output: Path) -> None:
@@ -749,7 +763,48 @@ def run_streamed_walk_forward(
         payload_bytes = 0
         payload_sizes_complete = True
         combinations_processed = 0
-        with closing(sqlite3.connect(database)) as connection:
+        risk_started_at: float | None = None
+        risk_worker_cpu_seconds = 0.0
+        risk_parent_cpu_seconds = 0.0
+        risk_worker_rss_peak: int | None = None
+        pending_risk = deque()
+
+        def collect_oldest_risk() -> None:
+            nonlocal risk_parent_cpu_seconds, risk_worker_cpu_seconds, risk_worker_rss_peak
+            batch_id, future, batch_started_at, prediction_rows = pending_risk[0]
+            parent_cpu_started = process_time()
+            while True:
+                check_cancellation(cancellation_check)
+                try:
+                    risk_by_window, risk_by_set, worker_cpu, worker_rss = future.result(
+                        timeout=0.1
+                    )
+                    break
+                except FutureTimeoutError:
+                    continue
+            pending_risk.popleft()
+            risk_window_parts.append(risk_by_window)
+            risk_set_parts.append(risk_by_set)
+            risk_parent_cpu_seconds += process_time() - parent_cpu_started
+            risk_worker_cpu_seconds += worker_cpu
+            if worker_rss is not None:
+                risk_worker_rss_peak = max(risk_worker_rss_peak or 0, worker_rss)
+            with measurements.measure("progress_reporting"):
+                report_progress(
+                    progress_callback,
+                    phase,
+                    substage=f"batch {batch_id + 1}/{total_batches}",
+                    completed_units=batch_id + 1,
+                    total_units=total_batches,
+                    details={
+                        "batch_id": batch_id,
+                        "rows": prediction_rows,
+                        "elapsed_seconds": perf_counter() - batch_started_at,
+                    },
+                )
+
+        with (ProcessPoolExecutor(max_workers=_LOCAL_RISK_WORKERS, mp_context=mp.get_context("spawn"))
+              as risk_executor, closing(sqlite3.connect(database)) as connection):
             for batch_id in range(total_batches):
                 batch_started_at = perf_counter()
                 check_cancellation(cancellation_check)
@@ -778,25 +833,43 @@ def run_streamed_walk_forward(
                     )
                     aggregate_by_set, _ = _aggregate_predictions(predictions, windows)
                     aggregate_set_parts.append(aggregate_by_set)
-                with measurements.measure("aggregate_risk"):
-                    risk_by_window, risk_by_set, _ = _aggregate_risk(predictions, config)
-                    risk_window_parts.append(risk_by_window)
-                    risk_set_parts.append(risk_by_set)
+                if risk_started_at is None:
+                    risk_started_at = perf_counter()
+                    report_progress(
+                        progress_callback, phase, substage="aggregate_risk_started",
+                        details={"resource_subphase": "aggregate_risk",
+                                 "resource_subphase_event": "started"},
+                    )
+                pending_risk.append((
+                    batch_id,
+                    risk_executor.submit(_batch_risk_task, predictions, config),
+                    batch_started_at,
+                    len(predictions),
+                ))
                 with measurements.measure("sqlite_insertion"):
                     row_offset = _insert_predictions(connection, predictions, row_offset)
-                with measurements.measure("progress_reporting"):
-                    report_progress(
-                        progress_callback,
-                        phase,
-                        substage=f"batch {batch_id + 1}/{total_batches}",
-                        completed_units=batch_id + 1,
-                        total_units=total_batches,
-                        details={
-                            "batch_id": batch_id,
-                            "rows": len(predictions),
-                            "elapsed_seconds": perf_counter() - batch_started_at,
-                        },
-                    )
+                if len(pending_risk) == _LOCAL_RISK_WORKERS:
+                    collect_oldest_risk()
+            while pending_risk:
+                collect_oldest_risk()
+            report_progress(
+                progress_callback, phase, substage="aggregate_risk_completed",
+                details={"resource_subphase": "aggregate_risk",
+                         "resource_subphase_event": "completed"},
+            )
+            assert risk_started_at is not None
+            risk_measurement = measurements.values["aggregate_risk"]
+            risk_measurement["duration_seconds"] = perf_counter() - risk_started_at
+            risk_measurement["cpu_seconds_parent"] = risk_parent_cpu_seconds
+            risk_measurement["cpu_seconds_workers"] = risk_worker_cpu_seconds
+            risk_measurement["cpu_mean_worker_cores"] = (
+                risk_worker_cpu_seconds / risk_measurement["duration_seconds"]
+            )
+            risk_measurement["rss_peak_observed_worker_bytes"] = risk_worker_rss_peak
+            risk_measurement["rss_peak_observed_parent_bytes"] = process_rss_bytes()
+            risk_measurement["calls"] = total_batches
+            # Release worker memory before the unrelated global SQL pass.
+            risk_executor.shutdown(wait=True)
             with measurements.measure("sql_global_metrics"):
                 windows = pd.concat(window_definition_parts, ignore_index=True).groupby(
                     "Window", sort=True, as_index=False

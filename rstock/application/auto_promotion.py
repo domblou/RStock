@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from rstock.combinations import canonical_combination_id_from_set
 from rstock.progress import (
     CancellationCheck,
     ProgressCallback,
@@ -329,6 +330,7 @@ class PromotionCoordinator:
                 {
                     "set_name": set_name,
                     "direction": "Up",
+                    "canonical_combination_id": canonical_combination_id_from_set(set_name, "Up"),
                     "status": "pending",
                     "model_id": None,
                     "created": None,
@@ -345,15 +347,22 @@ class PromotionCoordinator:
         """Return the canonical promotion population without persisting a plan."""
 
         source_digests, guidance = self._source_values()
-        candidate_sets = sorted(
-            set(
-                guidance.loc[
-                    guidance["Statut promotion"] == "Candidat", "Combinaison"
-                ].astype(str)
-            )
-            if not guidance.empty
-            else set()
-        )
+        raw_sets = sorted(set(
+            guidance.loc[
+                guidance["Statut promotion"] == "Candidat", "Combinaison"
+            ].astype(str)
+        )) if not guidance.empty else []
+        by_identity: dict[str, str] = {}
+        for set_name in raw_sets:
+            scientific_id = canonical_combination_id_from_set(set_name, "Up")
+            key = scientific_id or f"legacy:{set_name}"
+            previous = by_identity.setdefault(key, set_name)
+            if previous != set_name:
+                raise ValueError(
+                    "Ambiguous candidate representations for one scientific combination: "
+                    f"{previous}, {set_name}"
+                )
+        candidate_sets = list(by_identity.values())
         return source_digests, guidance, candidate_sets
 
     def _load(self) -> dict[str, Any]:

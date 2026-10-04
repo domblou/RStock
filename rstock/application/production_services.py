@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from rstock.combinations import canonical_combination_id
 from rstock.calendars import next_market_session
 from rstock.config import RStockConfig
 from rstock.data import prefix_symbol_columns
@@ -292,6 +293,10 @@ class PromotionService:
             holdout_metrics=holdout_metrics,
             created_at=utc_now(),
             training_metadata={
+                "canonical_combination_ids": {
+                    direction: canonical_combination_id(target, direction, predictors)
+                    for direction in ("Up", "Down")
+                },
                 "promotion_fingerprint": fingerprint,
                 "selected_threshold_direction": selected_threshold_direction,
                 "calendar": spec.calendar,

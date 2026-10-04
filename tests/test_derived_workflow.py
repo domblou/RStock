@@ -15,7 +15,9 @@ from rstock.application.end_to_end import (
     build_pipeline_manifest, persist_or_validate_pipeline_manifest,
     run_end_to_end, validate_pipeline_manifest,
 )
-from rstock.application.derivation import Derivation
+from rstock.application.derivation import (
+    Derivation, FORK_STAGE_KEYS, SPLIT_FORK_STAGE_KEYS,
+)
 from rstock.application.repository import RunRepository
 from rstock.application.run_storage import RunStorageService
 from rstock.application.runner import RunService
@@ -33,9 +35,15 @@ def _completed(repository, run_id):
     repository.transition(run_id, JobStatus.COMPLETED)
 
 
-def _source(tmp_path, *, temporal=False, legacy_manifest=False, split=False):
+def _source(tmp_path, *, temporal=False, legacy_manifest=False, split=False,
+            prefilter_top_n=None, end_offset=0):
     repository = RunRepository(tmp_path / "runs")
-    config = replace(DEFAULT_CONFIG, project_root=tmp_path)
+    config = replace(
+        DEFAULT_CONFIG, project_root=tmp_path,
+        predictor_prefilter_enabled=prefilter_top_n is not None,
+        predictor_prefilter_top_n=prefilter_top_n or DEFAULT_CONFIG.predictor_prefilter_top_n,
+        walk_forward_end_offset_sessions=end_offset,
+    )
     source = ExperimentSpec(
         job_type=JobType.END_TO_END, config=config, symbols=("AAA", "BBB"),
         historical_data_cutoff=None if temporal else "2026-09-26",
@@ -329,6 +337,9 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
     source_spec = repository.load_spec(source_id)
     source_snapshot = forward_module.build_forward_model_snapshot(
         repository, source_id, source_spec
+    )
+    assert source_snapshot["models"][0]["canonical_combination_id"] == (
+        '["AAA","Up","BBB"]'
     )
     class RecordingBackend:
         def launch(self, _runs_root, _run_id, _limit):
@@ -953,3 +964,193 @@ def test_derived_upstream_fork_executes_only_its_downstream_graph(
     assert all(child_id not in {
         stage["child_run_id"] for stage in source_manifest["stages"]
     } for child_id in called)
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_prefilter_fork_recomputes_walk_forward_and_downstream_from_frozen_source(
+    tmp_path, monkeypatch, split,
+):
+    from rstock.application import end_to_end as pipeline
+
+    assert FORK_STAGE_KEYS[0] == SPLIT_FORK_STAGE_KEYS[0] == "walk_forward"
+    repository, source_id, source_manifest, digest = _source(
+        tmp_path, split=split, prefilter_top_n=12, end_offset=63,
+    )
+    source_wf = source_manifest["stages"][0]["child_run_id"]
+    source_snapshot = (
+        repository.run_directory(source_wf)
+        / "checkpoints" / "artifacts" / "prepared_snapshot.pkl"
+    )
+    source_sha = hashlib.sha256(source_snapshot.read_bytes()).hexdigest()
+    spec = build_derived_spec(
+        repository, source_id, "walk_forward", {"predictor_prefilter_top_n": 20},
+    )
+    assert spec.config.predictor_prefilter_top_n == 20
+    assert replace(spec.config, predictor_prefilter_top_n=12) == (
+        repository.load_spec(source_id).config
+    )
+    assert spec.derivation.source_end_to_end_run_id == source_id
+    assert spec.derivation.inherited_stages == {}
+    assert spec.derivation.prepared_snapshot_source_run_id == source_wf
+    assert spec.derivation.prepared_snapshot_sha256 == source_sha
+    assert spec.source_prepared_dataset_sha256 == digest
+    derived_id = repository.create(spec)
+    manifest = persist_or_validate_pipeline_manifest(repository, derived_id, spec)
+    assert manifest["prepared_dataset_as_of"] == source_manifest["prepared_dataset_as_of"]
+    assert all(stage["mode"] == "recomputed" for stage in manifest["stages"]
+               if stage["stage_key"] not in {"promotion", "forward_simulation"})
+    assert manifest["stages"][0]["child_run_id"] != source_wf
+    assert manifest["derivation"]["prepared_snapshot_source_run_id"] == source_wf
+    child = pipeline.build_stage_spec(repository, derived_id, spec,
+                                      "walk_forward", manifest)
+    assert child.source_walk_forward_run == source_wf
+    assert child.source_prepared_dataset_sha256 == digest
+    assert child.prepared_snapshot_required is True
+    assert child.prepared_dataset_digest_required is True
+    assert child.historical_data_cutoff == manifest["prepared_dataset_as_of"]
+    assert child.config.walk_forward_end_offset_sessions == 63
+
+    def no_market(*_args, **_kwargs):
+        pytest.fail("derived Walk-forward accessed market data")
+
+    monkeypatch.setattr(workflows.MarketDataService, "load", no_market)
+    prepared, predictors, targets, calendars = workflows._prepared_inputs(
+        child, None, None,
+    )
+    original = pickle.loads(source_snapshot.read_bytes())["prepared"]
+    pd.testing.assert_frame_equal(prepared, original)
+    assert prepared.index.max() == original.index.max()
+    assert predictors == targets == ["AAA", "BBB"]
+    assert calendars == {"AAA": "XNYS", "BBB": "XNYS"}
+
+
+def test_prefilter_fork_rejects_missing_changed_snapshot_and_digest(tmp_path):
+    from rstock.application import end_to_end as pipeline
+
+    repository, source_id, source_manifest, _ = _source(
+        tmp_path, split=True, prefilter_top_n=12,
+    )
+    source_wf = source_manifest["stages"][0]["child_run_id"]
+    snapshot = (repository.run_directory(source_wf)
+                / "checkpoints" / "artifacts" / "prepared_snapshot.pkl")
+    original = snapshot.read_bytes()
+    spec = build_derived_spec(repository, source_id, "walk_forward",
+                              {"predictor_prefilter_top_n": 20})
+    derived_id = repository.create(spec)
+    manifest = persist_or_validate_pipeline_manifest(repository, derived_id, spec)
+    snapshot.write_bytes(original + b"changed")
+    with pytest.raises(ValueError, match="snapshot has changed"):
+        pipeline.build_pipeline_manifest(repository, derived_id, spec)
+    snapshot.unlink()
+    with pytest.raises(ValueError, match="snapshot is missing or changed"):
+        pipeline.build_stage_spec(repository, derived_id, spec,
+                                  "walk_forward", manifest)
+    snapshot.write_bytes(original)
+    summary = repository.summary(source_wf)
+    summary["traceability"]["prepared_dataset_sha256"] = "0" * 64
+    repository.write_json(source_wf, "summary.json", summary)
+    with pytest.raises(ValueError, match="dataset digest has changed"):
+        pipeline.build_pipeline_manifest(repository, derived_id, spec)
+    with pytest.raises(ValueError, match="dataset digest has changed"):
+        pipeline.build_stage_spec(repository, derived_id, spec,
+                                  "walk_forward", manifest)
+
+
+def test_prefilter_fork_executes_new_walk_forward_and_all_split_stages(
+    tmp_path, monkeypatch,
+):
+    from rstock.application import end_to_end as pipeline
+
+    repository, source_id, source_manifest, digest = _source(
+        tmp_path, split=True, prefilter_top_n=12,
+    )
+    monkeypatch.setattr(pipeline, "build_forward_model_snapshot", lambda *a, **k: {})
+    spec = build_derived_spec(repository, source_id, "walk_forward",
+                              {"predictor_prefilter_top_n": 20})
+    derived_id = repository.create(spec)
+    called = []
+    interrupted = False
+
+    def execute(repo, child_id):
+        nonlocal interrupted
+        if repo.status(child_id)["status"] == "completed":
+            return
+        child = repo.load_spec(child_id)
+        key = child.job_type.value
+        called.append(key)
+        results = repo.run_directory(child_id) / "results"
+        results.mkdir(exist_ok=True)
+        if key == "walk_forward":
+            assert child.source_walk_forward_run == source_manifest["stages"][0]["child_run_id"]
+            assert child.source_prepared_dataset_sha256 == digest
+            repo.write_json(child_id, "summary.json", {
+                "traceability": {
+                    "prepared_dataset_sha256": digest,
+                    "prepared_market_last_date": "2026-09-25T00:00:00",
+                },
+            })
+            prepared, predictors, targets, calendars = workflows._prepared_inputs(
+                child, None, None,
+            )
+            checkpoint = CheckpointManager(
+                repo.run_directory(child_id), run_id=child_id,
+                job_type=key, configuration_fingerprint=child.fingerprint,
+                batch_sizes={
+                    "predictor_prefilter_walk_forward": child.config.predictor_prefilter_batch_size,
+                    "walk_forward": child.config.walk_forward_batch_size,
+                    "final_holdout": child.config.final_holdout_batch_size,
+                },
+            )
+            checkpoint.commit_snapshot(prepared, {
+                "predictor_symbols": predictors, "target_symbols": targets,
+                "calendars": calendars,
+                "effective_end_date": prepared.attrs["effective_end_date"],
+            })
+        for relative in pipeline.REQUIRED_ARTIFACTS[key]:
+            path = repo.run_directory(child_id) / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if key == "walk_forward" and relative == "summary.json":
+                continue
+            path.write_text("{}" if path.suffix == ".json" else "Set\n")
+        if key == "threshold_calibration":
+            for name in ("threshold_metrics_by_set.csv", "sampled_combinations.csv"):
+                (results / name).write_text("Set\n")
+        if key == "xgboost_calibration":
+            repo.write_json(child_id, "results/selected_configurations.json", {
+                direction: {"parameters": {
+                    "max_depth": 2, "eta": 0.05, "num_boost_round": 20,
+                }} for direction in ("Up", "Down")
+            })
+        if key == "threshold_parameter_calibration":
+            repo.write_json(
+                child_id, "results/selected_threshold_calibration_configuration.json",
+                {"parameters": ThresholdCalibrationParameters.from_config(
+                    child.config
+                ).as_dict()},
+            )
+        _completed(repo, child_id)
+        if key == "walk_forward" and not interrupted:
+            interrupted = True
+            raise RuntimeError("interrupted after Walk-forward checkpoint")
+
+    with pytest.raises(RuntimeError, match="interrupted after Walk-forward"):
+        run_end_to_end(
+            spec, repository.run_directory(derived_id) / "results", None, None,
+            execute_reserved_child=execute, phase_callback=lambda *a, **k: None,
+        )
+    reserved = pipeline.load_pipeline_manifest(repository, derived_id)
+    reserved_wf = reserved["stages"][0]["child_run_id"]
+    result = run_end_to_end(
+        spec, repository.run_directory(derived_id) / "results", None, None,
+        execute_reserved_child=execute, phase_callback=lambda *a, **k: None,
+    )
+    assert tuple(called) == tuple(key for key, _, _ in SPLIT_SCIENTIFIC_STAGES)
+    assert result["stage_run_ids"]["walk_forward"] != (
+        source_manifest["stages"][0]["child_run_id"]
+    )
+    assert result["stage_run_ids"]["walk_forward"] == reserved_wf
+    forward_prepared, forward_cutoff = forward_module._derived_discovery_data(
+        repository, derived_id, spec,
+    )
+    assert prepared_dataset_hash(forward_prepared) == digest
+    assert forward_cutoff == pd.Timestamp("2026-09-25")

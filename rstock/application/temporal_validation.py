@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from rstock.combinations import canonical_combination_id_from_set
+
 from .auto_promotion import _promotion_guidance
 from .domain import JobType, RunPurpose, RunRole
 from .repository import RunRepository
@@ -23,7 +25,7 @@ TEMPORAL_VALIDATION_SCHEMA_VERSION = 1
 TEMPORAL_VALIDATION_POLICY_VERSION = 1
 BOOTSTRAP_METHOD_VERSION = "moving_date_block_bootstrap_v1"
 BOOTSTRAP_REPLICATIONS = 2_000
-CANDIDATE_IDENTITY_STABILITY_POLICY_VERSION = "candidate_identity_stability_v1"
+CANDIDATE_IDENTITY_STABILITY_POLICY_VERSION = "candidate_identity_stability_v2"
 TEMPORAL_VALIDATION_CHECKPOINT = "orchestration/temporal_validation.json"
 TEMPORAL_VALIDATION_RESULT = "results/temporal_validation_comparison.json"
 
@@ -202,6 +204,9 @@ def _candidate_population(
             "predictors": predictors,
             "direction": direction,
             "symbol_set_id": set_id,
+            "canonical_combination_id": canonical_combination_id_from_set(
+                set_id, direction, target=target, predictors=predictors
+            ),
             "threshold": _as_float(row.get("Seuil calibré")),
             "holdout_signal_count": _optional_int(row.get("Signaux holdout")),
             "holdout_precision": _as_float(row.get("Précision holdout")),
@@ -223,33 +228,59 @@ def candidate_identity_stability(
 ) -> dict[str, object]:
     """Describe candidate identity overlap without affecting any gate."""
 
-    reference_keys = set(reference_candidates)
-    validation_keys = set(validation_candidates)
+    def indexed(population: dict[tuple[str, str], dict[str, object]]) -> dict[str, tuple[tuple[str, str], dict[str, object]]]:
+        result: dict[str, tuple[tuple[str, str], dict[str, object]]] = {}
+        for source_key, candidate in sorted(population.items()):
+            set_id, direction = source_key
+            scientific_id = canonical_combination_id_from_set(
+                set_id, direction,
+                target=candidate.get("target"),
+                predictors=candidate.get("predictors"),
+            )
+            # Incomplete historical records retain their former ordered identity.
+            key = scientific_id or json.dumps(["legacy", set_id, direction])
+            projected = dict(candidate)
+            projected["canonical_combination_id"] = scientific_id
+            result.setdefault(key, (source_key, projected))
+        return result
+
+    reference = indexed(reference_candidates)
+    validation = indexed(validation_candidates)
+    reference_keys = set(reference)
+    validation_keys = set(validation)
     common_keys = reference_keys & validation_keys
     lost_keys = reference_keys - validation_keys
     new_keys = validation_keys - reference_keys
 
-    def ordered(keys: set[tuple[str, str]]) -> list[tuple[str, str]]:
-        return sorted(keys, key=lambda item: (item[0], item[1]))
+    def ordered(keys: set[str]) -> list[str]:
+        return sorted(keys)
 
     common = [
         {
-            "target": reference_candidates[key]["target"],
-            "predictors": reference_candidates[key]["predictors"],
-            "direction": key[1],
-            "symbol_set_id": key[0],
+            "target": reference[key][1]["target"],
+            "predictors": reference[key][1]["predictors"],
+            "direction": reference[key][0][1],
+            "symbol_set_id": reference[key][0][0],
+            "validation_symbol_set_id": validation[key][0][0],
+            "canonical_combination_id": canonical_combination_id_from_set(
+                reference[key][0][0], reference[key][0][1],
+                target=reference[key][1].get("target"),
+                predictors=reference[key][1].get("predictors"),
+            ),
             "reference": {
                 name: value
-                for name, value in reference_candidates[key].items()
+                for name, value in reference[key][1].items()
                 if name not in {
-                    "target", "predictors", "direction", "symbol_set_id"
+                    "target", "predictors", "direction", "symbol_set_id",
+                    "canonical_combination_id",
                 }
             },
             "validation": {
                 name: value
-                for name, value in validation_candidates[key].items()
+                for name, value in validation[key][1].items()
                 if name not in {
-                    "target", "predictors", "direction", "symbol_set_id"
+                    "target", "predictors", "direction", "symbol_set_id",
+                    "canonical_combination_id",
                 }
             },
         }
@@ -274,9 +305,55 @@ def candidate_identity_stability(
         ),
         "jaccard_index": common_count / union_count if union_count else None,
         "common_candidates": common,
-        "lost_candidates": [reference_candidates[key] for key in ordered(lost_keys)],
-        "new_candidates": [validation_candidates[key] for key in ordered(new_keys)],
+        "lost_candidates": [reference[key][1] for key in ordered(lost_keys)],
+        "new_candidates": [validation[key][1] for key in ordered(new_keys)],
     }
+
+
+def read_time_candidate_identity_stability(stability: dict[str, object]) -> dict[str, object]:
+    """Project a persisted v1 comparison onto scientific identities in memory.
+
+    Historical comparison files are neither modified nor recomputed from market
+    data. If their candidate rows are incomplete, retain the original result.
+    """
+
+    if stability.get("policy_version") != "candidate_identity_stability_v1":
+        return stability
+    reference: dict[tuple[str, str], dict[str, object]] = {}
+    validation: dict[tuple[str, str], dict[str, object]] = {}
+
+    def add(item: object, side: str, metrics: object = None) -> bool:
+        if not isinstance(item, dict):
+            return False
+        set_id = item.get("symbol_set_id")
+        direction = item.get("direction")
+        if not isinstance(set_id, str) or not isinstance(direction, str):
+            return False
+        values = dict(item)
+        if isinstance(metrics, dict):
+            values.update(metrics)
+        (reference if side == "reference" else validation)[(set_id, direction)] = values
+        return True
+
+    for item in stability.get("common_candidates", ()):
+        if not isinstance(item, dict) or not add(item, "reference", item.get("reference")):
+            return stability
+        if not add(item, "validation", item.get("validation")):
+            return stability
+    for item in stability.get("lost_candidates", ()):
+        if not add(item, "reference"):
+            return stability
+    for item in stability.get("new_candidates", ()):
+        if not add(item, "validation"):
+            return stability
+    if (
+        len(reference) != stability.get("reference_candidate_count")
+        or len(validation) != stability.get("validation_candidate_count")
+    ):
+        return stability
+    projected = candidate_identity_stability(reference, validation)
+    projected["historical_read_time_projection"] = True
+    return projected
 
 
 def _single_candidate_yield(
