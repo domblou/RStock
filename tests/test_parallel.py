@@ -4,6 +4,7 @@ import pytest
 
 from rstock.parallel import (
     iter_combination_batches,
+    iter_ordered_process_results,
     process_cancellation_requested,
     run_combination_tasks,
 )
@@ -80,3 +81,13 @@ def test_combination_batches_preserve_input_order_and_batch_boundaries():
     ))
 
     assert batches == [[0, 10], [20, 30], [40]]
+
+
+def test_ordered_process_results_keep_input_order_with_bounded_work():
+    results = list(iter_ordered_process_results(
+        [0, 1, 2, 3], workers=2,
+        initializer=_set_test_context,
+        context={0: 0.15, 1: 0.01, 2: 0.01, 3: 0.01},
+        task=_process_task,
+    ))
+    assert results == [0, 10, 20, 30]

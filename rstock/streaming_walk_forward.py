@@ -6,10 +6,10 @@ import json
 import os
 import sqlite3
 import tempfile
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, process_time
 from collections.abc import Iterable
 from typing import Any, Mapping
 
@@ -30,6 +30,7 @@ from .walk_forward import (
     _aggregate_predictions,
     _aggregate_risk,
     _combine_selection_results,
+    _empty_final_holdout_frames,
     _evaluate_final_holdout,
     _set_walk_forward_task_context,
     _validate_prepared_index,
@@ -62,6 +63,51 @@ FINAL_ARTIFACT_NAMES = {
     "final_holdout_risk.csv",
     "run_configuration.json",
 }
+
+
+class _AggregationMeasurements:
+    """Attempt-local timings; never enter scientific checkpoints or results."""
+
+    NAMES = (
+        "load_batch", "local_classification_windows", "aggregate_risk",
+        "sqlite_insertion", "progress_reporting", "sql_global_metrics",
+        "assembly_finalization",
+    )
+
+    def __init__(self) -> None:
+        self.values = {
+            name: {"duration_seconds": 0.0, "cpu_seconds_parent": 0.0,
+                   "rss_peak_observed_parent_bytes": None, "calls": 0}
+            for name in self.NAMES
+        }
+
+    @contextmanager
+    def measure(self, name: str):
+        started = perf_counter()
+        cpu_started = process_time()
+        try:
+            yield
+        finally:
+            row = self.values[name]
+            row["duration_seconds"] += perf_counter() - started
+            row["cpu_seconds_parent"] += process_time() - cpu_started
+            row["calls"] += 1
+            rss = process_rss_bytes()
+            if rss is not None:
+                row["rss_peak_observed_parent_bytes"] = max(
+                    row["rss_peak_observed_parent_bytes"] or 0, rss
+                )
+
+    def rows(self) -> list[dict[str, object]]:
+        return [{"name": name, **self.values[name]} for name in self.NAMES]
+
+
+def _observed_file_bytes(path: Path) -> int | None:
+    """An unavailable telemetry size must not fail a scientific run."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def validate_final_artifacts(output: Path) -> None:
@@ -405,7 +451,10 @@ def _workflow_configuration(
         "development_end": development_end.isoformat(),
         "final_holdout_start": holdout_start.isoformat(),
         "qualification": qualification_parameters(config),
-        "model_selection": model_selection_parameters(config),
+        "model_selection": {
+            **model_selection_parameters(config),
+            "composite_score_evaluated": evaluate_holdout,
+        },
         "ranking_order": [
             "PctWindowsAboveRandom desc",
             "ROCAUCMedian desc",
@@ -416,6 +465,8 @@ def _workflow_configuration(
     }
     if not evaluate_holdout:
         values["final_holdout_evaluated"] = False
+    else:
+        values["final_holdout_evaluated"] = True
     return values
 
 
@@ -694,63 +745,103 @@ def run_streamed_walk_forward(
         risk_window_parts: list[pd.DataFrame] = []
         risk_set_parts: list[pd.DataFrame] = []
         row_offset = 0
+        measurements = _AggregationMeasurements()
+        payload_bytes = 0
+        payload_sizes_complete = True
+        combinations_processed = 0
         with closing(sqlite3.connect(database)) as connection:
             for batch_id in range(total_batches):
                 batch_started_at = perf_counter()
                 check_cancellation(cancellation_check)
-                payload = checkpoint.load_batch("walk_forward", batch_id)
+                with measurements.measure("load_batch"):
+                    payload = checkpoint.load_batch("walk_forward", batch_id)
+                    payload_size = _observed_file_bytes(
+                        checkpoint.root / "batches" / "walk_forward"
+                        / f"batch-{batch_id:06d}" / "payload.pkl"
+                    )
+                    if payload_size is None:
+                        payload_sizes_complete = False
+                    else:
+                        payload_bytes += payload_size
                 windows = payload["windows"]
                 predictions = payload["predictions"]
-                window_evaluations += len(windows)
-                window_definition_parts.append(
-                    windows.groupby("Window", sort=True, as_index=False).agg(
-                        TrainStart=("TrainStart", "min"),
-                        TrainEnd=("TrainEnd", "max"),
-                        TestStart=("TestStart", "min"),
-                        TestEnd=("TestEnd", "max"),
+                combinations_processed += int(windows["Set"].nunique())
+                with measurements.measure("local_classification_windows"):
+                    window_evaluations += len(windows)
+                    window_definition_parts.append(
+                        windows.groupby("Window", sort=True, as_index=False).agg(
+                            TrainStart=("TrainStart", "min"),
+                            TrainEnd=("TrainEnd", "max"),
+                            TestStart=("TestStart", "min"),
+                            TestEnd=("TestEnd", "max"),
+                        )
                     )
+                    aggregate_by_set, _ = _aggregate_predictions(predictions, windows)
+                    aggregate_set_parts.append(aggregate_by_set)
+                with measurements.measure("aggregate_risk"):
+                    risk_by_window, risk_by_set, _ = _aggregate_risk(predictions, config)
+                    risk_window_parts.append(risk_by_window)
+                    risk_set_parts.append(risk_by_set)
+                with measurements.measure("sqlite_insertion"):
+                    row_offset = _insert_predictions(connection, predictions, row_offset)
+                with measurements.measure("progress_reporting"):
+                    report_progress(
+                        progress_callback,
+                        phase,
+                        substage=f"batch {batch_id + 1}/{total_batches}",
+                        completed_units=batch_id + 1,
+                        total_units=total_batches,
+                        details={
+                            "batch_id": batch_id,
+                            "rows": len(predictions),
+                            "elapsed_seconds": perf_counter() - batch_started_at,
+                        },
+                    )
+            with measurements.measure("sql_global_metrics"):
+                windows = pd.concat(window_definition_parts, ignore_index=True).groupby(
+                    "Window", sort=True, as_index=False
+                ).agg(
+                    TrainStart=("TrainStart", "min"),
+                    TrainEnd=("TrainEnd", "max"),
+                    TestStart=("TestStart", "min"),
+                    TestEnd=("TestEnd", "max"),
                 )
-                aggregate_by_set, _ = _aggregate_predictions(predictions, windows)
-                risk_by_window, risk_by_set, _ = _aggregate_risk(predictions, config)
-                aggregate_set_parts.append(aggregate_by_set)
-                risk_window_parts.append(risk_by_window)
-                risk_set_parts.append(risk_by_set)
-                row_offset = _insert_predictions(connection, predictions, row_offset)
-                report_progress(
-                    progress_callback,
-                    phase,
-                    substage=f"batch {batch_id + 1}/{total_batches}",
-                    completed_units=batch_id + 1,
-                    total_units=total_batches,
-                    details={
-                        "batch_id": batch_id,
-                        "rows": len(predictions),
-                        "elapsed_seconds": perf_counter() - batch_started_at,
-                    },
+                aggregate_by_window, aggregate_global = _sql_aggregate_predictions(
+                    connection, windows, window_evaluations
                 )
-            windows = pd.concat(window_definition_parts, ignore_index=True).groupby(
-                "Window", sort=True, as_index=False
-            ).agg(
-                TrainStart=("TrainStart", "min"),
-                TrainEnd=("TrainEnd", "max"),
-                TestStart=("TestStart", "min"),
-                TestEnd=("TestEnd", "max"),
-            )
-            aggregate_by_window, aggregate_global = _sql_aggregate_predictions(
-                connection, windows, window_evaluations
-            )
-            risk_global = _sql_global_risk(connection, config)
-        aggregation = {
-            "aggregate_by_window": aggregate_by_window,
-            "aggregate_by_set": pd.concat(aggregate_set_parts, ignore_index=True),
-            "aggregate_global": aggregate_global,
-            "risk_by_window": pd.concat(risk_window_parts, ignore_index=True),
-            "risk_by_set": pd.concat(risk_set_parts, ignore_index=True),
-            "risk_global": risk_global,
-        }
-        aggregation["_elapsed_seconds"] = perf_counter() - phase_started
-        checkpoint.commit_artifact("aggregation", aggregation)
-        checkpoint.phase_completed(phase)
+                risk_global = _sql_global_risk(connection, config)
+        sqlite_bytes = _observed_file_bytes(database)
+        with measurements.measure("assembly_finalization"):
+            aggregation = {
+                "aggregate_by_window": aggregate_by_window,
+                "aggregate_by_set": pd.concat(aggregate_set_parts, ignore_index=True),
+                "aggregate_global": aggregate_global,
+                "risk_by_window": pd.concat(risk_window_parts, ignore_index=True),
+                "risk_by_set": pd.concat(risk_set_parts, ignore_index=True),
+                "risk_global": risk_global,
+            }
+            aggregation["_elapsed_seconds"] = perf_counter() - phase_started
+            checkpoint.commit_artifact("aggregation", aggregation)
+            checkpoint.phase_completed(phase)
+        aggregation_checkpoint_bytes = _observed_file_bytes(
+            checkpoint.root / "artifacts" / "aggregation.pkl"
+        )
+        subphases = measurements.rows()
+        measured_payload_bytes = payload_bytes if payload_sizes_complete else None
+        subphases[0].update(batches=total_batches, payload_bytes=measured_payload_bytes,
+                            estimated_read_bytes=(
+                                2 * payload_bytes if payload_sizes_complete else None
+                            ))
+        subphases[1].update(combinations=combinations_processed,
+                            window_evaluations=window_evaluations,
+                            prediction_rows=row_offset)
+        subphases[2].update(combinations=combinations_processed,
+                            prediction_rows=row_offset)
+        subphases[3].update(prediction_rows=row_offset,
+                            sqlite_database_bytes=sqlite_bytes)
+        subphases[4].update(batches=total_batches)
+        subphases[5].update(prediction_rows=row_offset)
+        subphases[6].update(aggregation_checkpoint_bytes=aggregation_checkpoint_bytes)
         telemetry["aggregation_seconds"] = aggregation["_elapsed_seconds"]
         phase_seconds[phase] = aggregation["_elapsed_seconds"]
         report_progress(
@@ -760,6 +851,15 @@ def run_streamed_walk_forward(
             details={
                 "phase_event": "completed",
                 "elapsed_seconds": aggregation["_elapsed_seconds"],
+                "subphases": subphases,
+                "batches": total_batches,
+                "combinations_processed": combinations_processed,
+                "window_evaluations": window_evaluations,
+                "prediction_rows": row_offset,
+                "checkpoint_payload_bytes": measured_payload_bytes,
+                "checkpoint_payload_read_passes": 2,
+                "sqlite_database_bytes": sqlite_bytes,
+                "aggregation_checkpoint_bytes": aggregation_checkpoint_bytes,
             },
         )
 
@@ -819,7 +919,9 @@ def run_streamed_walk_forward(
         report_progress(progress_callback, phase, substage="started", details={"phase_event": "started"})
         phase_started = perf_counter()
         completed_holdout = set(checkpoint.completed_batch_ids(phase))
-        for batch_id, start in enumerate(range(0, len(eligible), holdout_batch_size)):
+        for batch_id, start in enumerate(
+            range(0, len(eligible), holdout_batch_size) if evaluate_holdout else ()
+        ):
             if batch_id in completed_holdout:
                 continue
             batch_started_at = perf_counter()
@@ -881,14 +983,7 @@ def run_streamed_walk_forward(
                 else pd.DataFrame()
             )
         else:
-            final_holdout, empty_predictions = _evaluate_final_holdout(
-                ordered,
-                holdout_sets,
-                qualification.assign(Eligible=False),
-                config,
-                holdout_start,
-                calendars,
-            )
+            final_holdout, empty_predictions = _empty_final_holdout_frames()
             final_holdout_risk = pd.DataFrame()
             checkpoint.commit_artifact("empty_final_predictions", empty_predictions)
         if not final_holdout_risk.empty:
@@ -923,12 +1018,17 @@ def run_streamed_walk_forward(
         report_progress(progress_callback, phase, substage="started", details={"phase_event": "started"})
         phase_started = perf_counter()
         selection_results = score_qualified_models(
-            _combine_selection_results(qualification, final_holdout), config
+            _combine_selection_results(
+                qualification, final_holdout, holdout_evaluated=evaluate_holdout,
+            ), config,
+            composite_score_enabled=evaluate_holdout,
         )
         aggregate_global = aggregation["aggregate_global"].copy()
         aggregate_global["EligibleSets"] = int(qualification["Eligible"].sum())
         aggregate_global["EligiblePct"] = float(qualification["Eligible"].mean())
-        aggregate_global["FinalConfirmedSets"] = int(final_holdout["FinalConfirmed"].sum())
+        aggregate_global["FinalConfirmedSets"] = (
+            int(final_holdout["FinalConfirmed"].sum()) if evaluate_holdout else None
+        )
         run_configuration = _workflow_configuration(
             config,
             min_train=min_train,

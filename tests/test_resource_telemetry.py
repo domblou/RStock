@@ -74,6 +74,24 @@ def test_resource_resume_reconciles_an_unfinished_attempt(tmp_path, monkeypatch)
     assert attempts[0]["phase_rows"][0]["finished_at"] is None
 
 
+def test_aggregation_subphases_persist_in_resource_summary(tmp_path):
+    run = tmp_path / "run"
+    recorder = resource_telemetry.ResourceRecorder(run, "run", {})
+    recorder.phase_started("aggregation")
+    recorder.phase_completed("aggregation", {
+        "batches": 2,
+        "prediction_rows": 100,
+        "subphases": [{"name": "load_batch", "duration_seconds": 1.2}],
+    })
+    recorder.close("completed")
+    document = json.loads((run / "telemetry/resource_summary.json").read_text(encoding="utf-8"))
+    phase = document["attempts"][0]["phase_rows"][0]
+    assert phase["details"]["subphases"] == [
+        {"name": "load_batch", "duration_seconds": 1.2}
+    ]
+    assert phase["details"]["prediction_rows"] == 100
+
+
 def test_phase_duration_uses_its_own_start_after_another_phase_starts(tmp_path, monkeypatch):
     from rstock.application import runner
 
@@ -161,3 +179,44 @@ def test_resource_view_shows_measured_cpu_phases_and_two_charts(tmp_path, monkey
     assert frames[0].iloc[0]["Durée (s)"] == 40
     assert frames[0].iloc[0]["Débit"] == "0.50 combinaisons/s"
     assert len(charts) == 2
+
+
+def test_resource_view_shows_aggregation_subphases(tmp_path, monkeypatch):
+    folder = tmp_path / "runs" / "run" / "telemetry"
+    folder.mkdir(parents=True)
+    (folder / "resource_summary.json").write_text(json.dumps({
+        "schema_version": 1, "attempts": [{
+            "attempt_id": "one", "status": "completed", "elapsed_seconds": 20,
+            "logical_processors": 16, "wait_seconds": {}, "configuration": {},
+            "phase_rows": [{
+                "name": "aggregation", "duration_seconds": 12,
+                "details": {"batches": 2, "combinations_processed": 5,
+                            "prediction_rows": 100, "subphases": [{
+                    "name": "load_batch", "duration_seconds": 2,
+                    "cpu_seconds_parent": 1,
+                    "rss_peak_observed_parent_bytes": 2**30,
+                    "batches": 2, "estimated_read_bytes": 2**20,
+                }]},
+            }],
+        }],
+    }), encoding="utf-8")
+    frames, headings, captions = [], [], []
+    column = SimpleNamespace(metric=lambda *_args: None)
+    fake = SimpleNamespace(
+        session_state=SimpleNamespace(lab_config=SimpleNamespace(project_root=tmp_path)),
+        caption=captions.append, subheader=headings.append,
+        columns=lambda count: [column] * count,
+        dataframe=lambda frame, **_kwargs: frames.append(frame),
+        column_config=SimpleNamespace(
+            TextColumn=lambda **kwargs: kwargs,
+            NumberColumn=lambda **kwargs: kwargs,
+        ),
+    )
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    streamlit_app._render_run_resources("run")
+    assert headings == ["Détail de la phase aggregation"]
+    assert len(frames) == 2
+    assert frames[1].iloc[0]["Durée (s)"] == 2
+    assert frames[1].iloc[0]["CPU moyen parent"] == "0.50 cœur"
+    assert frames[1].iloc[0]["Débit"] == "1.0 lots/s"
+    assert any("deux passages du payload" in caption for caption in captions)

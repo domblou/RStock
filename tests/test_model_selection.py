@@ -141,3 +141,22 @@ def test_invalid_weights_are_rejected():
         score_qualified_models(
             rows, _config(model_selection_stability_weight=-1.0)
         )
+
+
+def test_missing_final_holdout_does_not_create_a_comparable_composite_score():
+    rows = pd.DataFrame([_row("first", FinalUpROCAUC=np.nan), _row("second", FinalUpROCAUC=np.nan)])
+    scored = score_qualified_models(rows, _config())
+    assert scored["holdout_score"].isna().all()
+    assert scored["model_selection_score"].isna().all()
+    assert scored["model_selection_rank"].isna().all()
+    assert scored["predictive_quality_score"].notna().all()
+
+
+def test_skipped_final_holdout_disables_composite_even_if_holdout_weight_is_zero():
+    scored = score_qualified_models(
+        pd.DataFrame([_row("first")]),
+        _config(model_selection_holdout_weight=0.0),
+        composite_score_enabled=False,
+    )
+    assert pd.isna(scored.loc[0, "model_selection_score"])
+    assert pd.isna(scored.loc[0, "model_selection_rank"])

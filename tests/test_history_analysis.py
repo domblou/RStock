@@ -159,6 +159,28 @@ def test_combination_table_exposes_persisted_score_and_components():
     assert pd.isna(row["Score qualité signal"])
 
 
+def test_combination_table_marks_unevaluated_holdout_and_hides_composite_rank():
+    scores = pd.DataFrame([{
+        "Set": "DIS<-PFE+WMT", "model_selection_score": pd.NA,
+        "model_selection_rank": pd.NA, "holdout_score": pd.NA,
+    }])
+    table = combination_table(
+        _qualification(), pd.DataFrame(), depth=3, selection_results=scores,
+    )
+    row = table[table["Combinaison"] == "DIS<-PFE+WMT"].iloc[0]
+    assert row["Statut"] == "Holdout non calculé"
+    assert pd.isna(row["Holdout confirmé"])
+    assert "Score" not in table
+    assert "Rang" not in table
+    analytics = analyze_run(
+        {"run_id": "wf", "status": "completed"},
+        {"configuration": {}, "summary": {}},
+        _qualification(), pd.DataFrame(), selection_results=scores,
+    )
+    assert analytics.confirmed_count is None
+    assert analytics.confirmation_rate is None
+
+
 def test_comparison_keeps_configuration_and_missing_values_distinct():
     first = _analysis("run-a", 120.0)
     second = _analysis("run-b", 60.0)

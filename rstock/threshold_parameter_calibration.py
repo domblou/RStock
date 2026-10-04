@@ -24,6 +24,7 @@ from .calibration_sampling import (
 from .checkpoints import CheckpointManager, _atomic_json
 from .config import RStockConfig
 from .modeling import XGBoostParameters
+from .parallel import iter_ordered_process_results
 from .progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from .threshold_calibration import (
     generate_development_probabilities,
@@ -54,6 +55,55 @@ SELECTION_ORDER = (
     "TotalSignals desc",
     "Configuration asc",
 )
+
+_GRID_GROUPS: list[tuple[str, pd.DataFrame]] | None = None
+_GRID_CONFIG: RStockConfig | None = None
+_METRICS_CONTEXT: tuple[Mapping[str, Mapping[str, object]], RStockConfig] | None = None
+
+
+def _initialize_grid_worker(context: tuple[pd.DataFrame, RStockConfig]) -> None:
+    global _GRID_GROUPS, _GRID_CONFIG
+    predictions, _GRID_CONFIG = context
+    _GRID_GROUPS = [
+        (str(set_name), group)
+        for set_name, group in predictions.groupby("Set", sort=True)
+    ]
+
+
+def _compute_grid_task(
+    task: tuple[str, ThresholdCalibrationParameters, int, int],
+) -> tuple[str, dict[str, object], float]:
+    if _GRID_GROUPS is None or _GRID_CONFIG is None:
+        raise RuntimeError("Threshold-grid worker context is unavailable")
+    key, parameters, start, stop = task
+    effective = parameters.apply(_GRID_CONFIG)
+    started = perf_counter()
+    invariant = {
+        set_name: threshold_calibration_invariant(group, effective)
+        for set_name, group in _GRID_GROUPS[start:stop]
+    }
+    return key, invariant, perf_counter() - started
+
+
+def _initialize_metrics_worker(
+    context: tuple[Mapping[str, Mapping[str, object]], RStockConfig],
+) -> None:
+    global _METRICS_CONTEXT
+    _METRICS_CONTEXT = context
+
+
+def _compute_metrics_task(
+    task: tuple[str, ThresholdCalibrationParameters],
+) -> tuple[dict[str, object], list[pd.DataFrame], float]:
+    if _METRICS_CONTEXT is None:
+        raise RuntimeError("Threshold-metrics worker context is unavailable")
+    invariants, config = _METRICS_CONTEXT
+    name, parameters = task
+    started = perf_counter()
+    row, frames = _evaluate_candidate(
+        name, parameters, invariants[parameters.grid_key], config,
+    )
+    return row, frames, perf_counter() - started
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,29 +455,70 @@ def run_threshold_parameter_calibration(
     invariants_by_grid: dict[str, Mapping[str, object]] = {}
     grid_reused = 0
     grid_timings: dict[str, float] = {}
+    unique_grids: list[tuple[str, ThresholdCalibrationParameters]] = []
+    seen_grid_keys: set[str] = set()
     for parameters in candidate_list:
-        if parameters.grid_key in invariants_by_grid:
-            continue
-        artifact = f"threshold_grid_{parameters.grid_key}"
+        if parameters.grid_key not in seen_grid_keys:
+            unique_grids.append((parameters.grid_key, parameters))
+            seen_grid_keys.add(parameters.grid_key)
+    pending_grids: list[tuple[str, ThresholdCalibrationParameters]] = []
+    resolved_grids: dict[str, Mapping[str, object]] = {}
+    for key, parameters in unique_grids:
+        artifact = f"threshold_grid_{key}"
         if checkpoint_manager is not None and checkpoint_manager.artifact_exists(artifact):
             payload = checkpoint_manager.load_artifact(artifact)
             if payload.get("prediction_key") == prediction_key:
-                invariants_by_grid[parameters.grid_key] = payload["invariant"]
+                resolved_grids[key] = payload["invariant"]
                 grid_reused += 1
-                grid_timings[parameters.grid_key] = 0.0
+                grid_timings[key] = 0.0
                 continue
-        effective = parameters.apply(config)
-        started_at = perf_counter()
-        invariant = {
-            str(set_name): threshold_calibration_invariant(group, effective)
-            for set_name, group in predictions.groupby("Set", sort=True)
-        }
-        grid_timings[parameters.grid_key] = perf_counter() - started_at
-        invariants_by_grid[parameters.grid_key] = invariant
-        if checkpoint_manager is not None:
-            checkpoint_manager.commit_artifact(
-                artifact, {"prediction_key": prediction_key, "invariant": invariant}
-            )
+        pending_grids.append((key, parameters))
+
+    set_count = int(predictions["Set"].nunique())
+    if set_count > 1 and pending_grids:
+        # A single grid is split between both workers; multiple grids are the
+        # natural independent units. Inputs are installed once per worker.
+        chunk_size = (set_count + 1) // 2 if len(pending_grids) == 1 else set_count
+        grid_tasks = [
+            (key, parameters, start, min(start + chunk_size, set_count))
+            for key, parameters in pending_grids
+            for start in range(0, set_count, chunk_size)
+        ]
+        results = iter_ordered_process_results(
+            grid_tasks, workers=2,
+            initializer=_initialize_grid_worker, context=(predictions, config),
+            task=_compute_grid_task, cancellation_check=cancellation_check,
+        )
+        try:
+            for key, chunk, worker_seconds in results:
+                current = dict(resolved_grids.get(key, {}))
+                current.update(chunk)
+                resolved_grids[key] = current
+                grid_timings[key] = grid_timings.get(key, 0.0) + worker_seconds
+                if len(current) == set_count and checkpoint_manager is not None:
+                    checkpoint_manager.commit_artifact(
+                        f"threshold_grid_{key}",
+                        {"prediction_key": prediction_key, "invariant": current},
+                    )
+        finally:
+            results.close()
+    else:
+        for key, parameters in pending_grids:
+            effective = parameters.apply(config)
+            started_at = perf_counter()
+            invariant = {
+                str(set_name): threshold_calibration_invariant(group, effective)
+                for set_name, group in predictions.groupby("Set", sort=True)
+            }
+            grid_timings[key] = perf_counter() - started_at
+            resolved_grids[key] = invariant
+            if checkpoint_manager is not None:
+                checkpoint_manager.commit_artifact(
+                    f"threshold_grid_{key}",
+                    {"prediction_key": prediction_key, "invariant": invariant},
+                )
+    for key, _ in unique_grids:
+        invariants_by_grid[key] = resolved_grids[key]
     grid_elapsed_seconds = perf_counter() - grid_started_at
     report_progress(progress_callback, "threshold_grid", substage="completed", details={"phase_event": "completed", "grids": len(invariants_by_grid)})
     rows: list[dict[str, object]] = []
@@ -436,31 +527,61 @@ def run_threshold_parameter_calibration(
     selection_started_at = perf_counter()
     selection_timings: dict[str, float] = {}
     report_progress(progress_callback, "metrics", substage="started", details={"phase_event": "started"})
-    for number, ((_, tested_row), parameters) in enumerate(
-        zip(tested.iterrows(), candidate_list, strict=True), start=1
-    ):
-        check_cancellation(cancellation_check)
-        artifact = f"parameter_candidate_{str(tested_row['Configuration'])}"
-        if checkpoint_manager is not None and checkpoint_manager.artifact_exists(artifact):
-            payload = checkpoint_manager.load_artifact(artifact)
-            row, frames = payload["row"], payload["frames"]
-            reused_candidates += 1
-            selection_timings[str(tested_row["Configuration"])] = 0.0
-        else:
-            started_at = perf_counter()
-            row, frames = _evaluate_candidate(
-                str(tested_row["Configuration"]), parameters,
-                invariants_by_grid[parameters.grid_key], config,
-            )
-            if checkpoint_manager is not None:
-                checkpoint_manager.commit_artifact(artifact, {"row": row, "frames": frames})
-            selection_timings[str(tested_row["Configuration"])] = perf_counter() - started_at
-        rows.append(row)
-        window_frames.extend(frames)
-        report_progress(
-            progress_callback, "metrics", substage=str(tested_row["Configuration"]),
-            completed_units=number, total_units=len(candidate_list),
+    candidate_names = [str(value) for value in tested["Configuration"]]
+    pending_candidates = [
+        (name, parameters)
+        for name, parameters in zip(candidate_names, candidate_list, strict=True)
+        if checkpoint_manager is None
+        or not checkpoint_manager.artifact_exists(f"parameter_candidate_{name}")
+    ]
+    parallel_candidates = set_count > 1 and len(pending_candidates) > 1
+    calculated = (
+        iter_ordered_process_results(
+            pending_candidates, workers=2,
+            initializer=_initialize_metrics_worker,
+            context=(invariants_by_grid, config),
+            task=_compute_metrics_task, cancellation_check=cancellation_check,
         )
+        if parallel_candidates else None
+    )
+    try:
+        for number, (name, parameters) in enumerate(
+            zip(candidate_names, candidate_list, strict=True), start=1
+        ):
+            check_cancellation(cancellation_check)
+            artifact = f"parameter_candidate_{name}"
+            if checkpoint_manager is not None and checkpoint_manager.artifact_exists(artifact):
+                payload = checkpoint_manager.load_artifact(artifact)
+                row, frames = payload["row"], payload["frames"]
+                reused_candidates += 1
+                selection_timings[name] = 0.0
+            else:
+                started_at = perf_counter()
+                if calculated is None:
+                    row, frames = _evaluate_candidate(
+                        name, parameters, invariants_by_grid[parameters.grid_key], config,
+                    )
+                    worker_seconds = 0.0
+                else:
+                    row, frames, worker_seconds = next(calculated)
+                    if row["Configuration"] != name:
+                        raise RuntimeError("Threshold candidate results arrived out of order")
+                commit_started = perf_counter()
+                if checkpoint_manager is not None:
+                    checkpoint_manager.commit_artifact(artifact, {"row": row, "frames": frames})
+                selection_timings[name] = (
+                    perf_counter() - started_at if calculated is None
+                    else worker_seconds + (perf_counter() - commit_started)
+                )
+            rows.append(row)
+            window_frames.extend(frames)
+            report_progress(
+                progress_callback, "metrics", substage=name,
+                completed_units=number, total_units=len(candidate_list),
+            )
+    finally:
+        if calculated is not None:
+            calculated.close()
     ranked = rank_threshold_parameter_configurations(pd.DataFrame(rows))
     selection_elapsed_seconds = perf_counter() - selection_started_at
     winner = ranked.iloc[0]

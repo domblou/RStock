@@ -559,6 +559,21 @@ def test_qualified_table_prefers_persisted_final_score_when_available():
     ]
 
 
+def test_qualified_table_uses_development_order_when_holdout_score_is_absent():
+    qualification = pd.DataFrame([
+        {"Set": "A<-B", "Observation": "A", "Predictors": '["B"]', "Eligible": True, "ROCAUCMedian": 0.80},
+        {"Set": "C<-D", "Observation": "C", "Predictors": '["D"]', "Eligible": True, "ROCAUCMedian": 0.70},
+    ])
+    scores = pd.DataFrame([
+        {"Set": "A<-B", "model_selection_score": pd.NA, "model_selection_rank": pd.NA},
+        {"Set": "C<-D", "model_selection_score": pd.NA, "model_selection_rank": pd.NA},
+    ])
+    table = qualified_combinations_table(qualification, selection_results=scores)
+    assert table["Combinaison"].tolist() == ["A<-B", "C<-D"]
+    assert "Score" not in table
+    assert "Rang" not in table
+
+
 def test_threshold_calibration_history_summary_explains_missing_frozen_threshold():
     row = history_row(
         _run("threshold-run", "threshold_calibration"),

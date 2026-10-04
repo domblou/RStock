@@ -76,6 +76,75 @@ def _forbid_walk_forward(monkeypatch):
     monkeypatch.setattr(streaming, "_walk_forward_combination", forbidden)
 
 
+def test_skipped_final_holdout_persists_absence_without_composite_score(tmp_path, monkeypatch):
+    prepared, generated, config, manager, output = _fixture(tmp_path)
+    monkeypatch.setattr(
+        streaming, "_evaluate_final_holdout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("holdout was evaluated")),
+    )
+    result = streaming.run_streamed_walk_forward(
+        prepared, generated, config, manager, output,
+        evaluate_holdout=False,
+        run_configuration_extras={
+            "final_holdout_policy": "delegated_to_end_to_end_holdout_evaluation",
+        },
+    )
+    assert result.run_configuration["final_holdout_evaluated"] is False
+    assert result.run_configuration["final_holdout_policy"] == "delegated_to_end_to_end_holdout_evaluation"
+    assert result.run_configuration["model_selection"]["composite_score_evaluated"] is False
+    assert pd.isna(result.aggregate_global.iloc[0]["FinalConfirmedSets"])
+    scores = pd.read_csv(output / "selection_results.csv")
+    assert scores["model_selection_score"].isna().all()
+    assert scores["model_selection_rank"].isna().all()
+    assert set(scores.loc[scores["Eligible"], "FinalStatus"]) == {"not_evaluated_disabled"}
+    assert pd.read_csv(output / "final_holdout_predictions.csv").empty
+    assert result.telemetry["final_holdout_batches"] == 0
+
+
+def test_aggregation_reports_subphases_without_changing_scientific_artifact(tmp_path):
+    prepared, generated, config, manager, output = _fixture(tmp_path)
+    events = []
+    result = streaming.run_streamed_walk_forward(
+        prepared, generated, config, manager, output,
+        progress_callback=events.append, evaluate_holdout=False,
+    )
+    completed = next(
+        event for event in events
+        if event.stage == "aggregation" and event.details.get("phase_event") == "completed"
+    )
+    details = completed.details
+    subphases = details["subphases"]
+    assert [row["name"] for row in subphases] == list(streaming._AggregationMeasurements.NAMES)
+    assert all(row["duration_seconds"] >= 0 and row["cpu_seconds_parent"] >= 0
+               for row in subphases)
+    assert details["batches"] == result.telemetry["walk_forward_batches"]
+    assert details["combinations_processed"] == len(generated)
+    assert details["prediction_rows"] == len(pd.read_csv(output / "predictions.csv"))
+    assert details["checkpoint_payload_bytes"] > 0
+    assert subphases[0]["estimated_read_bytes"] == 2 * details["checkpoint_payload_bytes"]
+    assert details["sqlite_database_bytes"] > 0
+    assert details["aggregation_checkpoint_bytes"] > 0
+    assert "subphases" not in manager.load_artifact("aggregation")
+    assert "subphases" not in result.run_configuration
+
+
+def test_nonstreamed_walk_forward_skip_never_calls_final_holdout(tmp_path, monkeypatch):
+    prepared, generated, config, _, _ = _fixture(tmp_path)
+    monkeypatch.setattr(
+        walk_forward, "_evaluate_final_holdout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("holdout was evaluated")),
+    )
+    result = walk_forward.evaluate_walk_forward(
+        prepared, generated, config, evaluate_holdout=False,
+    )
+    assert result.final_holdout.empty
+    assert result.run_configuration["final_holdout_evaluated"] is False
+    assert result.selection_results["model_selection_score"].isna().all()
+    assert set(result.selection_results.loc[
+        result.selection_results["Eligible"], "FinalStatus"
+    ]) == {"not_evaluated_disabled"}
+
+
 def test_resume_after_walk_forward_crash_replays_only_incomplete_batch(
     monkeypatch, tmp_path
 ):

@@ -789,6 +789,34 @@ def _aggregate_final_risk(
     return pd.DataFrame(records)
 
 
+_FINAL_HOLDOUT_METRIC_NAMES = (
+    "TN", "FP", "FN", "TP", "Accuracy", "Precision", "Recall", "F1",
+    "ROCAUC", "PRAUC", "Prevalence",
+)
+_FINAL_HOLDOUT_COLUMNS = (
+    "Set", "Observation", "Predictors", "MarketCalendar",
+    "FinalTrainStart", "FinalTrainEnd", "FinalTestStart", "FinalTestEnd",
+    "FinalTrainObservations", "FinalTestObservations", "FinalPredictions",
+    "FinalUpPositiveOutcomes", "FinalDownPositiveOutcomes",
+    "FinalAvailable", "FinalConfirmed",
+    *(f"Final{direction}{name}" for direction in ("Up", "Down")
+      for name in _FINAL_HOLDOUT_METRIC_NAMES),
+)
+_FINAL_HOLDOUT_PREDICTION_COLUMNS = (
+    "Set", "Observation", "Predictors", "Date", "OvernightReturn",
+    "IntradayReturn", "CloseToCloseReturn", "IntradayTarget", "UpTarget",
+    "DownTarget", "MFE", "MAE", "UpPrediction", "UpProbability",
+    "DownPrediction", "DownProbability",
+)
+
+
+def _empty_final_holdout_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    return (
+        pd.DataFrame(columns=_FINAL_HOLDOUT_COLUMNS),
+        pd.DataFrame(columns=_FINAL_HOLDOUT_PREDICTION_COLUMNS),
+    )
+
+
 def _evaluate_final_holdout(
     ordered: pd.DataFrame,
     generated_sets: pd.DataFrame,
@@ -804,10 +832,7 @@ def _evaluate_final_holdout(
     generated_lookup = {
         symbol_set_id(row): row for _, row in generated_sets.iterrows()
     }
-    metric_names = [
-        "TN", "FP", "FN", "TP", "Accuracy", "Precision", "Recall", "F1",
-        "ROCAUC", "PRAUC", "Prevalence",
-    ]
+    metric_names = _FINAL_HOLDOUT_METRIC_NAMES
     records: list[dict[str, object]] = []
     prediction_records: list[dict[str, object]] = []
     eligible = qualification[qualification["Eligible"]].sort_values("EligibleRank")
@@ -927,32 +952,15 @@ def _evaluate_final_holdout(
             total_units=len(eligible),
         )
 
-    columns = [
-        "Set", "Observation", "Predictors", "MarketCalendar",
-        "FinalTrainStart", "FinalTrainEnd", "FinalTestStart", "FinalTestEnd",
-        "FinalTrainObservations", "FinalTestObservations", "FinalPredictions",
-        "FinalUpPositiveOutcomes", "FinalDownPositiveOutcomes",
-        "FinalAvailable", "FinalConfirmed",
-        *[
-            f"Final{direction}{name}"
-            for direction in ("Up", "Down")
-            for name in metric_names
-        ],
-    ]
-    prediction_columns = [
-        "Set", "Observation", "Predictors", "Date", "OvernightReturn",
-        "IntradayReturn", "CloseToCloseReturn", "IntradayTarget", "UpTarget",
-        "DownTarget", "MFE", "MAE", "UpPrediction", "UpProbability",
-        "DownPrediction", "DownProbability",
-    ]
     return (
-        pd.DataFrame(records, columns=columns),
-        pd.DataFrame(prediction_records, columns=prediction_columns),
+        pd.DataFrame(records, columns=_FINAL_HOLDOUT_COLUMNS),
+        pd.DataFrame(prediction_records, columns=_FINAL_HOLDOUT_PREDICTION_COLUMNS),
     )
 
 
 def _combine_selection_results(
-    qualification: pd.DataFrame, final_holdout: pd.DataFrame
+    qualification: pd.DataFrame, final_holdout: pd.DataFrame, *,
+    holdout_evaluated: bool = True,
 ) -> pd.DataFrame:
     final_metrics = final_holdout.drop(
         columns=["Observation", "Predictors"], errors="ignore"
@@ -960,6 +968,9 @@ def _combine_selection_results(
     combined = qualification.merge(final_metrics, on="Set", how="left")
     combined["FinalStatus"] = "not_evaluated_ineligible"
     eligible = combined["Eligible"]
+    if not holdout_evaluated:
+        combined.loc[eligible, "FinalStatus"] = "not_evaluated_disabled"
+        return combined
     unavailable = eligible & ~combined["FinalAvailable"].fillna(False).astype(bool)
     confirmed = eligible & combined["FinalConfirmed"].fillna(False).astype(bool)
     combined.loc[unavailable, "FinalStatus"] = "not_confirmed_unavailable"
@@ -1252,21 +1263,13 @@ def evaluate_walk_forward(
     risk_by_set = risk_by_set.merge(eligibility, on="Set", how="left")
     report_progress(progress_callback, "qualification", substage="completed", details={"phase_event": "completed", "eligible_combinations": int(qualification["Eligible"].sum())})
     report_progress(progress_callback, "final_holdout", substage="started", details={"phase_event": "started"})
-    holdout_qualification = (
-        qualification
-        if evaluate_holdout
-        else qualification.assign(Eligible=False)
-    )
-    final_holdout, final_predictions = _evaluate_final_holdout(
-        ordered,
-        generated_sets,
-        holdout_qualification,
-        config,
-        holdout_start,
-        market_calendars or {},
-        progress_callback,
-        cancellation_check,
-    )
+    if evaluate_holdout:
+        final_holdout, final_predictions = _evaluate_final_holdout(
+            ordered, generated_sets, qualification, config, holdout_start,
+            market_calendars or {}, progress_callback, cancellation_check,
+        )
+    else:
+        final_holdout, final_predictions = _empty_final_holdout_frames()
     report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed", "evaluated_combinations": len(final_holdout)})
     report_progress(progress_callback, "metrics", substage="started", details={"phase_event": "started"})
     final_holdout_risk = _aggregate_final_risk(final_predictions, config)
@@ -1275,12 +1278,15 @@ def evaluate_walk_forward(
             eligibility, on="Set", how="left"
         )
     selection_results = score_qualified_models(
-        _combine_selection_results(qualification, final_holdout), config
+        _combine_selection_results(
+            qualification, final_holdout, holdout_evaluated=evaluate_holdout,
+        ), config,
+        composite_score_enabled=evaluate_holdout,
     )
     aggregate_global["EligibleSets"] = int(qualification["Eligible"].sum())
     aggregate_global["EligiblePct"] = float(qualification["Eligible"].mean())
-    aggregate_global["FinalConfirmedSets"] = int(
-        final_holdout["FinalConfirmed"].sum()
+    aggregate_global["FinalConfirmedSets"] = (
+        int(final_holdout["FinalConfirmed"].sum()) if evaluate_holdout else None
     )
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     run_configuration: dict[str, object] = {
@@ -1301,7 +1307,10 @@ def evaluate_walk_forward(
         "development_end": development_end.isoformat(),
         "final_holdout_start": holdout_start.isoformat(),
         "qualification": qualification_parameters(config),
-        "model_selection": model_selection_parameters(config),
+        "model_selection": {
+            **model_selection_parameters(config),
+            "composite_score_evaluated": evaluate_holdout,
+        },
         "ranking_order": [
             "PctWindowsAboveRandom desc",
             "ROCAUCMedian desc",
@@ -1310,8 +1319,7 @@ def evaluate_walk_forward(
             "PRAUCMedian desc",
         ],
     }
-    if not evaluate_holdout:
-        run_configuration["final_holdout_evaluated"] = False
+    run_configuration["final_holdout_evaluated"] = evaluate_holdout
     return WalkForwardResult(
         windows=windows_frame,
         predictions=predictions_frame,

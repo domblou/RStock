@@ -585,9 +585,13 @@ def _walk_forward(
         generated,
         spec.config,
         market_calendars=calendars,
+        evaluate_holdout=spec.evaluate_final_holdout,
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
     )
+    holdout_policy = _end_to_end_walk_forward_holdout_policy(spec)
+    if holdout_policy is not None:
+        result.run_configuration["final_holdout_policy"] = holdout_policy
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     traceability = _persist_prepared_traceability(
         result.run_configuration, prepared, spec
@@ -639,6 +643,16 @@ def _walk_forward(
         summary["total_combinations"] = len(generated)
         summary["predictor_prefilter"] = _json_value(prefilter.diagnostics)
     return summary
+
+
+def _end_to_end_walk_forward_holdout_policy(spec: ExperimentSpec) -> str | None:
+    if not spec.source_end_to_end_run or spec.evaluate_final_holdout:
+        return None
+    if spec.forced_period_lock is not None:
+        return "delegated_to_fixed_candidate_evaluation"
+    if spec.pipeline_version >= 3:
+        return "delegated_to_end_to_end_holdout_evaluation"
+    return "delegated_to_threshold_calibration"
 
 
 def _resumable_walk_forward(
@@ -845,6 +859,9 @@ def _resumable_walk_forward(
         "effective_end_date": prepared.attrs.get("effective_end_date"),
     }
     extras: dict[str, object] = dict(period)
+    holdout_policy = _end_to_end_walk_forward_holdout_policy(spec)
+    if holdout_policy is not None:
+        extras["final_holdout_policy"] = holdout_policy
     traceability = _persist_prepared_traceability(extras, prepared, spec)
     if prefilter is not None:
         extras["predictor_prefilter"] = {
@@ -2227,6 +2244,9 @@ def _planned_walk_forward(
             "effective_batch_count": effective_batch_count,
         },
     }
+    holdout_policy = _end_to_end_walk_forward_holdout_policy(spec)
+    if holdout_policy is not None:
+        extras["final_holdout_policy"] = holdout_policy
     traceability = _persist_prepared_traceability(extras, prepared, spec)
     if prefilter is not None:
         extras["predictor_prefilter"] = {

@@ -40,6 +40,56 @@ def process_cancellation_requested() -> bool:
     return bool(_CANCELLATION_EVENT is not None and _CANCELLATION_EVENT.is_set())
 
 
+def iter_ordered_process_results(
+    items: Sequence[Item],
+    *,
+    workers: int,
+    initializer: Callable[[Any], None],
+    context: Any,
+    task: Callable[[Item], Result],
+    cancellation_check: CancellationCheck | None = None,
+) -> Iterator[Result]:
+    """Bound in-flight process work and yield only in canonical input order.
+
+    Workers never write checkpoints. The caller can persist each yielded result
+    before requesting the next one, including after a resumed run.
+    """
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if not items:
+        return
+    executor = ProcessPoolExecutor(
+        max_workers=min(workers, len(items)),
+        mp_context=mp.get_context("spawn"),
+        initializer=initializer,
+        initargs=(context,),
+    )
+    futures: dict[Any, int] = {}
+    ready: dict[int, Result] = {}
+    next_submit = 0
+    next_yield = 0
+    try:
+        while next_yield < len(items):
+            check_cancellation(cancellation_check)
+            while (
+                next_submit < len(items)
+                and len(futures) + len(ready) < 2 * workers
+            ):
+                future = executor.submit(task, items[next_submit])
+                futures[future] = next_submit
+                next_submit += 1
+            while next_yield in ready:
+                yield ready.pop(next_yield)
+                next_yield += 1
+            if next_yield == len(items):
+                break
+            done, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in done:
+                ready[futures.pop(future)] = future.result()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _initialize_process_worker(
     cancellation_event: Any,
     context_initializer: Callable[[Any], None],

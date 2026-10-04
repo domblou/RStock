@@ -1,6 +1,9 @@
+import json
+
 import pandas as pd
 
 from rstock.application.temporal_validation_trace import (
+    forced_candidate_trace_lookup,
     resolve_lost_candidate_traces,
 )
 
@@ -165,3 +168,42 @@ def test_holdout_and_non_candidate_stops_use_existing_statuses():
     assert candidate_trace[('["AAA","BBB"]', "Up")] == {
         "last_stage": "Calibration seuils", "elimination_reason": "AUC 0,58 < 0,60"
     }
+
+
+def test_skipped_final_holdout_is_not_reported_as_failed_confirmation():
+    set_id = '["AAA","BBB"]'
+    inputs = dict(
+        lost_candidates=[_candidate(set_id, "AAA", ["BBB"])],
+        prefilter=_prefilter("AAA", ["BBB"]),
+        qualification=pd.DataFrame([{"Set": set_id, "Eligible": True}]),
+        final_holdout=pd.DataFrame(), config={}, final_holdout_evaluated=False,
+    )
+    trace = resolve_lost_candidate_traces(**inputs)
+    assert trace[(set_id, "Up")]["elimination_reason"] == "Holdout non calculé"
+    trace = resolve_lost_candidate_traces(
+        **inputs, promotion_lookup={(set_id, "Up"): {
+            "promotion_status": "Non candidat", "promotion_reason": "AUC holdout insuffisante",
+        }}
+    )
+    assert trace[(set_id, "Up")]["elimination_reason"] == "AUC holdout insuffisante"
+
+
+def test_forced_trace_reads_persisted_holdout_skipped_provenance(tmp_path):
+    set_id = '["AAA","BBB"]'
+    root = tmp_path / "runs"
+    forced = root / "forced"
+    (forced / "orchestration").mkdir(parents=True)
+    (forced / "config.json").write_text(json.dumps({"rstock_config": {}}), encoding="utf-8")
+    (forced / "orchestration" / "pipeline.json").write_text(json.dumps({
+        "stages": [{"stage_key": "walk_forward", "child_run_id": "wf"}],
+    }), encoding="utf-8")
+    results = root / "wf" / "results"
+    results.mkdir(parents=True)
+    pd.DataFrame([{"Set": set_id, "Eligible": True}]).to_csv(results / "qualification.csv", index=False)
+    (results / "run_configuration.json").write_text(
+        json.dumps({"final_holdout_evaluated": False}), encoding="utf-8",
+    )
+    trace = forced_candidate_trace_lookup(
+        {"common_candidates": [_candidate(set_id, "AAA", ["BBB"])]}, forced,
+    )
+    assert trace[(set_id, "Up")]["status"] == "Holdout final non calculé"

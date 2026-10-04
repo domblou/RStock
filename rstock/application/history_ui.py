@@ -602,10 +602,12 @@ def qualified_combinations_table(
             lambda value: "Qualifiée" if not value or str(value) in {"[]", "nan"} else str(value)
         ),
     }
-    if "model_selection_score" in eligible:
+    if "model_selection_score" in eligible and pd.to_numeric(
+        eligible["model_selection_score"], errors="coerce"
+    ).notna().any():
         values["Score"] = pd.to_numeric(eligible["model_selection_score"], errors="coerce")
-    if "model_selection_rank" in eligible:
-        values["Rang"] = pd.to_numeric(eligible["model_selection_rank"], errors="coerce").astype("Int64")
+        if "model_selection_rank" in eligible:
+            values["Rang"] = pd.to_numeric(eligible["model_selection_rank"], errors="coerce").astype("Int64")
     result = pd.DataFrame(values)
     sort_columns = ["Score", "Combinaison"] if "Score" in result else ["AUC dev médiane", "Combinaison"]
     return result.sort_values(sort_columns, ascending=[False, True], kind="stable")

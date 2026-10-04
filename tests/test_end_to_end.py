@@ -64,6 +64,45 @@ def _write_json(path, values):
     path.write_text(json.dumps(values), encoding="utf-8")
 
 
+def test_new_e2e_walk_forward_skips_final_holdout_but_existing_child_keeps_contract(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    parent = _spec(tmp_path, pipeline_version=3, evaluate_final_holdout=True)
+    root_id = repository.create(parent)
+    manifest = build_pipeline_manifest(repository, root_id, parent)
+    child = end_to_end.build_stage_spec(repository, root_id, parent, "walk_forward", manifest)
+    assert child.evaluate_final_holdout is False
+    assert parent.evaluate_final_holdout is True
+    child_id = manifest["stages"][0]["child_run_id"]
+    historical_child = replace(child, evaluate_final_holdout=True)
+    repository.create(historical_child, run_id=child_id)
+    resumed = end_to_end.build_stage_spec(repository, root_id, parent, "walk_forward", manifest)
+    assert resumed.fingerprint == historical_child.fingerprint
+    assert resumed.evaluate_final_holdout is True
+    standalone = replace(child, source_end_to_end_run=None, source_experiment_run=None,
+                         evaluate_final_holdout=True)
+    assert standalone.evaluate_final_holdout is True
+
+
+def test_forced_e2e_walk_forward_preserves_existing_child_on_resume(tmp_path):
+    repository = RunRepository(tmp_path / "runs")
+    lock = {
+        "schema_version": 1,
+        "effective_cutoff": "2026-07-06",
+        "temporal_walk_forward_run_id": "temporal-wf",
+        "prepared_dataset_sha256": "a" * 64,
+    }
+    parent = _spec(tmp_path, pipeline_version=3, forced_period_lock=lock)
+    root_id = repository.create(parent)
+    manifest = build_pipeline_manifest(repository, root_id, parent)
+    child = end_to_end.build_stage_spec(repository, root_id, parent, "walk_forward", manifest)
+    assert child.evaluate_final_holdout is False
+    historical_child = replace(child, evaluate_final_holdout=True)
+    repository.create(historical_child, run_id=manifest["stages"][0]["child_run_id"])
+    resumed = end_to_end.build_stage_spec(repository, root_id, parent, "walk_forward", manifest)
+    assert resumed.evaluate_final_holdout is True
+    assert resumed.fingerprint == historical_child.fingerprint
+
+
 def test_historical_forced_spec_without_period_lock_keeps_legacy_contract(tmp_path):
     raw = _spec(tmp_path).to_dict()
     raw.pop("forced_period_lock", None)
@@ -198,6 +237,8 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
     source = end_to_end.build_stage_spec(
         repository, root_id, parent, "walk_forward", manifest
     )
+    assert source.evaluate_final_holdout is False
+    assert parent.evaluate_final_holdout is True
     assert source.historical_data_cutoff == expected_as_of
     prepared_source, *_ = workflows._prepared_inputs(source, None, None)
     digest = prepared_dataset_hash(prepared_source)
@@ -270,6 +311,7 @@ def test_end_to_end_freezes_the_same_market_request_window_for_descendants(
     holdout = end_to_end.build_stage_spec(
         repository, root_id, parent, "holdout_evaluation", manifest
     )
+    assert holdout.evaluate_final_holdout is True
     assert holdout.prepared_snapshot_required
     assert holdout.source_prepared_dataset_sha256 == digest
     assert prepared_dataset_hash(workflows._prepared_inputs(holdout, None, None)[0]) == digest

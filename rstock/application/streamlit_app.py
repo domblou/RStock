@@ -1773,6 +1773,14 @@ def _render_walk_forward_promotion(
     scores = pd.read_csv(selection_path) if selection_path.exists() else pd.DataFrame()
     combinations = qualified_combinations_table(qualification, holdout, scores)
     st.subheader("Combinaisons qualifiées")
+    configuration_path = results / "run_configuration.json"
+    if configuration_path.is_file():
+        run_configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+        if run_configuration.get("final_holdout_evaluated") is False:
+            st.caption(
+                "Holdout final WF non calculé : score et rang composites indisponibles. "
+                "Tri par AUC médiane des fenêtres Walk-forward."
+            )
     if combinations.empty:
         st.info("Aucune combinaison ne satisfait les critères de qualification.")
         return
@@ -2665,6 +2673,81 @@ def _render_run_resources(run_id: str) -> None:
     else:
         st.caption("Aucune phase terminée mesurée pour cette tentative.")
 
+    aggregation_phase = next(
+        (phase for phase in reversed(attempt.get("phase_rows", []))
+         if isinstance(phase, dict) and phase.get("name") == "aggregation"
+         and isinstance(phase.get("details"), dict)
+         and isinstance(phase["details"].get("subphases"), list)),
+        None,
+    )
+    if aggregation_phase is not None:
+        details = aggregation_phase["details"]
+
+        def volume_text(value: object) -> str:
+            if not isinstance(value, (int, float)):
+                return "—"
+            return (f"{value / 2**30:.2f} Gio" if value >= 2**30
+                    else f"{value / 2**20:.1f} Mio")
+
+        labels = {
+            "load_batch": "Chargement des lots",
+            "local_classification_windows": "Classification et fenêtres locales",
+            "aggregate_risk": "Risque local",
+            "sqlite_insertion": "Insertion SQLite",
+            "progress_reporting": "Suivi des lots",
+            "sql_global_metrics": "Métriques SQL globales",
+            "assembly_finalization": "Assemblage et finalisation",
+        }
+        subphase_rows = []
+        for row in details["subphases"]:
+            if not isinstance(row, dict) or row.get("name") not in labels:
+                continue
+            duration = row.get("duration_seconds")
+            cpu_seconds = row.get("cpu_seconds_parent")
+            cpu_mean = (
+                cpu_seconds / duration
+                if isinstance(cpu_seconds, (int, float))
+                and isinstance(duration, (int, float)) and duration > 0 else None
+            )
+            count, unit = next(
+                ((row[key], label) for key, label in (
+                    ("batches", "lots"), ("combinations", "combinaisons"),
+                    ("prediction_rows", "lignes"),
+                ) if isinstance(row.get(key), int)),
+                (None, None),
+            )
+            throughput = (
+                f"{count / duration:.1f} {unit}/s"
+                if isinstance(count, int) and unit
+                and isinstance(duration, (int, float)) and duration > 0 else "—"
+            )
+            subphase_rows.append({
+                "Sous-phase": labels[row["name"]],
+                "Durée (s)": duration,
+                "CPU moyen parent": "—" if cpu_mean is None else f"{cpu_mean:.2f} cœur",
+                "RSS parent observé": memory_text(row.get("rss_peak_observed_parent_bytes")),
+                "Traités": f"{count} {unit}" if unit else "—",
+                "Débit": throughput,
+                "Volume lu estimé": volume_text(row.get("estimated_read_bytes")),
+                "Taille du fichier produit": volume_text(
+                    row.get("sqlite_database_bytes") or row.get("aggregation_checkpoint_bytes")
+                ),
+            })
+        if subphase_rows:
+            st.subheader("Détail de la phase aggregation")
+            st.caption(
+                f"{details.get('batches', '—')} lots · "
+                f"{details.get('combinations_processed', '—')} combinaisons · "
+                f"{details.get('window_evaluations', '—')} évaluations de fenêtres · "
+                f"{details.get('prediction_rows', '—')} lignes de prédictions. "
+                "CPU et RSS des sous-phases : processus parent seulement. "
+                "RSS relevé à la fin des opérations; les pics intermédiaires peuvent échapper à la mesure. "
+                "Lecture estimée : deux passages du payload par lot (vérification puis chargement). "
+                "La taille des fichiers ne mesure pas les octets physiques écrits sur disque. "
+                "L'assemblage inclut l'écriture du checkpoint, exclue du compteur historique aggregation_seconds."
+            )
+            st.dataframe(pd.DataFrame(subphase_rows), hide_index=True, width="stretch")
+
     samples = []
     path = root / "samples.jsonl"
     if path.is_file():
@@ -3120,7 +3203,10 @@ def _render_walk_forward_metrics(analytics: RunAnalytics) -> None:
         analytics.tested_count if analytics.tested_count is not None else "-",
     )
     metrics[1].metric("Qualifiees", analytics.qualified_count)
-    metrics[2].metric("Confirmees holdout", analytics.confirmed_count)
+    metrics[2].metric(
+        "Confirmees holdout",
+        analytics.confirmed_count if analytics.confirmed_count is not None else "—",
+    )
     metrics[3].metric("AUC dev mediane", _format_metric(analytics.dev_auc_median))
     metrics[4].metric("AUC holdout mediane", _format_metric(analytics.holdout_auc_median))
     windows = (

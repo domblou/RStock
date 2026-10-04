@@ -39,7 +39,7 @@ def model_selection_parameters(config: RStockConfig) -> dict[str, object]:
     return {
         "scale": "0-100",
         "weights": weights,
-        "missing_component_policy": "exclude_and_renormalize_available_weights",
+        "missing_component_policy": "require_weighted_holdout_then_renormalize_other_available_weights",
         "components": {
             "predictive_quality_score": ["ROCAUCMedian"],
             "stability_score": [
@@ -186,7 +186,8 @@ def _component_scores(row: pd.Series, config: RStockConfig) -> dict[str, float]:
 
 
 def score_qualified_models(
-    selection_results: pd.DataFrame, config: RStockConfig
+    selection_results: pd.DataFrame, config: RStockConfig, *,
+    composite_score_enabled: bool = True,
 ) -> pd.DataFrame:
     """Score and rank eligible rows without changing their qualification verdict."""
 
@@ -211,6 +212,12 @@ def score_qualified_models(
             for name, value in components.items()
             if np.isfinite(value) and weights[name] > 0
         }
+        # A score with its holdout component silently renormalized away is not
+        # comparable to the score persisted by older, holdout-evaluated runs.
+        if not composite_score_enabled or (
+            weights["holdout_score"] > 0 and "holdout_score" not in available
+        ):
+            continue
         available_weight = sum(weights[name] for name in available)
         result.at[index, "model_selection_score"] = (
             sum(available[name] * weights[name] for name in available) / available_weight

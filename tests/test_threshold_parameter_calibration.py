@@ -3,6 +3,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.repository import RunRepository
@@ -60,6 +61,181 @@ def _predictions() -> pd.DataFrame:
                     "MAE": -0.01,
                 })
     return pd.DataFrame(rows)
+
+
+def _two_set_predictions() -> pd.DataFrame:
+    first = _predictions()
+    second = first.copy()
+    second["Set"] = "BBB<-AAA"
+    second["Observation"] = "BBB"
+    second["Probability"] = 1.0 - second["Probability"]
+    return pd.concat([first, second], ignore_index=True)
+
+
+def test_parallel_grid_and_metrics_match_ordered_serial_calculation(monkeypatch, tmp_path):
+    import hashlib
+    import rstock.threshold_parameter_calibration as module
+
+    prepared = pd.DataFrame({"x": np.arange(20)}, index=pd.bdate_range("2025-01-01", periods=20))
+    config = _config(tmp_path)
+    baseline = ThresholdCalibrationParameters.from_config(config)
+    candidates = [
+        baseline,
+        replace(baseline, min_signals_per_window=2),
+        replace(baseline, quantiles=(0.5, 0.8, 0.99)),
+    ]
+    monkeypatch.setattr(module, "generate_development_probabilities",
+                        lambda *_args, **_kwargs: _two_set_predictions())
+    common = dict(
+        xgboost_parameters_by_direction={
+            "Up": XGBoostParameters(2, .05, 20),
+            "Down": XGBoostParameters(2, .05, 20),
+        },
+        xgboost_parameter_source="test", candidates=candidates,
+    )
+
+    def ordered_serial(items, *, initializer, context, task, **_kwargs):
+        initializer(context)
+        for item in items:
+            yield task(item)
+
+    serial_manager = CheckpointManager(
+        tmp_path / "serial", run_id="serial", job_type="threshold_parameter_calibration",
+        configuration_fingerprint="same-inputs", batch_sizes={},
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "iter_ordered_process_results", ordered_serial)
+        serial = run_threshold_parameter_calibration(
+            prepared, generate_symbol_sets(["AAA", "BBB"], 1), config,
+            checkpoint_manager=serial_manager, **common,
+        )
+
+    parallel_manager = CheckpointManager(
+        tmp_path / "parallel", run_id="parallel", job_type="threshold_parameter_calibration",
+        configuration_fingerprint="same-inputs", batch_sizes={},
+    )
+    parallel = run_threshold_parameter_calibration(
+        prepared, generate_symbol_sets(["AAA", "BBB"], 1), config,
+        checkpoint_manager=parallel_manager, **common,
+    )
+    pd.testing.assert_frame_equal(serial.development_by_configuration,
+                                  parallel.development_by_configuration, check_exact=True)
+    pd.testing.assert_frame_equal(serial.development_by_window,
+                                  parallel.development_by_window, check_exact=True)
+    assert serial.selected_configuration["configuration"] == parallel.selected_configuration["configuration"]
+    assert serial.selected_configuration["development_metrics"] == parallel.selected_configuration["development_metrics"]
+    for name in [
+        *(f"threshold_grid_{candidate.grid_key}" for candidate in candidates[::2]),
+        "parameter_candidate_baseline", "parameter_candidate_candidate_01",
+        "parameter_candidate_candidate_02",
+    ]:
+        serial_file = serial_manager.root / "artifacts" / f"{name}.pkl"
+        parallel_file = parallel_manager.root / "artifacts" / f"{name}.pkl"
+        for path in (serial_file, parallel_file):
+            metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+            assert metadata["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        if name.startswith("threshold_grid_"):
+            assert serial_file.read_bytes() == parallel_file.read_bytes()
+        else:
+            source = serial_manager.load_artifact(name)
+            actual = parallel_manager.load_artifact(name)
+            pd.testing.assert_series_equal(pd.Series(source["row"]), pd.Series(actual["row"]))
+            assert len(source["frames"]) == len(actual["frames"])
+            for expected_frame, actual_frame in zip(source["frames"], actual["frames"], strict=True):
+                pd.testing.assert_frame_equal(expected_frame, actual_frame, check_exact=True)
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_grids_reused", "expected_candidates_reused"),
+    [("grid", 1, 0), ("candidate", 2, 1)],
+)
+def test_parallel_threshold_parameter_resume_keeps_completed_checkpoints(
+    monkeypatch, tmp_path, failure_stage, expected_grids_reused, expected_candidates_reused,
+):
+    import rstock.threshold_parameter_calibration as module
+
+    prepared = pd.DataFrame({"x": np.arange(20)}, index=pd.bdate_range("2025-01-01", periods=20))
+    config = _config(tmp_path)
+    baseline = ThresholdCalibrationParameters.from_config(config)
+    candidates = [baseline, replace(baseline, quantiles=(0.5, 0.8, 0.99))]
+    monkeypatch.setattr(module, "generate_development_probabilities",
+                        lambda *_args, **_kwargs: _two_set_predictions())
+    args = dict(
+        xgboost_parameters_by_direction={
+            "Up": XGBoostParameters(2, .05, 20),
+            "Down": XGBoostParameters(2, .05, 20),
+        },
+        xgboost_parameter_source="test", candidates=candidates,
+    )
+    run_dir = tmp_path / failure_stage
+    manager = CheckpointManager(
+        run_dir, run_id="resume", job_type="threshold_parameter_calibration",
+        configuration_fingerprint="same-inputs", batch_sizes={},
+    )
+    original = manager.commit_artifact
+    failing_name = (
+        f"threshold_grid_{candidates[1].grid_key}"
+        if failure_stage == "grid" else "parameter_candidate_candidate_01"
+    )
+
+    def interrupt(name, payload):
+        if name == failing_name:
+            raise RuntimeError("interrupted before checkpoint publication")
+        return original(name, payload)
+
+    monkeypatch.setattr(manager, "commit_artifact", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted before checkpoint"):
+        run_threshold_parameter_calibration(
+            prepared, generate_symbol_sets(["AAA", "BBB"], 1), config,
+            checkpoint_manager=manager, **args,
+        )
+    resumed_manager = CheckpointManager(
+        run_dir, run_id="resume", job_type="threshold_parameter_calibration",
+        configuration_fingerprint="same-inputs", batch_sizes={},
+    )
+    resumed = run_threshold_parameter_calibration(
+        prepared, generate_symbol_sets(["AAA", "BBB"], 1), config,
+        checkpoint_manager=resumed_manager, **args,
+    )
+    performance = resumed.run_configuration["performance"]
+    assert performance["threshold_grids_reused"] == expected_grids_reused
+    assert performance["candidate_checkpoints_reused"] == expected_candidates_reused
+    assert len(resumed.development_by_configuration) == 2
+    assert len(resumed.development_by_window) > 0
+
+
+def test_single_grid_splits_sets_across_two_workers(monkeypatch, tmp_path):
+    import rstock.threshold_parameter_calibration as module
+    from rstock.threshold_calibration import threshold_calibration_invariant
+
+    prepared = pd.DataFrame({"x": np.arange(20)}, index=pd.bdate_range("2025-01-01", periods=20))
+    config = _config(tmp_path)
+    baseline = ThresholdCalibrationParameters.from_config(config)
+    predictions = _two_set_predictions()
+    monkeypatch.setattr(module, "generate_development_probabilities",
+                        lambda *_args, **_kwargs: predictions)
+    manager = CheckpointManager(
+        tmp_path / "single", run_id="single", job_type="threshold_parameter_calibration",
+        configuration_fingerprint="same-inputs", batch_sizes={},
+    )
+    result = run_threshold_parameter_calibration(
+        prepared, generate_symbol_sets(["AAA", "BBB"], 1), config,
+        xgboost_parameters_by_direction={
+            "Up": XGBoostParameters(2, .05, 20),
+            "Down": XGBoostParameters(2, .05, 20),
+        },
+        xgboost_parameter_source="test", candidates=[baseline],
+        checkpoint_manager=manager,
+    )
+    invariant = manager.load_artifact(f"threshold_grid_{baseline.grid_key}")["invariant"]
+    assert list(invariant) == sorted(predictions["Set"].unique())
+    for set_name, group in predictions.groupby("Set", sort=True):
+        expected = threshold_calibration_invariant(group, config)
+        pd.testing.assert_frame_equal(
+            invariant[set_name].metrics_by_window, expected.metrics_by_window,
+            check_exact=True,
+        )
+    assert len(result.development_by_configuration) == 1
 
 
 def test_new_job_type_and_threshold_lineage_round_trip(tmp_path):

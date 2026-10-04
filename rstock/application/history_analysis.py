@@ -1087,9 +1087,10 @@ def combination_table(
     if not scored.empty and "Set" in scored:
         names = ["Set", *[name for name in MODEL_SELECTION_COLUMNS if name in scored]]
         work = work.merge(scored.loc[:, names], on="Set", how="left", validate="one_to_one")
-    holdout_confirmed = _boolean(
-        work.get("FinalConfirmed", pd.Series(False, index=work.index))
-    )
+    holdout_confirmed = pd.Series(pd.NA, index=work.index, dtype="boolean")
+    if "FinalConfirmed" in work:
+        measured = work["FinalConfirmed"].notna()
+        holdout_confirmed.loc[measured] = _boolean(work.loc[measured, "FinalConfirmed"])
     dev_auc = _number(work, "ROCAUCMedian")
     holdout_auc = _number(work, "FinalUpROCAUC")
     result = pd.DataFrame({
@@ -1109,10 +1110,15 @@ def combination_table(
     })
     result["Statut"] = "Non qualifiée"
     result.loc[result["Eligible"], "Statut"] = "Qualifiée développement"
-    result.loc[result["Holdout confirmé"], "Statut"] = "Holdout confirmé"
+    result.loc[result["Eligible"] & result["Holdout confirmé"].isna(), "Statut"] = "Holdout non calculé"
+    result.loc[result["Eligible"] & result["Holdout confirmé"].eq(False).fillna(False), "Statut"] = "Holdout non confirmé"
+    result.loc[result["Holdout confirmé"].eq(True).fillna(False), "Statut"] = "Holdout confirmé"
     optional_columns: list[str] = []
     for source, display in MODEL_SELECTION_COLUMNS.items():
-        if source in work:
+        if source in work and (
+            source not in {"model_selection_score", "model_selection_rank"}
+            or _number(work, source).notna().any()
+        ):
             result[display] = _number(work, source)
             optional_columns.append(display)
     sort_columns = (
@@ -1187,8 +1193,10 @@ class RunAnalytics:
         return int(self.combinations["Eligible"].sum()) if not self.combinations.empty else 0
 
     @property
-    def confirmed_count(self) -> int:
-        return int(self.combinations["Holdout confirmé"].sum()) if not self.combinations.empty else 0
+    def confirmed_count(self) -> int | None:
+        if self.combinations.empty or self.combinations["Holdout confirmé"].isna().all():
+            return None
+        return int(self.combinations["Holdout confirmé"].sum())
 
     @property
     def dev_auc_median(self) -> float | None:
@@ -1208,7 +1216,8 @@ class RunAnalytics:
 
     @property
     def confirmation_rate(self) -> float | None:
-        return None if not self.qualified_count else self.confirmed_count / self.qualified_count
+        confirmed = self.confirmed_count
+        return None if not self.qualified_count or confirmed is None else confirmed / self.qualified_count
 
 
 def analyze_run(

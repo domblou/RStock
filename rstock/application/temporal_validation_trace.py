@@ -116,6 +116,7 @@ def resolve_lost_candidate_traces(
     final_holdout: pd.DataFrame | None,
     config: Mapping[str, object] | None,
     promotion_lookup: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
+    final_holdout_evaluated: bool = True,
 ) -> dict[tuple[str, str], dict[str, str]]:
     """Resolve display-only first-stop provenance from already persisted rows."""
 
@@ -192,9 +193,9 @@ def resolve_lost_candidate_traces(
                     "last_stage": "Qualification WF",
                     "elimination_reason": _ineligibility_reason(row, settings, prefilter=False),
                 }
-            elif set_id not in holdout:
+            elif final_holdout_evaluated and set_id not in holdout:
                 resolved[(set_id, direction)] = dict(_MISSING)
-            elif not _as_bool(holdout[set_id].get("FinalConfirmed")):
+            elif final_holdout_evaluated and not _as_bool(holdout[set_id].get("FinalConfirmed")):
                 resolved[(set_id, direction)] = {
                     "last_stage": "Holdout final",
                     "elimination_reason": "Holdout non confirmé",
@@ -212,7 +213,10 @@ def resolve_lost_candidate_traces(
                         "elimination_reason": "—",
                     }
                 else:
-                    resolved[(set_id, direction)] = dict(_MISSING)
+                    resolved[(set_id, direction)] = (
+                        {"last_stage": "Holdout final", "elimination_reason": "Holdout non calculé"}
+                        if not final_holdout_evaluated else dict(_MISSING)
+                    )
     return resolved
 
 
@@ -233,6 +237,7 @@ def lost_candidate_trace_lookup(
         return {}
     root = validation_run_directory.parent
     results = root / walk_forward_id / "results"
+    walk_configuration = _read_json(results / "run_configuration.json") or {}
     promotion: dict[tuple[str, str], Mapping[str, object]] = {}
     rstock = config.get("rstock_config", {})
     settings = rstock if isinstance(rstock, Mapping) else {}
@@ -259,6 +264,7 @@ def lost_candidate_trace_lookup(
         final_holdout=_read_csv(results / "final_holdout.csv"),
         config=settings,
         promotion_lookup=promotion,
+        final_holdout_evaluated=walk_configuration.get("final_holdout_evaluated", True),
     )
 
 
@@ -287,6 +293,8 @@ def forced_candidate_trace_lookup(
     root = forced_run_directory.parent
     qualification = _read_csv(root / walk_id / "results" / "qualification.csv")
     holdout = _read_csv(root / walk_id / "results" / "final_holdout.csv")
+    walk_configuration = _read_json(root / walk_id / "results" / "run_configuration.json") or {}
+    final_holdout_evaluated = walk_configuration.get("final_holdout_evaluated", True)
     if qualification is None or "Set" not in qualification:
         return {}
     qualified = {str(row["Set"]): row for _, row in qualification.iterrows()}
@@ -332,7 +340,11 @@ def forced_candidate_trace_lookup(
                 "last_stage": "Qualification WF",
                 "reason": _ineligibility_reason(row, settings, prefilter=False),
             }
-        elif set_id not in holdout_rows or not _as_bool(holdout_rows[set_id].get("FinalConfirmed")):
+        elif final_holdout_evaluated and set_id not in holdout_rows:
+            resolved[(set_id, direction)] = {
+                "status": "Non évaluable", "last_stage": "Holdout final", "reason": "Mesure holdout absente",
+            }
+        elif final_holdout_evaluated and not _as_bool(holdout_rows[set_id].get("FinalConfirmed")):
             resolved[(set_id, direction)] = {
                 "status": "Holdout non confirmé", "last_stage": "Holdout final",
                 "reason": "Holdout non confirmé",
@@ -341,8 +353,9 @@ def forced_candidate_trace_lookup(
             guidance = promotion.get((set_id, direction))
             if guidance is None:
                 resolved[(set_id, direction)] = {
-                    "status": "Aucun seuil sélectionné", "last_stage": "Calibration seuils",
-                    "reason": "Aucun seuil sélectionné",
+                    "status": "Aucun seuil sélectionné" if final_holdout_evaluated else "Holdout final non calculé",
+                    "last_stage": "Calibration seuils" if final_holdout_evaluated else "Holdout final",
+                    "reason": "Aucun seuil sélectionné" if final_holdout_evaluated else "Holdout final non calculé",
                 }
             elif str(guidance.get("status")) == "Candidat":
                 resolved[(set_id, direction)] = {

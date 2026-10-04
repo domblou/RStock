@@ -870,10 +870,14 @@ def build_stage_spec(
     job_type = JobType(str(stage["expected_job_type"]))
     child = _base_child_spec(parent, root_run_id=root_run_id, job_type=job_type)
     if stage_key == "walk_forward":
+        existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
+        if existing.is_file():
+            return repository.load_spec(str(stage["child_run_id"]))
         if parent.forced_period_lock is not None:
             lock = parent.forced_period_lock
             return replace(
                 child,
+                evaluate_final_holdout=False,
                 source_walk_forward_run=str(lock["temporal_walk_forward_run_id"]),
                 source_prepared_dataset_sha256=str(lock["prepared_dataset_sha256"]),
                 prepared_dataset_digest_required=True,
@@ -882,18 +886,16 @@ def build_stage_spec(
             )
         # A completed child keeps its persisted specification on resume. New
         # pipelines freeze the request date before the first market load.
-        existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
-        if existing.is_file():
-            return repository.load_spec(str(stage["child_run_id"]))
         if (
             child.historical_data_cutoff is None
             and child.config.walk_forward_end_offset_sessions == 0
             and manifest.get("prepared_dataset_as_of")
         ):
             return replace(
-                child, historical_data_cutoff=str(manifest["prepared_dataset_as_of"])
+                child, historical_data_cutoff=str(manifest["prepared_dataset_as_of"]),
+                evaluate_final_holdout=False,
             )
-        return child
+        return replace(child, evaluate_final_holdout=False)
 
     # A child already materialized by an older pipeline retains its frozen
     # execution contract and fingerprint on resume. New children consume the
