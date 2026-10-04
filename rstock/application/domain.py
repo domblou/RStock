@@ -276,6 +276,9 @@ class ExperimentSpec:
     source_holdout_evaluation_run: str | None = None
     derivation: Derivation | None = None
     prefilter_derivation: dict[str, Any] | None = None
+    prefilter_method: str = "single_origin"
+    stability_origin_count: int = 5
+    stability_step_sessions: int = 1
     experimental_overrides: tuple[dict[str, Any], ...] = ()
     auto_promote_candidates: bool = False
     temporal_validation_enabled: bool = False
@@ -352,6 +355,16 @@ class ExperimentSpec:
                 raise ValueError("Predictor prefilter must be enabled")
             if self.historical_data_cutoff is None or self.config.walk_forward_end_offset_sessions != 0:
                 raise ValueError("Predictor prefilter requires an explicit cutoff and zero end offset")
+            if self.prefilter_method not in {"single_origin", "temporal_stability"}:
+                raise ValueError("Unsupported Predictor prefilter method")
+            for field_name in ("stability_origin_count", "stability_step_sessions"):
+                value = getattr(self, field_name)
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                    raise ValueError(f"{field_name} must be a positive integer")
+        elif (self.prefilter_method != "single_origin"
+              or self.stability_origin_count != 5
+              or self.stability_step_sessions != 1):
+            raise ValueError("Prefilter method settings belong only to Predictor prefilter jobs")
         if self.historical_forced_validation_backfill and self.auto_promote_candidates:
             raise ValueError(
                 "Historical forced validation backfill cannot promote candidates"
@@ -614,6 +627,10 @@ class ExperimentSpec:
             values["derivation"] = self.derivation.to_dict()
         if self.prefilter_derivation is not None:
             values["prefilter_derivation"] = deepcopy(self.prefilter_derivation)
+        if self.job_type is JobType.PREDICTOR_PREFILTER:
+            values["prefilter_method"] = self.prefilter_method
+            values["stability_origin_count"] = self.stability_origin_count
+            values["stability_step_sessions"] = self.stability_step_sessions
         if self.prepared_snapshot_required:
             values["prepared_snapshot_required"] = True
         if self.experimental_overrides:
@@ -767,6 +784,9 @@ class ExperimentSpec:
                 None if values.get("prefilter_derivation") is None
                 else dict(values["prefilter_derivation"])
             ),
+            prefilter_method=str(values.get("prefilter_method", "single_origin")),
+            stability_origin_count=values.get("stability_origin_count", 5),
+            stability_step_sessions=values.get("stability_step_sessions", 1),
             experimental_overrides=tuple(values.get("experimental_overrides") or ()),
             auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),
             temporal_validation_enabled=bool(

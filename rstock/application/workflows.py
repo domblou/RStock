@@ -82,6 +82,8 @@ from .production_repository import ProductionRepository
 from .production_quality_runtime import synchronize_production_quality
 from .production_quality_rebuild import ProductionQualityRebuildRunner
 from .repository import RunRepository
+from .prefilter_experiments import prefilter_checkpoint_batch_sizes
+from .prefilter_stability import aggregate_temporal_prefilter, resolve_stability_origins
 from .walk_forward_batches import (
     PREFILTER_POLICY_VERSION,
     build_manifest,
@@ -688,9 +690,7 @@ def _predictor_prefilter(
         configuration_fingerprint=repository.configuration_fingerprint(
             run_id, fallback=spec.fingerprint,
         ),
-        batch_sizes={
-            "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
-        },
+        batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
     )
     _ensure_prefilter_checkpoint_protocol(checkpoint)
     if checkpoint.artifact_exists("prepared_snapshot"):
@@ -726,6 +726,12 @@ def _predictor_prefilter(
         checkpoint.phase_completed("predictor_prefilter_generation")
         _phase(progress_callback, "predictor_prefilter_generation", "completed",
                combinations=len(univariate_sets))
+    if spec.prefilter_method == "temporal_stability":
+        return _temporal_stability_prefilter(
+            spec, output, checkpoint, prepared, univariate_sets,
+            predictor_symbols, target_symbols, calendars,
+            progress_callback, cancellation_check,
+        )
     univariate = evaluate_prefilter_walk_forward(
         prepared, univariate_sets, _prefilter_qualification_config(spec.config),
         market_calendars=calendars, progress_callback=progress_callback,
@@ -780,6 +786,129 @@ def _predictor_prefilter(
         "predictor_prefilter": _json_value(prefilter.diagnostics),
         "retained_predictors": sum(len(items) for items in prefilter.predictors_by_target.values()),
         "univariate_pairs": len(univariate.qualification),
+        "result_files": sorted(path.name for path in output.iterdir()),
+        "checkpoint_manifest": "checkpoints/manifest.json",
+        **({"prefilter_derivation": spec.prefilter_derivation}
+           if spec.prefilter_derivation is not None else {}),
+    }
+
+
+def _temporal_stability_prefilter(
+    spec: ExperimentSpec, output: Path, checkpoint: CheckpointManager,
+    prepared: pd.DataFrame, univariate_sets: pd.DataFrame,
+    predictor_symbols: list[str], target_symbols: list[str],
+    calendars: dict[str, str], progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+) -> dict[str, Any]:
+    """Evaluate prior origins from the one frozen prepared snapshot."""
+    origins = resolve_stability_origins(
+        prepared, cutoff=str(spec.historical_data_cutoff), calendar=spec.calendar,
+        origin_count=spec.stability_origin_count,
+        step_sessions=spec.stability_step_sessions,
+        symbols=predictor_symbols,
+    )
+    repository = RunRepository(output.parent.parent)
+    run_id = output.parent.name
+    fingerprint = repository.configuration_fingerprint(run_id, fallback=spec.fingerprint)
+    origin_tables: list[pd.DataFrame] = []
+    qualifications: list[pd.DataFrame] = []
+    telemetry: list[dict[str, object]] = []
+    for origin in origins:
+        check_cancellation(cancellation_check)
+        date = origin.date().isoformat()
+        origin_view = prepared.loc[:origin].copy()
+        origin_view.attrs["effective_end_date"] = origin.isoformat()
+        origin_checkpoint = CheckpointManager(
+            output.parent / "checkpoints" / "temporal_origins" / date,
+            run_id=f"{run_id}:origin:{date}",
+            job_type="predictor_prefilter_origin",
+            configuration_fingerprint=hashlib.sha256(
+                f"{fingerprint}:{date}".encode("utf-8")
+            ).hexdigest(),
+            batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
+        )
+        _ensure_prefilter_checkpoint_protocol(origin_checkpoint)
+        if origin_checkpoint.artifact_exists("prefilter_selection"):
+            selection = origin_checkpoint.load_artifact("prefilter_selection")
+            qualification = origin_checkpoint.load_artifact("prefilter_qualification")
+            origin_telemetry = origin_checkpoint.load_artifact("prefilter_telemetry")
+        else:
+            _phase(progress_callback, "predictor_prefilter_walk_forward", "started",
+                   origin_cutoff=date)
+            univariate = evaluate_prefilter_walk_forward(
+                origin_view, univariate_sets, _prefilter_qualification_config(spec.config),
+                market_calendars=calendars, progress_callback=progress_callback,
+                cancellation_check=cancellation_check,
+                checkpoint_manager=origin_checkpoint,
+            )
+            _require_exploitable_prefilter(univariate)
+            qualification = univariate.qualification
+            origin_telemetry = univariate.telemetry
+            selection = select_predictors(
+                qualification, origin_view.iloc[:-spec.config.final_holdout_size],
+                targets=target_symbols, candidate_symbols=predictor_symbols,
+                config=spec.config,
+                excluded_targets=getattr(univariate, "excluded_targets", {}),
+            )
+            origin_checkpoint.commit_artifact("prefilter_qualification", qualification)
+            origin_checkpoint.commit_artifact("prefilter_telemetry", origin_telemetry)
+            origin_checkpoint.commit_artifact("prefilter_selection", selection)
+            _phase(progress_callback, "predictor_prefilter_walk_forward", "completed",
+                   origin_cutoff=date)
+        metrics = selection.metrics.copy()
+        metrics["OriginCutoff"] = date
+        origin_tables.append(metrics)
+        qualified = qualification.copy()
+        qualified["OriginCutoff"] = date
+        qualifications.append(qualified)
+        telemetry.append({"origin_cutoff": date, **origin_telemetry})
+    checkpoint.phase_completed("predictor_prefilter_walk_forward")
+    aggregate, details, retained = aggregate_temporal_prefilter(
+        origin_tables, targets=target_symbols, predictors=predictor_symbols,
+        config=spec.config,
+        principal_development=prepared.iloc[:-spec.config.final_holdout_size],
+    )
+    checkpoint.phase_completed("predictor_prefilter_selection")
+    output.mkdir(parents=True, exist_ok=True)
+    aggregate.to_csv(output / "predictor_prefilter.csv", index=False)
+    details.to_csv(output / "predictor_prefilter_origins.csv", index=False)
+    pd.concat(qualifications, ignore_index=True).to_csv(
+        output / "prefilter_qualification.csv", index=False,
+    )
+    traceability = _persist_prepared_traceability({}, prepared, spec)
+    manifest = {
+        "schema_version": 1,
+        "prefilter_method": "temporal_stability",
+        "stability_origin_count": spec.stability_origin_count,
+        "stability_step_sessions": spec.stability_step_sessions,
+        "origin_cutoffs": [origin.date().isoformat() for origin in origins],
+        "rank_definition": "PrefilterScoreRank among evaluable univariate predictors",
+        "top_n_frequency_definition": (
+            "Fraction of origins eligible and within Top-N before correlation"
+        ),
+        "prepared_dataset_as_of": spec.historical_data_cutoff,
+        "prepared_dataset_sha256": traceability["prepared_dataset_sha256"],
+        "snapshot_source": (None if spec.prefilter_derivation is None
+                            else spec.prefilter_derivation["source_run_id"]),
+        "source_snapshot_sha256": (None if spec.prefilter_derivation is None
+                                   else spec.prefilter_derivation["prepared_snapshot_sha256"]),
+        "predictors_by_target": {
+            target: list(items) for target, items in retained.items()
+        },
+        "telemetry": telemetry,
+    }
+    (output / "predictor_prefilter.json").write_text(
+        json.dumps(_json_value(manifest), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "job_type": spec.job_type.value,
+        "prefilter_method": spec.prefilter_method,
+        "origin_cutoffs": manifest["origin_cutoffs"],
+        "prepared_dataset_as_of": spec.historical_data_cutoff,
+        "traceability": traceability,
+        "retained_predictors": sum(len(items) for items in retained.values()),
+        "univariate_pairs": len(details),
         "result_files": sorted(path.name for path in output.iterdir()),
         "checkpoint_manifest": "checkpoints/manifest.json",
         **({"prefilter_derivation": spec.prefilter_derivation}

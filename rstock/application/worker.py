@@ -22,6 +22,7 @@ from rstock.checkpoints import CheckpointManager
 from .domain import JobStatus, JobType
 from .orchestration_runtime import child_executor_context
 from .processes import process_alive
+from .prefilter_experiments import prefilter_checkpoint_batch_sizes
 from .repository import RunRepository
 from .runner import LocalProcessBackend, ProgressReporter, RunService
 from .resource_telemetry import ResourceRecorder
@@ -721,13 +722,14 @@ def execute_run(
                     run_id
                 ),
                 batch_sizes=(
+                    prefilter_checkpoint_batch_sizes(spec.config)
+                    if spec.job_type is JobType.PREDICTOR_PREFILTER else
                     {
                         "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
                         "walk_forward": spec.config.walk_forward_batch_size,
                         "final_holdout": spec.config.final_holdout_batch_size,
                     }
-                    if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH,
-                                         JobType.PREDICTOR_PREFILTER}
+                    if spec.job_type in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH}
                     else (
                         {"xgboost_calibration": spec.config.walk_forward_batch_size}
                         if spec.job_type is JobType.XGBOOST_CALIBRATION

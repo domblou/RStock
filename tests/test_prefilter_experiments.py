@@ -15,9 +15,14 @@ from rstock.application.model_ui import job_domain
 from rstock.application.prefilter_experiments import (
     PREFILTER_DERIVATION_FIELDS, build_derived_prefilter_spec,
 )
+from rstock.application.prefilter_stability import (
+    aggregate_temporal_prefilter, resolve_stability_origins,
+)
 from rstock.application.repository import RunRepository
 from rstock.application.run_detail_tabs import tabs_for_job
 from rstock.application.runner import RunService
+from rstock.application.worker import execute_run
+from rstock.checkpoints import CheckpointIncompatibleError
 from rstock.config import DEFAULT_CONFIG
 from rstock.walk_forward import PrefilterWalkForwardResult
 
@@ -42,7 +47,11 @@ def _fixture(tmp_path, monkeypatch):
         historical_data_cutoff="2026-09-25",
     )
     prepared = pd.DataFrame(
-        {"AAA_Close": range(10), "BBB_Close": range(10)},
+        {
+            "AAA_Close": range(10), "BBB_Close": range(10),
+            **{f"{symbol}.intraday_return": [0.01] * 10
+               for symbol in ("AAA", "BBB", "CCC", "DDD")},
+        },
         index=pd.date_range("2026-09-14", periods=10, freq="B"),
     )
     prepared.attrs["effective_end_date"] = "2026-09-25T00:00:00"
@@ -188,3 +197,274 @@ def test_prefilter_job_visible_in_history_and_derived_fields_are_bounded(tmp_pat
         "results", "resources", "configuration", "files", "logs",
     }
     assert "predictor_prefilter_top_n" in PREFILTER_DERIVATION_FIELDS
+
+
+def test_new_prefilter_worker_creates_matching_checkpoint(tmp_path, monkeypatch):
+    repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    run_id = repository.create(spec)
+    manifest_path = repository.run_directory(run_id) / "checkpoints/manifest.json"
+    assert not manifest_path.exists()
+
+    execute_run(repository, run_id, 1)
+
+    assert repository.status(run_id)["status"] == "completed"
+    manifest = repository.read_json(run_id, "checkpoints/manifest.json")
+    assert manifest["run_id"] == run_id
+    assert manifest["job_type"] == JobType.PREDICTOR_PREFILTER.value
+    assert manifest["configuration_fingerprint"] == repository.configuration_fingerprint(run_id)
+    assert manifest["batch_sizes"] == {
+        "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
+    }
+
+
+def test_prefilter_worker_resumes_compatible_checkpoint(tmp_path, monkeypatch):
+    repository, spec, preparation_calls, _, _ = _fixture(tmp_path, monkeypatch)
+    run_id = repository.create(spec)
+    evaluator = workflows.evaluate_prefilter_walk_forward
+
+    def interrupted(*_args, **_kwargs):
+        raise InterruptedError("stop after preparation")
+
+    monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", interrupted)
+    execute_run(repository, run_id, 1)
+    assert repository.status(run_id)["status"] == "failed"
+    monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", evaluator)
+    monkeypatch.setattr(
+        workflows, "_prepared_inputs",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("preparation repeated")),
+    )
+
+    RunService(repository, backend=_Backend()).resume(run_id)
+    execute_run(repository, run_id, 1)
+
+    assert repository.status(run_id)["status"] == "completed"
+    assert preparation_calls == [True]
+    manifest = repository.read_json(run_id, "checkpoints/manifest.json")
+    assert manifest["attempt_count"] == 2
+    assert manifest["resume_count"] == 1
+
+
+@pytest.mark.parametrize("changed_field", [
+    "configuration_fingerprint", "batch_sizes", "job_type",
+])
+def test_prefilter_resume_rejects_only_incompatible_checkpoint(
+    tmp_path, monkeypatch, changed_field,
+):
+    repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    run_id = repository.create(spec)
+    monkeypatch.setattr(
+        workflows, "evaluate_prefilter_walk_forward",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(InterruptedError("stop")),
+    )
+    execute_run(repository, run_id, 1)
+    assert repository.status(run_id)["status"] == "failed"
+    manifest = repository.read_json(run_id, "checkpoints/manifest.json")
+    if changed_field == "configuration_fingerprint":
+        manifest[changed_field] = "0" * 64
+    elif changed_field == "batch_sizes":
+        manifest[changed_field]["final_holdout"] = 25
+    else:
+        manifest[changed_field] = JobType.WALK_FORWARD.value
+    repository.write_json(run_id, "checkpoints/manifest.json", manifest)
+
+    with pytest.raises(CheckpointIncompatibleError, match="configuration"):
+        RunService(repository, backend=_Backend()).resume(run_id)
+    assert repository.status(run_id)["status"] == "failed"
+
+
+def test_historical_prefilter_run_defaults_to_single_origin(tmp_path, monkeypatch):
+    repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    values = spec.to_dict()
+    for field in ("prefilter_method", "stability_origin_count", "stability_step_sessions"):
+        values.pop(field)
+    restored = ExperimentSpec.from_dict(values)
+    assert restored.prefilter_method == "single_origin"
+    assert restored.stability_origin_count == 5
+    assert restored.stability_step_sessions == 1
+    current_id = repository.create(spec)
+    historical_id = repository.create(restored)
+    for run_id, configuration in ((current_id, spec), (historical_id, restored)):
+        workflows._predictor_prefilter(
+            configuration, repository.run_directory(run_id) / "results", None, None,
+        )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(repository.run_directory(current_id) / "results/predictor_prefilter.csv"),
+        pd.read_csv(repository.run_directory(historical_id) / "results/predictor_prefilter.csv"),
+    )
+
+
+def test_temporal_origins_resolve_market_sessions_and_reject_missing_or_incomplete(tmp_path, monkeypatch):
+    _, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    prepared, *_ = workflows._prepared_inputs(spec, None, None)
+    origins = resolve_stability_origins(
+        prepared, cutoff=spec.historical_data_cutoff, calendar="XNYS",
+        origin_count=3, step_sessions=1, symbols=spec.predictor_symbols,
+    )
+    assert [value.date().isoformat() for value in origins] == [
+        "2026-09-25", "2026-09-24", "2026-09-23",
+    ]
+    missing = prepared.drop(pd.Timestamp("2026-09-24"))
+    with pytest.raises(ValueError, match="lacks temporal origin"):
+        resolve_stability_origins(
+            missing, cutoff=spec.historical_data_cutoff, calendar="XNYS",
+            origin_count=3, step_sessions=1, symbols=spec.predictor_symbols,
+        )
+    incomplete = prepared.copy()
+    incomplete.at[pd.Timestamp("2026-09-24"), "BBB.intraday_return"] = float("nan")
+    with pytest.raises(ValueError, match="incompl"):
+        resolve_stability_origins(
+            incomplete, cutoff=spec.historical_data_cutoff, calendar="XNYS",
+            origin_count=3, step_sessions=1, symbols=spec.predictor_symbols,
+        )
+
+
+def test_temporal_aggregate_is_deterministic_and_redundancy_follows_top_n(tmp_path):
+    config = replace(
+        DEFAULT_CONFIG, project_root=tmp_path, predictor_prefilter_top_n=2,
+        predictor_prefilter_correlation_threshold=0.8, lag_depth=1,
+    )
+    frames = []
+    for cutoff in ("2026-09-25", "2026-09-24", "2026-09-23"):
+        rows = []
+        for rank, symbol in enumerate(("BBB", "CCC", "DDD"), start=1):
+            rows.append({
+                "OriginCutoff": cutoff, "Observation": "AAA", "Predictor": symbol,
+                "PrefilterScoreRank": rank, "PrefilterRank": rank,
+                "PrefilterScore": 1.0 - rank / 10,
+                "ROCAUCMedian": 0.8 - rank / 20,
+                "PctWindowsAboveRandom": 0.8, "ROCAUCWorst": 0.6,
+                "ROCAUCStd": 0.03, "Eligible": True,
+                "PrefilterStatus": "retained" if rank <= 2 else "rejected_top_n",
+            })
+        frames.append(pd.DataFrame(rows))
+    development = pd.DataFrame({
+        "BBB_intraday_J-1": [1, 2, 3, 4],
+        "CCC_intraday_J-1": [2, 4, 6, 8],
+        "DDD_intraday_J-1": [1, 0, 1, 0],
+    })
+    aggregate, details, retained = aggregate_temporal_prefilter(
+        frames, targets=["AAA"], predictors=["AAA", "BBB", "CCC", "DDD"],
+        config=config, principal_development=development,
+    )
+    reversed_aggregate, _, _ = aggregate_temporal_prefilter(
+        [frame.iloc[::-1] for frame in frames[::-1]], targets=["AAA"],
+        predictors=["AAA", "BBB", "CCC", "DDD"],
+        config=config, principal_development=development,
+    )
+    pd.testing.assert_frame_equal(aggregate, reversed_aggregate)
+    assert aggregate["Predictor"].tolist() == ["BBB", "CCC", "DDD"]
+    assert aggregate["AggregateRank"].tolist() == [1, 2, 3]
+    assert aggregate["TopNFrequency"].tolist() == [1.0, 1.0, 0.0]
+    assert aggregate["PrefilterStatus"].tolist() == [
+        "retained", "removed_redundancy", "rejected_top_n",
+    ]
+    assert retained["AAA"] == ("BBB",)
+    assert len(details) == 9
+
+
+def test_temporal_top_n_uses_aggregate_eligibility_before_score(tmp_path):
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path, predictor_prefilter_top_n=1)
+    frames = []
+    for cutoff, bbb_eligible in (("2026-09-25", True), ("2026-09-24", False)):
+        frames.append(pd.DataFrame([
+            {
+                "OriginCutoff": cutoff, "Observation": "AAA", "Predictor": "BBB",
+                "PrefilterScoreRank": 1, "PrefilterRank": 1 if bbb_eligible else pd.NA,
+                "PrefilterScore": 100.0, "ROCAUCMedian": 0.9,
+                "PctWindowsAboveRandom": 1.0, "ROCAUCWorst": 0.9,
+                "ROCAUCStd": 0.0, "Eligible": bbb_eligible,
+                "PrefilterStatus": "retained" if bbb_eligible else "rejected_threshold",
+            },
+            {
+                "OriginCutoff": cutoff, "Observation": "AAA", "Predictor": "CCC",
+                "PrefilterScoreRank": 2, "PrefilterRank": 2 if bbb_eligible else 1,
+                "PrefilterScore": 1.0, "ROCAUCMedian": 0.7,
+                "PctWindowsAboveRandom": 0.8, "ROCAUCWorst": 0.6,
+                "ROCAUCStd": 0.1, "Eligible": True,
+                "PrefilterStatus": "rejected_top_n" if bbb_eligible else "retained",
+            },
+        ]))
+    aggregate, _, retained = aggregate_temporal_prefilter(
+        frames, targets=["AAA"], predictors=["AAA", "BBB", "CCC"],
+        config=config, principal_development=pd.DataFrame(),
+    )
+    assert aggregate["Predictor"].tolist() == ["CCC", "BBB"]
+    assert aggregate["EligibleFrequency"].tolist() == [1.0, 0.5]
+    assert aggregate["TopNFrequency"].tolist() == [0.5, 0.5]
+    assert retained["AAA"] == ("CCC",)
+
+
+def test_single_origin_can_derive_temporal_on_exact_source_snapshot(tmp_path, monkeypatch):
+    repository, spec, preparation_calls, _, original_prepared_inputs = _fixture(tmp_path, monkeypatch)
+    parent = repository.create(spec)
+    parent_summary = workflows._predictor_prefilter(
+        spec, repository.run_directory(parent) / "results", None, None,
+    )
+    _complete(repository, parent, parent_summary)
+    parent_sha = hashlib.sha256((
+        repository.run_directory(parent) / "checkpoints/artifacts/prepared_snapshot.pkl"
+    ).read_bytes()).hexdigest()
+    monkeypatch.setattr(workflows, "_prepared_inputs", original_prepared_inputs)
+    monkeypatch.setattr(workflows.MarketDataService, "load", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("market downloaded")))
+    monkeypatch.setattr(workflows, "prepare_dataset", lambda *_args: (_ for _ in ()).throw(AssertionError("market re-prepared")))
+    evaluator = workflows.evaluate_prefilter_walk_forward
+    observed = []
+
+    def evaluate(origin_view, *args, **kwargs):
+        observed.append((origin_view.index.max().date().isoformat(), len(origin_view)))
+        return evaluator(origin_view, *args, **kwargs)
+
+    monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", evaluate)
+    child = RunService(repository, backend=_Backend()).create_derived(
+        parent, "predictor_prefilter", {
+            "prefilter_method": "temporal_stability",
+            "stability_origin_count": 3,
+            "stability_step_sessions": 2,
+        },
+    ).run_id
+    child_spec = repository.load_spec(child)
+    assert child_spec.prefilter_method == "temporal_stability"
+    assert child_spec.stability_origin_count == 3
+    assert child_spec.stability_step_sessions == 2
+    assert child_spec.prefilter_derivation["prepared_snapshot_sha256"] == parent_sha
+    summary = workflows._predictor_prefilter(
+        child_spec, repository.run_directory(child) / "results", None, None,
+    )
+    assert observed == [("2026-09-25", 10), ("2026-09-23", 8), ("2026-09-21", 6)]
+    assert preparation_calls == [True]
+    assert summary["traceability"]["prepared_dataset_sha256"] == parent_summary["traceability"]["prepared_dataset_sha256"]
+    assert summary["origin_cutoffs"] == [date for date, _ in observed]
+    results = repository.run_directory(child) / "results"
+    assert pd.read_csv(results / "predictor_prefilter_origins.csv")["OriginCutoff"].nunique() == 3
+    assert "AggregateRank" in pd.read_csv(results / "predictor_prefilter.csv")
+
+
+def test_temporal_prefilter_resumes_from_completed_origin(tmp_path, monkeypatch):
+    repository, base, preparation_calls, _, _ = _fixture(tmp_path, monkeypatch)
+    spec = replace(base, prefilter_method="temporal_stability", stability_origin_count=3)
+    run_id = repository.create(spec)
+    output = repository.run_directory(run_id) / "results"
+    evaluator = workflows.evaluate_prefilter_walk_forward
+    observed = []
+    failed = False
+
+    def interrupt_second(origin_view, *args, **kwargs):
+        nonlocal failed
+        date = origin_view.index.max().date().isoformat()
+        observed.append(date)
+        if date == "2026-09-24" and not failed:
+            failed = True
+            raise InterruptedError("second origin interrupted")
+        return evaluator(origin_view, *args, **kwargs)
+
+    monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", interrupt_second)
+    with pytest.raises(InterruptedError):
+        workflows._predictor_prefilter(spec, output, None, None)
+    monkeypatch.setattr(
+        workflows, "_prepared_inputs",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("snapshot prepared twice")),
+    )
+    summary = workflows._predictor_prefilter(spec, output, None, None)
+    assert summary["origin_cutoffs"] == ["2026-09-25", "2026-09-24", "2026-09-23"]
+    assert observed == ["2026-09-25", "2026-09-24", "2026-09-24", "2026-09-23"]
+    assert preparation_calls == [True]

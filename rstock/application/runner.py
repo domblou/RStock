@@ -24,6 +24,7 @@ from .domain import (
     JobType,
 )
 from .processes import process_alive
+from .prefilter_experiments import prefilter_checkpoint_batch_sizes
 from .repository import RunRepository, utc_now
 from rstock.checkpoints import (
     CHECKPOINT_IMPLEMENTATION_VERSION,
@@ -674,7 +675,7 @@ class RunService:
                         self.repository.configuration_fingerprint(run_id)
                     ),
                     batch_sizes=(
-                        {"predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size}
+                        prefilter_checkpoint_batch_sizes(spec.config)
                         if spec.job_type is JobType.PREDICTOR_PREFILTER else {
                             "predictor_prefilter_walk_forward": spec.config.predictor_prefilter_batch_size,
                             "walk_forward": spec.config.walk_forward_batch_size,

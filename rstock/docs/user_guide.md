@@ -1049,14 +1049,25 @@ recalcule pas les étapes déjà terminées.
 ### Préfiltre prédicteurs autonome
 
 Dans **Expériences**, choisir **Préfiltre prédicteurs**, fixer un cutoff historique
-et saisir le Top N, les quatre seuils AUC et le seuil de corrélation. Le job
-prépare un snapshot figé, évalue les prédicteurs un par un avec le préfiltre du
-Walk-forward, puis enregistre le classement et la sélection dans
+et choisir **Origine unique** ou **Stabilité temporelle**. Les paramètres
+scientifiques du préfiltre proviennent des Settings et sont figés dans le run.
+En mode temporel, choisir le nombre d’origines (5 par défaut) et le pas en
+séances (1 par défaut). Le job prépare un seul snapshot au cutoff principal,
+évalue les prédicteurs un par un et enregistre le classement dans
 `results/predictor_prefilter.csv`. Il ne génère pas les combinaisons complètes
 et ne lance pas le Walk-forward complet.
 
+Le mode temporel utilise J, J−pas, J−2×pas, etc. Chaque évaluation reçoit
+uniquement les lignes du snapshot antérieures ou égales à son origine. Le
+classement agrégé suit, dans l’ordre, la fréquence d’admissibilité, le rang
+médian, la dispersion du rang, le score médian et le nom du prédicteur. Le
+Top N puis la règle habituelle de corrélation sont appliqués après ce classement.
+Les métriques et rangs par origine sont exportables depuis l’Historique et
+persistés dans `results/predictor_prefilter_origins.csv`.
+
 Dans l’**Historique** d’un préfiltre terminé, **Créer une expérience dérivée**
-permet de modifier ces six paramètres. Le dérivé vérifie et réutilise le
+permet de modifier la méthode, le nombre d’origines, le pas en séances et les
+six paramètres scientifiques. Le dérivé vérifie et réutilise le
 snapshot préparé du parent, son cutoff et son digest. Si le snapshot manque ou
 a changé, le dérivé échoue; il ne télécharge pas de nouvelles données marché.
 Le parent et le SHA du snapshot source sont conservés dans la provenance du

@@ -22,6 +22,16 @@ PREFILTER_DERIVATION_FIELDS = frozenset({
     "predictor_prefilter_max_auc_std",
     "predictor_prefilter_correlation_threshold",
 })
+PREFILTER_METHOD_FIELDS = frozenset({
+    "prefilter_method", "stability_origin_count", "stability_step_sessions",
+})
+
+
+def prefilter_checkpoint_batch_sizes(config: RStockConfig) -> dict[str, int]:
+    """One checkpoint identity for worker initialization, execution and resume."""
+    return {
+        "predictor_prefilter_walk_forward": config.predictor_prefilter_batch_size,
+    }
 
 
 def _snapshot_path(repository: RunRepository, run_id: str) -> Path:
@@ -29,11 +39,14 @@ def _snapshot_path(repository: RunRepository, run_id: str) -> Path:
             / "prepared_snapshot.pkl")
 
 
-def _validate_changes(config: RStockConfig, changes: Mapping[str, object]) -> dict[str, object]:
-    if not changes or set(changes) - PREFILTER_DERIVATION_FIELDS:
+def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> dict[str, object]:
+    config = source.config
+    if not changes or set(changes) - (PREFILTER_DERIVATION_FIELDS | PREFILTER_METHOD_FIELDS):
         raise ValueError("Unsupported or empty Predictor prefilter derivation")
-    effective = {key: value for key, value in changes.items()
-                 if value != getattr(config, key)}
+    effective = {
+        key: value for key, value in changes.items()
+        if value != getattr(config if key in PREFILTER_DERIVATION_FIELDS else source, key)
+    }
     if not effective:
         raise ValueError("At least one prefilter parameter must change")
     top_n = effective.get("predictor_prefilter_top_n", config.predictor_prefilter_top_n)
@@ -44,6 +57,13 @@ def _validate_changes(config: RStockConfig, changes: Mapping[str, object]) -> di
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not 0.0 <= float(value) <= 1.0):
             raise ValueError(f"{field} must be between zero and one")
+    method = effective.get("prefilter_method", source.prefilter_method)
+    if method not in {"single_origin", "temporal_stability"}:
+        raise ValueError("Unsupported Predictor prefilter method")
+    for field in ("stability_origin_count", "stability_step_sessions"):
+        value = effective.get(field, getattr(source, field))
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{field} must be a positive integer")
     return effective
 
 
@@ -94,7 +114,7 @@ def build_derived_prefilter_spec(
         raise ValueError("Source Predictor prefilter must be completed")
     if repository.storage(source_run_id)["state"] != "full":
         raise ValueError("Source Predictor prefilter has been purged")
-    effective = _validate_changes(source.config, changes)
+    effective = _validate_changes(source, changes)
     summary = repository.summary(source_run_id)
     trace = summary.get("traceability")
     if not isinstance(trace, dict) or not trace.get("prepared_dataset_sha256"):
@@ -126,12 +146,22 @@ def build_derived_prefilter_spec(
         "prepared_dataset_as_of": as_of,
         "created_at": utc_now(),
         "overrides": {
-            field: {"old_value": getattr(source.config, field), "new_value": value}
+            field: {"old_value": getattr(
+                source.config if field in PREFILTER_DERIVATION_FIELDS else source, field
+            ), "new_value": value}
             for field, value in sorted(effective.items())
         },
     }
+    config_changes = {
+        field: value for field, value in effective.items()
+        if field in PREFILTER_DERIVATION_FIELDS
+    }
+    method_changes = {
+        field: value for field, value in effective.items()
+        if field in PREFILTER_METHOD_FIELDS
+    }
     return replace(
-        source, config=replace(source.config, **effective),
+        source, config=replace(source.config, **config_changes), **method_changes,
         source_experiment_run=source_run_id,
         source_prepared_dataset_sha256=digest,
         prepared_dataset_digest_required=True,

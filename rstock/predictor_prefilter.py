@@ -63,6 +63,26 @@ def _feature_correlation(
     return correlation if np.isfinite(correlation) else None
 
 
+def filter_correlated_predictors(
+    ordered_predictors: list[str], prepared_development: pd.DataFrame,
+    *, lag_depth: int, threshold: float,
+) -> tuple[list[str], dict[str, tuple[str, float]]]:
+    """Apply the existing greedy redundancy rule to an ordered Top-N list."""
+    retained: list[str] = []
+    removed: dict[str, tuple[str, float]] = {}
+    for predictor in ordered_predictors:
+        for kept in retained:
+            correlation = _feature_correlation(
+                prepared_development, predictor, kept, lag_depth,
+            )
+            if correlation is not None and abs(correlation) >= threshold:
+                removed[predictor] = (kept, correlation)
+                break
+        else:
+            retained.append(predictor)
+    return retained, removed
+
+
 def _combination_count(candidate_count: int, depth: int) -> int:
     return sum(comb(candidate_count, size) for size in range(1, min(
         candidate_count, depth
@@ -182,25 +202,16 @@ def select_predictors(
         top = qualified.head(config.predictor_prefilter_top_n)
         metrics.loc[qualified.index, "PrefilterStatus"] = "rejected_top_n"
         metrics.loc[top.index, "PrefilterStatus"] = "retained"
-        retained: list[str] = []
+        retained, redundant = filter_correlated_predictors(
+            [str(value) for value in top["Predictor"]], prepared_development,
+            lag_depth=config.lag_depth, threshold=threshold,
+        )
         for index, row in top.iterrows():
             predictor = str(row["Predictor"])
-            redundant_with = None
-            redundancy_correlation = None
-            for kept in retained:
-                correlation = _feature_correlation(
-                    prepared_development, predictor, kept, config.lag_depth
-                )
-                if correlation is not None and abs(correlation) >= threshold:
-                    redundant_with = kept
-                    redundancy_correlation = correlation
-                    break
-            if redundant_with is None:
-                retained.append(predictor)
-            else:
+            if predictor in redundant:
                 metrics.at[index, "PrefilterStatus"] = "removed_redundancy"
-                metrics.at[index, "RedundantWith"] = redundant_with
-                metrics.at[index, "RedundancyCorrelation"] = redundancy_correlation
+                metrics.at[index, "RedundantWith"] = redundant[predictor][0]
+                metrics.at[index, "RedundancyCorrelation"] = redundant[predictor][1]
         retained_by_target[target] = tuple(retained)
         diagnostics.append({
             "target": target,

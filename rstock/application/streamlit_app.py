@@ -738,11 +738,17 @@ def _render_experiment_submission_confirmation(
     maximum = getattr(preview, "max_combinations_after_prefilter", None)
     maximum_text = "—" if maximum is None else f"{maximum:,}"
     if spec.job_type is JobType.PREDICTOR_PREFILTER:
+        method_text = (
+            "Origine unique"
+            if spec.prefilter_method == "single_origin" else
+            f"Stabilité temporelle ({spec.stability_origin_count} origines, "
+            f"pas {spec.stability_step_sessions} séances)"
+        )
         st.success(
             f"Soumettre le préfiltre prédicteurs ? {len(spec.target_symbols):,} cibles · "
             f"{len(spec.predictor_symbols):,} prédicteurs · "
             f"cutoff {spec.historical_data_cutoff} · "
-            f"Top {spec.config.predictor_prefilter_top_n}. "
+            f"Top {spec.config.predictor_prefilter_top_n} · {method_text}. "
             "Le job s'arrête après le classement et la sélection."
         )
     else:
@@ -978,51 +984,41 @@ def _experiments(service: ExperimentService) -> None:
     choice = st.selectbox("Type de job", list(labels))
     selected_job_type = labels[choice]
     run_config = st.session_state.lab_config
+    prefilter_method = "single_origin"
+    stability_origin_count = 5
+    stability_step_sessions = 1
     if selected_job_type is JobType.PREDICTOR_PREFILTER:
         st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet.")
+        prefilter_method = st.radio(
+            "Méthode de préfiltre", ("single_origin", "temporal_stability"),
+            format_func=lambda value: {
+                "single_origin": "Origine unique",
+                "temporal_stability": "Stabilité temporelle",
+            }[value], horizontal=True, key="launch-prefilter-method",
+        )
+        if prefilter_method == "temporal_stability":
+            first, second = st.columns(2)
+            stability_origin_count = int(first.number_input(
+                "Nombre d'origines", min_value=1, value=5, step=1,
+                key="launch-prefilter-origin-count",
+            ))
+            stability_step_sessions = int(second.number_input(
+                "Pas en séances", min_value=1, value=1, step=1,
+                key="launch-prefilter-step-sessions",
+            ))
         with st.container(border=True):
-            st.markdown("**Paramètres du préfiltre pour ce run**")
-            p1, p2, p3 = st.columns(3)
-            prefilter_values = {
-                "predictor_prefilter_top_n": int(p1.number_input(
-                    "Top N prédicteurs", min_value=1,
-                    value=run_config.predictor_prefilter_top_n,
-                    key="launch-prefilter-top-n",
-                )),
-                "predictor_prefilter_min_median_auc": float(p2.number_input(
-                    "AUC médiane minimale", min_value=0.0, max_value=1.0,
-                    value=run_config.predictor_prefilter_min_median_auc,
-                    format="%.4f",
-                    key="launch-prefilter-median",
-                )),
-                "predictor_prefilter_min_pct_above_random": float(p3.number_input(
-                    "Part minimale des fenêtres > 0,50", min_value=0.0, max_value=1.0,
-                    value=run_config.predictor_prefilter_min_pct_above_random,
-                    format="%.4f",
-                    key="launch-prefilter-pct",
-                )),
-                "predictor_prefilter_min_worst_auc": float(p1.number_input(
-                    "Pire AUC minimale", min_value=0.0, max_value=1.0,
-                    value=run_config.predictor_prefilter_min_worst_auc,
-                    format="%.4f",
-                    key="launch-prefilter-worst",
-                )),
-                "predictor_prefilter_max_auc_std": float(p2.number_input(
-                    "Std AUC maximale", min_value=0.0, max_value=1.0,
-                    value=run_config.predictor_prefilter_max_auc_std,
-                    format="%.4f",
-                    key="launch-prefilter-std",
-                )),
-                "predictor_prefilter_correlation_threshold": float(p3.number_input(
-                    "Seuil de corrélation", min_value=0.0, max_value=1.0,
-                    value=run_config.predictor_prefilter_correlation_threshold,
-                    format="%.4f",
-                    key="launch-prefilter-correlation",
-                )),
-            }
+            st.caption(
+                "Paramètres scientifiques hérités des Settings : "
+                f"Top {run_config.predictor_prefilter_top_n}, "
+                f"AUC médiane ≥ {run_config.predictor_prefilter_min_median_auc:.3f}, "
+                f"fenêtres > 0,50 ≥ {run_config.predictor_prefilter_min_pct_above_random:.3f}, "
+                f"pire AUC ≥ {run_config.predictor_prefilter_min_worst_auc:.3f}, "
+                f"std AUC ≤ {run_config.predictor_prefilter_max_auc_std:.3f}, "
+                f"corrélation < {run_config.predictor_prefilter_correlation_threshold:.3f}."
+            )
         run_config = replace(
             run_config, predictor_prefilter_enabled=True,
-            walk_forward_end_offset_sessions=0, **prefilter_values,
+            walk_forward_end_offset_sessions=0,
         )
     auto_promote_candidates = False
     temporal_validation_enabled = False
@@ -1132,6 +1128,9 @@ def _experiments(service: ExperimentService) -> None:
         spec = ExperimentSpec(
             job_type=selected_job_type,
             config=run_config,
+            prefilter_method=prefilter_method,
+            stability_origin_count=stability_origin_count,
+            stability_step_sessions=stability_step_sessions,
             symbols=tuple(st.session_state.lab_symbols),
             calendar=st.session_state.lab_calendar,
             combinations_per_target=st.session_state.lab_combinations_per_target,
@@ -2886,7 +2885,32 @@ def _render_standard_results(
         result_path = result_dir / "predictor_prefilter.csv"
         if result_path.is_file():
             st.subheader("Classement et sélection des prédicteurs")
-            st.dataframe(pd.read_csv(result_path), hide_index=True, width="stretch")
+            ranking = pd.read_csv(result_path)
+            selected_target = "Toutes"
+            if "AggregateRank" in ranking.columns:
+                targets = sorted(ranking["Observation"].dropna().astype(str).unique())
+                selected_target = st.selectbox(
+                    "Cible", ["Toutes", *targets],
+                    key=f"prefilter-results-target-{run_id}",
+                )
+                if selected_target != "Toutes":
+                    ranking = ranking.loc[ranking["Observation"] == selected_target]
+            st.dataframe(ranking, hide_index=True, width="stretch")
+            origins_path = result_dir / "predictor_prefilter_origins.csv"
+            if origins_path.is_file():
+                with st.expander("Métriques par origine"):
+                    origin_rows = pd.read_csv(origins_path)
+                    if selected_target != "Toutes":
+                        origin_rows = origin_rows.loc[
+                            origin_rows["Observation"] == selected_target
+                        ]
+                    st.dataframe(origin_rows, hide_index=True, width="stretch")
+                    st.download_button(
+                        "Exporter les métriques par origine (CSV)",
+                        data=origins_path.read_bytes(),
+                        file_name=f"{run_id}_predictor_prefilter_origins.csv",
+                        mime="text/csv", key=f"prefilter-origins-download-{run_id}",
+                    )
         else:
             st.info("Classement indisponible tant que le préfiltre n'est pas terminé.")
         manifest = _read_light_json(result_dir / "predictor_prefilter.json")
@@ -3783,6 +3807,32 @@ def _render_prefilter_derived_creation(
     }
     changes: dict[str, object] = {}
     with st.container(border=True):
+        method_values = ("single_origin", "temporal_stability")
+        selected_method = st.selectbox(
+            "Méthode de préfiltre", method_values,
+            index=method_values.index(source.prefilter_method),
+            format_func=lambda value: {
+                "single_origin": "Origine unique",
+                "temporal_stability": "Stabilité temporelle",
+            }[value], key=f"prefilter-derive-{run_id}-method",
+        )
+        if selected_method != source.prefilter_method:
+            changes["prefilter_method"] = selected_method
+        if selected_method == "temporal_stability":
+            origin_count = int(st.number_input(
+                "Nombre d'origines", min_value=1,
+                value=source.stability_origin_count, step=1,
+                key=f"prefilter-derive-{run_id}-origin-count",
+            ))
+            step_sessions = int(st.number_input(
+                "Pas en séances", min_value=1,
+                value=source.stability_step_sessions, step=1,
+                key=f"prefilter-derive-{run_id}-step-sessions",
+            ))
+            if origin_count != source.stability_origin_count:
+                changes["stability_origin_count"] = origin_count
+            if step_sessions != source.stability_step_sessions:
+                changes["stability_step_sessions"] = step_sessions
         for field in sorted(PREFILTER_DERIVATION_FIELDS):
             original = getattr(source.config, field)
             if field == "predictor_prefilter_top_n":
