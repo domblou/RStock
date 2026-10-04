@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from rstock.application import workflows
+from rstock.application import streamlit_app
 from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.history_ui import EXPERIMENT_JOB_TYPES, JOB_LABELS
 from rstock.application.model_ui import job_domain
@@ -24,6 +27,7 @@ from rstock.application.runner import RunService
 from rstock.application.worker import execute_run
 from rstock.checkpoints import CheckpointIncompatibleError
 from rstock.config import DEFAULT_CONFIG
+from rstock.modeling import historical_xgboost_parameters
 from rstock.walk_forward import PrefilterWalkForwardResult
 
 
@@ -133,6 +137,101 @@ def test_prefilter_job_and_derived_run_share_frozen_source_without_market(tmp_pa
     assert qualifications == [spec.config.predictor_prefilter_min_median_auc, 0.6]
     assert preparation_calls == [True]
     assert not (repository.run_directory(child) / "results/walk_forward.csv").exists()
+
+
+def test_prefilter_derived_xgboost_values_are_inherited_and_used(tmp_path, monkeypatch):
+    repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    spec = replace(spec, config=replace(
+        spec.config, xgb_max_depth=7, xgb_eta=0.3, xgb_rounds=11,
+    ))
+    parent = repository.create(spec)
+    parent_summary = workflows._predictor_prefilter(
+        spec, repository.run_directory(parent) / "results", None, None,
+    )
+    _complete(repository, parent, parent_summary)
+
+    inherited = build_derived_prefilter_spec(
+        repository, parent, {"predictor_prefilter_top_n": 2},
+    )
+    assert (inherited.config.xgb_max_depth, inherited.config.xgb_eta,
+            inherited.config.xgb_rounds) == (7, 0.3, 11)
+
+    received = []
+    evaluate = workflows.evaluate_prefilter_walk_forward
+
+    def capture(prepared, sets, config, **kwargs):
+        received.append((config.xgb_max_depth, config.xgb_eta, config.xgb_rounds))
+        return evaluate(prepared, sets, config, **kwargs)
+
+    monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", capture)
+    child = RunService(repository, backend=_Backend()).create_derived(
+        parent, "predictor_prefilter",
+        {"xgb_max_depth": 3, "xgb_eta": 0.2, "xgb_rounds": 20},
+    ).run_id
+    child_spec = repository.load_spec(child)
+    assert (child_spec.config.xgb_max_depth, child_spec.config.xgb_eta,
+            child_spec.config.xgb_rounds) == (3, 0.2, 20)
+    parameters = historical_xgboost_parameters(child_spec.config)
+    assert (parameters.max_depth, parameters.eta,
+            parameters.num_boost_round) == (3, 0.2, 20)
+    assert set(child_spec.prefilter_derivation["overrides"]) == {
+        "xgb_max_depth", "xgb_eta", "xgb_rounds",
+    }
+    workflows._predictor_prefilter(
+        child_spec, repository.run_directory(child) / "results", None, None,
+    )
+    assert received == [(3, 0.2, 20)]
+
+
+def test_prefilter_derivation_ui_prefills_and_submits_xgboost_values(tmp_path, monkeypatch):
+    repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    spec = replace(spec, config=replace(
+        spec.config, xgb_max_depth=7, xgb_eta=0.3, xgb_rounds=11,
+    ))
+    run_id = repository.create(spec)
+    shown = {}
+    submitted = []
+    overrides = {"xgb_max_depth": 3, "xgb_eta": 0.2, "xgb_rounds": 20}
+
+    class FakeStreamlit:
+        session_state = {}
+
+        def button(self, _label, *, key, **_kwargs):
+            return key in {f"prefilter-derive-button-{run_id}",
+                           f"prefilter-derive-submit-{run_id}"}
+
+        def number_input(self, _label, *, key, value, **_kwargs):
+            field = key.removeprefix(f"prefilter-derive-{run_id}-")
+            shown[field] = value
+            return overrides.get(field, value)
+
+        def selectbox(self, _label, values, *, index, **_kwargs):
+            return values[index]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def caption(self, *_args):
+            pass
+
+        def success(self, *_args):
+            pass
+
+    service = SimpleNamespace(
+        run_service=SimpleNamespace(repository=repository),
+        create_derived=lambda parent, kind, changes: (
+            submitted.append((parent, kind, changes.copy()))
+            or SimpleNamespace(run_id="child")
+        ),
+    )
+    monkeypatch.setattr(streamlit_app, "st", FakeStreamlit())
+    streamlit_app._render_prefilter_derived_creation(
+        run_id, {"configuration": {}, "status": {"status": "completed"}}, service,
+    )
+    assert {field: shown[field] for field in overrides} == {
+        "xgb_max_depth": 7, "xgb_eta": 0.3, "xgb_rounds": 11,
+    }
+    assert submitted == [(run_id, "predictor_prefilter", overrides)]
 
 
 def test_prefilter_derivation_rejects_missing_or_changed_source_snapshot(tmp_path, monkeypatch):

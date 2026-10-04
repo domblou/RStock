@@ -212,7 +212,7 @@ def selected_run_action(run_ids: Sequence[str]) -> str | None:
 
     if len(run_ids) == 1:
         return "detail"
-    if 2 <= len(run_ids) <= 5:
+    if 2 <= len(run_ids) <= 6:
         return "comparison"
     return None
 
@@ -1251,7 +1251,7 @@ def analyze_run(
 
 
 def comparison_table(analyses: Sequence[RunAnalytics], labels: Mapping[str, str]) -> pd.DataFrame:
-    """Produce the summary matrix for 2–5 WF runs, including missing values."""
+    """Produce the summary matrix for 2–6 WF runs, including missing values."""
 
     rows = {
         "Cutoff demandé": [analysis.requested_cutoff for analysis in analyses],

@@ -1074,6 +1074,17 @@ Le parent et le SHA du snapshot source sont conservés dans la provenance du
 dérivé. Les deux classements CSV peuvent servir à comparer les rangs et les
 entrées ou sorties du Top N.
 
+Dans **Historique > Comparer**, sélectionner de 2 à 6 runs du même type.
+La comparaison **Préfiltre** regroupe les runs par cutoff et Worst AUC,
+affiche les paramètres enregistrés et signale leurs différences. Elle compte
+les paires cible/prédicteur distinctes avant filtrage, les admissibles, celles
+du Top N et les candidats retenus après corrélation. Pour la stabilité
+temporelle, « admissible » signifie admissible à au moins une origine.
+L’intersection et le recouvrement des candidats utilisent leur identité
+canonique. L’export CSV contient une ligne de synthèse par run, puis une ligne
+par candidat avec sa présence dans chaque run; les valeurs indisponibles
+apparaissent comme `N/D`.
+
 Depuis le résumé d’un End-to-end terminé, **Créer une expérience dérivée** permet
 de modifier les paramètres d’une étape scientifique et de recalculer cette étape
 et ses suivantes. Si le run source possède une validation temporelle, celle-ci

@@ -196,12 +196,15 @@ def test_derived_v2_resolves_effective_threshold_stage(tmp_path, threshold_mode)
     assert item.holdout_signals == 25
 
 
-@pytest.mark.parametrize("count", [2, 5])
+@pytest.mark.parametrize("count", [2, 5, 6])
 def test_homogeneous_comparison_modes_and_mixed_rejection(count):
     assert comparison_types(["walk_forward"] * count) == "walk_forward"
     assert comparison_types(["end_to_end"] * count) == "end_to_end"
+    assert comparison_types(["predictor_prefilter"] * count) == "predictor_prefilter"
     assert comparison_types(["walk_forward", "end_to_end"]) is None
-    assert comparison_types(["end_to_end"] * 6) is None
+    assert comparison_types(["predictor_prefilter", "walk_forward"]) is None
+    assert comparison_types(["predictor_prefilter", "end_to_end"]) is None
+    assert comparison_types(["end_to_end"] * 7) is None
 
 
 def test_candidate_cohort_and_funnel_use_distinct_populations(tmp_path):

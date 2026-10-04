@@ -581,8 +581,10 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
         "Version scientifique": {key: config.get(key) for key in ("pipeline_version", "calibration_sampling_policy_version")},
     }
 def comparison_types(types: Sequence[str]) -> str | None:
-    """Return the homogeneous comparison mode for two to five runs."""
-    if not 2 <= len(types) <= 5:
+    """Return the homogeneous comparison mode for two to six runs."""
+    if not 2 <= len(types) <= 6:
         return None
     kind = set(types)
-    return next(iter(kind)) if len(kind) == 1 and kind <= {"walk_forward", "end_to_end"} else None
+    return next(iter(kind)) if len(kind) == 1 and kind <= {
+        "walk_forward", "end_to_end", "predictor_prefilter",
+    } else None

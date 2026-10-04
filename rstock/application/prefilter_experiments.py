@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import fields, replace
+from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,6 +22,9 @@ PREFILTER_DERIVATION_FIELDS = frozenset({
     "predictor_prefilter_min_worst_auc",
     "predictor_prefilter_max_auc_std",
     "predictor_prefilter_correlation_threshold",
+    "xgb_max_depth",
+    "xgb_eta",
+    "xgb_rounds",
 })
 PREFILTER_METHOD_FIELDS = frozenset({
     "prefilter_method", "stability_origin_count", "stability_step_sessions",
@@ -52,7 +56,17 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> 
     top_n = effective.get("predictor_prefilter_top_n", config.predictor_prefilter_top_n)
     if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
         raise ValueError("predictor_prefilter_top_n must be a positive integer")
-    for field in PREFILTER_DERIVATION_FIELDS - {"predictor_prefilter_top_n"}:
+    for field in ("xgb_max_depth", "xgb_rounds"):
+        value = effective.get(field, getattr(config, field))
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{field} must be a positive integer")
+    eta = effective.get("xgb_eta", config.xgb_eta)
+    if (isinstance(eta, bool) or not isinstance(eta, (int, float))
+            or not isfinite(eta) or eta <= 0):
+        raise ValueError("xgb_eta must be positive and finite")
+    for field in PREFILTER_DERIVATION_FIELDS - {
+        "predictor_prefilter_top_n", "xgb_max_depth", "xgb_eta", "xgb_rounds",
+    }:
         value = effective.get(field, getattr(config, field))
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not 0.0 <= float(value) <= 1.0):

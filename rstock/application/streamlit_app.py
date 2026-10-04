@@ -99,6 +99,10 @@ from rstock.application.run_comparison import (
     comparison_types,
     load_end_to_end_comparison,
 )
+from rstock.application.prefilter_comparison import (
+    ND, compare_prefilter_candidates, load_prefilter_comparison,
+    prefilter_comparison_csv, prefilter_profile_differences,
+)
 from rstock.application.runner import running_duration
 from rstock.application.end_to_end import historical_forced_validation_state
 from rstock.application.derivation import (
@@ -3804,6 +3808,9 @@ def _render_prefilter_derived_creation(
         "predictor_prefilter_min_worst_auc": "Pire AUC minimale",
         "predictor_prefilter_max_auc_std": "Écart-type AUC maximal",
         "predictor_prefilter_correlation_threshold": "Seuil de corrélation / redondance",
+        "xgb_max_depth": "max_depth",
+        "xgb_eta": "eta",
+        "xgb_rounds": "rounds",
     }
     changes: dict[str, object] = {}
     with st.container(border=True):
@@ -3835,9 +3842,15 @@ def _render_prefilter_derived_creation(
                 changes["stability_step_sessions"] = step_sessions
         for field in sorted(PREFILTER_DERIVATION_FIELDS):
             original = getattr(source.config, field)
-            if field == "predictor_prefilter_top_n":
+            if field in {"predictor_prefilter_top_n", "xgb_max_depth", "xgb_rounds"}:
                 value = int(st.number_input(
                     labels[field], min_value=1, value=int(original), step=1,
+                    key=f"prefilter-derive-{run_id}-{field}",
+                ))
+            elif field == "xgb_eta":
+                value = float(st.number_input(
+                    labels[field], min_value=0.0001,
+                    value=float(original), format="%.4f",
                     key=f"prefilter-derive-{run_id}-{field}",
                 ))
             else:
@@ -4920,12 +4933,103 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
         _history_navigation("detail", [chosen])
 
 
+def _render_prefilter_comparison(run_ids: list[str]) -> None:
+    root = st.session_state.lab_config.project_root
+    items = [load_prefilter_comparison(root, run_id) for run_id in run_ids]
+    st.caption(
+        "Combinaisons = paires cible/prédicteur distinctes. En stabilité temporelle, "
+        "admissible signifie admissible sur au moins une origine; "
+        "la sélection finale suit le classement agrégé, le Top N et la corrélation."
+    )
+    st.subheader("Paramètres et volumes du préfiltre")
+    summary_grid = pd.DataFrame([item.display_row() for item in items])
+    summary_grid["_worst_sort"] = pd.to_numeric(
+        summary_grid["Worst AUC min"], errors="coerce",
+    )
+    summary_grid = summary_grid.sort_values(
+        ["Cutoff résolu", "_worst_sort", "Run ID"], na_position="last",
+        kind="stable",
+    ).drop(columns="_worst_sort")
+    st.dataframe(
+        summary_grid,
+        hide_index=True, width="stretch",
+    )
+    profiles = {
+        item.run_id: {
+            "Profil / preset": item.profile if item.profile is not None else ND,
+            "Méthode": item.method if item.method is not None else ND,
+            "Univers": item.universe if item.universe is not None else ND,
+            **item.settings,
+        } for item in items
+    }
+    fields = sorted(set().union(*(values.keys() for values in profiles.values())))
+    differences = prefilter_profile_differences(items)
+    if differences:
+        st.warning("Profils ou paramètres différents : " + ", ".join(differences) + ".")
+        st.dataframe(pd.DataFrame([
+            {"Paramètre": field, **values}
+            for field, values in differences.items()
+        ]), hide_index=True, width="stretch")
+    else:
+        st.caption("Aucune différence de profil ou de paramètres enregistrés.")
+    with st.expander("Tous les paramètres de préfiltre enregistrés"):
+        st.dataframe(pd.DataFrame([
+            {"Paramètre": field, **{
+                run_id: profiles[run_id].get(field, ND) for run_id in run_ids
+            }} for field in fields
+        ]), hide_index=True, width="stretch")
+
+    overlap = compare_prefilter_candidates(items)
+    st.subheader("Population retenue")
+    metrics = st.columns(2)
+    metrics[0].metric(
+        "Candidats présents dans tous les runs",
+        ND if overlap.common is None else len(overlap.common),
+    )
+    metrics[1].metric(
+        "Recouvrement intersection / union",
+        ND if overlap.overlap_rate is None else f"{overlap.overlap_rate:.1%}",
+    )
+    st.dataframe(pd.DataFrame([{
+        "Run ID": item.run_id,
+        "Candidats retenus": item.retained if item.retained is not None else ND,
+        "Propres à ce run": (
+            len(overlap.own[item.run_id]) if overlap.own is not None else ND
+        ),
+    } for item in items]), hide_index=True, width="stretch")
+    if overlap.union is not None:
+        candidate_rows = []
+        for identity in sorted(overlap.union):
+            target, direction, predictor = json.loads(identity)
+            candidate_rows.append({
+                "Candidat canonique": identity,
+                "Cible": target, "Prédicteur": predictor,
+                "Dans tous les runs": identity in (overlap.common or ()),
+                **{
+                    run_id: identity in (item.candidates or ())
+                    for run_id, item in zip(run_ids, items, strict=True)
+                },
+            })
+        st.dataframe(pd.DataFrame(candidate_rows), hide_index=True, width="stretch")
+    else:
+        st.info("Recouvrement indisponible : la sélection finale manque pour au moins un run.")
+    st.download_button(
+        "Exporter la comparaison Préfiltre (CSV)",
+        data=prefilter_comparison_csv(items),
+        file_name="comparaison_prefiltre.csv", mime="text/csv",
+        key="prefilter-comparison-export",
+    )
+    chosen = st.selectbox("Ouvrir le détail d’un run", run_ids, key="comparison-open-run")
+    if st.button("Ouvrir le run sélectionné", key="comparison-open-detail"):
+        _history_navigation("detail", [chosen])
+
+
 def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) -> None:
     types = [str(service.run_service.repository.status(run_id)["job_type"]) for run_id in run_ids]
     mode = comparison_types(types)
     if mode is None:
         _page_header("Historique")
-        st.error("Sélectionnez de 2 à 5 runs du même type : uniquement Walk-forward ou uniquement End-to-End.")
+        st.error("Sélectionnez de 2 à 6 runs du même type : Walk-forward, End-to-End ou Préfiltre.")
         return
     if mode == JobType.END_TO_END.value:
         _page_header("Historique")
@@ -4934,6 +5038,14 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
             _clear_history_navigation()
         st.subheader("Comparaison de runs — End-to-End")
         _render_end_to_end_comparison(run_ids)
+        return
+    if mode == JobType.PREDICTOR_PREFILTER.value:
+        _page_header("Historique")
+        st.caption("Historique > Comparaison de runs")
+        if st.button("← Retour à Historique", key="history-back-comparison"):
+            _clear_history_navigation()
+        st.subheader("Comparaison de runs — Préfiltre")
+        _render_prefilter_comparison(run_ids)
         return
     details = [service.run(run_id) for run_id in run_ids]
     analytics = [_load_run_analytics(run_id, item["status"], item) for run_id, item in zip(run_ids, details, strict=True)]
@@ -5212,12 +5324,15 @@ def _history_runs_panel(
             str(next(run for run in filtered if str(run["run_id"]) == run_id)["job_type"])
             for run_id in selected
         }
-        if selected_types not in ({JobType.WALK_FORWARD.value}, {JobType.END_TO_END.value}):
-            st.caption("Sélectionnez uniquement des runs du même type : Walk-forward ou End-to-End.")
+        if selected_types not in (
+            {JobType.WALK_FORWARD.value}, {JobType.END_TO_END.value},
+            {JobType.PREDICTOR_PREFILTER.value},
+        ):
+            st.caption("Sélectionnez uniquement des runs du même type : Walk-forward, End-to-End ou Préfiltre.")
         elif st.button("Comparer les runs", type="primary", key=f"compare-history-{key_prefix}"):
             _history_navigation("comparison", selected)
         return
-    st.warning("Sélectionnez au maximum 5 runs pour une comparaison.")
+    st.warning("Sélectionnez au maximum 6 runs pour une comparaison.")
 
 
 def _format_storage_size(size_bytes: int) -> str:
@@ -7956,7 +8071,7 @@ def _history_page() -> None:
         if mode == "detail" and len(run_ids) == 1 and run_ids[0] in available:
             _render_run_detail_view(service, run_ids[0])
             return
-        if mode == "comparison" and 2 <= len(run_ids) <= 5 and set(run_ids) <= available:
+        if mode == "comparison" and 2 <= len(run_ids) <= 6 and set(run_ids) <= available:
             _render_run_comparison_view(service, run_ids)
             return
         st.session_state.pop("history-navigation", None)
