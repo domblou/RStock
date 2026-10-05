@@ -40,6 +40,11 @@ SPLIT_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "promotion": ("promotion_qualification",),
     "forward_simulation": ("promotion_qualification",),
 }
+PREFILTER_STAGE_DEPENDENCIES = {
+    "prefilter": (), "walk_forward": ("prefilter",),
+    **{key: value for key, value in SPLIT_STAGE_DEPENDENCIES.items() if key != "walk_forward"},
+}
+PREFILTER_SCIENTIFIC_STAGE_KEYS = tuple(PREFILTER_STAGE_DEPENDENCIES)[:7]
 SCIENTIFIC_STAGE_KEYS = tuple(STAGE_DEPENDENCIES)[:4]
 FORK_STAGE_KEYS = SCIENTIFIC_STAGE_KEYS
 SPLIT_SCIENTIFIC_STAGE_KEYS = tuple(SPLIT_STAGE_DEPENDENCIES)[:6]
@@ -95,8 +100,28 @@ SPLIT_STAGE_PARAMETER_FIELDS = {
     "forward_simulation": STAGE_PARAMETER_FIELDS["forward_simulation"],
 }
 
+PREFILTER_STAGE_PARAMETER_FIELDS = {
+    **SPLIT_STAGE_PARAMETER_FIELDS,
+    "prefilter": STAGE_PARAMETER_FIELDS["walk_forward"] | frozenset({
+        "predictor_prefilter_min_median_auc", "predictor_prefilter_min_pct_above_random",
+        "predictor_prefilter_min_worst_auc", "predictor_prefilter_max_auc_std",
+        "predictor_prefilter_correlation_threshold",
+        "prefilter_xgb_max_depth", "prefilter_xgb_eta", "prefilter_xgb_num_boost_round",
+        "prefilter_xgb_min_child_weight", "prefilter_xgb_subsample",
+        "prefilter_xgb_colsample_bytree", "prefilter_xgb_gamma", "prefilter_xgb_reg_alpha",
+        "prefilter_xgb_reg_lambda", "prefilter_xgb_seed",
+        "prefilter_method", "stability_origin_count", "stability_step_sessions",
+        "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
+    }),
+    "walk_forward": frozenset({"xgb_max_depth", "xgb_eta", "xgb_rounds",
+        "xgb_min_child_weight", "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma",
+        "xgb_reg_alpha", "xgb_reg_lambda", "xgb_seed"}),
+}
+
 
 def derivation_graph(schema_version: int) -> tuple[dict[str, tuple[str, ...]], dict[str, frozenset[str]]]:
+    if schema_version == 3:
+        return PREFILTER_STAGE_DEPENDENCIES, PREFILTER_STAGE_PARAMETER_FIELDS
     if schema_version == DERIVATION_SCHEMA_VERSION:
         return STAGE_DEPENDENCIES, STAGE_PARAMETER_FIELDS
     if schema_version == SPLIT_DERIVATION_SCHEMA_VERSION:
@@ -123,7 +148,7 @@ def stage_modes(
 ) -> dict[str, str]:
     """Invalidate the fork and its transitive dependants in the stage DAG."""
     dependencies, _ = derivation_graph(schema_version)
-    fork_keys = (FORK_STAGE_KEYS if schema_version == 1 else SPLIT_FORK_STAGE_KEYS)
+    fork_keys = (PREFILTER_SCIENTIFIC_STAGE_KEYS if schema_version == 3 else FORK_STAGE_KEYS if schema_version == 1 else SPLIT_FORK_STAGE_KEYS)
     if fork_stage not in fork_keys:
         raise ValueError(f"Unsupported derivation point: {fork_stage}")
     invalidated = {fork_stage}
@@ -270,13 +295,13 @@ class Derivation:
             self.source_temporal_validation_enabled, bool
         ):
             raise ValueError("Source temporal validation provenance must be boolean")
-        if self.fork_stage not in (FORK_STAGE_KEYS if self.schema_version == 1 else SPLIT_FORK_STAGE_KEYS):
+        if self.fork_stage not in (PREFILTER_SCIENTIFIC_STAGE_KEYS if self.schema_version == 3 else FORK_STAGE_KEYS if self.schema_version == 1 else SPLIT_FORK_STAGE_KEYS):
             raise ValueError(f"Unsupported derivation point: {self.fork_stage}")
         try:
             datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
         except (TypeError, ValueError) as error:
             raise ValueError("created_at must be an ISO timestamp") from error
-        if not self.inherited_stages and self.fork_stage != "walk_forward":
+        if not self.inherited_stages and self.fork_stage not in {"walk_forward", "prefilter"}:
             raise ValueError("A derivation must inherit at least the Walk-forward")
         if not all(isinstance(ref, InheritedStage) for ref in self.inherited_stages.values()):
             raise ValueError("Invalid inherited stage reference")
@@ -293,7 +318,7 @@ class Derivation:
             promotion_enabled=promotion_enabled,
             forward_enabled=forward_enabled, schema_version=self.schema_version,
         )
-        scientific_keys = (SCIENTIFIC_STAGE_KEYS if self.schema_version == 1
+        scientific_keys = (PREFILTER_SCIENTIFIC_STAGE_KEYS if self.schema_version == 3 else SCIENTIFIC_STAGE_KEYS if self.schema_version == 1
                            else SPLIT_SCIENTIFIC_STAGE_KEYS)
         expected = {
             stage for stage in scientific_keys if modes[stage] == "inherited"

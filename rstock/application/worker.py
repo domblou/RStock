@@ -110,6 +110,7 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
         ("production_quality_rebuild", 98), ("publishing", 2),
     ],
     JobType.END_TO_END: [
+        ("prefilter", 10),
         ("walk_forward", 18),
         ("xgboost_calibration", 18),
         ("threshold_parameter_calibration", 18),
@@ -782,6 +783,12 @@ def execute_run(
                 ),
                 ("publishing", 1),
             ]
+        if spec.job_type is JobType.WALK_FORWARD and spec.source_prefilter_run:
+            phases = [item for item in phases if not item[0].startswith("predictor_prefilter")]
+        if spec.job_type is JobType.END_TO_END and not (
+            spec.pipeline_version >= 4 and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None
+        ):
+            phases = [item for item in phases if item[0] != "prefilter"]
         reporter.configure_phases(phases)
         working = repository.run_directory(run_id) / "_working"
         results = repository.run_directory(run_id) / "results"

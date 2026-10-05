@@ -170,6 +170,55 @@ def test_history_rows_display_run_id_and_lineage():
     }
 
 
+def test_history_summary_shows_persisted_prefilter_derived_changes():
+    detail = _detail()
+    detail["configuration"].update({
+        "run_description": "Préfiltre prédicteurs",
+        "requested_historical_cutoff": "2026-07-07",
+        "prefilter_derivation": {
+            "source_run_id": "parent",
+            "overrides": {
+                "xgb_eta": {"old_value": 0.5, "new_value": 0.2},
+                "xgb_rounds": {"old_value": 8, "new_value": 20},
+                "predictor_prefilter_top_n": {"old_value": 12, "new_value": 20},
+            },
+        },
+    })
+
+    row = history_row(_run("child", "predictor_prefilter"), detail, {})
+
+    assert row.lineage == "Dérivé de parent"
+    assert "Préfiltre prédicteurs" in row.summary
+    assert "Cutoff demandé : 2026-07-07" in row.summary
+    assert row.summary.endswith(
+        "Modifications : top_n 12 → 20 · eta 0,5 → 0,2 · rounds 8 → 20"
+    )
+
+
+def test_history_summary_shows_end_to_end_overrides_and_legacy_fallback():
+    detail = _detail()
+    detail["configuration"].update({
+        "run_description": "Pipeline dérivé",
+        "derivation": {
+            "source_end_to_end_run_id": "parent",
+            "overrides": [
+                {"field": "combinations_per_target", "old_value": 3, "new_value": 5},
+                {"field": "predictor_prefilter_top_n", "old_value": 12, "new_value": 20},
+            ],
+        },
+    })
+    derived = history_row(_run("child", "end_to_end"), detail, {})
+    assert derived.summary.endswith(
+        "Modifications : combinations_per_target 3 → 5 · top_n 12 → 20"
+    )
+
+    legacy = _detail()
+    legacy["configuration"]["run_description"] = "Pipeline historique"
+    baseline = history_row(_run("old", "end_to_end"), legacy, {}).summary
+    legacy["configuration"]["derivation"] = {"source_end_to_end_run_id": "parent"}
+    assert history_row(_run("old", "end_to_end"), legacy, {}).summary == baseline
+
+
 def test_history_summary_prepends_the_current_or_legacy_frozen_universe():
     modern = _detail(summary={"eligible_combinations": 3})
     modern["configuration"]["primary_universe_id"] = "PRIMARY"

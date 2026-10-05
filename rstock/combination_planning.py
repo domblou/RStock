@@ -385,6 +385,9 @@ def build_combination_preview(
     prefilter_enabled: bool = False,
     prefilter_top_n: int | None = None,
     effective_plan: CombinationPlan | None = None,
+    prefilter_selection_mode: str = "single_origin",
+    temporal_consensus_origins: int = 4,
+    temporal_consensus_min_occurrences: int = 3,
 ) -> CombinationPlanPreview:
     """Summarize raw preview counts and optional post-prefilter counts."""
 
@@ -396,12 +399,17 @@ def build_combination_preview(
     raw_count = raw_plan.count()
     if prefilter_enabled and (prefilter_top_n is None or prefilter_top_n < 1):
         raise ValueError("prefilter_top_n must be positive when prefilter is enabled")
+    predictor_bound = prefilter_top_n
+    if prefilter_enabled and prefilter_selection_mode == "temporal_consensus":
+        if not 1 <= temporal_consensus_min_occurrences <= temporal_consensus_origins:
+            raise ValueError("Invalid consensus denominator")
+        predictor_bound = int(prefilter_top_n) * temporal_consensus_origins // temporal_consensus_min_occurrences
     max_after_prefilter = (
         raw_count
         if not prefilter_enabled
         else sum(
             count_target_symbol_sets(
-                min(len(predictors), int(prefilter_top_n)),
+                min(len(predictors), int(predictor_bound)),
                 raw_plan.permutation_depth,
             )
             for predictors in raw_plan.predictors_by_target.values()

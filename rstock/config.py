@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, fields, replace
+from math import isfinite
 from pathlib import Path
 from typing import Mapping
 
@@ -108,6 +109,24 @@ class RStockConfig:
     predictor_prefilter_max_auc_std: float = 0.15
     predictor_prefilter_correlation_threshold: float = 0.90
 
+    # Selection mode is explicit; historical snapshots default to single_origin.
+    prefilter_selection_mode: str = "single_origin"
+    temporal_consensus_origins: int = 4
+    temporal_consensus_step_sessions: int = 21
+    temporal_consensus_min_occurrences: int = 3
+
+    # Independent training parameters for univariate predictor prefiltering.
+    prefilter_xgb_max_depth: int = 3
+    prefilter_xgb_eta: float = 0.2
+    prefilter_xgb_num_boost_round: int = 20
+    prefilter_xgb_min_child_weight: float = 1.0
+    prefilter_xgb_subsample: float = 1.0
+    prefilter_xgb_colsample_bytree: float = 1.0
+    prefilter_xgb_gamma: float = 0.0
+    prefilter_xgb_reg_alpha: float = 0.0
+    prefilter_xgb_reg_lambda: float = 5.0
+    prefilter_xgb_seed: int = 1234
+
     # Decision-threshold calibration is performed only on development predictions.
     threshold_calibration_min_signals_per_window: int = 20
     # Total signals required before a threshold is preferred as a robust sample.
@@ -142,6 +161,36 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if self.prefilter_selection_mode not in {"single_origin", "temporal_stability", "temporal_consensus"}:
+            raise ValueError("Unsupported prefilter selection mode")
+        for name in ("temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.temporal_consensus_min_occurrences > self.temporal_consensus_origins:
+            raise ValueError("Consensus occurrences cannot exceed origins")
+        for name, minimum in (
+            ("prefilter_xgb_max_depth", 1),
+            ("prefilter_xgb_num_boost_round", 1),
+            ("prefilter_xgb_seed", 0),
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        for name in (
+            "prefilter_xgb_eta", "prefilter_xgb_min_child_weight",
+            "prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree",
+            "prefilter_xgb_gamma", "prefilter_xgb_reg_alpha", "prefilter_xgb_reg_lambda",
+        ):
+            value = getattr(self, name)
+            positive = name in {
+                "prefilter_xgb_eta", "prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree",
+            }
+            bounded = name in {"prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree"}
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not isfinite(value) or value < 0
+                    or (positive and value == 0) or (bounded and value > 1)):
+                raise ValueError(f"{name} is outside its valid XGBoost range")
         if self.walk_forward_window_mode not in {"expanding", "rolling"}:
             raise ValueError(
                 "walk_forward_window_mode must be 'expanding' or 'rolling'"
@@ -265,9 +314,54 @@ class RStockConfig:
 
 DEFAULT_CONFIG = RStockConfig(project_root=Path(__file__).resolve().parents[1])
 
+# Historical prefilters used the general XGBoost parameters. Resolve every
+# missing field from that snapshot, independently, without overriding explicit
+# dedicated values. User settings deliberately keep the modern defaults.
+PREFILTER_XGBOOST_LEGACY_FIELDS = {
+    "prefilter_xgb_max_depth": "xgb_max_depth",
+    "prefilter_xgb_eta": "xgb_eta",
+    "prefilter_xgb_num_boost_round": "xgb_rounds",
+    "prefilter_xgb_min_child_weight": "xgb_min_child_weight",
+    "prefilter_xgb_subsample": "xgb_subsample",
+    "prefilter_xgb_colsample_bytree": "xgb_colsample_bytree",
+    "prefilter_xgb_gamma": "xgb_gamma",
+    "prefilter_xgb_reg_alpha": "xgb_reg_alpha",
+    "prefilter_xgb_reg_lambda": "xgb_reg_lambda",
+    "prefilter_xgb_seed": "xgb_seed",
+}
+HISTORICAL_PREFILTER_XGBOOST_DEFAULTS = {
+    "prefilter_xgb_max_depth": 6,
+    "prefilter_xgb_eta": 1.0,
+    "prefilter_xgb_num_boost_round": 4,
+    "prefilter_xgb_min_child_weight": 1.0,
+    "prefilter_xgb_subsample": 1.0,
+    "prefilter_xgb_colsample_bytree": 1.0,
+    "prefilter_xgb_gamma": 0.0,
+    "prefilter_xgb_reg_alpha": 0.0,
+    "prefilter_xgb_reg_lambda": 1.0,
+    "prefilter_xgb_seed": 1234,
+}
+
+
+def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[str, object]:
+    """Restore prefilter training values used by an immutable run snapshot."""
+    return {
+        dedicated: snapshot.get(
+            dedicated, snapshot.get(general, HISTORICAL_PREFILTER_XGBOOST_DEFAULTS[dedicated]),
+        )
+        for dedicated, general in PREFILTER_XGBOOST_LEGACY_FIELDS.items()
+    }
+
+
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    # Absent mode never activates a new scientific policy on an old snapshot.
+    "prefilter_selection_mode": "single_origin",
+    "temporal_consensus_origins": 4,
+    "temporal_consensus_step_sessions": 21,
+    "temporal_consensus_min_occurrences": 3,
+
     # Before configurable geometry, every walk-forward was expanding. Keep that
     # scientific behavior when immutable historical snapshots omit these fields.
     "walk_forward_window_mode": "expanding",

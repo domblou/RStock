@@ -16,7 +16,7 @@ from rstock.progress import CancellationCheck, ProgressCallback, check_cancellat
 
 from .auto_promotion import PromotionCoordinator
 from .domain import ExperimentSpec, JobType, RunMetadata, RunPurpose, RunRole
-from .derivation import STAGE_DEPENDENCIES, SPLIT_STAGE_DEPENDENCIES
+from .derivation import STAGE_DEPENDENCIES, SPLIT_STAGE_DEPENDENCIES, PREFILTER_STAGE_DEPENDENCIES, derivation_graph
 from rstock.calendars import forward_market_sessions, resolve_market_session_on_or_before
 from .repository import RunRepository, utc_now
 from .temporal_validation import (
@@ -31,6 +31,8 @@ PIPELINE_SCHEMA_VERSION = 1
 DERIVED_PIPELINE_SCHEMA_VERSION = 2
 SPLIT_PIPELINE_SCHEMA_VERSION = 3
 SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION = 4
+PREFILTER_PIPELINE_SCHEMA_VERSION = 5
+PREFILTER_DERIVED_PIPELINE_SCHEMA_VERSION = 6
 PIPELINE_MANIFEST = "orchestration/pipeline.json"
 CHILD_ID_POLICY_DETERMINISTIC = 1
 CHILD_ID_POLICY_RESERVED = 2
@@ -53,6 +55,11 @@ SPLIT_SCIENTIFIC_STAGES: tuple[tuple[str, JobType, tuple[str, ...]], ...] = (
     *SCIENTIFIC_STAGES,
     ("holdout_evaluation", JobType.HOLDOUT_EVALUATION, ("threshold_calibration",)),
     ("promotion_qualification", JobType.PROMOTION_QUALIFICATION, ("holdout_evaluation",)),
+)
+PREFILTER_SCIENTIFIC_STAGES = (
+    ("prefilter", JobType.PREDICTOR_PREFILTER, ()),
+    ("walk_forward", JobType.WALK_FORWARD, ("prefilter",)),
+    *SPLIT_SCIENTIFIC_STAGES[1:],
 )
 SPLIT_STAGE_PARAMETER_FIELDS: dict[str, tuple[str, ...]] = {
     "threshold_calibration": (
@@ -103,6 +110,7 @@ HISTORICAL_FORCED_VALIDATION_RELATION_KEY = "historical_forced_candidate_validat
 THREE_PASS_PIPELINE_VERSION = 2
 
 REQUIRED_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "prefilter": ("results/prefilter_contract.json", "checkpoints/artifacts/prepared_snapshot.pkl", "checkpoints/artifacts/prepared_snapshot.json"),
     "walk_forward": (
         "summary.json",
         "results/qualification.csv",
@@ -140,6 +148,8 @@ def _scientific_stages_for_spec(
 ) -> tuple[tuple[str, JobType, tuple[str, ...]], ...]:
     if spec.forced_symbol_sets is not None:
         return FORCED_SCIENTIFIC_STAGES
+    if spec.pipeline_version >= 4 and spec.config.predictor_prefilter_enabled and (spec.derivation is None or spec.derivation.schema_version == 3):
+        return PREFILTER_SCIENTIFIC_STAGES
     if spec.pipeline_version >= 3 and (spec.derivation is None or spec.derivation.schema_version == 2):
         return SPLIT_SCIENTIFIC_STAGES
     return SCIENTIFIC_STAGES
@@ -150,7 +160,9 @@ def _scientific_stages_for_manifest(
 ) -> tuple[tuple[str, JobType, tuple[str, ...]], ...]:
     if manifest.get("forced_candidate_validation", False):
         return FORCED_SCIENTIFIC_STAGES
-    if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}:
+    if manifest.get("schema_version") in {5, 6}:
+        return PREFILTER_SCIENTIFIC_STAGES
+    if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION, 5, 6}:
         return SPLIT_SCIENTIFIC_STAGES
     return SCIENTIFIC_STAGES
 
@@ -164,7 +176,7 @@ def effective_stage_run_id(
 ) -> str | None:
     """Resolve the physical run providing a stage, regardless of ownership."""
     stage = _stage(manifest, stage_key)
-    if (manifest.get("schema_version") == SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+    if (manifest.get("schema_version") in {SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION, 6}
             or manifest.get("schema_version") == DERIVED_PIPELINE_SCHEMA_VERSION
             and manifest.get("workflow_type") != JobType.FORCED_CANDIDATE_VALIDATION.value):
         mode = stage["mode"]
@@ -199,7 +211,7 @@ def _build_derived_pipeline_manifest(
     source_manifest = load_pipeline_manifest(
         repository, derivation.source_end_to_end_run_id
     )
-    source_schema = (SPLIT_PIPELINE_SCHEMA_VERSION if derivation.schema_version == 2
+    source_schema = (5 if derivation.schema_version == 3 else SPLIT_PIPELINE_SCHEMA_VERSION if derivation.schema_version == 2
                      else PIPELINE_SCHEMA_VERSION)
     if source_manifest is None or source_manifest["schema_version"] != source_schema:
         raise ValueError("Derived sources are not supported in this pipeline version")
@@ -260,8 +272,7 @@ def _build_derived_pipeline_manifest(
     effective_ids: dict[str, str | None] = {}
     stages: list[dict[str, Any]] = []
     scientific_stages = _scientific_stages_for_spec(spec)
-    dependencies_graph = (SPLIT_STAGE_DEPENDENCIES if derivation.schema_version == 2
-                          else STAGE_DEPENDENCIES)
+    dependencies_graph, _ = derivation_graph(derivation.schema_version)
     job_types = {stage: job for stage, job, _ in scientific_stages}
     job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
     for stage_key, dependencies in dependencies_graph.items():
@@ -290,7 +301,7 @@ def _build_derived_pipeline_manifest(
             ),
             "not_executed_reason": "disabled" if mode == "not_executed" else None,
         }
-        if derivation.schema_version == 2 and stage_key in job_types:
+        if derivation.schema_version >= 2 and stage_key in job_types:
             entry["parameter_contract"] = (
                 dict(_stage(source_manifest, stage_key)["parameter_contract"])
                 if mode == "inherited"
@@ -312,7 +323,7 @@ def _build_derived_pipeline_manifest(
         if pd.Timestamp(traced_date).date().isoformat() != anchor:
             raise ValueError("Derived dataset session differs from Walk-forward traceability")
     result = {
-        "schema_version": (SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+        "schema_version": (6 if derivation.schema_version == 3 else SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
                            if derivation.schema_version == 2 else DERIVED_PIPELINE_SCHEMA_VERSION),
         "root_run_id": root_run_id,
         "pipeline_version": spec.pipeline_version,
@@ -347,7 +358,7 @@ def build_pipeline_manifest(
             repository, root_run_id, spec, reserved_child_ids=reserved_child_ids
         )
     scientific_stages = _scientific_stages_for_spec(spec)
-    split_pipeline = scientific_stages is SPLIT_SCIENTIFIC_STAGES
+    split_pipeline = scientific_stages in (SPLIT_SCIENTIFIC_STAGES, PREFILTER_SCIENTIFIC_STAGES)
     terminal_stage = "promotion_qualification" if split_pipeline else "threshold_calibration"
     if child_id_policy_version not in {
         CHILD_ID_POLICY_DETERMINISTIC,
@@ -442,15 +453,18 @@ def build_pipeline_manifest(
             "artifact_digests": {},
         }
     )
+    anchor = spec.resolved_market_session_cutoff or spec.historical_data_cutoff or date.today().isoformat()
+    if scientific_stages is PREFILTER_SCIENTIFIC_STAGES:
+        from rstock.calendars import offset_market_session
+        anchor = resolve_market_session_on_or_before(anchor, spec.calendar)
+        if spec.historical_data_cutoff is None:
+            anchor = offset_market_session(anchor, spec.calendar, spec.config.walk_forward_end_offset_sessions)
+        anchor = pd.Timestamp(anchor).date().isoformat()
     return {
         "schema_version": (
-            SPLIT_PIPELINE_SCHEMA_VERSION if split_pipeline else PIPELINE_SCHEMA_VERSION
+            5 if scientific_stages is PREFILTER_SCIENTIFIC_STAGES else SPLIT_PIPELINE_SCHEMA_VERSION if split_pipeline else PIPELINE_SCHEMA_VERSION
         ),
-        "prepared_dataset_as_of": str(
-            spec.resolved_market_session_cutoff
-            or spec.historical_data_cutoff
-            or date.today().isoformat()
-        ),
+        "prepared_dataset_as_of": str(anchor),
         "child_id_policy_version": child_id_policy_version,
         "pipeline_version": spec.pipeline_version,
         "root_run_id": root_run_id,
@@ -475,11 +489,11 @@ def load_pipeline_manifest(
 def validate_pipeline_manifest(
     manifest: dict[str, Any], *, root_run_id: str
 ) -> None:
-    if manifest.get("schema_version") in {DERIVED_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}:
+    if manifest.get("schema_version") in {DERIVED_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION, 6}:
         _validate_derived_pipeline_manifest(manifest, root_run_id=root_run_id)
         return
     if manifest.get("schema_version") not in {
-        PIPELINE_SCHEMA_VERSION, SPLIT_PIPELINE_SCHEMA_VERSION,
+        PIPELINE_SCHEMA_VERSION, SPLIT_PIPELINE_SCHEMA_VERSION, 5,
     }:
         raise ValueError("Version du manifest End-to-end incompatible")
     if manifest.get("root_run_id") != root_run_id:
@@ -490,7 +504,7 @@ def validate_pipeline_manifest(
     scientific_stages = _scientific_stages_for_manifest(manifest)
     terminal_stage = (
         "promotion_qualification"
-        if manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION
+        if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, 5}
         else "threshold_calibration"
     )
     expected = [item[0] for item in scientific_stages]
@@ -522,7 +536,7 @@ def validate_pipeline_manifest(
         if not isinstance(item.get("artifact_digests"), dict):
             raise ValueError(f"Digests invalides pour l'étape {stage_key}")
         if (
-            manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION
+            manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, 5}
             and not isinstance(item.get("parameter_contract"), dict)
         ):
             raise ValueError(f"Parameter contract missing for {stage_key}")
@@ -597,9 +611,8 @@ def _validate_derived_pipeline_manifest(
     if not isinstance(raw_derivation, dict):
         raise ValueError("Derived manifest has no derivation plan")
     derivation = Derivation.from_dict(raw_derivation)
-    dependencies_graph = (SPLIT_STAGE_DEPENDENCIES if derivation.schema_version == 2
-                          else STAGE_DEPENDENCIES)
-    expected_schema = (SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+    dependencies_graph, _ = derivation_graph(derivation.schema_version)
+    expected_schema = (6 if derivation.schema_version == 3 else SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
                        if derivation.schema_version == 2 else DERIVED_PIPELINE_SCHEMA_VERSION)
     if manifest.get("schema_version") != expected_schema:
         raise ValueError("Derived manifest schema differs from derivation")
@@ -630,7 +643,7 @@ def _validate_derived_pipeline_manifest(
     elif temporal_provenance is not None:
         raise ValueError("Historic derivation has unexpected temporal provenance")
     job_types = {stage: job for stage, job, _ in (
-        SPLIT_SCIENTIFIC_STAGES if derivation.schema_version == 2 else SCIENTIFIC_STAGES
+        PREFILTER_SCIENTIFIC_STAGES if derivation.schema_version == 3 else SPLIT_SCIENTIFIC_STAGES if derivation.schema_version == 2 else SCIENTIFIC_STAGES
     )}
     job_types["forward_simulation"] = JobType.FORWARD_SIMULATION
     effective_ids: dict[str, str | None] = {}
@@ -645,7 +658,7 @@ def _validate_derived_pipeline_manifest(
         )
         if stage.get("expected_job_type") != expected_job_type:
             raise ValueError(f"Derived stage job type mismatch: {stage_key}")
-        if derivation.schema_version == 2 and stage_key in job_types and not isinstance(
+        if derivation.schema_version >= 2 and stage_key in job_types and not isinstance(
             stage.get("parameter_contract"), dict
         ):
             raise ValueError(f"Derived stage parameter contract is missing: {stage_key}")
@@ -697,7 +710,7 @@ def persist_or_validate_pipeline_manifest(
         repository.write_json(run_id, PIPELINE_MANIFEST, expected)
         return load_pipeline_manifest(repository, run_id) or expected
     if spec.derivation is not None:
-        expected_derived_schema = (SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
+        expected_derived_schema = (6 if spec.derivation.schema_version == 3 else SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION
                                    if spec.derivation.schema_version == 2
                                    else DERIVED_PIPELINE_SCHEMA_VERSION)
         if persisted.get("schema_version") != expected_derived_schema:
@@ -726,13 +739,13 @@ def persist_or_validate_pipeline_manifest(
             ):
                 if actual.get(key) != wanted.get(key):
                     raise ValueError(f"Derived stage reservation changed: {key}")
-            if spec.derivation.schema_version == 2 and actual.get(
+            if spec.derivation.schema_version >= 2 and actual.get(
                 "parameter_contract"
             ) != wanted.get("parameter_contract"):
                 raise ValueError("Derived stage parameter contract changed")
         return persisted
     expected_schema = (
-        SPLIT_PIPELINE_SCHEMA_VERSION
+        5 if _scientific_stages_for_spec(spec) is PREFILTER_SCIENTIFIC_STAGES else SPLIT_PIPELINE_SCHEMA_VERSION
         if _scientific_stages_for_spec(spec) is SPLIT_SCIENTIFIC_STAGES
         else PIPELINE_SCHEMA_VERSION
     )
@@ -839,13 +852,17 @@ def _base_child_spec(
     *,
     root_run_id: str,
     job_type: JobType,
+    snapshot_cutoff: str | None = None,
 ) -> ExperimentSpec:
     return replace(
         parent,
         job_type=job_type,
+        config=replace(parent.config, walk_forward_end_offset_sessions=0) if job_type is JobType.PREDICTOR_PREFILTER else parent.config,
         derivation=None,
         experimental_overrides=(),
         prepared_snapshot_required=False,
+        prefilter_method="single_origin", stability_origin_count=5, stability_step_sessions=1,
+        source_prefilter_run=None, source_prefilter_contract_sha256=None,
         source_experiment_run=root_run_id,
         source_walk_forward_run=None,
         source_xgboost_calibration_run=None,
@@ -858,7 +875,7 @@ def _base_child_spec(
         auto_promote_candidates=False,
         temporal_validation_enabled=False,
         historical_data_cutoff=(
-            parent.resolved_market_session_cutoff or parent.historical_data_cutoff
+            snapshot_cutoff or parent.resolved_market_session_cutoff or parent.historical_data_cutoff
         ),
         requested_historical_cutoff=parent.requested_historical_cutoff,
         resolved_market_session_cutoff=parent.resolved_market_session_cutoff,
@@ -880,8 +897,51 @@ def build_stage_spec(
 ) -> ExperimentSpec:
     stage = _stage(manifest, stage_key)
     job_type = JobType(str(stage["expected_job_type"]))
-    child = _base_child_spec(parent, root_run_id=root_run_id, job_type=job_type)
+    child = _base_child_spec(parent, root_run_id=root_run_id, job_type=job_type,
+                             snapshot_cutoff=str(manifest["prepared_dataset_as_of"])
+                             if job_type is JobType.PREDICTOR_PREFILTER else None)
+    if stage_key == "prefilter":
+        existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
+        if existing.is_file():
+            return repository.load_spec(str(stage["child_run_id"]))
+        cutoff = pd.Timestamp(manifest["prepared_dataset_as_of"])
+        child = replace(child, historical_data_cutoff=pd.Timestamp(cutoff).date().isoformat(),
+                        config=replace(child.config, walk_forward_end_offset_sessions=0),
+                        prefilter_method=parent.prefilter_method,
+                        stability_origin_count=parent.stability_origin_count,
+                        stability_step_sessions=parent.stability_step_sessions)
+        if parent.derivation is not None:
+            source_manifest = load_pipeline_manifest(repository, parent.derivation.source_end_to_end_run_id)
+            source_id = effective_stage_run_id(source_manifest, "prefilter")
+            from .prefilter_experiments import build_derived_prefilter_spec
+            source_spec = repository.load_spec(source_id)
+            from .prefilter_experiments import PREFILTER_DERIVATION_FIELDS
+            changes = {key: getattr(child.config, key) for key in PREFILTER_DERIVATION_FIELDS
+                       if getattr(child.config, key) != getattr(source_spec.config, key)}
+            changes.update({key: getattr(child, key) for key in ("prefilter_method", "stability_origin_count", "stability_step_sessions")
+                            if getattr(child, key) != getattr(source_spec, key)})
+            return replace(build_derived_prefilter_spec(repository, source_id, changes),
+                           source_end_to_end_run=root_run_id)
+        return child
+    if stage_key == "walk_forward" and manifest["schema_version"] in {5, 6}:
+        existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
+        if existing.is_file():
+            return repository.load_spec(str(stage["child_run_id"]))
+        from .prefilter_contract import CONTRACT
+        source = effective_stage_run_id(manifest, "prefilter")
+        path = repository.run_directory(source) / CONTRACT
+        contract = json.loads(path.read_text(encoding="utf-8"))
+        child = replace(child, source_prefilter_run=source,
+                       source_prefilter_contract_sha256=_sha256(path),
+                       source_prepared_dataset_sha256=contract["prepared_dataset_sha256"],
+                       historical_data_cutoff=contract["cutoff"],
+                       prepared_snapshot_required=True, prepared_dataset_digest_required=True,
+                       prefilter_execution_version=2, evaluate_final_holdout=False)
+        from .prefilter_contract import plan
+        plan(repository, child)  # Reject an empty selection before materializing a WF job.
+        return child
     if stage_key == "walk_forward":
+        child = replace(child, prefilter_execution_version=1)
         existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
         if existing.is_file():
             return repository.load_spec(str(stage["child_run_id"]))
@@ -968,7 +1028,7 @@ def build_stage_spec(
             raise ValueError("Fixed evaluation source is unavailable")
         return replace(child, source_threshold_calibration_run=fixed_id,
                        source_holdout_evaluation_run=fixed_id)
-    if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}:
+    if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION, 5, 6}:
         if stage_key == "promotion_qualification":
             threshold_id = effective_stage_run_id(manifest, "threshold_calibration")
             holdout_id = effective_stage_run_id(manifest, "holdout_evaluation")
@@ -1017,7 +1077,7 @@ def build_stage_spec(
         return child
 
     if (
-        manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}
+        manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION, 5, 6}
         and stage_key == "holdout_evaluation"
     ):
         threshold_id = effective_stage_run_id(manifest, "threshold_calibration")
@@ -1074,7 +1134,7 @@ def build_stage_spec(
         experimental_overrides=experimental_overrides,
     )
     if (
-        manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION}
+        manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, SPLIT_DERIVED_PIPELINE_SCHEMA_VERSION, 5, 6}
         and stage_key == "threshold_calibration"
     ):
         child = replace(child, evaluate_final_holdout=False)
@@ -1354,11 +1414,11 @@ def _forced_candidate_spec(
         threshold_calibration_run_id=threshold_id,
         holdout_evaluation_run_id=(
             str(_stage(manifest, "holdout_evaluation")["child_run_id"])
-            if manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION else None
+            if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, 5} else None
         ),
         promotion_qualification_run_id=(
             str(_stage(manifest, "promotion_qualification")["child_run_id"])
-            if manifest.get("schema_version") == SPLIT_PIPELINE_SCHEMA_VERSION else None
+            if manifest.get("schema_version") in {SPLIT_PIPELINE_SCHEMA_VERSION, 5} else None
         ),
     ).source_candidates()
     direction_by_set = {
@@ -1446,6 +1506,8 @@ def _forced_candidate_spec(
     return replace(
         parent,
         job_type=JobType.FORCED_CANDIDATE_VALIDATION,
+        prefilter_method="single_origin", stability_origin_count=5, stability_step_sessions=1,
+        source_prefilter_run=None, source_prefilter_contract_sha256=None,
         config=(
             validation_spec.config
             if validation_spec is not None
@@ -1886,6 +1948,7 @@ def run_end_to_end(
                 raise ValueError("Forward end must follow the historical cutoff")
             child_spec = replace(
                 spec, job_type=JobType.FORWARD_SIMULATION,
+                prefilter_method="single_origin", stability_origin_count=5, stability_step_sessions=1,
                 derivation=None,
                 source_end_to_end_run=root_run_id,
                 source_forward_model_snapshot_sha256=forward_snapshot.get("snapshot_sha256"),

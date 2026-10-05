@@ -134,6 +134,7 @@ _ESSENTIAL_FILES: dict[JobType, tuple[str, ...]] = {
 }
 
 _SOURCE_FIELDS = (
+    "source_prefilter_run",
     "source_experiment_run",
     "source_walk_forward_run",
     "source_holdout_evaluation_run",
@@ -518,6 +519,12 @@ class RunStorageService:
             except (FileNotFoundError, ValueError):
                 continue
             if status.get("status") == JobStatus.COMPLETED.value:
+                snapshot = self.repository.read_json(other_id, "config.json")
+                prefilter_derivation = snapshot.get("prefilter_derivation")
+                prefilter_source = (prefilter_derivation.get("source_run_id")
+                                    if isinstance(prefilter_derivation, Mapping) else None)
+                if (snapshot.get("source_prefilter_run") in candidate_ids or prefilter_source in candidate_ids) and self.repository.storage(other_id)["state"] == "full":
+                    return other_id
                 continue
             metadata = self.repository.run_metadata(other_id)
             if (

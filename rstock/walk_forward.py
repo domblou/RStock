@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 
@@ -26,9 +26,11 @@ from .features import (
     predictor_columns,
 )
 from .modeling import (
+    XGBoostParameters,
     fit_booster,
     fit_booster_matrix,
     historical_xgboost_parameters,
+    prefilter_xgboost_parameters,
     predict_probabilities,
     predict_probabilities_matrix,
     xgboost_module,
@@ -156,6 +158,7 @@ def _walk_forward_combination(
     cancellation_check: CancellationCheck | None,
     *,
     include_down: bool = True,
+    parameters: XGBoostParameters | None = None,
 ) -> _WalkForwardCombinationResult:
     """Evaluate one combination; its chronological windows remain sequential."""
 
@@ -224,7 +227,7 @@ def _walk_forward_combination(
         if train.index.max() >= test.index.min():
             raise AssertionError("Walk-forward window leaked future test data")
         xgb = xgboost_module()
-        parameters = historical_xgboost_parameters(config)
+        effective_parameters = parameters or historical_xgboost_parameters(config)
         train_features = train[names]
         test_features = test[names]
         test_matrix = xgb.DMatrix(test_features, feature_names=names)
@@ -232,7 +235,7 @@ def _walk_forward_combination(
             train_features, label=train[up_outcome_name], feature_names=names
         )
         up_booster = fit_booster_matrix(
-            up_train_matrix, config, parameters=parameters
+            up_train_matrix, config, parameters=effective_parameters
         )
         up_probabilities = predict_probabilities_matrix(up_booster, test_matrix)
         up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
@@ -260,7 +263,7 @@ def _walk_forward_combination(
                 train_features, label=train[down_outcome_name], feature_names=names
             )
             down_booster = fit_booster_matrix(
-                down_train_matrix, config, parameters=parameters
+                down_train_matrix, config, parameters=effective_parameters
             )
             down_probabilities = predict_probabilities_matrix(
                 down_booster, test_matrix
@@ -325,8 +328,15 @@ def _prefilter_combination(
     """Return one exact qualification row and discard prediction-level detail."""
 
     try:
+        config = context[1]
+        # Keep the shared evaluator's geometry and qualification untouched. Only
+        # this prefilter training context receives the independent seed.
+        training_context = (
+            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed), *context[2:],
+        )
         result = _walk_forward_combination(
-            row_values, context, cancellation_check, include_down=False
+            row_values, training_context, cancellation_check, include_down=False,
+            parameters=prefilter_xgboost_parameters(config),
         )
     except InsufficientWalkForwardObservations as error:
         _, _, _, market_calendars, _, _, _ = context

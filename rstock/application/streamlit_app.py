@@ -106,11 +106,17 @@ from rstock.application.prefilter_comparison import (
 from rstock.application.runner import running_duration
 from rstock.application.end_to_end import historical_forced_validation_state
 from rstock.application.derivation import (
-    FORK_STAGE_KEYS, SPLIT_FORK_STAGE_KEYS, STAGE_PARAMETER_FIELDS,
+    FORK_STAGE_KEYS, SPLIT_FORK_STAGE_KEYS, PREFILTER_SCIENTIFIC_STAGE_KEYS, PREFILTER_STAGE_PARAMETER_FIELDS, STAGE_PARAMETER_FIELDS,
     SPLIT_STAGE_PARAMETER_FIELDS, stage_modes,
 )
 from rstock.application.derived_experiments import source_parameter_value
-from rstock.application.prefilter_experiments import PREFILTER_DERIVATION_FIELDS
+from rstock.application.prefilter_experiments import (
+    PREFILTER_DERIVATION_FIELDS, PREFILTER_XGBOOST_FIELDS,
+)
+from rstock.application.walk_forward_experiments import (
+    WF_GEOMETRY_FIELDS, WF_XGBOOST_FIELDS, WF_QUALIFICATION_FIELDS,
+    WF_SELECTION_FIELDS,
+)
 from rstock.application.end_to_end import load_pipeline_manifest
 from rstock.application.qualification_holdout_diagnostic import diagnostic_state
 from rstock.application.temporal_validation_ui import (
@@ -227,11 +233,14 @@ from rstock.application.universes import (
 )
 from rstock.application.universe_ui import universe_display_name, universe_ui_preview
 from rstock.combination_planning import (
+    CombinationPlan,
     build_combination_plan,
     build_combination_preview,
 )
+from rstock.application.repository import RunRepository
 from rstock.config import (
     DEFAULT_CONFIG,
+    RStockConfig,
     UI_SETTINGS_DEFAULTS,
     load_user_settings,
     save_user_settings,
@@ -668,29 +677,43 @@ def _market_benchmark_options(
     return options
 
 
-def _combination_plan_preview(job_type: JobType) -> bool:
+def _combination_plan_preview(job_type: JobType, *, config=None, selection_mode=None, source_prefilter_run=None) -> bool:
     """Render the raw plan shared with future WF and End-to-end execution."""
 
     st.session_state.pop("experiment-combination-preview", None)
     if job_type not in {JobType.WALK_FORWARD, JobType.END_TO_END}:
         return True
+    config = config or st.session_state.lab_config
+    selection_mode = selection_mode or config.prefilter_selection_mode
+    bounds_config = config
+    effective = None
+    if source_prefilter_run:
+        repository = RunRepository(config.project_root / "runs")
+        source_spec = repository.load_spec(source_prefilter_run)
+        bounds_config, selection_mode = source_spec.config, source_spec.prefilter_method
+        from .prefilter_contract import CONTRACT
+        contract = json.loads((repository.run_directory(source_prefilter_run) / CONTRACT).read_text(encoding="utf-8"))
+        effective = CombinationPlan.from_target_predictors(dict(contract["ordered_predictors_by_target"]), config.permutation_depth)
     try:
         plan = build_combination_plan(
             target_symbols=st.session_state.lab_target_symbols,
             predictor_symbols=st.session_state.lab_symbols,
-            permutation_depth=st.session_state.lab_config.permutation_depth,
+            permutation_depth=config.permutation_depth,
         )
         preview = build_combination_preview(
             plan,
             context_symbols=st.session_state.lab_context_symbols,
+            effective_plan=effective, prefilter_selection_mode=selection_mode,
+            temporal_consensus_origins=bounds_config.temporal_consensus_origins,
+            temporal_consensus_min_occurrences=bounds_config.temporal_consensus_min_occurrences,
             max_combinations_per_batch=(
-                st.session_state.lab_config.walk_forward_max_combinations_per_batch
+                config.walk_forward_max_combinations_per_batch
             ),
             prefilter_enabled=(
-                st.session_state.lab_config.predictor_prefilter_enabled
+                config.predictor_prefilter_enabled
             ),
             prefilter_top_n=(
-                st.session_state.lab_config.predictor_prefilter_top_n
+                bounds_config.predictor_prefilter_top_n
             ),
         )
     except ValueError as error:
@@ -728,6 +751,10 @@ def _combination_plan_preview(job_type: JobType) -> bool:
             "nombre réel peut être inférieur après qualification et suppression "
             "des redondances."
         )
+        if selection_mode == "temporal_consensus":
+            st.caption("Borne consensus : Top N × origines / occurrences minimales. Aucun Top N global n'est appliqué.")
+        if effective is not None:
+            st.metric("Combinaisons figées du Préfiltre", f"{effective.count():,}")
     return True
 
 
@@ -745,6 +772,8 @@ def _render_experiment_submission_confirmation(
         method_text = (
             "Origine unique"
             if spec.prefilter_method == "single_origin" else
+            f"Consensus temporel ({spec.config.temporal_consensus_min_occurrences}/{spec.config.temporal_consensus_origins})"
+            if spec.prefilter_method == "temporal_consensus" else
             f"Stabilité temporelle ({spec.stability_origin_count} origines, "
             f"pas {spec.stability_step_sessions} séances)"
         )
@@ -988,17 +1017,20 @@ def _experiments(service: ExperimentService) -> None:
     choice = st.selectbox("Type de job", list(labels))
     selected_job_type = labels[choice]
     run_config = st.session_state.lab_config
-    prefilter_method = "single_origin"
+    prefilter_method = run_config.prefilter_selection_mode if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} else "single_origin"
     stability_origin_count = 5
     stability_step_sessions = 1
-    if selected_job_type is JobType.PREDICTOR_PREFILTER:
-        st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet.")
+    if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}:
+        st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet."
+                   if selected_job_type is JobType.PREDICTOR_PREFILTER else
+                   "Le Préfiltre, lorsqu'il est activé, est une étape autonome avant le Walk-forward.")
         prefilter_method = st.radio(
-            "Méthode de préfiltre", ("single_origin", "temporal_stability"),
+            "Méthode de préfiltre", ("single_origin", "temporal_stability", "temporal_consensus"),
             format_func=lambda value: {
                 "single_origin": "Origine unique",
                 "temporal_stability": "Stabilité temporelle",
-            }[value], horizontal=True, key="launch-prefilter-method",
+                "temporal_consensus": "Consensus temporel",
+            }[value], index=("single_origin", "temporal_stability", "temporal_consensus").index(prefilter_method), horizontal=True, key="launch-prefilter-method",
         )
         if prefilter_method == "temporal_stability":
             first, second = st.columns(2)
@@ -1021,8 +1053,8 @@ def _experiments(service: ExperimentService) -> None:
                 f"corrélation < {run_config.predictor_prefilter_correlation_threshold:.3f}."
             )
         run_config = replace(
-            run_config, predictor_prefilter_enabled=True,
-            walk_forward_end_offset_sessions=0,
+            run_config, predictor_prefilter_enabled=True if selected_job_type is JobType.PREDICTOR_PREFILTER else run_config.predictor_prefilter_enabled,
+            walk_forward_end_offset_sessions=0 if selected_job_type is JobType.PREDICTOR_PREFILTER else run_config.walk_forward_end_offset_sessions,
         )
     auto_promote_candidates = False
     temporal_validation_enabled = False
@@ -1031,7 +1063,9 @@ def _experiments(service: ExperimentService) -> None:
     forward_simulation_enabled = False
     forward_simulation_mode = None
     forward_simulation_end_date = None
-    if selected_job_type in {JobType.END_TO_END, JobType.PREDICTOR_PREFILTER}:
+    if selected_job_type in {
+        JobType.END_TO_END, JobType.PREDICTOR_PREFILTER, JobType.WALK_FORWARD,
+    }:
         requested_historical_cutoff = st.date_input(
             "Cutoff historique", value=None,
             help="Dernière séance XNYS disponible pour la découverte scientifique.",
@@ -1109,11 +1143,28 @@ def _experiments(service: ExperimentService) -> None:
             run_config,
             window_mode,
         )
+    prefilter_reference = None
+    if selected_job_type is JobType.WALK_FORWARD and run_config.predictor_prefilter_enabled:
+        repository = service.run_service.repository
+        sources = []
+        for candidate in repository.list_run_ids():
+            if (repository.status(candidate).get("status") == "completed"
+                    and repository.load_spec(candidate).job_type is JobType.PREDICTOR_PREFILTER
+                    and repository.storage(candidate)["state"] == "full"
+                    and (repository.run_directory(candidate) / "results/prefilter_contract.json").is_file()):
+                sources.append(candidate)
+        if sources:
+            prefilter_reference = st.selectbox("Préfiltre source (résultat figé)", sources,
+                                              key="launch-wf-prefilter-source")
+            st.caption("Le Walk-forward consomme les candidats et les données figées de ce Préfiltre.")
+        else:
+            st.info("Lancez d'abord un job Préfiltre, ou utilisez End-to-End pour enchaîner les étapes.")
     valid_universe = _experiment_universe_selector()
     valid_plan = (
-        _combination_plan_preview(selected_job_type) if valid_universe else False
+        _combination_plan_preview(selected_job_type, config=run_config, selection_mode=prefilter_method,
+                                  source_prefilter_run=prefilter_reference) if valid_universe else False
     )
-    submit_disabled = not (valid_universe and valid_plan) or (
+    submit_disabled = (selected_job_type is JobType.WALK_FORWARD and run_config.predictor_prefilter_enabled and prefilter_reference is None) or not (valid_universe and valid_plan) or (
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
     ) or (selected_job_type is JobType.PREDICTOR_PREFILTER
           and resolved_historical_cutoff is None
@@ -1171,6 +1222,17 @@ def _experiments(service: ExperimentService) -> None:
                 else f"profondeur {st.session_state.lab_config.permutation_depth}"
             ),
         )
+        if prefilter_reference is not None:
+            from .prefilter_contract import CONTRACT
+            repository = service.run_service.repository
+            path = repository.run_directory(prefilter_reference) / CONTRACT
+            contract = json.loads(path.read_text(encoding="utf-8"))
+            import hashlib
+            spec = replace(spec, source_prefilter_run=prefilter_reference,
+                           source_prefilter_contract_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                           source_prepared_dataset_sha256=contract["prepared_dataset_sha256"],
+                           historical_data_cutoff=contract["cutoff"],
+                           prepared_snapshot_required=True, prepared_dataset_digest_required=True)
         st.session_state["pending-experiment-submission"] = spec
         st.rerun()
     st.caption(
@@ -1178,6 +1240,64 @@ def _experiments(service: ExperimentService) -> None:
         "configuration sont figées au lancement."
     )
     _live_job_panel(service, domain="experiment")
+
+
+def _prefilter_temporal_settings(current):
+    with st.container(border=True):
+        st.subheader("Sélection temporelle")
+        modes = ("single_origin", "temporal_stability", "temporal_consensus")
+        mode = st.selectbox("Mode de sélection", modes,
+                            index=modes.index(current.prefilter_selection_mode),
+                            key="settings-prefilter-selection-mode")
+        columns = st.columns(3)
+        origins = int(columns[0].number_input("Nombre d'origines", min_value=1,
+            value=current.temporal_consensus_origins, disabled=mode != "temporal_consensus",
+            key="settings-consensus-origins"))
+        step = int(columns[1].number_input("Espacement en séances", min_value=1,
+            value=current.temporal_consensus_step_sessions, disabled=mode != "temporal_consensus",
+            key="settings-consensus-step"))
+        minimum = int(columns[2].number_input("Occurrences minimales", min_value=1,
+            value=current.temporal_consensus_min_occurrences, disabled=mode != "temporal_consensus",
+            key="settings-consensus-minimum"))
+        if mode == "temporal_stability":
+            st.caption("Les origines de stabilité se règlent au lancement ; les champs ci-dessus sont propres au consensus.")
+        st.caption("Le consensus temporel retient les candidats sélectionnés de façon répétée sur plusieurs cutoffs historiques point-in-time.")
+    return dict(prefilter_selection_mode=mode, temporal_consensus_origins=origins,
+                temporal_consensus_step_sessions=step, temporal_consensus_min_occurrences=minimum)
+
+
+def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, int | float]:
+    """Edit dedicated training values within the predictor-prefilter section."""
+    values: dict[str, int | float] = {}
+    with st.container(border=True):
+        st.subheader("XGBoost du préfiltre")
+        columns = st.columns(3)
+        for index, field in enumerate(PREFILTER_XGBOOST_FIELDS):
+            label = field.removeprefix("prefilter_xgb_")
+            original = getattr(config, field)
+            bounds: dict[str, object] = {}
+            if field in {
+                "prefilter_xgb_max_depth", "prefilter_xgb_num_boost_round", "prefilter_xgb_seed",
+            }:
+                bounds["min_value"] = 0 if field == "prefilter_xgb_seed" else 1
+                bounds["step"] = 1
+                value = int(columns[index % 3].number_input(
+                    label, value=int(original), key=f"settings-{field}", **bounds,
+                ))
+            else:
+                bounds["min_value"] = (
+                    0.0001 if field == "prefilter_xgb_eta" else
+                    0.01 if field in {"prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree"}
+                    else 0.0
+                )
+                if field in {"prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree"}:
+                    bounds["max_value"] = 1.0
+                value = float(columns[index % 3].number_input(
+                    label, value=float(original), format="%.4f",
+                    key=f"settings-{field}", **bounds,
+                ))
+            values[field] = value
+    return values
 
 
 def _settings() -> None:
@@ -1238,6 +1358,9 @@ def _settings() -> None:
             value=current.predictor_prefilter_correlation_threshold,
             help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
         )
+
+        prefilter_temporal_values = _prefilter_temporal_settings(current)
+        prefilter_xgboost_values = _prefilter_xgboost_settings(current)
 
         st.subheader("Walk-forward")
         window_mode_label = st.selectbox(
@@ -1666,6 +1789,8 @@ def _settings() -> None:
             )
             new_config = replace(
                 current,
+                **prefilter_xgboost_values,
+                **prefilter_temporal_values,
                 model_history_days=int(history),
                 permutation_depth=int(permutation),
                 max_generated_sets=int(max_sets),
@@ -2919,6 +3044,16 @@ def _render_standard_results(
             st.info("Classement indisponible tant que le préfiltre n'est pas terminé.")
         manifest = _read_light_json(result_dir / "predictor_prefilter.json")
         if manifest is not None:
+            if manifest.get("prefilter_method") == "temporal_consensus":
+                st.metric("Candidats consensus retenus", manifest["retained_predictors"])
+                st.caption(f"Origines : {', '.join(manifest['origin_cutoffs'])} · minimum {manifest['min_occurrences']} occurrences")
+                st.dataframe(pd.DataFrame([{"Occurrences": key, "Candidats": count}
+                                          for key, count in manifest["occurrence_distribution"].items()]),
+                             hide_index=True, width="stretch")
+                consensus_path = result_dir / "temporal_consensus_candidates.csv"
+                if consensus_path.is_file():
+                    st.download_button("Exporter le consensus (CSV)", consensus_path.read_bytes(),
+                                       file_name=f"{run_id}_temporal_consensus_candidates.csv", mime="text/csv")
             with st.expander("Provenance et diagnostic"):
                 st.json(manifest)
         return
@@ -3647,7 +3782,7 @@ def _render_derived_creation(
     repository = service.run_service.repository
     source_spec = repository.load_spec(run_id)
     source_manifest = load_pipeline_manifest(repository, run_id)
-    if source_manifest is None or source_manifest.get("schema_version") not in {1, 3}:
+    if source_manifest is None or source_manifest.get("schema_version") not in {1, 3, 5}:
         st.error("Le manifest source ne permet pas cette dérivation.")
         return
     labels = {
@@ -3658,9 +3793,13 @@ def _render_derived_creation(
     }
     labels.update({"holdout_evaluation": "Évaluation holdout",
                    "promotion_qualification": "Qualification promotion"})
-    split = source_manifest["schema_version"] == 3
-    fork_keys = SPLIT_FORK_STAGE_KEYS if split else FORK_STAGE_KEYS
-    parameter_fields = SPLIT_STAGE_PARAMETER_FIELDS if split else STAGE_PARAMETER_FIELDS
+    split = source_manifest["schema_version"] in {3, 5}
+    separated = source_manifest["schema_version"] == 5
+    labels["prefilter"] = "Préfiltre"
+    if separated:
+        labels["walk_forward"] = "Walk-forward"
+    fork_keys = PREFILTER_SCIENTIFIC_STAGE_KEYS if separated else SPLIT_FORK_STAGE_KEYS if split else FORK_STAGE_KEYS
+    parameter_fields = PREFILTER_STAGE_PARAMETER_FIELDS if separated else SPLIT_STAGE_PARAMETER_FIELDS if split else STAGE_PARAMETER_FIELDS
     fork = st.selectbox(
         "Point de dérivation", fork_keys,
         format_func=lambda value: labels[value], key=f"derive-fork-{run_id}",
@@ -3676,7 +3815,7 @@ def _render_derived_creation(
         value=False, key=f"derive-forward-{run_id}",
     )
     modes = stage_modes(fork, forward_enabled=forward_enabled,
-                        schema_version=2 if split else 1)
+                        schema_version=3 if separated else 2 if split else 1)
     st.caption("Amont hérité : " + ", ".join(
         labels.get(stage, "Walk-forward")
         for stage in ("walk_forward", *fork_keys)
@@ -3735,7 +3874,11 @@ def _render_derived_creation(
             except (OSError, ValueError, KeyError) as error:
                 st.error(f"Valeur source indisponible pour {field} : {error}")
                 return
-            if isinstance(original, bool):
+            if field == "prefilter_method":
+                modes = ("single_origin", "temporal_stability", "temporal_consensus")
+                value = st.selectbox("Mode de sélection", modes, index=modes.index(original),
+                                     key=f"derive-value-{run_id}-{fork}-{field}")
+            elif isinstance(original, bool):
                 value = st.checkbox(field, value=original, key=f"derive-value-{run_id}-{fork}-{field}")
             elif isinstance(original, int):
                 value = st.number_input(field, value=original, step=1, key=f"derive-value-{run_id}-{fork}-{field}")
@@ -3799,7 +3942,8 @@ def _render_prefilter_derived_creation(
     )
     st.caption(
         f"Snapshot préparé, cutoff {cutoff} et digest {digest} hérités et figés "
-        "depuis ce run. Aucune nouvelle préparation ni actualisation marché."
+        "depuis ce run. Les origines consensus existantes sont réutilisées ; "
+        "les origines supplémentaires nécessitent leur propre snapshot historique."
     )
     labels = {
         "predictor_prefilter_top_n": "Nombre de prédicteurs retenus (Top-N)",
@@ -3808,19 +3952,27 @@ def _render_prefilter_derived_creation(
         "predictor_prefilter_min_worst_auc": "Pire AUC minimale",
         "predictor_prefilter_max_auc_std": "Écart-type AUC maximal",
         "predictor_prefilter_correlation_threshold": "Seuil de corrélation / redondance",
-        "xgb_max_depth": "max_depth",
-        "xgb_eta": "eta",
-        "xgb_rounds": "rounds",
+        "prefilter_xgb_max_depth": "max_depth",
+        "prefilter_xgb_eta": "eta",
+        "prefilter_xgb_num_boost_round": "num_boost_round",
+        "prefilter_xgb_min_child_weight": "min_child_weight",
+        "prefilter_xgb_gamma": "gamma",
+        "prefilter_xgb_subsample": "subsample",
+        "prefilter_xgb_colsample_bytree": "colsample_bytree",
+        "prefilter_xgb_reg_alpha": "reg_alpha",
+        "prefilter_xgb_reg_lambda": "reg_lambda",
+        "prefilter_xgb_seed": "seed",
     }
     changes: dict[str, object] = {}
     with st.container(border=True):
-        method_values = ("single_origin", "temporal_stability")
+        method_values = ("single_origin", "temporal_stability", "temporal_consensus")
         selected_method = st.selectbox(
             "Méthode de préfiltre", method_values,
             index=method_values.index(source.prefilter_method),
             format_func=lambda value: {
                 "single_origin": "Origine unique",
                 "temporal_stability": "Stabilité temporelle",
+                "temporal_consensus": "Consensus temporel",
             }[value], key=f"prefilter-derive-{run_id}-method",
         )
         if selected_method != source.prefilter_method:
@@ -3840,17 +3992,20 @@ def _render_prefilter_derived_creation(
                 changes["stability_origin_count"] = origin_count
             if step_sessions != source.stability_step_sessions:
                 changes["stability_step_sessions"] = step_sessions
-        for field in sorted(PREFILTER_DERIVATION_FIELDS):
+        if selected_method == "temporal_consensus":
+            for field, label in (("temporal_consensus_origins", "Nombre d'origines"),
+                                 ("temporal_consensus_step_sessions", "Espacement en séances"),
+                                 ("temporal_consensus_min_occurrences", "Occurrences minimales")):
+                original = getattr(source.config, field)
+                value = int(st.number_input(label, min_value=1, value=original, step=1,
+                                            key=f"prefilter-derive-{run_id}-{field}"))
+                if value != original:
+                    changes[field] = value
+        for field in sorted(PREFILTER_DERIVATION_FIELDS - set(PREFILTER_XGBOOST_FIELDS) - {"temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"}):
             original = getattr(source.config, field)
-            if field in {"predictor_prefilter_top_n", "xgb_max_depth", "xgb_rounds"}:
+            if field == "predictor_prefilter_top_n":
                 value = int(st.number_input(
                     labels[field], min_value=1, value=int(original), step=1,
-                    key=f"prefilter-derive-{run_id}-{field}",
-                ))
-            elif field == "xgb_eta":
-                value = float(st.number_input(
-                    labels[field], min_value=0.0001,
-                    value=float(original), format="%.4f",
                     key=f"prefilter-derive-{run_id}-{field}",
                 ))
             else:
@@ -3858,6 +4013,26 @@ def _render_prefilter_derived_creation(
                     labels[field], min_value=0.0, max_value=1.0,
                     value=float(original), format="%.4f",
                     key=f"prefilter-derive-{run_id}-{field}",
+                ))
+            if value != original:
+                changes[field] = value
+        st.subheader("XGBoost du préfiltre")
+        xgb_columns = st.columns(3)
+        for index, field in enumerate(PREFILTER_XGBOOST_FIELDS):
+            original = getattr(source.config, field)
+            if field in {"prefilter_xgb_max_depth", "prefilter_xgb_num_boost_round", "prefilter_xgb_seed"}:
+                value = int(xgb_columns[index % 3].number_input(
+                    labels[field], min_value=0 if field == "prefilter_xgb_seed" else 1,
+                    value=int(original), step=1,
+                    key=f"prefilter-derive-{run_id}-{field}",
+                ))
+            else:
+                bounds = {"min_value": 0.0}
+                if field in {"prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree"}:
+                    bounds["max_value"] = 1.0
+                value = float(xgb_columns[index % 3].number_input(
+                    labels[field], value=float(original), format="%.4f",
+                    key=f"prefilter-derive-{run_id}-{field}", **bounds,
                 ))
             if value != original:
                 changes[field] = value
@@ -3873,6 +4048,119 @@ def _render_prefilter_derived_creation(
         else:
             st.session_state[key] = False
             st.success(f"Préfiltre dérivé créé : {result.run_id}")
+
+
+def _render_walk_forward_derived_creation(
+    run_id: str, detail: dict[str, object], service: ExperimentService,
+) -> None:
+    status = detail.get("status", {})
+    storage = detail.get("storage", {})
+    if (not isinstance(status, Mapping) or status.get("status") != "completed"
+            or isinstance(storage, Mapping) and storage.get("state") == "purged"):
+        return
+    key = f"wf-derive-open-{run_id}"
+    if st.button("Créer une expérience dérivée", key=f"wf-derive-button-{run_id}"):
+        st.session_state[key] = True
+    if not st.session_state.get(key):
+        return
+    source = service.run_service.repository.load_spec(run_id)
+    summary = detail.get("summary", {})
+    trace = summary.get("traceability", {}) if isinstance(summary, Mapping) else {}
+    as_of = trace.get("prepared_market_last_date", "N/D") if isinstance(trace, Mapping) else "N/D"
+    st.caption(
+        f"Hérité et figé : snapshot préparé, cutoff demandé "
+        f"{source.requested_historical_cutoff or 'N/D'}, séance {as_of}, "
+        "candidats/combinaisons d'entrée, préfiltre et offset "
+        f"{source.config.walk_forward_end_offset_sessions}. "
+        "Recalculé : Walk-forward, qualification, holdout interne s'il est activé, "
+        "et classement. Aucune promotion ni Forward Simulation automatique."
+    )
+    labels = {
+        "walk_forward_window_mode": "Mode de fenêtre",
+        "walk_forward_min_train_size": "Train minimal (expansive)",
+        "walk_forward_train_size": "Train fixe (glissante)",
+        "walk_forward_test_size": "Taille du test",
+        "walk_forward_step_size": "Pas des fenêtres",
+        "final_holdout_size": "Taille du holdout final",
+        "xgb_rounds": "num_boost_round",
+        "qualification_min_median_auc": "Médiane AUC minimale",
+        "qualification_min_pct_windows_above_random": "Proportion minimale de fenêtres AUC > 0,50",
+        "qualification_min_worst_window_auc": "Worst AUC minimal",
+        "qualification_min_windows": "Nombre minimal de fenêtres",
+        "qualification_min_positive_observations": "Nombre minimal de positifs",
+        "qualification_max_auc_std": "Std AUC maximal",
+        "final_confirmation_min_auc": "AUC minimale de confirmation holdout",
+        "prediction_threshold": "Seuil de prédiction binaire",
+    }
+    changes: dict[str, object] = {}
+
+    def field_input(field: str, widget: object) -> None:
+        original = getattr(source.config, field)
+        label = labels.get(field, field.removeprefix("xgb_").removeprefix("model_selection_"))
+        widget_key = f"wf-derive-{run_id}-{field}"
+        if field == "walk_forward_window_mode":
+            modes = ("expanding", "rolling")
+            value = widget.selectbox(label, modes, index=modes.index(original), key=widget_key)
+        elif field in {
+            "walk_forward_min_train_size", "walk_forward_train_size",
+            "walk_forward_test_size", "walk_forward_step_size",
+            "final_holdout_size", "xgb_max_depth", "xgb_rounds",
+            "qualification_min_windows", "qualification_min_positive_observations",
+            "xgb_seed",
+        }:
+            minimum = 0 if field in {
+                "qualification_min_positive_observations", "xgb_seed",
+            } else 1
+            value = int(widget.number_input(
+                label, min_value=minimum, value=int(original), step=1,
+                key=widget_key,
+            ))
+        else:
+            bounds = {"min_value": 0.0}
+            if field in {
+                "xgb_subsample", "xgb_colsample_bytree",
+                "qualification_min_median_auc",
+                "qualification_min_pct_windows_above_random",
+                "qualification_min_worst_window_auc",
+                "final_confirmation_min_auc", "prediction_threshold",
+            }:
+                bounds["max_value"] = 1.0
+            value = float(widget.number_input(
+                label, value=float(original), format="%.4f", key=widget_key,
+                **bounds,
+            ))
+        if value != original:
+            changes[field] = value
+
+    with st.container(border=True):
+        st.subheader("Géométrie Walk-forward")
+        for field in WF_GEOMETRY_FIELDS:
+            field_input(field, st)
+        st.subheader("XGBoost")
+        columns = st.columns(3)
+        for index, field in enumerate(WF_XGBOOST_FIELDS):
+            field_input(field, columns[index % 3])
+        st.subheader("Qualification et classement")
+        for field in (*WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS):
+            field_input(field, st)
+        holdout = st.checkbox(
+            "Évaluer le holdout final", value=source.evaluate_final_holdout,
+            key=f"wf-derive-{run_id}-evaluate_final_holdout",
+        )
+        if holdout != source.evaluate_final_holdout:
+            changes["evaluate_final_holdout"] = holdout
+        submitted = st.button(
+            "Lancer le Walk-forward dérivé", disabled=not changes,
+            key=f"wf-derive-submit-{run_id}",
+        )
+    if submitted:
+        try:
+            result = service.create_derived(run_id, "walk_forward", changes)
+        except (OSError, ValueError, RuntimeError, TypeError) as error:
+            st.error(f"Dérivation impossible : {error}")
+        else:
+            st.session_state[key] = False
+            st.success(f"Walk-forward dérivé créé : {result.run_id}")
 
 
 def _render_pipeline_summary(
@@ -4691,6 +4979,7 @@ def _render_job_detail_tabs(
     elif job_type is JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC:
         _render_qualification_holdout_diagnostic(run_id, detail)
     elif job_type is JobType.WALK_FORWARD:
+        _render_walk_forward_derived_creation(run_id, detail, service)
         _render_walk_forward_tabs(service, run_id, status, detail)
     elif job_type is JobType.PREDICTOR_PREFILTER:
         _render_prefilter_derived_creation(run_id, detail, service)
@@ -4939,7 +5228,9 @@ def _render_prefilter_comparison(run_ids: list[str]) -> None:
     st.caption(
         "Combinaisons = paires cible/prédicteur distinctes. En stabilité temporelle, "
         "admissible signifie admissible sur au moins une origine; "
-        "la sélection finale suit le classement agrégé, le Top N et la corrélation."
+        "la sélection finale suit le classement agrégé, le Top N et la corrélation. "
+        "En consensus, les occurrences internes comptent les sélections finales par origine ; "
+        "le Jaccard compare les populations finales entre runs."
     )
     st.subheader("Paramètres et volumes du préfiltre")
     summary_grid = pd.DataFrame([item.display_row() for item in items])

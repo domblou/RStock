@@ -8,13 +8,19 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping
 
-from rstock.config import RStockConfig
+from rstock.config import PREFILTER_XGBOOST_LEGACY_FIELDS, RStockConfig
 
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
 from .repository import RunRepository, utc_now
 
 
+PREFILTER_XGBOOST_FIELDS = (
+    "prefilter_xgb_max_depth", "prefilter_xgb_eta", "prefilter_xgb_num_boost_round",
+    "prefilter_xgb_min_child_weight", "prefilter_xgb_subsample",
+    "prefilter_xgb_colsample_bytree", "prefilter_xgb_gamma",
+    "prefilter_xgb_reg_alpha", "prefilter_xgb_reg_lambda", "prefilter_xgb_seed",
+)
 PREFILTER_DERIVATION_FIELDS = frozenset({
     "predictor_prefilter_top_n",
     "predictor_prefilter_min_median_auc",
@@ -22,9 +28,8 @@ PREFILTER_DERIVATION_FIELDS = frozenset({
     "predictor_prefilter_min_worst_auc",
     "predictor_prefilter_max_auc_std",
     "predictor_prefilter_correlation_threshold",
-    "xgb_max_depth",
-    "xgb_eta",
-    "xgb_rounds",
+}) | frozenset(PREFILTER_XGBOOST_FIELDS) | frozenset({
+    "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
 })
 PREFILTER_METHOD_FIELDS = frozenset({
     "prefilter_method", "stability_origin_count", "stability_step_sessions",
@@ -56,28 +61,39 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> 
     top_n = effective.get("predictor_prefilter_top_n", config.predictor_prefilter_top_n)
     if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
         raise ValueError("predictor_prefilter_top_n must be a positive integer")
-    for field in ("xgb_max_depth", "xgb_rounds"):
+    for field in ("prefilter_xgb_max_depth", "prefilter_xgb_num_boost_round", "prefilter_xgb_seed"):
         value = effective.get(field, getattr(config, field))
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise ValueError(f"{field} must be a positive integer")
-    eta = effective.get("xgb_eta", config.xgb_eta)
-    if (isinstance(eta, bool) or not isinstance(eta, (int, float))
-            or not isfinite(eta) or eta <= 0):
-        raise ValueError("xgb_eta must be positive and finite")
+        minimum = 0 if field == "prefilter_xgb_seed" else 1
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            raise ValueError(f"{field} must be an integer >= {minimum}")
+    for field in PREFILTER_XGBOOST_FIELDS[1:]:
+        if field in {"prefilter_xgb_num_boost_round", "prefilter_xgb_seed"}:
+            continue
+        value = effective.get(field, getattr(config, field))
+        lower = 0.0
+        positive = field in {"prefilter_xgb_eta", "prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree"}
+        upper = 1.0 if field in {"prefilter_xgb_subsample", "prefilter_xgb_colsample_bytree"} else None
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not isfinite(value) or value < lower
+                or (positive and value == lower)
+                or (upper is not None and value > upper)):
+            raise ValueError(f"{field} is outside its valid XGBoost range")
     for field in PREFILTER_DERIVATION_FIELDS - {
-        "predictor_prefilter_top_n", "xgb_max_depth", "xgb_eta", "xgb_rounds",
+        "predictor_prefilter_top_n", *PREFILTER_XGBOOST_FIELDS,
+        "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }:
         value = effective.get(field, getattr(config, field))
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not 0.0 <= float(value) <= 1.0):
             raise ValueError(f"{field} must be between zero and one")
     method = effective.get("prefilter_method", source.prefilter_method)
-    if method not in {"single_origin", "temporal_stability"}:
+    if method not in {"single_origin", "temporal_stability", "temporal_consensus"}:
         raise ValueError("Unsupported Predictor prefilter method")
     for field in ("stability_origin_count", "stability_step_sessions"):
         value = effective.get(field, getattr(source, field))
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f"{field} must be a positive integer")
+    replace(config, **{k: v for k, v in effective.items() if k in PREFILTER_DERIVATION_FIELDS})
     return effective
 
 
@@ -92,6 +108,10 @@ def validate_prefilter_source(
     if not isinstance(source_id, str) or source_id != spec.source_experiment_run:
         raise ValueError("Predictor prefilter source run differs from provenance")
     source = repository.load_spec(source_id)
+    if provenance.get("source_prefilter_report_sha256") is not None:
+        report = repository.run_directory(source_id) / "results/predictor_prefilter.json"
+        if hashlib.sha256(report.read_bytes()).hexdigest() != provenance["source_prefilter_report_sha256"]:
+            raise ValueError("Source Prefilter origin provenance changed")
     if source.job_type is not JobType.PREDICTOR_PREFILTER:
         raise ValueError("Predictor prefilter source has the wrong job type")
     if repository.configuration_fingerprint(source_id) != provenance.get("source_fingerprint"):
@@ -102,6 +122,13 @@ def validate_prefilter_source(
     if source.historical_data_cutoff != spec.historical_data_cutoff:
         raise ValueError("Predictor prefilter source cutoff differs")
     frozen_fields = {item.name for item in fields(RStockConfig)} - PREFILTER_DERIVATION_FIELDS
+    # Already persisted prefilter derivations used general XGBoost field names.
+    # Preserve their execution contract; new derivations accept dedicated fields only.
+    for field, override in provenance.get("overrides", {}).items():
+        if field in PREFILTER_XGBOOST_LEGACY_FIELDS.values() and isinstance(override, dict):
+            if (override.get("old_value") == getattr(source.config, field)
+                    and override.get("new_value") == getattr(spec.config, field)):
+                frozen_fields.discard(field)
     if any(getattr(source.config, field) != getattr(spec.config, field)
            for field in frozen_fields):
         raise ValueError("Predictor prefilter preparation or ML configuration changed")
@@ -155,6 +182,7 @@ def build_derived_prefilter_spec(
         "schema_version": 1,
         "source_run_id": source_run_id,
         "source_fingerprint": repository.configuration_fingerprint(source_run_id),
+        "source_prefilter_report_sha256": hashlib.sha256((repository.run_directory(source_run_id) / "results/predictor_prefilter.json").read_bytes()).hexdigest(),
         "prepared_snapshot_sha256": snapshot_sha,
         "prepared_dataset_sha256": digest,
         "prepared_dataset_as_of": as_of,

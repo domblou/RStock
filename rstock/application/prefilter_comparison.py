@@ -5,11 +5,12 @@ from __future__ import annotations
 import csv
 import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from rstock.combinations import canonical_combination_id
+from rstock.config import historical_prefilter_config_values
 
 
 ND = "N/D"
@@ -95,7 +96,7 @@ def _profile_parameters(config: Mapping[str, Any], manifest: Mapping[str, Any]) 
     scientific = _mapping(config.get("rstock_config"))
     settings = {
         key: value for key, value in scientific.items()
-        if key.startswith("predictor_prefilter_")
+        if key.startswith("predictor_prefilter_") or key.startswith("temporal_consensus_")
         or "profile" in key.casefold() or "preset" in key.casefold()
         or key in {
             "lag_depth", "intraday_target_threshold", "intraday_down_threshold",
@@ -104,7 +105,9 @@ def _profile_parameters(config: Mapping[str, Any], manifest: Mapping[str, Any]) 
             "walk_forward_test_size", "walk_forward_step_size",
         }
     }
-    for key in ("prefilter_method", "stability_origin_count", "stability_step_sessions"):
+    if scientific:
+        settings.update(historical_prefilter_config_values(scientific))
+    for key in ("prefilter_method", "stability_origin_count", "stability_step_sessions", "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"):
         value = config.get(key, manifest.get(key))
         if value is not None:
             settings[key] = value
@@ -128,6 +131,8 @@ class PrefilterComparison:
     retained: int | None
     candidates: frozenset[str] | None
     origin_evaluations: int | None
+    occurrence_distribution: dict[str, int] = field(default_factory=dict)
+    origin_count: int | None = None
 
     @property
     def survival_rate(self) -> float | None:
@@ -135,6 +140,7 @@ class PrefilterComparison:
 
     def display_row(self) -> dict[str, Any]:
         return {
+            **{f"Sélection {count}/{self.origin_count}": number for count, number in self.occurrence_distribution.items()},
             "Run ID": self.run_id,
             "Cutoff demandé": self.requested_cutoff or ND,
             "Cutoff résolu": self.resolved_cutoff or ND,
@@ -215,6 +221,8 @@ def load_prefilter_comparison(project_root: Path, run_id: str) -> PrefilterCompa
         after_top_n=after_top_n,
         retained=None if candidates is None else len(candidates),
         candidates=candidates,
+        occurrence_distribution=dict(manifest.get("occurrence_distribution", {})),
+        origin_count=len(manifest["origin_cutoffs"]) if "origin_cutoffs" in manifest else None,
         origin_evaluations=None if origin_rows is None else len(origin_rows),
     )
 

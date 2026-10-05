@@ -255,7 +255,7 @@ def _derived_discovery_data(
     walk_forward_id = stages["walk_forward"]
     snapshot_source_id = (
         spec.derivation.prepared_snapshot_source_run_id
-        if spec.derivation is not None and spec.derivation.fork_stage == "walk_forward"
+        if spec.derivation is not None and (spec.derivation.fork_stage == "walk_forward" or spec.derivation.schema_version == 3)
         else walk_forward_id
     )
     traceability = repository.summary(walk_forward_id).get("traceability")
@@ -274,6 +274,7 @@ def _derived_discovery_data(
         raise ValueError("Derived prepared snapshot has changed")
     child_spec = replace(
         spec, job_type=JobType.XGBOOST_CALIBRATION, derivation=None,
+        prefilter_method="single_origin", stability_origin_count=5, stability_step_sessions=1,
         source_walk_forward_run=str(snapshot_source_id),
         source_prepared_dataset_sha256=str(traceability["prepared_dataset_sha256"]),
         prepared_dataset_digest_required=True,

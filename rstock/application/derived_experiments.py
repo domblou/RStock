@@ -11,7 +11,7 @@ import pandas as pd
 
 from .derivation import (
     Derivation, InheritedStage, ParameterOverride, derivation_graph,
-    SCIENTIFIC_STAGE_KEYS, SPLIT_SCIENTIFIC_STAGE_KEYS, stage_modes,
+    SCIENTIFIC_STAGE_KEYS, SPLIT_SCIENTIFIC_STAGE_KEYS, PREFILTER_SCIENTIFIC_STAGE_KEYS, stage_modes,
 )
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
@@ -23,6 +23,8 @@ def source_parameter_value(
     repository: RunRepository, source_spec: ExperimentSpec,
     source_manifest: dict[str, Any], field: str,
 ) -> Any:
+    if field in {"prefilter_method", "stability_origin_count", "stability_step_sessions"}:
+        return getattr(source_spec, field)
     if field == "combinations_per_target":
         return source_spec.combinations_per_target
     if field == "evaluate_final_holdout":
@@ -68,15 +70,15 @@ def build_derived_spec(
     if repository.storage(source_end_to_end_run_id)["state"] != "full":
         raise ValueError("Source End-to-End has been purged")
     manifest = load_pipeline_manifest(repository, source_end_to_end_run_id)
-    if manifest is None or manifest["schema_version"] not in {1, 3}:
+    if manifest is None or manifest["schema_version"] not in {1, 3, 5}:
         raise ValueError("Source End-to-End manifest is unavailable")
     if manifest.get("temporal_validation_enabled") is not source_spec.temporal_validation_enabled:
         raise ValueError("Source temporal validation provenance is inconsistent")
-    schema_version = 2 if manifest["schema_version"] == 3 else 1
+    schema_version = 3 if manifest["schema_version"] == 5 else 2 if manifest["schema_version"] == 3 else 1
     _, parameter_fields = derivation_graph(schema_version)
     parameter_owner = {field: stage for stage, fields in parameter_fields.items()
                        for field in fields}
-    scientific_keys = (SPLIT_SCIENTIFIC_STAGE_KEYS if schema_version == 2
+    scientific_keys = (PREFILTER_SCIENTIFIC_STAGE_KEYS if schema_version == 3 else SPLIT_SCIENTIFIC_STAGE_KEYS if schema_version == 2
                        else SCIENTIFIC_STAGE_KEYS)
     modes = stage_modes(fork_stage, schema_version=schema_version)
     inherited: dict[str, InheritedStage] = {}
@@ -96,13 +98,14 @@ def build_derived_spec(
         if digests != stage.get("artifact_digests"):
             raise ValueError(f"Inherited stage artifact digests differ: {key}")
         inherited[key] = InheritedStage(run_id, fingerprint, digests)
-    walk_forward_id = str(manifest["stages"][0]["child_run_id"])
+    walk_forward_id = str(next(stage["child_run_id"] for stage in manifest["stages"] if stage["stage_key"] == "walk_forward"))
     traceability = repository.summary(walk_forward_id).get("traceability")
     if not isinstance(traceability, dict) or not traceability.get("prepared_dataset_sha256"):
         raise ValueError("Source Walk-forward digest is unavailable")
     expected_digest = str(traceability["prepared_dataset_sha256"])
     snapshot_spec = replace(
         source_spec, job_type=JobType.XGBOOST_CALIBRATION,
+        prefilter_method="single_origin", stability_origin_count=5, stability_step_sessions=1,
         temporal_validation_enabled=False,
         source_walk_forward_run=walk_forward_id,
         source_prepared_dataset_sha256=expected_digest,
@@ -140,7 +143,7 @@ def build_derived_spec(
         if old_value == new_value:
             continue
         overrides.append(ParameterOverride(field, old_value, new_value))
-        if field in {"combinations_per_target", "evaluate_final_holdout"} or field.startswith("forward_simulation_"):
+        if field in {"combinations_per_target", "evaluate_final_holdout", "prefilter_method", "stability_origin_count", "stability_step_sessions"} or field.startswith("forward_simulation_"):
             other_changes[field] = new_value
         else:
             config_changes[field] = (
@@ -149,7 +152,7 @@ def build_derived_spec(
             )
     if not overrides:
         raise ValueError("At least one parameter must change")
-    if fork_stage == "walk_forward":
+    if fork_stage == "prefilter" or (fork_stage == "walk_forward" and schema_version < 3):
         top_n = config_changes.get("predictor_prefilter_top_n",
                                    source_spec.config.predictor_prefilter_top_n)
         enabled = config_changes.get("predictor_prefilter_enabled",

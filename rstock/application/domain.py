@@ -10,7 +10,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from rstock.config import HISTORICAL_MISSING_CONFIG_DEFAULTS, RStockConfig
+from rstock.config import (
+    HISTORICAL_MISSING_CONFIG_DEFAULTS, RStockConfig, historical_prefilter_config_values,
+)
 
 from .universes import UniverseSelection
 from .derivation import Derivation
@@ -218,7 +220,11 @@ def _config_from_dict(values: dict[str, Any]) -> RStockConfig:
     unknown = set(values) - allowed
     if unknown:
         raise ValueError(f"Unknown RStock configuration fields: {sorted(unknown)}")
-    restored = {**HISTORICAL_MISSING_CONFIG_DEFAULTS, **values}
+    restored = {
+        **HISTORICAL_MISSING_CONFIG_DEFAULTS,
+        **historical_prefilter_config_values(values),
+        **values,
+    }
     restored["project_root"] = Path(restored["project_root"])
     for field_name in ("selected_symbols", "threshold_calibration_quantiles"):
         if restored.get(field_name) is not None:
@@ -276,13 +282,17 @@ class ExperimentSpec:
     source_holdout_evaluation_run: str | None = None
     derivation: Derivation | None = None
     prefilter_derivation: dict[str, Any] | None = None
-    prefilter_method: str = "single_origin"
+    walk_forward_derivation: dict[str, Any] | None = None
+    source_prefilter_run: str | None = None
+    source_prefilter_contract_sha256: str | None = None
+    prefilter_execution_version: int = 2
+    prefilter_method: str | None = None
     stability_origin_count: int = 5
     stability_step_sessions: int = 1
     experimental_overrides: tuple[dict[str, Any], ...] = ()
     auto_promote_candidates: bool = False
     temporal_validation_enabled: bool = False
-    pipeline_version: int = 3
+    pipeline_version: int = 4
     forced_symbol_sets: tuple[tuple[str, ...], ...] | None = None
     forced_candidate_identities: tuple[tuple[str, str], ...] | None = None
     historical_forced_validation_backfill: bool = False
@@ -310,6 +320,10 @@ class ExperimentSpec:
     )
 
     def __post_init__(self) -> None:
+        if self.prefilter_method is None:
+            object.__setattr__(self, "prefilter_method", self.config.prefilter_selection_mode
+                               if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}
+                               else "single_origin")
         if self.forward_policy != "FROZEN":
             raise ValueError("Unsupported forward policy")
         if self.forced_period_lock is not None and (
@@ -336,7 +350,7 @@ class ExperimentSpec:
                     if override.field == "combinations_per_target"
                     else getattr(self, override.field)
                     if override.field.startswith("forward_simulation_")
-                    or override.field == "evaluate_final_holdout"
+                    or override.field in {"evaluate_final_holdout", "prefilter_method", "stability_origin_count", "stability_step_sessions"}
                     else getattr(self.config, override.field)
                 )
                 if isinstance(effective, tuple):
@@ -350,18 +364,27 @@ class ExperimentSpec:
                 raise ValueError("Prefilter derivation requires a Predictor prefilter job")
             if not isinstance(self.prefilter_derivation, dict) or self.prefilter_derivation.get("schema_version") != 1:
                 raise ValueError("Invalid prefilter derivation contract")
+        if self.walk_forward_derivation is not None:
+            if (self.job_type is not JobType.WALK_FORWARD or self.derivation is not None
+                    or not isinstance(self.walk_forward_derivation, dict)
+                    or self.walk_forward_derivation.get("schema_version") != 1):
+                raise ValueError("Invalid Walk-forward derivation contract")
+        if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} and self.prefilter_method not in {"single_origin", "temporal_stability", "temporal_consensus"}:
+            raise ValueError("Unsupported Predictor prefilter method")
+        if self.prefilter_execution_version not in {1, 2}:
+            raise ValueError("Unsupported prefilter execution version")
         if self.job_type is JobType.PREDICTOR_PREFILTER:
             if not self.config.predictor_prefilter_enabled:
                 raise ValueError("Predictor prefilter must be enabled")
             if self.historical_data_cutoff is None or self.config.walk_forward_end_offset_sessions != 0:
                 raise ValueError("Predictor prefilter requires an explicit cutoff and zero end offset")
-            if self.prefilter_method not in {"single_origin", "temporal_stability"}:
+            if self.prefilter_method not in {"single_origin", "temporal_stability", "temporal_consensus"}:
                 raise ValueError("Unsupported Predictor prefilter method")
             for field_name in ("stability_origin_count", "stability_step_sessions"):
                 value = getattr(self, field_name)
                 if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                     raise ValueError(f"{field_name} must be a positive integer")
-        elif (self.prefilter_method != "single_origin"
+        elif self.job_type is not JobType.END_TO_END and (self.prefilter_method != "single_origin"
               or self.stability_origin_count != 5
               or self.stability_step_sessions != 1):
             raise ValueError("Prefilter method settings belong only to Predictor prefilter jobs")
@@ -627,7 +650,13 @@ class ExperimentSpec:
             values["derivation"] = self.derivation.to_dict()
         if self.prefilter_derivation is not None:
             values["prefilter_derivation"] = deepcopy(self.prefilter_derivation)
-        if self.job_type is JobType.PREDICTOR_PREFILTER:
+        if self.walk_forward_derivation is not None:
+            values["walk_forward_derivation"] = deepcopy(self.walk_forward_derivation)
+        if self.source_prefilter_run is not None:
+            values["source_prefilter_run"] = self.source_prefilter_run
+            values["source_prefilter_contract_sha256"] = self.source_prefilter_contract_sha256
+        values["prefilter_execution_version"] = self.prefilter_execution_version
+        if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}:
             values["prefilter_method"] = self.prefilter_method
             values["stability_origin_count"] = self.stability_origin_count
             values["stability_step_sessions"] = self.stability_step_sessions
@@ -784,7 +813,14 @@ class ExperimentSpec:
                 None if values.get("prefilter_derivation") is None
                 else dict(values["prefilter_derivation"])
             ),
-            prefilter_method=str(values.get("prefilter_method", "single_origin")),
+            walk_forward_derivation=(
+                None if values.get("walk_forward_derivation") is None
+                else dict(values["walk_forward_derivation"])
+            ),
+            source_prefilter_run=values.get("source_prefilter_run"),
+            source_prefilter_contract_sha256=values.get("source_prefilter_contract_sha256"),
+            prefilter_execution_version=int(values.get("prefilter_execution_version", 1)),
+            prefilter_method=values.get("prefilter_method"),
             stability_origin_count=values.get("stability_origin_count", 5),
             stability_step_sessions=values.get("stability_step_sessions", 1),
             experimental_overrides=tuple(values.get("experimental_overrides") or ()),

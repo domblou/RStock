@@ -29,6 +29,7 @@ from rstock.features import prepare_dataset, require_complete_last_session
 from rstock.market_cache import market_data_service
 from rstock.modeling import (
     DirectionalXGBoostParameters,
+    prefilter_xgboost_snapshot,
     resolve_directional_xgboost_parameters,
 )
 from rstock.progress import (
@@ -158,6 +159,20 @@ def _prepared_inputs(
 ) -> tuple[pd.DataFrame, list[str], list[str], dict[str, str]]:
     phase_started_at = perf_counter()
     _phase(progress_callback, "data_preparation", "started")
+    if spec.source_prefilter_run and spec.job_type is JobType.WALK_FORWARD:
+        from .prefilter_contract import load
+        from .derived_snapshot import load_source_prepared_snapshot
+        repository = RunRepository(spec.config.project_root / "runs")
+        contract = load(repository, spec)
+        return load_source_prepared_snapshot(
+            repository, spec, source_run_id=spec.source_prefilter_run,
+            source_job_type=JobType.PREDICTOR_PREFILTER,
+            expected_snapshot_sha256=contract["prepared_snapshot_sha256"],
+        )
+    if (spec.job_type is JobType.WALK_FORWARD and spec.prefilter_execution_version >= 2
+            and spec.config.predictor_prefilter_enabled
+            and spec.forced_symbol_sets is None and spec.walk_forward_derivation is None):
+        raise ValueError("Walk-forward requires an explicit Prefilter reference")
     if spec.prepared_snapshot_required:
         if spec.job_type is JobType.PREDICTOR_PREFILTER:
             from .prefilter_experiments import validate_prefilter_source
@@ -188,7 +203,11 @@ def _prepared_inputs(
 
         prepared, predictor_symbols, target_symbols, calendars = (
             load_source_prepared_snapshot(
-                RunRepository(spec.config.project_root / "runs"), spec
+                RunRepository(spec.config.project_root / "runs"), spec,
+                expected_snapshot_sha256=(
+                    spec.walk_forward_derivation["prepared_snapshot_sha256"]
+                    if spec.walk_forward_derivation is not None else None
+                ),
             )
         )
         if spec.forced_period_lock is not None:
@@ -436,6 +455,56 @@ def _prefilter_qualification_config(config: RStockConfig) -> RStockConfig:
     )
 
 
+def _inherit_walk_forward_prefilter(
+    spec: ExperimentSpec, output: Path, configuration: dict[str, object],
+) -> None:
+    """Keep inherited prefilter artifacts and training provenance from the source."""
+    if spec.source_prefilter_run:
+        from .prefilter_contract import load, CONTRACT
+        repository = RunRepository(spec.config.project_root / "runs")
+        contract = load(repository, spec)
+        source = repository.run_directory(spec.source_prefilter_run) / "results"
+        output.mkdir(parents=True, exist_ok=True)
+        for filename in ("predictor_prefilter.csv", "predictor_prefilter.json", "prefilter_contract.json"):
+            path = source / filename
+            if path.is_file():
+                (output / filename).write_bytes(path.read_bytes())
+        configuration["predictor_prefilter"] = {
+            "enabled": True, "source_prefilter_run": spec.source_prefilter_run,
+            "contract_sha256": spec.source_prefilter_contract_sha256,
+            "selection_sha256": contract["selection_sha256"],
+            "selection_mode": contract["selection_mode"],
+            "xgboost_parameters": prefilter_xgboost_snapshot(repository.load_spec(spec.source_prefilter_run).config),
+            "effective_configuration": contract["effective_configuration"],
+        }
+        return
+    if spec.walk_forward_derivation is None or not spec.config.predictor_prefilter_enabled:
+        return
+    source_id = str(spec.walk_forward_derivation["source_run_id"])
+    repository = RunRepository(spec.config.project_root / "runs")
+    source_results = repository.run_directory(source_id) / "results"
+    output.mkdir(parents=True, exist_ok=True)
+    for filename in ("predictor_prefilter.csv", "predictor_prefilter.json"):
+        source_path = source_results / filename
+        if source_path.is_file():
+            (output / filename).write_bytes(source_path.read_bytes())
+    source_config_path = source_results / "run_configuration.json"
+    provenance: dict[str, object] = {}
+    if source_config_path.is_file():
+        provenance = dict(json.loads(source_config_path.read_text(encoding="utf-8"))
+                          .get("predictor_prefilter", {}))
+    if not provenance and not any(
+        (source_results / filename).is_file()
+        for filename in ("predictor_prefilter.csv", "predictor_prefilter.json")
+    ):
+        return
+    source_spec = repository.load_spec(source_id)
+    provenance.setdefault("xgboost_parameters", prefilter_xgboost_snapshot(source_spec.config))
+    configuration["predictor_prefilter"] = {
+        **provenance, "enabled": True, "source_walk_forward_run": source_id,
+    }
+
+
 def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager) -> None:
     """Reject only legacy prefilter work; full WF checkpoints remain compatible."""
 
@@ -517,19 +586,40 @@ def _qualified_sets_from_walk_forward_source(
     )
 
 
+def _validate_walk_forward_prefilter_input(spec: ExperimentSpec) -> None:
+    if spec.source_prefilter_run:
+        from .prefilter_contract import load
+        load(RunRepository(spec.config.project_root / "runs"), spec)
+    elif (spec.prefilter_execution_version >= 2 and spec.config.predictor_prefilter_enabled
+          and spec.forced_symbol_sets is None and spec.walk_forward_derivation is None):
+        raise ValueError("Walk-forward requires an explicit Prefilter reference")
+
+
 def _walk_forward(
     spec: ExperimentSpec,
     output: Path,
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
+    _validate_walk_forward_prefilter_input(spec)
     if output.name == "_working":
         return _resumable_walk_forward(
             spec, output, progress_callback, cancellation_check
         )
     prefilter = None
     prefilter_walk_forward_telemetry: dict[str, object] | None = None
-    if spec.forced_symbol_sets is not None:
+    if spec.walk_forward_derivation is not None:
+        from .walk_forward_experiments import load_frozen_walk_forward_candidates
+
+        prepared, _, _, calendars = _prepared_inputs(
+            spec, progress_callback, cancellation_check,
+        )
+        generated = load_frozen_walk_forward_candidates(
+            RunRepository(spec.config.project_root / "runs"), spec,
+        )
+        if not isinstance(generated, pd.DataFrame):
+            raise ValueError("Derived Walk-forward expected frozen generated sets")
+    elif spec.forced_symbol_sets is not None:
         prepared, _, _, calendars = _prepared_inputs(
             spec, progress_callback, cancellation_check
         )
@@ -544,6 +634,11 @@ def _walk_forward(
             "completed",
             combinations=len(generated),
         )
+    elif spec.source_prefilter_run:
+        from .prefilter_contract import plan
+        prepared, _, _, calendars = _prepared_inputs(spec, progress_callback, cancellation_check)
+        effective = plan(RunRepository(spec.config.project_root / "runs"), spec)
+        generated = effective.slice(0, effective.count())
     elif spec.config.predictor_prefilter_enabled:
         prepared, predictor_symbols, target_symbols, calendars = _prepared_inputs(
             spec, progress_callback, cancellation_check
@@ -626,6 +721,7 @@ def _walk_forward(
         result.run_configuration["predictor_prefilter"] = {
             "enabled": True,
             "score_formula": PREFILTER_SCORE_FORMULA,
+            "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
             "top_n": spec.config.predictor_prefilter_top_n,
             "min_median_auc": spec.config.predictor_prefilter_min_median_auc,
             "min_pct_above_random": (
@@ -640,6 +736,7 @@ def _walk_forward(
             "telemetry": prefilter_walk_forward_telemetry,
         }
     _phase(progress_callback, "result_writing", "started")
+    _inherit_walk_forward_prefilter(spec, output, result.run_configuration)
     write_walk_forward_results(result, output)
     if prefilter is not None:
         prefilter.metrics.to_csv(output / "predictor_prefilter.csv", index=False)
@@ -647,6 +744,7 @@ def _walk_forward(
             json.dumps(
                 {
                     "score_formula": PREFILTER_SCORE_FORMULA,
+                    "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
                     "targets": prefilter.diagnostics,
                     "telemetry": prefilter_walk_forward_telemetry,
                 },
@@ -671,7 +769,15 @@ def _walk_forward(
     return summary
 
 
-def _predictor_prefilter(
+def _predictor_prefilter(spec, output, progress_callback, cancellation_check):
+    result = _execute_predictor_prefilter(spec, output, progress_callback, cancellation_check)
+    from .prefilter_contract import publish
+    publish(RunRepository(spec.config.project_root / "runs"), output.parent.name, spec, output)
+    result["result_files"] = sorted(path.name for path in output.iterdir())
+    return result
+
+
+def _execute_predictor_prefilter(
     spec: ExperimentSpec,
     output: Path,
     progress_callback: ProgressCallback | None,
@@ -726,6 +832,11 @@ def _predictor_prefilter(
         checkpoint.phase_completed("predictor_prefilter_generation")
         _phase(progress_callback, "predictor_prefilter_generation", "completed",
                combinations=len(univariate_sets))
+    if spec.prefilter_method == "temporal_consensus":
+        from .prefilter_consensus import execute_consensus
+        return execute_consensus(spec, output, checkpoint, prepared, univariate_sets,
+                                 predictor_symbols, target_symbols, calendars,
+                                 progress_callback, cancellation_check)
     if spec.prefilter_method == "temporal_stability":
         return _temporal_stability_prefilter(
             spec, output, checkpoint, prepared, univariate_sets,
@@ -769,6 +880,7 @@ def _predictor_prefilter(
         "source_snapshot_sha256": (None if spec.prefilter_derivation is None
                                    else spec.prefilter_derivation["prepared_snapshot_sha256"]),
         "score_formula": PREFILTER_SCORE_FORMULA,
+        "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
         "predictors_by_target": {
             target: list(items) for target, items in prefilter.predictors_by_target.items()
         },
@@ -879,6 +991,7 @@ def _temporal_stability_prefilter(
     manifest = {
         "schema_version": 1,
         "prefilter_method": "temporal_stability",
+        "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
         "stability_origin_count": spec.stability_origin_count,
         "stability_step_sessions": spec.stability_step_sessions,
         "origin_cutoffs": [origin.date().isoformat() for origin in origins],
@@ -932,11 +1045,16 @@ def _resumable_walk_forward(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
+    _validate_walk_forward_prefilter_input(spec)
     """Production walk-forward path backed by versioned run checkpoints."""
 
     if (
         spec.config.walk_forward_max_combinations_per_batch is not None
         and spec.forced_symbol_sets is None
+        and not (
+            spec.walk_forward_derivation is not None
+            and spec.walk_forward_derivation.get("candidate_artifact") == "generated_sets"
+        )
     ):
         return _planned_walk_forward(
             spec, output, progress_callback, cancellation_check
@@ -985,7 +1103,22 @@ def _resumable_walk_forward(
 
     prefilter = None
     prefilter_telemetry: dict[str, object] | None = None
-    if spec.forced_symbol_sets is not None:
+    if spec.walk_forward_derivation is not None:
+        from .walk_forward_experiments import load_frozen_walk_forward_candidates
+
+        source_generated = load_frozen_walk_forward_candidates(
+            RunRepository(spec.config.project_root / "runs"), spec,
+        )
+        if not isinstance(source_generated, pd.DataFrame):
+            raise ValueError("Derived Walk-forward expected frozen generated sets")
+        if checkpoint.artifact_exists("generated_sets"):
+            generated = checkpoint.load_artifact("generated_sets")
+            if not generated.equals(source_generated):
+                raise ValueError("Derived Walk-forward candidates differ from source")
+        else:
+            checkpoint.commit_artifact("generated_sets", source_generated)
+            generated = source_generated
+    elif spec.forced_symbol_sets is not None:
         if not spec.forced_symbol_sets:
             raise ValueError("Forced candidate validation has no candidate")
         if checkpoint.artifact_exists("generated_sets"):
@@ -1005,6 +1138,15 @@ def _resumable_walk_forward(
                 "completed",
                 combinations=len(generated),
             )
+    elif spec.source_prefilter_run:
+        from .prefilter_contract import plan
+        effective = plan(RunRepository(spec.config.project_root / "runs"), spec)
+        generated = effective.slice(0, effective.count())
+        if checkpoint.artifact_exists("generated_sets"):
+            if not generated.equals(checkpoint.load_artifact("generated_sets")):
+                raise ValueError("Frozen Prefilter candidates changed")
+        else:
+            checkpoint.commit_artifact("generated_sets", generated)
     elif spec.config.predictor_prefilter_enabled:
         _ensure_prefilter_checkpoint_protocol(checkpoint)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
@@ -1120,6 +1262,8 @@ def _resumable_walk_forward(
         "effective_end_date": prepared.attrs.get("effective_end_date"),
     }
     extras: dict[str, object] = dict(period)
+    if spec.walk_forward_derivation is not None:
+        extras["walk_forward_derivation"] = spec.walk_forward_derivation
     holdout_policy = _end_to_end_walk_forward_holdout_policy(spec)
     if holdout_policy is not None:
         extras["final_holdout_policy"] = holdout_policy
@@ -1128,6 +1272,7 @@ def _resumable_walk_forward(
         extras["predictor_prefilter"] = {
             "enabled": True,
             "score_formula": PREFILTER_SCORE_FORMULA,
+            "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
             "top_n": spec.config.predictor_prefilter_top_n,
             "min_median_auc": spec.config.predictor_prefilter_min_median_auc,
             "min_pct_above_random": (
@@ -1141,6 +1286,7 @@ def _resumable_walk_forward(
             "targets": prefilter.diagnostics,
             "telemetry": prefilter_telemetry,
         }
+    _inherit_walk_forward_prefilter(spec, output, extras)
     result = run_streamed_walk_forward(
         prepared,
         generated,
@@ -1159,6 +1305,7 @@ def _resumable_walk_forward(
             json.dumps(
                 {
                     "score_formula": PREFILTER_SCORE_FORMULA,
+                    "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
                     "targets": prefilter.diagnostics,
                     "telemetry": prefilter_telemetry,
                 },
@@ -1178,6 +1325,8 @@ def _resumable_walk_forward(
         "execution_telemetry": _json_value(result.telemetry),
         "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "checkpoint_manifest": "checkpoints/manifest.json",
+        **({"walk_forward_derivation": spec.walk_forward_derivation}
+           if spec.walk_forward_derivation is not None else {}),
         **(
             {"total_combinations": len(generated), "predictor_prefilter": _json_value(prefilter.diagnostics)}
             if prefilter is not None
@@ -2199,6 +2348,33 @@ def _planned_effective_plan(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> tuple[CombinationPlan, CombinationPlan, object | None, dict[str, object] | None, str, str]:
+    if spec.walk_forward_derivation is not None:
+        from .walk_forward_experiments import load_frozen_walk_forward_candidates
+
+        repository = RunRepository(spec.config.project_root / "runs")
+        source_id = spec.source_walk_forward_run
+        effective_plan = load_frozen_walk_forward_candidates(repository, spec)
+        if not isinstance(effective_plan, CombinationPlan):
+            raise ValueError("Derived Walk-forward expected a frozen combination plan")
+        source_spec = repository.load_spec(source_id)
+        source_checkpoint = _walk_forward_checkpoint(repository, source_id, source_spec)
+        raw_plan = CombinationPlan.from_dict(
+            source_checkpoint.load_artifact("raw_combination_plan")
+        )
+        for name, plan in (
+            ("raw_combination_plan", raw_plan),
+            ("effective_combination_plan", effective_plan),
+        ):
+            if checkpoint.artifact_exists(name):
+                persisted = CombinationPlan.from_dict(checkpoint.load_artifact(name))
+                if persisted.plan_sha256 != plan.plan_sha256:
+                    raise ValueError("Derived Walk-forward combination plan changed")
+            else:
+                checkpoint.commit_artifact(name, plan.to_dict())
+        return (
+            raw_plan, effective_plan, None, None, "inherited_v1",
+            prefilter_digest(effective_plan.predictors_by_target),
+        )
     raw_plan = build_combination_plan(
         target_symbols=target_symbols,
         predictor_symbols=predictor_symbols,
@@ -2218,7 +2394,12 @@ def _planned_effective_plan(
     telemetry: dict[str, object] | None = None
     policy_version = "disabled_v1"
     digest = prefilter_digest(raw_plan.predictors_by_target)
-    if spec.config.predictor_prefilter_enabled:
+    if spec.source_prefilter_run:
+        from .prefilter_contract import plan
+        effective_plan = plan(RunRepository(spec.config.project_root / "runs"), spec)
+        policy_version = "external_prefilter_v1"
+        digest = prefilter_digest(effective_plan.predictors_by_target)
+    elif spec.config.predictor_prefilter_enabled:
         policy_version = PREFILTER_POLICY_VERSION
         _ensure_prefilter_checkpoint_protocol(checkpoint)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
@@ -2403,6 +2584,7 @@ def _planned_walk_forward(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
+    _validate_walk_forward_prefilter_input(spec)
     run_directory = output.parent
     repository = RunRepository(run_directory.parent)
     run_id = run_directory.name
@@ -2460,6 +2642,13 @@ def _planned_walk_forward(
                 else None
             ),
         )
+        if spec.walk_forward_derivation is not None:
+            proposed["walk_forward_derivation"] = {
+                "source_run_id": spec.walk_forward_derivation["source_run_id"],
+                "prepared_snapshot_sha256": spec.walk_forward_derivation["prepared_snapshot_sha256"],
+                "candidate_artifact": spec.walk_forward_derivation["candidate_artifact"],
+                "candidate_sha256": spec.walk_forward_derivation["candidate_sha256"],
+            }
         manifest = persist_or_validate_manifest(repository, run_id, proposed)
         # IDs are durable before any child directory is created.
         materialize_reservations(
@@ -2509,6 +2698,8 @@ def _planned_walk_forward(
             "effective_batch_count": effective_batch_count,
         },
     }
+    if spec.walk_forward_derivation is not None:
+        extras["walk_forward_derivation"] = spec.walk_forward_derivation
     holdout_policy = _end_to_end_walk_forward_holdout_policy(spec)
     if holdout_policy is not None:
         extras["final_holdout_policy"] = holdout_policy
@@ -2517,6 +2708,7 @@ def _planned_walk_forward(
         extras["predictor_prefilter"] = {
             "enabled": True,
             "score_formula": PREFILTER_SCORE_FORMULA,
+            "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
             "top_n": spec.config.predictor_prefilter_top_n,
             "min_median_auc": spec.config.predictor_prefilter_min_median_auc,
             "min_pct_above_random": (
@@ -2530,6 +2722,7 @@ def _planned_walk_forward(
             "targets": prefilter.diagnostics,
             "telemetry": prefilter_telemetry,
         }
+    _inherit_walk_forward_prefilter(spec, output, extras)
     result = run_streamed_walk_forward(
         prepared,
         generated,
@@ -2552,6 +2745,7 @@ def _planned_walk_forward(
             json.dumps(
                 {
                     "score_formula": PREFILTER_SCORE_FORMULA,
+                    "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
                     "targets": prefilter.diagnostics,
                     "telemetry": prefilter_telemetry,
                 },
@@ -2574,6 +2768,8 @@ def _planned_walk_forward(
         "execution_telemetry": _json_value(result.telemetry),
         "walk_forward_protocol": _walk_forward_protocol_summary(spec.config),
         "checkpoint_manifest": "checkpoints/manifest.json",
+        **({"walk_forward_derivation": spec.walk_forward_derivation}
+           if spec.walk_forward_derivation is not None else {}),
         **(
             {"walk_forward_batch_manifest": "orchestration/walk_forward_batches.json"}
             if manifest is not None

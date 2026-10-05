@@ -14,6 +14,7 @@ from rstock.config import (
     DEFAULT_CONFIG,
     HISTORICAL_MISSING_CONFIG_DEFAULTS,
     RStockConfig,
+    historical_prefilter_config_values,
 )
 
 from .domain import ExperimentSpec, JobType
@@ -229,6 +230,12 @@ def walk_forward_duplication_draft(
         "auto_promote_candidates": bool(
             configuration.get("auto_promote_candidates", False)
         ),
+        "source_prefilter_run": configuration.get("source_prefilter_run"),
+        "source_prefilter_contract_sha256": configuration.get("source_prefilter_contract_sha256"),
+        "prefilter_execution_version": int(configuration.get("prefilter_execution_version", 1)),
+        "prefilter_method": configuration.get("prefilter_method", "single_origin"),
+        "stability_origin_count": configuration.get("stability_origin_count", 5),
+        "stability_step_sessions": configuration.get("stability_step_sessions", 1),
         "pipeline_version": int(configuration.get("pipeline_version", 0)),
         "calibration_sampling_policy_version": int(
             configuration.get("calibration_sampling_policy_version", 1)
@@ -252,6 +259,7 @@ def config_from_historical_snapshot(
     allowed = {field.name for field in fields(RStockConfig)} - {"project_root"}
     values: dict[str, Any] = asdict(DEFAULT_CONFIG)
     values.update(HISTORICAL_MISSING_CONFIG_DEFAULTS)
+    values.update(historical_prefilter_config_values(source))
     values.update({name: deepcopy(value) for name, value in source.items() if name in allowed})
     values["project_root"] = Path(current_project_root)
     for name in ("selected_symbols", "threshold_calibration_quantiles"):
@@ -544,6 +552,12 @@ def experiment_spec_from_duplication(
             else str(values["source_threshold_calibration_run"])
         ),
         auto_promote_candidates=bool(values.get("auto_promote_candidates", False)),
+        source_prefilter_run=values.get("source_prefilter_run"),
+        source_prefilter_contract_sha256=values.get("source_prefilter_contract_sha256"),
+        prefilter_execution_version=int(values.get("prefilter_execution_version", 1)),
+        prefilter_method=values.get("prefilter_method", "single_origin"),
+        stability_origin_count=int(values.get("stability_origin_count", 5)),
+        stability_step_sessions=int(values.get("stability_step_sessions", 1)),
         pipeline_version=int(values.get("pipeline_version", 0)),
         calibration_sampling_policy_version=int(
             values.get("calibration_sampling_policy_version", 1)

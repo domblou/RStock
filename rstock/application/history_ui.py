@@ -488,6 +488,11 @@ def _lineage_text(
         source_id = prefilter_derivation.get("source_run_id")
         if source_id:
             return f"Dérivé de {source_id}"
+    walk_forward_derivation = configuration.get("walk_forward_derivation")
+    if job_type == "walk_forward" and isinstance(walk_forward_derivation, Mapping):
+        source_id = walk_forward_derivation.get("source_run_id")
+        if source_id:
+            return f"Dérivé de {source_id}"
     parent = metadata.get("parent_run_id")
     reference = metadata.get("reference_run_id")
     root = metadata.get("root_run_id")
@@ -528,6 +533,47 @@ def _lineage_text(
     return f"Source : {source}" if source else "—"
 
 
+def _derived_changes_text(job_type: str, configuration: Mapping[str, object]) -> str:
+    """Summarize only overrides explicitly persisted with a derived run."""
+    if job_type in {"predictor_prefilter", "walk_forward"}:
+        key = ("prefilter_derivation" if job_type == "predictor_prefilter"
+               else "walk_forward_derivation")
+        derivation = configuration.get(key)
+        overrides = derivation.get("overrides") if isinstance(derivation, Mapping) else None
+        entries = (
+            [(field, values) for field, values in overrides.items()]
+            if isinstance(overrides, Mapping) else []
+        )
+    elif job_type == "end_to_end":
+        derivation = configuration.get("derivation")
+        overrides = derivation.get("overrides") if isinstance(derivation, Mapping) else None
+        entries = (
+            [(item.get("field"), item) for item in overrides if isinstance(item, Mapping)]
+            if isinstance(overrides, (list, tuple)) else []
+        )
+    else:
+        return ""
+
+    def display(value: object) -> str:
+        if isinstance(value, float):
+            return format(value, "g").replace(".", ",")
+        if isinstance(value, (list, tuple, dict)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return "N/D" if value is None else str(value)
+
+    changes = []
+    for field, values in sorted(entries, key=lambda item: str(item[0])):
+        if (not isinstance(field, str) or not field or not isinstance(values, Mapping)
+                or "old_value" not in values or "new_value" not in values
+                or values["old_value"] == values["new_value"]):
+            continue
+        label = field.removeprefix("predictor_prefilter_").removeprefix("prefilter_xgb_").removeprefix("xgb_")
+        changes.append(
+            f"{label} {display(values['old_value'])} → {display(values['new_value'])}"
+        )
+    return " · ".join(changes)
+
+
 def history_row(
     status: Mapping[str, object],
     detail: Mapping[str, object],
@@ -554,6 +600,9 @@ def history_row(
     cutoff = _requested_cutoff(configuration)
     if cutoff is not None:
         summary_text += f" · Cutoff demandé : {cutoff}"
+    changes = _derived_changes_text(job_type, configuration)
+    if changes:
+        summary_text += f" · Modifications : {changes}"
     return HistoryRow(
         run_id=str(status["run_id"]),
         lineage=_lineage_text(

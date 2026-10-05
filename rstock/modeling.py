@@ -125,6 +125,30 @@ def historical_xgboost_parameters(config: RStockConfig) -> XGBoostParameters:
     )
 
 
+def prefilter_xgboost_parameters(config: RStockConfig) -> XGBoostParameters:
+    """Read only the dedicated predictor-prefilter hyperparameters."""
+    return XGBoostParameters(
+        max_depth=config.prefilter_xgb_max_depth,
+        eta=config.prefilter_xgb_eta,
+        num_boost_round=config.prefilter_xgb_num_boost_round,
+        min_child_weight=config.prefilter_xgb_min_child_weight,
+        subsample=config.prefilter_xgb_subsample,
+        colsample_bytree=config.prefilter_xgb_colsample_bytree,
+        gamma=config.prefilter_xgb_gamma,
+        reg_alpha=config.prefilter_xgb_reg_alpha,
+        reg_lambda=config.prefilter_xgb_reg_lambda,
+    )
+
+
+def prefilter_xgboost_snapshot(config: RStockConfig) -> dict[str, int | float]:
+    """Training provenance, including the dedicated seed and shared thread count."""
+    return {
+        **prefilter_xgboost_parameters(config).as_dict(),
+        "seed": config.prefilter_xgb_seed,
+        "nthread": config.xgb_nthread,
+    }
+
+
 def xgboost_module() -> Any:
     try:
         import xgboost as xgb

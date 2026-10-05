@@ -16,7 +16,8 @@ from rstock.application.domain import ExperimentSpec, JobStatus, JobType
 from rstock.application.history_ui import EXPERIMENT_JOB_TYPES, JOB_LABELS
 from rstock.application.model_ui import job_domain
 from rstock.application.prefilter_experiments import (
-    PREFILTER_DERIVATION_FIELDS, build_derived_prefilter_spec,
+    PREFILTER_DERIVATION_FIELDS, PREFILTER_XGBOOST_FIELDS,
+    build_derived_prefilter_spec,
 )
 from rstock.application.prefilter_stability import (
     aggregate_temporal_prefilter, resolve_stability_origins,
@@ -27,7 +28,7 @@ from rstock.application.runner import RunService
 from rstock.application.worker import execute_run
 from rstock.checkpoints import CheckpointIncompatibleError
 from rstock.config import DEFAULT_CONFIG
-from rstock.modeling import historical_xgboost_parameters
+from rstock.modeling import historical_xgboost_parameters, prefilter_xgboost_parameters
 from rstock.walk_forward import PrefilterWalkForwardResult
 
 
@@ -141,9 +142,21 @@ def test_prefilter_job_and_derived_run_share_frozen_source_without_market(tmp_pa
 
 def test_prefilter_derived_xgboost_values_are_inherited_and_used(tmp_path, monkeypatch):
     repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
-    spec = replace(spec, config=replace(
-        spec.config, xgb_max_depth=7, xgb_eta=0.3, xgb_rounds=11,
-    ))
+    source_values = {
+        "prefilter_xgb_max_depth": 7, "prefilter_xgb_eta": 0.3, "prefilter_xgb_num_boost_round": 11,
+        "prefilter_xgb_min_child_weight": 1.5, "prefilter_xgb_subsample": 0.9,
+        "prefilter_xgb_colsample_bytree": 0.8, "prefilter_xgb_gamma": 0.1,
+        "prefilter_xgb_reg_alpha": 0.2, "prefilter_xgb_reg_lambda": 2.0,
+        "prefilter_xgb_seed": 4321,
+    }
+    overrides = {
+        "prefilter_xgb_max_depth": 3, "prefilter_xgb_eta": 0.2, "prefilter_xgb_num_boost_round": 20,
+        "prefilter_xgb_min_child_weight": 2.5, "prefilter_xgb_subsample": 0.75,
+        "prefilter_xgb_colsample_bytree": 0.6, "prefilter_xgb_gamma": 0.3,
+        "prefilter_xgb_reg_alpha": 0.4, "prefilter_xgb_reg_lambda": 3.0,
+        "prefilter_xgb_seed": 5678,
+    }
+    spec = replace(spec, config=replace(spec.config, **source_values))
     parent = repository.create(spec)
     parent_summary = workflows._predictor_prefilter(
         spec, repository.run_directory(parent) / "results", None, None,
@@ -153,45 +166,61 @@ def test_prefilter_derived_xgboost_values_are_inherited_and_used(tmp_path, monke
     inherited = build_derived_prefilter_spec(
         repository, parent, {"predictor_prefilter_top_n": 2},
     )
-    assert (inherited.config.xgb_max_depth, inherited.config.xgb_eta,
-            inherited.config.xgb_rounds) == (7, 0.3, 11)
+    assert {field: getattr(inherited.config, field)
+            for field in PREFILTER_XGBOOST_FIELDS} == source_values
 
     received = []
     evaluate = workflows.evaluate_prefilter_walk_forward
 
     def capture(prepared, sets, config, **kwargs):
-        received.append((config.xgb_max_depth, config.xgb_eta, config.xgb_rounds))
+        received.append({field: getattr(config, field)
+                         for field in PREFILTER_XGBOOST_FIELDS})
         return evaluate(prepared, sets, config, **kwargs)
 
     monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", capture)
     child = RunService(repository, backend=_Backend()).create_derived(
         parent, "predictor_prefilter",
-        {"xgb_max_depth": 3, "xgb_eta": 0.2, "xgb_rounds": 20},
+        overrides,
     ).run_id
     child_spec = repository.load_spec(child)
-    assert (child_spec.config.xgb_max_depth, child_spec.config.xgb_eta,
-            child_spec.config.xgb_rounds) == (3, 0.2, 20)
-    parameters = historical_xgboost_parameters(child_spec.config)
-    assert (parameters.max_depth, parameters.eta,
-            parameters.num_boost_round) == (3, 0.2, 20)
-    assert set(child_spec.prefilter_derivation["overrides"]) == {
-        "xgb_max_depth", "xgb_eta", "xgb_rounds",
+    assert {field: getattr(child_spec.config, field)
+            for field in PREFILTER_XGBOOST_FIELDS} == overrides
+    parameters = prefilter_xgboost_parameters(child_spec.config)
+    assert parameters.as_dict() == {
+        "max_depth": 3, "eta": 0.2, "num_boost_round": 20,
+        "min_child_weight": 2.5, "subsample": 0.75,
+        "colsample_bytree": 0.6, "gamma": 0.3,
+        "reg_alpha": 0.4, "reg_lambda": 3.0,
     }
+    assert set(child_spec.prefilter_derivation["overrides"]) == set(overrides)
     workflows._predictor_prefilter(
         child_spec, repository.run_directory(child) / "results", None, None,
     )
-    assert received == [(3, 0.2, 20)]
+    assert received == [overrides]
+    assert historical_xgboost_parameters(child_spec.config) == historical_xgboost_parameters(spec.config)
+    assert child_spec.config.xgb_seed == spec.config.xgb_seed
 
 
 def test_prefilter_derivation_ui_prefills_and_submits_xgboost_values(tmp_path, monkeypatch):
     repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
-    spec = replace(spec, config=replace(
-        spec.config, xgb_max_depth=7, xgb_eta=0.3, xgb_rounds=11,
-    ))
+    source_values = {
+        "prefilter_xgb_max_depth": 7, "prefilter_xgb_eta": 0.3, "prefilter_xgb_num_boost_round": 11,
+        "prefilter_xgb_min_child_weight": 1.5, "prefilter_xgb_subsample": 0.9,
+        "prefilter_xgb_colsample_bytree": 0.8, "prefilter_xgb_gamma": 0.1,
+        "prefilter_xgb_reg_alpha": 0.2, "prefilter_xgb_reg_lambda": 2.0,
+        "prefilter_xgb_seed": 4321,
+    }
+    spec = replace(spec, config=replace(spec.config, **source_values))
     run_id = repository.create(spec)
     shown = {}
     submitted = []
-    overrides = {"xgb_max_depth": 3, "xgb_eta": 0.2, "xgb_rounds": 20}
+    overrides = {
+        "prefilter_xgb_max_depth": 3, "prefilter_xgb_eta": 0.2, "prefilter_xgb_num_boost_round": 20,
+        "prefilter_xgb_min_child_weight": 2.5, "prefilter_xgb_subsample": 0.75,
+        "prefilter_xgb_colsample_bytree": 0.6, "prefilter_xgb_gamma": 0.3,
+        "prefilter_xgb_reg_alpha": 0.4, "prefilter_xgb_reg_lambda": 3.0,
+        "prefilter_xgb_seed": 5678,
+    }
 
     class FakeStreamlit:
         session_state = {}
@@ -214,6 +243,12 @@ def test_prefilter_derivation_ui_prefills_and_submits_xgboost_values(tmp_path, m
         def caption(self, *_args):
             pass
 
+        def subheader(self, *_args):
+            pass
+
+        def columns(self, count):
+            return [self] * count
+
         def success(self, *_args):
             pass
 
@@ -228,9 +263,7 @@ def test_prefilter_derivation_ui_prefills_and_submits_xgboost_values(tmp_path, m
     streamlit_app._render_prefilter_derived_creation(
         run_id, {"configuration": {}, "status": {"status": "completed"}}, service,
     )
-    assert {field: shown[field] for field in overrides} == {
-        "xgb_max_depth": 7, "xgb_eta": 0.3, "xgb_rounds": 11,
-    }
+    assert {field: shown[field] for field in overrides} == source_values
     assert submitted == [(run_id, "predictor_prefilter", overrides)]
 
 
@@ -264,6 +297,39 @@ def test_prefilter_derivation_rejects_source_digest_mismatch(tmp_path, monkeypat
     _complete(repository, parent, summary)
     with pytest.raises(ValueError, match="digest"):
         build_derived_prefilter_spec(repository, parent, {"predictor_prefilter_top_n": 2})
+
+
+def test_historical_prefilter_derivation_keeps_legacy_xgboost_override(tmp_path, monkeypatch):
+    repository, spec, _, _, _ = _fixture(tmp_path, monkeypatch)
+    parent = repository.create(spec)
+    snapshot = spec.to_dict()
+    for field in PREFILTER_XGBOOST_FIELDS:
+        snapshot["rstock_config"].pop(field)
+    repository.write_json(parent, "config.json", snapshot)
+    source = repository.load_spec(parent)
+    summary = workflows._predictor_prefilter(
+        source, repository.run_directory(parent) / "results", None, None,
+    )
+    _complete(repository, parent, summary)
+    derived = build_derived_prefilter_spec(repository, parent, {"prefilter_xgb_eta": 0.3})
+    child = repository.create(derived)
+    legacy = derived.to_dict()
+    for field in PREFILTER_XGBOOST_FIELDS:
+        legacy["rstock_config"].pop(field)
+    legacy["rstock_config"]["xgb_eta"] = 0.3
+    legacy["prefilter_derivation"]["overrides"] = {
+        "xgb_eta": {"old_value": source.config.xgb_eta, "new_value": 0.3},
+    }
+    repository.write_json(child, "config.json", legacy)
+    restored = repository.load_spec(child)
+    assert restored.config.prefilter_xgb_eta == 0.3
+    assert restored.config.prefilter_xgb_num_boost_round == source.config.xgb_rounds
+    result = workflows._predictor_prefilter(
+        restored, repository.run_directory(child) / "results", None, None,
+    )
+    assert result["traceability"]["prepared_dataset_sha256"] == summary["traceability"]["prepared_dataset_sha256"]
+    with pytest.raises(ValueError, match="Unsupported"):
+        build_derived_prefilter_spec(repository, parent, {"xgb_eta": 0.4})
 
 
 def test_prefilter_resume_uses_committed_preparation_after_interruption(tmp_path, monkeypatch):

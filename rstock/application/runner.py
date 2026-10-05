@@ -221,6 +221,10 @@ class RunService:
             time.sleep(0.05)
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
+        if (spec.job_type is JobType.WALK_FORWARD and spec.prefilter_execution_version >= 2
+                and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None):
+            from .prefilter_contract import plan
+            plan(self.repository, spec)
         if spec.derivation is not None or spec.prefilter_derivation is not None:
             raise ValueError("Submit derived experiments through create_derived")
         with self._submission_lock():
@@ -254,6 +258,7 @@ class RunService:
         """Atomically preflight shared artifacts and launch a new root run."""
         from .derived_experiments import build_derived_spec
         from .prefilter_experiments import build_derived_prefilter_spec
+        from .walk_forward_experiments import build_derived_walk_forward_spec
         from .end_to_end import persist_or_validate_pipeline_manifest
 
         with self._submission_lock():
@@ -262,6 +267,12 @@ class RunService:
                 if fork_stage != "predictor_prefilter" or forward_enabled:
                     raise ValueError("Invalid Predictor prefilter derivation point")
                 spec = build_derived_prefilter_spec(
+                    self.repository, source_run_id, changes,
+                )
+            elif source.job_type is JobType.WALK_FORWARD:
+                if fork_stage != "walk_forward" or forward_enabled:
+                    raise ValueError("Invalid Walk-forward derivation point")
+                spec = build_derived_walk_forward_spec(
                     self.repository, source_run_id, changes,
                 )
             else:

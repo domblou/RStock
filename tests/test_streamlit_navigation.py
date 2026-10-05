@@ -485,7 +485,7 @@ def test_walk_forward_preview_uses_shared_lazy_combination_plan():
     assert "Batchs max après préfiltrage" in preview
     assert "Batchs requis (preview)" not in preview
     assert "selected_job_type = labels[choice]" in experiments
-    assert "_combination_plan_preview(selected_job_type)" in experiments
+    assert "_combination_plan_preview(selected_job_type, config=run_config" in experiments
 
 
 def test_universe_page_exposes_persisted_type_without_weakening_system_protection():

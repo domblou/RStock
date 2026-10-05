@@ -1051,6 +1051,37 @@ recalcule pas les étapes déjà terminées.
 Dans **Expériences**, choisir **Préfiltre prédicteurs**, fixer un cutoff historique
 et choisir **Origine unique** ou **Stabilité temporelle**. Les paramètres
 scientifiques du préfiltre proviennent des Settings et sont figés dans le run.
+Dans **Paramètres > Pré-filtrage des prédicteurs**, l'encadré **XGBoost du
+préfiltre** configure exclusivement l'entraînement du préfiltre autonome et
+la phase de préfiltrage d'un Walk-forward. Le calcul Walk-forward sur les
+combinaisons retenues utilise ensuite les champs généraux `xgb_*`.
+
+Les nouveaux runs utilisent ces valeurs par défaut :
+
+```ini
+prefilter_xgb_max_depth = 3
+prefilter_xgb_eta = 0.2
+prefilter_xgb_num_boost_round = 20
+prefilter_xgb_min_child_weight = 1
+prefilter_xgb_subsample = 1.0
+prefilter_xgb_colsample_bytree = 1.0
+prefilter_xgb_gamma = 0.0
+prefilter_xgb_reg_alpha = 0.0
+prefilter_xgb_reg_lambda = 5.0
+prefilter_xgb_seed = 1234
+```
+
+Le nombre de threads reste partagé via `xgb_nthread`. Les champs dédiés sont
+enregistrés dans `config.json`; les paramètres d'entraînement effectifs figurent
+également dans `results/predictor_prefilter.json` (`xgboost_parameters`) et, pour
+un Walk-forward avec préfiltre, dans la section `predictor_prefilter` de
+`results/run_configuration.json`.
+
+Lors de la lecture ou duplication d'un ancien snapshot, chaque champ dédié
+absent est restauré à partir du champ général correspondant du run historique.
+Une valeur dédiée explicitement enregistrée est prioritaire. Les Settings
+anciens utilisent les nouveaux defaults pour les futurs runs.
+
 En mode temporel, choisir le nombre d’origines (5 par défaut) et le pas en
 séances (1 par défaut). Le job prépare un seul snapshot au cutoff principal,
 évalue les prédicteurs un par un et enregistre le classement dans
@@ -1067,7 +1098,10 @@ persistés dans `results/predictor_prefilter_origins.csv`.
 
 Dans l’**Historique** d’un préfiltre terminé, **Créer une expérience dérivée**
 permet de modifier la méthode, le nombre d’origines, le pas en séances et les
-six paramètres scientifiques. Le dérivé vérifie et réutilise le
+six paramètres scientifiques ainsi que les hyperparamètres `prefilter_xgb_*`
+et leur seed. Les paramètres généraux du Walk-forward restent hérités.
+Un Walk-forward dérivé conserve les paramètres, les artefacts et les
+combinaisons du préfiltre source; il ne le recalcule pas. Le dérivé vérifie et réutilise le
 snapshot préparé du parent, son cutoff et son digest. Si le snapshot manque ou
 a changé, le dérivé échoue; il ne télécharge pas de nouvelles données marché.
 Le parent et le SHA du snapshot source sont conservés dans la provenance du
@@ -1563,3 +1597,70 @@ Les nouveaux agrégats sont persistés avec leurs digests dans le run Forward.
 Les anciens runs restent consultables avec leur résumé existant ; si leurs
 artefacts ne permettent pas une analyse temporelle exacte, la vue détaillée
 indique qu’elle est indisponible, sans recalcul à l’ouverture de l’Historique.
+
+
+### Préfiltre autonome dans End-to-End (pipeline version 4)
+
+Lorsque le préfiltrage est activé, les nouveaux End-to-End exécutent un job
+`Prefilter` puis un job `Walk-forward`. Le Préfiltre possède le snapshot préparé
+et publie `results/prefilter_contract.json` : sélection ordonnée, paramètres
+effectifs, provenance, empreinte du dataset et SHA-256 du snapshot. Le WF
+consomme ce contrat, construit ses combinaisons multivariées et utilise ses
+propres paramètres XGBoost. Il ne recalcule jamais le préfiltre.
+
+Un nouveau WF autonome avec préfiltre exige un Préfiltre source terminé,
+non purgé et compatible. Le choix est explicite au lancement. Sans préfiltrage,
+le WF conserve sa population brute. Les anciens snapshots, graphes et
+checkpoints conservent leur protocole imbriqué ; ils ne sont pas migrés en place.
+
+Une dérivation au niveau WF hérite du Préfiltre figé. Une dérivation au niveau
+Préfiltre recalcule la sélection puis ses descendants. Une augmentation du
+holdout qui recouvrirait le développement du Préfiltre hérité est refusée.
+
+### Trois modes de sélection du Préfiltre
+
+- `single_origin` : sélection actuelle à J, inchangée.
+- `temporal_stability` : agrégation historique des rangs/scores, Top N et
+  corrélation finale ; comportement scientifique inchangé.
+- `temporal_consensus` : sélections autonomes à plusieurs cutoffs, puis comptage
+  des sélections finales de chaque couple cible/prédicteur univarié.
+
+Defaults de configuration :
+
+```ini
+prefilter_selection_mode = single_origin
+temporal_consensus_origins = 4
+temporal_consensus_step_sessions = 21
+temporal_consensus_min_occurrences = 3
+```
+
+Le consensus utilise J, J-21, J-42 et J-63 **séances de marché**, avec le
+calendrier du run. Chaque origine conserve le même horizon `model_history_days`
+qu'un Préfiltre autonome à cette date : elle possède son propre snapshot,
+qualifié et sélectionné avec les mêmes paramètres. Le snapshot de J n'est pas
+simplement tronqué pour calculer les origines anciennes.
+
+Une occurrence compte uniquement après qualification, classement, Top N et
+suppression de redondance de l'origine. Le consensus retient `count >= minimum`.
+Aucun Top N, seuil, score ou filtre de corrélation n'est réappliqué globalement.
+Les scores/rangs par origine sont exclusivement diagnostiques. Le résultat peut
+donc contenir plus de prédicteurs que le Top N appliqué à une origine.
+
+`results/temporal_consensus_candidates.csv` expose identité canonique, count,
+fréquence, décision, cutoffs, sélection, statut, raison, rang et score par origine.
+`results/predictor_prefilter.json` conserve la distribution 0/M à M/M et les
+digests des snapshots par origine. Les checkpoints sous
+`checkpoints/consensus_origins/<cutoff>/` permettent de reprendre les origines
+incomplètes sans recalculer les sélections terminées.
+
+Une origine indisponible/globalement inexploitable fait échouer le consensus ;
+le dénominateur n'est jamais réduit. Un candidat non évaluable ne contribue pas
+au count. Un consensus vide est publié explicitement, puis le WF est arrêté.
+Les origines existantes d'un Préfiltre consensus dérivé réutilisent leurs données
+figées ; des origines supplémentaires nécessitent leurs propres données
+historiques. La validité d'un checkpoint dépend du contenu et de sa provenance,
+pas de sa date de création.
+
+Le comparateur distingue les occurrences **internes** au consensus et le
+Jaccard des populations finales **entre runs**. Les sources Prefilter encore
+référencées par un WF non purgé sont protégées contre la purge.

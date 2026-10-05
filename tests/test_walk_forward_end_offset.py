@@ -34,6 +34,7 @@ def _prices(index: pd.DatetimeIndex) -> pd.DataFrame:
 def _spec(tmp_path, offset: int) -> ExperimentSpec:
     return ExperimentSpec(
         job_type=JobType.WALK_FORWARD,
+        prefilter_execution_version=1,  # Historical embedded-prefilter period contract.
         config=replace(
             DEFAULT_CONFIG,
             project_root=tmp_path,
@@ -358,7 +359,7 @@ def test_offset_uses_the_common_market_session_and_preserves_history(
     assert calls[1] == {"history_days": 1095, "as_of": expected_end.date()}
 
 
-def test_all_symbols_share_one_effective_end_even_with_a_missing_last_observation(
+def test_incomplete_last_observation_is_rejected_at_shared_effective_end(
     monkeypatch, tmp_path
 ):
     sessions = xcals.get_calendar("XNYS").sessions_in_range("2021-01-01", "2026-01-30")
@@ -378,12 +379,9 @@ def test_all_symbols_share_one_effective_end_even_with_a_missing_last_observatio
         }
 
     monkeypatch.setattr("rstock.application.workflows.MarketDataService.load", fake_load)
-    prepared, _, _ = _prepared_experiment(_spec(tmp_path, 63), None, None)
-    effective_end = pd.Timestamp(sessions[-64])
-
-    assert prepared.index.max() == effective_end
-    assert pd.isna(prepared.loc[effective_end, intraday_target_column("BBB")])
-    assert prepared.loc[effective_end, intraday_target_column("AAA")] == 0.0
+    # The existing preparation contract already rejects an incomplete final session.
+    with pytest.raises(ValueError, match="incompl.*BBB"):
+        _prepared_experiment(_spec(tmp_path, 63), None, None)
 
 
 def test_offset_too_large_has_a_clear_user_error(monkeypatch, tmp_path):
