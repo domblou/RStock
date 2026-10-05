@@ -827,6 +827,34 @@ def _render_experiment_submission_confirmation(
         st.session_state.pop("pending-experiment-submission", None)
         st.rerun()
 
+
+def _launch_consensus_config(current: RStockConfig) -> tuple[RStockConfig, bool]:
+    """Edit the existing consensus fields without changing shared Settings."""
+    with st.container(border=True):
+        st.subheader("Paramètres du consensus temporel")
+        columns = st.columns(3)
+        fields = (
+            ("temporal_consensus_origins", "Nombre d'origines"),
+            ("temporal_consensus_step_sessions", "Espacement entre origines (séances XNYS)"),
+            ("temporal_consensus_min_occurrences", "Occurrences minimales"),
+        )
+        values = {
+            field: int(column.number_input(
+                label, min_value=1, value=getattr(current, field), step=1,
+                key=f"launch-{field}",
+            ))
+            for column, (field, label) in zip(columns, fields, strict=True)
+        }
+        if values["temporal_consensus_min_occurrences"] > values["temporal_consensus_origins"]:
+            st.error("Les occurrences minimales ne peuvent pas dépasser le nombre d'origines.")
+            return current, False
+        try:
+            return replace(current, **values), True
+        except ValueError as error:
+            st.error(f"Paramètres du consensus invalides : {error}")
+            return current, False
+
+
 def _experiment_universe_selector() -> bool:
     """Resolve the exact experiment symbols before the job is submitted."""
 
@@ -1020,6 +1048,7 @@ def _experiments(service: ExperimentService) -> None:
     prefilter_method = run_config.prefilter_selection_mode if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} else "single_origin"
     stability_origin_count = 5
     stability_step_sessions = 1
+    valid_consensus = True
     if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}:
         st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet."
                    if selected_job_type is JobType.PREDICTOR_PREFILTER else
@@ -1032,7 +1061,9 @@ def _experiments(service: ExperimentService) -> None:
                 "temporal_consensus": "Consensus temporel",
             }[value], index=("single_origin", "temporal_stability", "temporal_consensus").index(prefilter_method), horizontal=True, key="launch-prefilter-method",
         )
-        if prefilter_method == "temporal_stability":
+        if prefilter_method == "temporal_consensus":
+            run_config, valid_consensus = _launch_consensus_config(run_config)
+        elif prefilter_method == "temporal_stability":
             first, second = st.columns(2)
             stability_origin_count = int(first.number_input(
                 "Nombre d'origines", min_value=1, value=5, step=1,
@@ -1053,7 +1084,8 @@ def _experiments(service: ExperimentService) -> None:
                 f"corrélation < {run_config.predictor_prefilter_correlation_threshold:.3f}."
             )
         run_config = replace(
-            run_config, predictor_prefilter_enabled=True if selected_job_type is JobType.PREDICTOR_PREFILTER else run_config.predictor_prefilter_enabled,
+            run_config, prefilter_selection_mode=prefilter_method,
+            predictor_prefilter_enabled=True if selected_job_type is JobType.PREDICTOR_PREFILTER else run_config.predictor_prefilter_enabled,
             walk_forward_end_offset_sessions=0 if selected_job_type is JobType.PREDICTOR_PREFILTER else run_config.walk_forward_end_offset_sessions,
         )
     auto_promote_candidates = False
@@ -1075,6 +1107,30 @@ def _experiments(service: ExperimentService) -> None:
                 requested_historical_cutoff, st.session_state.lab_calendar
             ).date().isoformat()
             st.caption(f"Séance XNYS résolue : {resolved_historical_cutoff}")
+        if prefilter_method == "temporal_consensus" and valid_consensus:
+            st.caption(
+                f"{run_config.temporal_consensus_origins} origines, espacées de "
+                f"{run_config.temporal_consensus_step_sessions} séances XNYS. "
+                f"Règle : retenu si présent dans au moins "
+                f"{run_config.temporal_consensus_min_occurrences} origines sur "
+                f"{run_config.temporal_consensus_origins}."
+            )
+            if resolved_historical_cutoff is not None:
+                from .prefilter_consensus import resolve_consensus_origins
+                try:
+                    origins = resolve_consensus_origins(
+                        resolved_historical_cutoff, st.session_state.lab_calendar,
+                        run_config.temporal_consensus_origins,
+                        run_config.temporal_consensus_step_sessions,
+                    )
+                    st.caption("Cutoffs prévus : " + ", ".join(
+                        origin.date().isoformat() for origin in origins
+                    ))
+                except ValueError as error:
+                    st.error(f"Origines du consensus invalides : {error}")
+                    valid_consensus = False
+            else:
+                st.caption("Les cutoffs seront résolus à partir de la dernière séance disponible au lancement.")
     if selected_job_type is JobType.END_TO_END:
         if requested_historical_cutoff is not None:
             forward_simulation_enabled = st.checkbox(
@@ -1162,9 +1218,9 @@ def _experiments(service: ExperimentService) -> None:
     valid_universe = _experiment_universe_selector()
     valid_plan = (
         _combination_plan_preview(selected_job_type, config=run_config, selection_mode=prefilter_method,
-                                  source_prefilter_run=prefilter_reference) if valid_universe else False
+                                  source_prefilter_run=prefilter_reference) if valid_universe and valid_consensus else False
     )
-    submit_disabled = (selected_job_type is JobType.WALK_FORWARD and run_config.predictor_prefilter_enabled and prefilter_reference is None) or not (valid_universe and valid_plan) or (
+    submit_disabled = not valid_consensus or (selected_job_type is JobType.WALK_FORWARD and run_config.predictor_prefilter_enabled and prefilter_reference is None) or not (valid_universe and valid_plan) or (
         auto_promote_candidates and not st.session_state.lab_evaluate_holdout
     ) or (selected_job_type is JobType.PREDICTOR_PREFILTER
           and resolved_historical_cutoff is None
