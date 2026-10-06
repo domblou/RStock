@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><style>
+body { margin: 0; color: var(--text, #31333f); background: var(--bg, white); font: 13px sans-serif; }
+.grid { overflow: auto; border: 1px solid var(--border, #ddd); border-radius: 6px; box-sizing: border-box; }
+table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+th { position: sticky; top: 0; z-index: 2; background: var(--secondary, #f5f6f8); text-align: left; font-weight: 500; cursor: pointer; }
+th, td { padding: 5px 10px; border-bottom: 1px solid var(--border, #ddd); }
+th { height: 28px; }
+td { height: 34px; }
+tr.selected { background: var(--secondary, #f0f2f6); }
+tr:hover { background: var(--secondary, #f0f2f6); }
+input { accent-color: var(--primary, #ff4b4b); cursor: pointer; }
+.selection { width: 26px; min-width: 26px; text-align: center; }
+.run-id, .lineage { overflow: hidden; text-overflow: ellipsis; line-height: 17px; }
+.lineage { font-size: 11px; opacity: .65; }
+.cell-text { display: block; overflow: hidden; text-overflow: ellipsis; line-height: 17px; }
+.pager { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 12px; }
+.pager button { color: inherit; background: var(--secondary, #f5f6f8); border: 1px solid var(--border, #ddd); border-radius: 4px; padding: 4px 8px; cursor: pointer; }
+.empty { padding: 16px; opacity: .65; }
+@media (max-width: 600px) { th, td { padding: 5px 7px; } .pager { flex-wrap: wrap; } }
+</style></head>
+<body><div class="grid" id="grid" role="region" aria-label="Grille de données"><table><thead></thead><tbody></tbody></table></div><div class="pager" id="pager"></div>
+<script>
+const selected = new Set();
+let rows = [], columns = [], signature = null, sortColumn = null, descending = false;
+let options = {}, rowId = "Run ID", mode = "multi", pageSize = null, page = 0, maxHeight = 520, emptyMessage = "Aucune donnée à afficher.";
+function identity(row) { return String(row[rowId]); }
+function toggle(id) {
+  if (mode === "none") return;
+  if (selected.has(id)) selected.delete(id);
+  else { if (mode === "single") selected.clear(); selected.add(id); }
+  draw(); publish();
+}
+function styleColumn(cell, option) {
+  for (const [field, css] of [["width", "width"], ["min_width", "minWidth"], ["max_width", "maxWidth"]]) {
+    if (Number.isFinite(option[field]) && option[field] > 0) cell.style[css] = option[field] + "px";
+  }
+  if (["left", "right", "center"].includes(option.align)) cell.style.textAlign = option.align;
+}
+function send(type, data) {
+  window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
+}
+function publish() { send("streamlit:setComponentValue", {value: [...selected], dataType: "json"}); }
+function draw() {
+  const head = document.querySelector("thead"), body = document.querySelector("tbody");
+  head.replaceChildren(); body.replaceChildren();
+  const visible = [...rows];
+  if (sortColumn) visible.sort((a,b) => {
+    const left = a[sortColumn], right = b[sortColumn];
+    const result = typeof left === "number" && typeof right === "number" ? left - right : String(left ?? "").localeCompare(String(right ?? ""), "fr", {numeric:true});
+    return result * (descending ? -1 : 1);
+  });
+  const pages = pageSize ? Math.max(1, Math.ceil(rows.length / pageSize)) : 1;
+  page = Math.min(page, pages - 1);
+  const pageRows = pageSize ? visible.slice(page * pageSize, (page + 1) * pageSize) : visible;
+  const header = document.createElement("tr"), selectionHeader = document.createElement("th");
+  selectionHeader.className = "selection";
+  const all = document.createElement("input"); all.type = "checkbox"; all.ariaLabel = "Sélectionner tous les runs de cette page";
+  all.checked = pageRows.length > 0 && pageRows.every(row => selected.has(identity(row)));
+  all.indeterminate = selected.size > 0 && !all.checked;
+  all.addEventListener("change", () => {
+    pageRows.forEach(row => all.checked ? selected.add(identity(row)) : selected.delete(identity(row)));
+    draw(); publish();
+  });
+  if (mode === "multi") selectionHeader.append(all);
+  if (mode !== "none") header.append(selectionHeader);
+  columns.forEach(column => {
+    const option = options[column] || {};
+    const cell = document.createElement("th"); cell.textContent = option.label || column;
+    cell.title = option.help || ""; styleColumn(cell, option);
+    cell.tabIndex = 0; cell.ariaSort = sortColumn === column ? (descending ? "descending" : "ascending") : "none";
+    function sort() { descending = sortColumn === column ? !descending : false; sortColumn = column; page = 0; draw(); }
+    cell.addEventListener("click", sort);
+    cell.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); sort(); } });
+    header.append(cell);
+  });
+  head.append(header);
+  pageRows.forEach(row => {
+    const tr = document.createElement("tr"), id = identity(row);
+    if (selected.has(id)) tr.className = "selected";
+    const selectionCell = document.createElement("td"); selectionCell.className = "selection";
+    const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(id);
+    check.ariaLabel = "Sélectionner " + id;
+    check.addEventListener("click", event => event.stopPropagation());
+    check.addEventListener("change", () => toggle(id));
+    selectionCell.append(check); if (mode !== "none") tr.append(selectionCell);
+    columns.forEach(column => {
+      const cell = document.createElement("td");
+      const option = options[column] || {};
+      const secondaryKey = option.secondary_key;
+      if (secondaryKey) {
+        cell.className = "run";
+        const primary = document.createElement("div"), secondary = document.createElement("div");
+        const value = row[option.display_key || column] ?? "—";
+        primary.className = "run-id"; primary.textContent = value; primary.title = value;
+        secondary.className = "lineage"; secondary.textContent = row[secondaryKey] ?? ""; secondary.title = row[secondaryKey] ?? "";
+        cell.append(primary, secondary);
+      } else {
+        const value = row[option.display_key || column] ?? "—";
+        const text = document.createElement("span"); text.className = "cell-text"; text.textContent = value;
+        if (option.max_width) text.style.maxWidth = option.max_width + "px";
+        cell.append(text); cell.title = value;
+      }
+      styleColumn(cell, option);
+      if (secondaryKey && option.max_width) for (const child of cell.children) child.style.maxWidth = option.max_width + "px";
+      tr.append(cell);
+    });
+    if (mode !== "none") {
+      tr.tabIndex = 0; tr.ariaSelected = selected.has(id);
+      tr.addEventListener("click", () => toggle(id));
+      tr.addEventListener("keydown", event => { if (event.target === tr && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); toggle(id); } });
+    }
+    body.append(tr);
+  });
+  if (!rows.length) { const tr = document.createElement("tr"), cell = document.createElement("td"); cell.colSpan = columns.length + (mode === "none" ? 0 : 1); cell.className = "empty"; cell.textContent = emptyMessage; tr.append(cell); body.append(tr); }
+  const pager = document.getElementById("pager"); pager.replaceChildren();
+  if (pageSize && rows.length) {
+    const previous = document.createElement("button"), next = document.createElement("button"), label = document.createElement("span");
+    previous.textContent = "Précédent"; next.textContent = "Suivant";
+    previous.disabled = page === 0; next.disabled = page === pages - 1;
+    previous.onclick = () => { page--; draw(); }; next.onclick = () => { page++; draw(); };
+    label.textContent = `${rows.length} lignes · page ${page + 1} / ${pages}`;
+    pager.append(previous, label, next);
+  }
+  const height = Math.min(maxHeight, 55 + Math.max(1, pageRows.length) * 45);
+  document.getElementById("grid").style.height = (height - 2) + "px";
+  send("streamlit:setFrameHeight", {height: height + (pageSize && rows.length ? 36 : 0)});
+}
+window.addEventListener("message", event => {
+  if (event.source !== window.parent || event.data.type !== "streamlit:render") return;
+  const args = event.data.args, nextRows = args.rows || [];
+  rowId = args.row_id || "Run ID"; mode = args.selection_mode || "multi";
+  options = args.column_options || {}; pageSize = args.page_size || null;
+  maxHeight = args.max_height || 520; emptyMessage = args.empty_message || "Aucune donnée à afficher.";
+  const nextSignature = JSON.stringify([rowId, mode, pageSize, nextRows.map(identity)]);
+  if (signature !== nextSignature) {
+    selected.clear(); (args.selected_ids || []).forEach(id => { if (nextRows.some(row => identity(row) === id) && mode !== "none" && (mode !== "single" || !selected.size)) selected.add(id); });
+    sortColumn = null; page = 0; signature = nextSignature;
+  }
+  rows = nextRows; columns = args.columns;
+  const theme = event.data.theme || {};
+  for (const [key, value] of Object.entries({text:theme.textColor, bg:theme.backgroundColor, secondary:theme.secondaryBackgroundColor, primary:theme.primaryColor})) {
+    if (value) document.documentElement.style.setProperty("--" + key, value);
+  }
+  if (theme.font) document.body.style.fontFamily = theme.font;
+  draw();
+});
+send("streamlit:componentReady", {apiVersion: 1});
+</script></body></html>

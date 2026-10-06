@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from rstock.combination_planning import CombinationPlan
@@ -66,13 +66,18 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
     if hashlib.sha256(raw).hexdigest() != spec.source_prefilter_contract_sha256:
         raise ValueError("Frozen Prefilter contract changed")
     value = json.loads(raw)
+    if value.get("cutoff") != spec.historical_data_cutoff:
+        raise ValueError("Walk-forward cutoff must exactly match the frozen Prefilter cutoff")
+    if (spec.prefilter_execution_version >= 2
+            and spec.resolved_market_session_cutoff is not None
+            and spec.resolved_market_session_cutoff != value["cutoff"]):
+        raise ValueError("Resolved Walk-forward cutoff must match the frozen Prefilter cutoff")
     scientific = {key: item for key, item in value.items() if key != "contract_sha256"}
     if (value.get("schema_version") != 1 or value.get("contract_sha256") != digest(scientific)
             or value.get("source_run_id") != source
             or value.get("configuration_fingerprint") != repository.configuration_fingerprint(source)
             or value.get("selection_sha256") != digest(value["ordered_predictors_by_target"])
-            or value.get("prepared_dataset_sha256") != spec.source_prepared_dataset_sha256
-            or value.get("cutoff") != spec.historical_data_cutoff):
+            or value.get("prepared_dataset_sha256") != spec.source_prepared_dataset_sha256):
         raise ValueError("Invalid Prefilter provenance or selection digest")
     snapshot = repository.run_directory(source) / "checkpoints/artifacts/prepared_snapshot.pkl"
     if hashlib.sha256(snapshot.read_bytes()).hexdigest() != value["prepared_snapshot_sha256"]:
@@ -87,6 +92,21 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
     if spec.config.final_holdout_size > source_config.final_holdout_size:
         raise ValueError("Inherited Prefilter selection overlaps the new holdout; recompute Prefilter")
     return value
+
+
+def inherit_reference(repository: RunRepository, spec: ExperimentSpec) -> ExperimentSpec:
+    """Bind a newly created copy to its selected Prefilter; never alter a resumed run."""
+    raw = (repository.run_directory(spec.source_prefilter_run) / CONTRACT).read_bytes()
+    contract = json.loads(raw)
+    inherited = replace(
+        spec, historical_data_cutoff=contract["cutoff"],
+        requested_historical_cutoff=None, resolved_market_session_cutoff=contract["cutoff"],
+        source_prefilter_contract_sha256=hashlib.sha256(raw).hexdigest(),
+        source_prepared_dataset_sha256=contract["prepared_dataset_sha256"],
+        prepared_snapshot_required=True, prepared_dataset_digest_required=True,
+    )
+    load(repository, inherited)
+    return inherited
 
 
 def plan(repository: RunRepository, spec: ExperimentSpec) -> CombinationPlan:

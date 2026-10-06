@@ -1294,7 +1294,7 @@ def test_history_uses_filtered_paginated_row_selection_without_guid_dropdown():
 def test_history_supports_single_run_detail_and_multi_run_comparison_navigation():
     source = APP.read_text(encoding="utf-8")
 
-    assert 'selection_mode="multi-row"' in source
+    assert "render_history_grid(" in source
     assert "Ouvrir le run" in source
     assert "Comparer les runs" in source
     assert "Historique > Détail du run" in source
@@ -1407,7 +1407,7 @@ def test_history_grid_uses_lightweight_records_and_defers_purge_eligibility():
     history = source.split("def _history_runs_panel", 1)[1].split(
         "def _experiments_page", 1
     )[0]
-    grid_setup = history.split("selection = st.dataframe", 1)[0]
+    grid_setup = history.split("selection = render_history_grid", 1)[0]
 
     assert "service.history_runs(job_types=allowed_types)" in history
     assert "details_by_run_id" in history
@@ -1462,6 +1462,11 @@ def test_valid_grid_selection_is_preserved():
     assert _selected_rows(event, row_count=2) == [1]
 
 
+def test_selected_rows_accepts_history_grid_dictionary_selection():
+    assert _selected_rows({"selection": {"rows": [0, 1, 5]}}, row_count=2) == [0, 1]
+    assert _selected_rows({"selection": {"rows": []}}, row_count=2) == []
+
+
 def test_history_grid_uses_the_run_provenance_display_columns():
     source = APP.read_text(encoding="utf-8")
     history_ui = (APP.parent / "history_ui.py").read_text(encoding="utf-8")
@@ -1471,7 +1476,8 @@ def test_history_grid_uses_the_run_provenance_display_columns():
 
     assert '"Run ID": self.run_id' in history_ui
     assert '"Lignée": self.lineage' in history_ui
-    assert "pd.DataFrame([row.display() for row in rows])" in history
+    assert "history_grid_row(" in history
+    assert "render_history_grid(" in history
 
 
 def test_forward_detail_offers_recovery_only_through_the_central_diagnosis():

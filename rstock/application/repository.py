@@ -110,6 +110,19 @@ class RunRepository:
         run_id: str | None = None,
         metadata: RunMetadata | None = None,
     ) -> str:
+        from .run_integrity import graph_lock, validate_publication
+        with graph_lock(self.root):
+            validate_publication(self.root, {"config": spec.to_dict(),
+                                            "metadata": metadata.to_dict() if metadata else {}}, run_id)
+            return self._create(spec, run_id=run_id, metadata=metadata)
+
+    def _create(
+        self,
+        spec: ExperimentSpec,
+        *,
+        run_id: str | None = None,
+        metadata: RunMetadata | None = None,
+    ) -> str:
         self.root.mkdir(parents=True, exist_ok=True)
         run_id = run_id or self.generate_run_id()
         run_metadata = metadata or canonical_run_metadata(spec)
@@ -323,6 +336,20 @@ class RunRepository:
         *,
         tolerate_progress_failure: bool = True,
     ) -> bool:
+        from .run_integrity import graph_lock, validate_publication
+        with graph_lock(self.root):
+            validate_publication(self.root, values, run_id)
+            return self._write_json(run_id, name, values,
+                                    tolerate_progress_failure=tolerate_progress_failure)
+
+    def _write_json(
+        self,
+        run_id: str,
+        name: str,
+        values: dict[str, Any],
+        *,
+        tolerate_progress_failure: bool = True,
+    ) -> bool:
         """Atomically persist JSON, retrying transient Windows file locks.
 
         Returns ``False`` only for a non-critical ``progress.json`` update that
@@ -505,6 +532,18 @@ class RunRepository:
         return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
 
     def list_run_ids(self) -> list[str]:
+        from .run_integrity import graph_lock
+        from .run_delete import RunDeletionService, DeletionCleanupPending
+        with graph_lock(self.root):
+            try:
+                RunDeletionService(self)._recover_locked()
+            except DeletionCleanupPending:
+                # Every run has already left the live graph. A disk cleanup
+                # failure must not make the remaining history unavailable.
+                pass
+            return self._list_run_ids()
+
+    def _list_run_ids(self) -> list[str]:
         if not self.root.exists():
             return []
         return sorted(

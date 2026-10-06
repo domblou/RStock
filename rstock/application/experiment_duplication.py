@@ -448,7 +448,7 @@ def experiment_spec_from_duplication(
         JobType.THRESHOLD_PARAMETER_CALIBRATION,
         JobType.THRESHOLD_CALIBRATION,
     }
-    return ExperimentSpec(
+    spec = ExperimentSpec(
         job_type=selected_job_type,
         config=values["config"],
         symbols=tuple(str(item) for item in values["predictor_symbols"]),
@@ -583,3 +583,8 @@ def experiment_spec_from_duplication(
             else int(values["combination_range_stop"])
         ),
     )
+    if selected_job_type is JobType.WALK_FORWARD and spec.source_prefilter_run:
+        from .prefilter_contract import inherit_reference
+        from .repository import RunRepository
+        return inherit_reference(RunRepository(spec.config.project_root / "runs"), spec)
+    return spec

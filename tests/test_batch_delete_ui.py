@@ -1,3 +1,5 @@
+import pytest
+
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -52,7 +54,8 @@ def test_batch_delete_confirmation_is_explicit_and_refreshes_once(tmp_path, monk
     assert state["history-batch-delete-result"].succeeded == (run_id,)
 
 
-def test_individual_delete_confirmation_removes_run_and_refreshes_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", [JobStatus.CANCELLED, JobStatus.COMPLETED])
+def test_individual_delete_confirmation_removes_run_and_refreshes_once(tmp_path, monkeypatch, status):
     from dataclasses import replace
 
     repository = RunRepository(tmp_path / "runs")
@@ -62,7 +65,9 @@ def test_individual_delete_confirmation_removes_run_and_refreshes_once(tmp_path,
         symbols=("AAA", "BBB"), combinations_per_target=1,
     )
     run_id = repository.create(spec)
-    repository.transition(run_id, JobStatus.CANCELLED)
+    if status is JobStatus.COMPLETED:
+        repository.transition(run_id, JobStatus.RUNNING, pid=999_999_999)
+    repository.transition(run_id, status)
     service = ExperimentService(RunService(repository))
     plan = service.delete_preview(run_id)
     state: dict[str, object] = {"pending-run-delete": plan}

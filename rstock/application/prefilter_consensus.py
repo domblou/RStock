@@ -76,8 +76,9 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
     repository = RunRepository(spec.config.project_root / "runs")
     run_id = output.parent.name
     fingerprint = repository.configuration_fingerprint(run_id, fallback=spec.fingerprint)
-    tables, qualifications, provenance = [], [], []
-    for index, origin in enumerate(origins):
+    from .prefilter_progress import TemporalPrefilterProgress
+    origin_checkpoints = []
+    for origin in origins:
         check_cancellation(cancellation_check)
         date = origin.date().isoformat()
         identity = hashlib.sha256(f"{fingerprint}:{date}:consensus_v1".encode()).hexdigest()
@@ -88,6 +89,17 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
             batch_sizes=prefilter_checkpoint_batch_sizes(config),
         )
         wf._ensure_prefilter_checkpoint_protocol(origin_checkpoint)
+        origin_checkpoints.append(origin_checkpoint)
+    progress = TemporalPrefilterProgress(
+        progress_callback, [o.date().isoformat() for o in origins], len(sets),
+        origin_checkpoints, config.predictor_prefilter_batch_size,
+    )
+    tables, qualifications, provenance = [], [], []
+    for index, origin in enumerate(origins):
+        check_cancellation(cancellation_check)
+        date = origin.date().isoformat()
+        origin_checkpoint = origin_checkpoints[index]
+        origin_progress = progress.origin_callback(index)
         try:
             pending_snapshot = False
             if origin_checkpoint.artifact_exists("prepared_snapshot"):
@@ -108,7 +120,7 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
                         prepared_dataset_digest_required=False, source_prepared_dataset_sha256=None,
                     )
                     view, actual_predictors, actual_targets, actual_calendars = wf._prepared_inputs(
-                        origin_spec, progress_callback, cancellation_check)
+                        origin_spec, origin_progress, cancellation_check)
                     info = {"predictor_symbols": actual_predictors, "target_symbols": actual_targets,
                             "calendars": actual_calendars, "effective_end_date": view.attrs.get("effective_end_date")}
                 pending_snapshot = True
@@ -122,10 +134,9 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
                 selection = origin_checkpoint.load_artifact("prefilter_selection")
                 qualification = origin_checkpoint.load_artifact("prefilter_qualification")
             else:
-                wf._phase(progress_callback, "predictor_prefilter_walk_forward", "started", origin_cutoff=date)
                 result = wf.evaluate_prefilter_walk_forward(
                     view, sets, wf._prefilter_qualification_config(config), market_calendars=calendars,
-                    progress_callback=progress_callback, cancellation_check=cancellation_check,
+                    progress_callback=origin_progress, cancellation_check=cancellation_check,
                     checkpoint_manager=origin_checkpoint,
                 )
                 wf._require_exploitable_prefilter(result)
@@ -137,9 +148,9 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
                 )
                 origin_checkpoint.commit_artifact("prefilter_qualification", qualification)
                 origin_checkpoint.commit_artifact("prefilter_selection", selection)
-                wf._phase(progress_callback, "predictor_prefilter_walk_forward", "completed", origin_cutoff=date)
         except ValueError as error:
             raise ValueError(f"Consensus origin {date} is not executable: {error}") from error
+        progress.origin_completed(index)
         snapshot = output.parent / "checkpoints/consensus_origins" / date / "checkpoints/artifacts/prepared_snapshot.pkl"
         provenance.append({"cutoff": date, "prepared_snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
                            "prepared_dataset_sha256": wf._persist_prepared_traceability({}, view, spec)["prepared_dataset_sha256"],
@@ -151,6 +162,7 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
         qualified = qualification.copy()
         qualified["OriginCutoff"] = date
         qualifications.append(qualified)
+    progress.finish()
     aggregate, retained = aggregate_consensus(tables, origins=origins, targets=targets,
                                              predictors=predictors,
                                              min_occurrences=config.temporal_consensus_min_occurrences)

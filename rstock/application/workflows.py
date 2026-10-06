@@ -925,11 +925,11 @@ def _temporal_stability_prefilter(
     origin_tables: list[pd.DataFrame] = []
     qualifications: list[pd.DataFrame] = []
     telemetry: list[dict[str, object]] = []
+    from .prefilter_progress import TemporalPrefilterProgress
+    origin_checkpoints = []
     for origin in origins:
         check_cancellation(cancellation_check)
         date = origin.date().isoformat()
-        origin_view = prepared.loc[:origin].copy()
-        origin_view.attrs["effective_end_date"] = origin.isoformat()
         origin_checkpoint = CheckpointManager(
             output.parent / "checkpoints" / "temporal_origins" / date,
             run_id=f"{run_id}:origin:{date}",
@@ -940,16 +940,26 @@ def _temporal_stability_prefilter(
             batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
         )
         _ensure_prefilter_checkpoint_protocol(origin_checkpoint)
+        origin_checkpoints.append(origin_checkpoint)
+    progress = TemporalPrefilterProgress(
+        progress_callback, [o.date().isoformat() for o in origins], len(univariate_sets),
+        origin_checkpoints, spec.config.predictor_prefilter_batch_size,
+    )
+    for index, origin in enumerate(origins):
+        check_cancellation(cancellation_check)
+        date = origin.date().isoformat()
+        origin_view = prepared.loc[:origin].copy()
+        origin_view.attrs["effective_end_date"] = origin.isoformat()
+        origin_checkpoint = origin_checkpoints[index]
+        origin_progress = progress.origin_callback(index)
         if origin_checkpoint.artifact_exists("prefilter_selection"):
             selection = origin_checkpoint.load_artifact("prefilter_selection")
             qualification = origin_checkpoint.load_artifact("prefilter_qualification")
             origin_telemetry = origin_checkpoint.load_artifact("prefilter_telemetry")
         else:
-            _phase(progress_callback, "predictor_prefilter_walk_forward", "started",
-                   origin_cutoff=date)
             univariate = evaluate_prefilter_walk_forward(
                 origin_view, univariate_sets, _prefilter_qualification_config(spec.config),
-                market_calendars=calendars, progress_callback=progress_callback,
+                market_calendars=calendars, progress_callback=origin_progress,
                 cancellation_check=cancellation_check,
                 checkpoint_manager=origin_checkpoint,
             )
@@ -965,8 +975,7 @@ def _temporal_stability_prefilter(
             origin_checkpoint.commit_artifact("prefilter_qualification", qualification)
             origin_checkpoint.commit_artifact("prefilter_telemetry", origin_telemetry)
             origin_checkpoint.commit_artifact("prefilter_selection", selection)
-            _phase(progress_callback, "predictor_prefilter_walk_forward", "completed",
-                   origin_cutoff=date)
+        progress.origin_completed(index)
         metrics = selection.metrics.copy()
         metrics["OriginCutoff"] = date
         origin_tables.append(metrics)
@@ -974,6 +983,7 @@ def _temporal_stability_prefilter(
         qualified["OriginCutoff"] = date
         qualifications.append(qualified)
         telemetry.append({"origin_cutoff": date, **origin_telemetry})
+    progress.finish()
     checkpoint.phase_completed("predictor_prefilter_walk_forward")
     aggregate, details, retained = aggregate_temporal_prefilter(
         origin_tables, targets=target_symbols, predictors=predictor_symbols,

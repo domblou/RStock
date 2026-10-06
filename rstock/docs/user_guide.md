@@ -954,13 +954,30 @@ Cette approche est préférable à la reconstruction manuelle d’une expérienc
 **Purger les données lourdes** libère les artefacts volumineux d’un run terminé
 en conservant sa configuration, sa provenance et sa ligne dans l’Historique.
 
-**Supprimer définitivement** efface le dossier entier d’un run `failed` ou
-`cancelled`, individuellement ou avec une sélection multiple. La confirmation
-indique le nombre de runs concernés par type. Les enfants propriétaires sont
+**Supprimer définitivement** efface le dossier entier d’un run `completed`,
+`failed` ou `cancelled`, même déjà purgé, individuellement ou avec une sélection
+multiple. La confirmation indique les identifiants, le volume estimé et le nombre
+de runs concernés par type. Les enfants propriétaires sont
 inclus récursivement, même lorsqu’ils sont `completed`; une simple source
 référencée ne l’est jamais. La suppression est refusée si un worker est encore
-actif ou si un run conservé ou un modèle Production dépend du périmètre.
+actif ou si un run conservé, un modèle Production, un historique opérationnel
+ou un snapshot de simulation dépend du périmètre.
 Après confirmation, les runs supprimés disparaissent de l’Historique.
+
+La sélection est validée globalement : une source et ses dérivés peuvent être
+supprimés ensemble. Un dérivé conservé, même déjà purgé, continue de protéger
+sa source. Un blocage dans la sélection empêche toute la suppression groupée.
+Un enfant propriétaire ne peut pas être supprimé seul si son parent est conservé.
+Le périmètre, l’état persistant et les références sont revalidés à la confirmation ;
+un changement exige une nouvelle prévisualisation.
+
+Les dossiers passent d’abord dans une quarantaine locale sous `runs/.deletions`.
+Un journal versionné permet de restaurer tous les dossiers si le déplacement
+n’était pas entièrement validé, ou de terminer le nettoyage après validation.
+La réconciliation reprend à la prochaine lecture de l’Historique ou via le service
+de suppression. Si une erreur disque empêche la réconciliation, elle est signalée
+et doit être résolue avant de poursuivre. Les journaux terminés restent conservés
+pour empêcher une écriture périmée de recréer un run ou une référence supprimée.
 
 ---
 

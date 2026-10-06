@@ -116,8 +116,8 @@ def test_wf_ui_preview_consumes_the_frozen_prefilter_population(tmp_path, monkey
         def __getattr__(self, key):
             return self[key]
     class UI:
-        session_state = Session(lab_config=wf.config, lab_target_symbols=list(wf.target_symbols),
-                                lab_symbols=list(wf.predictor_symbols), lab_context_symbols=list(wf.context_symbols))
+        session_state = Session(lab_config=wf.config, lab_target_symbols=["STALE"],
+                                lab_symbols=["STALE"], lab_context_symbols=[])
         metrics = {}
         def container(self, **kwargs):
             return nullcontext()
@@ -136,6 +136,7 @@ def test_wf_ui_preview_consumes_the_frozen_prefilter_population(tmp_path, monkey
     assert streamlit_app._combination_plan_preview(JobType.WALK_FORWARD, config=wf.config,
                                                  source_prefilter_run=source)
     assert ui.session_state["experiment-combination-preview"].effective_combination_count == 1
+    assert ui.session_state["experiment-combination-preview"].target_count == len(wf.target_symbols)
 
 
 def test_end_to_end_resolves_offset_once_before_prefilter(tmp_path, monkeypatch):

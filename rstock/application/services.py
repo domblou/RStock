@@ -293,10 +293,17 @@ class ExperimentService:
     def delete_preview(self, run_id: str) -> DeletePlan:
         return RunDeletionService(self.run_service.repository).preview(run_id)
 
-    def delete_run(self, run_id: str, *, expected_run_ids: tuple[str, ...]) -> DeletePlan:
+    def delete_run(self, run_id: str, *, expected_run_ids: tuple[str, ...],
+                   expected_fingerprint: str) -> DeletePlan:
         return RunDeletionService(self.run_service.repository).delete(
-            run_id, expected_run_ids=expected_run_ids
+            run_id, expected_run_ids=expected_run_ids, expected_fingerprint=expected_fingerprint
         )
+
+    def delete_preview_many(self, run_ids: tuple[str, ...]) -> DeletePlan:
+        return RunDeletionService(self.run_service.repository).preview_many(run_ids)
+
+    def delete_many(self, plan: DeletePlan) -> DeletePlan:
+        return RunDeletionService(self.run_service.repository).delete_many(plan)
 
     def runs(self) -> list[dict[str, object]]:
         return self.run_service.list()

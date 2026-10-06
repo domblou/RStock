@@ -221,8 +221,9 @@ class RunService:
             time.sleep(0.05)
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
-        if (spec.job_type is JobType.WALK_FORWARD and spec.prefilter_execution_version >= 2
-                and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None):
+        if (spec.job_type is JobType.WALK_FORWARD and (spec.source_prefilter_run or (
+                spec.prefilter_execution_version >= 2
+                and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None))):
             from .prefilter_contract import plan
             plan(self.repository, spec)
         if spec.derivation is not None or spec.prefilter_derivation is not None:
@@ -655,6 +656,9 @@ class RunService:
             if status["status"] in ACTIVE_STATUSES:
                 raise ValueError("Ce run est déjà en cours ou en attente.")
             spec = self.repository.load_spec(run_id)
+            if spec.job_type is JobType.WALK_FORWARD and spec.source_prefilter_run:
+                from .prefilter_contract import load
+                load(self.repository, spec)
             resumable_types = {
                 JobType.WALK_FORWARD,
                 JobType.PREDICTOR_PREFILTER,
@@ -736,6 +740,9 @@ class RunService:
             )
         if replay_values:
             spec = replace(spec, **replay_values)
+        if spec.job_type is JobType.WALK_FORWARD and spec.source_prefilter_run:
+            from .prefilter_contract import load
+            load(self.repository, spec)
         with self._submission_lock():
             new_run_id = self.repository.create(spec)
             pid = self.backend.launch(
@@ -1208,8 +1215,15 @@ class ProgressReporter:
             eta = None
             if completed is not None and total is not None and total > 0:
                 percent = min(100.0, max(0.0, completed / total * 100.0))
-                if completed > 0 and completed < total and elapsed > 0:
-                    rate = completed / elapsed
+                if completed > 0 and completed < total and (
+                    elapsed > 0 or event.details.get("progress_scope") == "temporal_prefilter"
+                ):
+                    if event.details.get("progress_scope") == "temporal_prefilter":
+                        measured_units = float(event.details["progress_rate_completed_units"])
+                        measured_seconds = float(event.details["progress_rate_elapsed_seconds"])
+                        rate = measured_units / measured_seconds if measured_seconds > 0 else 0
+                    else:
+                        rate = completed / elapsed
                     eta = (total - completed) / rate if rate > 0 else None
             # A locked progress.json is intentionally best-effort: write_json
             # returns False after its bounded retries, without interrupting ML.

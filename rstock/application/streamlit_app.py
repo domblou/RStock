@@ -33,7 +33,7 @@ from rstock.application.batch_delete import (
     execute_batch_delete,
     preview_batch_delete,
 )
-from rstock.application.run_delete import DeletePlan
+from rstock.application.run_delete import DeletePlan, DeletionCleanupPending
 from rstock.application.promotion_qualification_ui import (
     DEFAULT_PROMOTION_SORT, sort_promotion_decisions, upstream_diagnostic,
 )
@@ -455,6 +455,12 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
     )
     with st.container(border=True):
         st.caption("Duplication en lecture seule — le run source ne sera pas modifié.")
+        if selected_job_type is JobType.WALK_FORWARD and draft.get("source_prefilter_run"):
+            from rstock.application.prefilter_contract import CONTRACT
+            contract = service.run_service.repository.read_json(draft["source_prefilter_run"], CONTRACT)
+            st.session_state["duplication-prefilter-cutoff"] = str(contract["cutoff"])
+            st.text_input("Cutoff hérité du Préfiltre", disabled=True,
+                          key="duplication-prefilter-cutoff")
         selected_label = st.selectbox(
             "Type de job",
             list(JOB_TYPE_BY_LABEL),
@@ -626,13 +632,22 @@ def _job_panel(
                 f"Sous-étape: {progress.get('substage') or '—'}"
             )
             workflow_percent = progress.get("workflow_percent")
+            origin_details = progress.get("details", {})
+            temporal_progress = origin_details.get("progress_scope") == "temporal_prefilter"
+            if temporal_progress:
+                st.caption(f"Origine : {origin_details['origin_number']} / {origin_details['origin_count']} · "
+                           f"Cutoff origine : {origin_details['origin_cutoff']}")
+                workflow_percent = progress.get("stage_percent")
             if workflow_percent is not None:
                 st.progress(float(workflow_percent) / 100.0)
             if progress.get("stage_percent") is not None:
                 completed = progress.get("completed_units")
                 total = progress.get("total_units")
                 eta = progress.get("eta_seconds")
-                message = f"{completed} / {total} unités"
+                message = f"{completed} / {total} unités" + (" globales" if temporal_progress else "")
+                if temporal_progress:
+                    message += (f" · Origine {origin_details['origin_number']}/{origin_details['origin_count']} : "
+                                f"{origin_details['origin_completed_units']} / {origin_details['origin_total_units']}")
                 if eta is not None:
                     message += f" · ETA estimée {_duration(float(eta))}"
                 st.caption(message)
@@ -687,22 +702,26 @@ def _combination_plan_preview(job_type: JobType, *, config=None, selection_mode=
     selection_mode = selection_mode or config.prefilter_selection_mode
     bounds_config = config
     effective = None
+    targets = st.session_state.lab_target_symbols
+    predictors = st.session_state.lab_symbols
+    contexts = st.session_state.lab_context_symbols
     if source_prefilter_run:
         repository = RunRepository(config.project_root / "runs")
         source_spec = repository.load_spec(source_prefilter_run)
         bounds_config, selection_mode = source_spec.config, source_spec.prefilter_method
-        from .prefilter_contract import CONTRACT
+        targets, predictors, contexts = source_spec.target_symbols, source_spec.predictor_symbols, source_spec.context_symbols
+        from rstock.application.prefilter_contract import CONTRACT
         contract = json.loads((repository.run_directory(source_prefilter_run) / CONTRACT).read_text(encoding="utf-8"))
         effective = CombinationPlan.from_target_predictors(dict(contract["ordered_predictors_by_target"]), config.permutation_depth)
     try:
         plan = build_combination_plan(
-            target_symbols=st.session_state.lab_target_symbols,
-            predictor_symbols=st.session_state.lab_symbols,
+            target_symbols=targets,
+            predictor_symbols=predictors,
             permutation_depth=config.permutation_depth,
         )
         preview = build_combination_preview(
             plan,
-            context_symbols=st.session_state.lab_context_symbols,
+            context_symbols=contexts,
             effective_plan=effective, prefilter_selection_mode=selection_mode,
             temporal_consensus_origins=bounds_config.temporal_consensus_origins,
             temporal_consensus_min_occurrences=bounds_config.temporal_consensus_min_occurrences,
@@ -853,6 +872,36 @@ def _launch_consensus_config(current: RStockConfig) -> tuple[RStockConfig, bool]
         except ValueError as error:
             st.error(f"Paramètres du consensus invalides : {error}")
             return current, False
+
+
+def _inherit_prefilter_universe(source: ExperimentSpec) -> None:
+    """Use the source snapshot, even when saved universe definitions have changed."""
+    values = {
+        "lab_universe_selection": source.universe_selection,
+        "lab_market_benchmark_symbol": source.market_benchmark_symbol,
+        "lab_context_universe_ids": list(source.context_universe_ids),
+        "lab_context_sample_size": source.context_sample_size,
+        "lab_context_selection_method": source.context_selection_method,
+        "lab_context_seed": source.context_seed,
+        "lab_target_symbols": list(source.target_symbols),
+        "lab_context_symbols": list(source.context_symbols),
+        "lab_symbols": list(source.predictor_symbols),
+        "lab_calendar": source.calendar,
+    }
+    for key, value in values.items():
+        st.session_state[key] = value
+    with st.container(border=True):
+        st.subheader("Univers hérités du Préfiltre (lecture seule)")
+        st.caption(f"Univers principal : {source.primary_universe_id} · "
+                   f"{len(source.target_symbols)} cibles · "
+                   f"{len(source.context_symbols)} symboles de contexte · "
+                   f"{len(source.predictor_symbols)} prédicteurs")
+        st.caption("Pour changer d'univers, créez un nouveau Préfiltre puis sélectionnez son run source.")
+        with st.expander("Voir les symboles hérités"):
+            st.write("Cibles")
+            st.code(", ".join(source.target_symbols))
+            st.write("Contexte")
+            st.code(", ".join(source.context_symbols) or "Aucun")
 
 
 def _experiment_universe_selector() -> bool:
@@ -1095,9 +1144,34 @@ def _experiments(service: ExperimentService) -> None:
     forward_simulation_enabled = False
     forward_simulation_mode = None
     forward_simulation_end_date = None
-    if selected_job_type in {
-        JobType.END_TO_END, JobType.PREDICTOR_PREFILTER, JobType.WALK_FORWARD,
-    }:
+    prefilter_reference = None
+    if selected_job_type is JobType.WALK_FORWARD and run_config.predictor_prefilter_enabled:
+        repository = service.run_service.repository
+        sources = []
+        for candidate in repository.list_run_ids():
+            if (repository.status(candidate).get("status") == "completed"
+                    and repository.load_spec(candidate).job_type is JobType.PREDICTOR_PREFILTER
+                    and repository.storage(candidate)["state"] == "full"
+                    and (repository.run_directory(candidate) / "results/prefilter_contract.json").is_file()):
+                sources.append(candidate)
+        if sources:
+            prefilter_reference = st.selectbox("Préfiltre source (résultat figé)", sources,
+                                              key="launch-wf-prefilter-source")
+            st.caption("Le Walk-forward consomme les candidats et les données figées de ce Préfiltre.")
+            from rstock.application.prefilter_contract import CONTRACT
+            contract = repository.read_json(prefilter_reference, CONTRACT)
+            resolved_historical_cutoff = str(contract["cutoff"])
+            st.session_state["launch-wf-inherited-cutoff"] = resolved_historical_cutoff
+            st.text_input("Cutoff hérité du Préfiltre", disabled=True,
+                          key="launch-wf-inherited-cutoff")
+            pending = st.session_state.get("pending-experiment-submission")
+            if pending is not None and pending.source_prefilter_run != prefilter_reference:
+                st.session_state.pop("pending-experiment-submission", None)
+        else:
+            st.info("Lancez d'abord un job Préfiltre, ou utilisez End-to-End pour enchaîner les étapes.")
+    if selected_job_type in {JobType.END_TO_END, JobType.PREDICTOR_PREFILTER} or (
+        selected_job_type is JobType.WALK_FORWARD and not run_config.predictor_prefilter_enabled
+    ):
         requested_historical_cutoff = st.date_input(
             "Cutoff historique", value=None,
             help="Dernière séance XNYS disponible pour la découverte scientifique.",
@@ -1116,7 +1190,7 @@ def _experiments(service: ExperimentService) -> None:
                 f"{run_config.temporal_consensus_origins}."
             )
             if resolved_historical_cutoff is not None:
-                from .prefilter_consensus import resolve_consensus_origins
+                from rstock.application.prefilter_consensus import resolve_consensus_origins
                 try:
                     origins = resolve_consensus_origins(
                         resolved_historical_cutoff, st.session_state.lab_calendar,
@@ -1199,23 +1273,24 @@ def _experiments(service: ExperimentService) -> None:
             run_config,
             window_mode,
         )
-    prefilter_reference = None
+    inherited_universe = None
     if selected_job_type is JobType.WALK_FORWARD and run_config.predictor_prefilter_enabled:
-        repository = service.run_service.repository
-        sources = []
-        for candidate in repository.list_run_ids():
-            if (repository.status(candidate).get("status") == "completed"
-                    and repository.load_spec(candidate).job_type is JobType.PREDICTOR_PREFILTER
-                    and repository.storage(candidate)["state"] == "full"
-                    and (repository.run_directory(candidate) / "results/prefilter_contract.json").is_file()):
-                sources.append(candidate)
-        if sources:
-            prefilter_reference = st.selectbox("Préfiltre source (résultat figé)", sources,
-                                              key="launch-wf-prefilter-source")
-            st.caption("Le Walk-forward consomme les candidats et les données figées de ce Préfiltre.")
-        else:
-            st.info("Lancez d'abord un job Préfiltre, ou utilisez End-to-End pour enchaîner les étapes.")
-    valid_universe = _experiment_universe_selector()
+        valid_universe = prefilter_reference is not None
+        if prefilter_reference is not None:
+            inherited_universe = repository.load_spec(prefilter_reference)
+            _inherit_prefilter_universe(inherited_universe)
+            pending = st.session_state.get("pending-experiment-submission")
+            if pending is not None and any(
+                getattr(pending, field) != getattr(inherited_universe, field)
+                for field in (
+                    "target_symbols", "context_symbols", "predictor_symbols", "calendar",
+                    "universe_selection", "primary_universe_id", "market_benchmark_symbol",
+                    "context_universe_ids", "context_sample_size", "context_selection_method", "context_seed",
+                )
+            ):
+                st.session_state.pop("pending-experiment-submission", None)
+    else:
+        valid_universe = _experiment_universe_selector()
     valid_plan = (
         _combination_plan_preview(selected_job_type, config=run_config, selection_mode=prefilter_method,
                                   source_prefilter_run=prefilter_reference) if valid_universe and valid_consensus else False
@@ -1279,15 +1354,18 @@ def _experiments(service: ExperimentService) -> None:
             ),
         )
         if prefilter_reference is not None:
-            from .prefilter_contract import CONTRACT
+            from rstock.application.prefilter_contract import CONTRACT
             repository = service.run_service.repository
             path = repository.run_directory(prefilter_reference) / CONTRACT
             contract = json.loads(path.read_text(encoding="utf-8"))
             import hashlib
             spec = replace(spec, source_prefilter_run=prefilter_reference,
+                           primary_universe_id=inherited_universe.primary_universe_id,
                            source_prefilter_contract_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                            source_prepared_dataset_sha256=contract["prepared_dataset_sha256"],
                            historical_data_cutoff=contract["cutoff"],
+                           requested_historical_cutoff=None,
+                           resolved_market_session_cutoff=contract["cutoff"],
                            prepared_snapshot_required=True, prepared_dataset_digest_required=True)
         st.session_state["pending-experiment-submission"] = spec
         st.rerun()
@@ -5568,13 +5646,14 @@ def _history_runs_panel(
         )
         for run in visible
     ]
-    selection = st.dataframe(
-        pd.DataFrame([row.display() for row in rows]),
-        hide_index=True,
-        width="stretch",
-        on_select="rerun",
-        selection_mode="multi-row",
-        key=f"{key_prefix}-grid",
+    from rstock.application.history_grid import history_grid_row, render_history_grid
+    grid_rows = [history_grid_row(
+        row, details_by_run_id[row.run_id], universe_labels=universe_labels,
+        related_details=details_by_run_id, runs_root=st.session_state.lab_config.project_root / "runs",
+    ) for row in rows]
+    selection = render_history_grid(
+        grid_rows, key=f"{key_prefix}-grid",
+        selected_ids=st.session_state.get(f"{key_prefix}-selected-runs", []),
     )
     selected_rows = _selected_rows(selection, len(rows))
     selected_key = f"{key_prefix}-selected-runs"
@@ -5595,7 +5674,7 @@ def _history_runs_panel(
         _render_batch_delete_confirmation(service, pending_delete, key_prefix=key_prefix)
         return
     if not selected:
-        st.caption("Sélectionnez des runs pour les ouvrir, comparer, purger ou supprimer définitivement ceux en échec ou annulés.")
+        st.caption("Sélectionnez des runs pour les ouvrir, comparer, purger ou supprimer définitivement ceux terminés, en échec ou annulés.")
         return
     if len(selected) > 1 and st.button(
         "Purger les données lourdes des runs sélectionnés",
@@ -5653,7 +5732,7 @@ def _history_runs_panel(
                 selected_run_id,
                 int(pending_purge.get("reclaimable_bytes", 0)),
             )
-        if str(selected_run.get("status")) in {"failed", "cancelled"} and actions[3].button(
+        if str(selected_run.get("status")) in {"completed", "failed", "cancelled"} and actions[3].button(
             "Supprimer définitivement", key=f"delete-history-{key_prefix}",
         ):
             try:
@@ -5815,14 +5894,16 @@ def _render_batch_delete_confirmation(
         st.warning(
             "Suppression définitive et irréversible : "
             f"{len(review.requested_run_ids)} runs sélectionnés, "
-            f"{len(review.plans)} racines admissibles, "
             f"{len(review.affected_run_ids)} runs à supprimer, enfants propriétaires inclus. "
+            f"({_format_storage_size(review.size_bytes)}). "
             "Leurs dossiers, logs, manifests, checkpoints, résultats et métadonnées disparaîtront."
         )
         st.caption("Par type : " + ", ".join(
             f"{JOB_LABELS.get(kind, kind)} : {count}"
             for kind, count in review.affected_by_type
         ))
+        if review.affected_run_ids:
+            st.caption("Périmètre confirmé : " + ", ".join(review.affected_run_ids))
         if review.skipped:
             st.info("Runs ignorés : " + "; ".join(
                 f"{run_id} : {reason}" for run_id, reason in review.skipped
@@ -5855,13 +5936,18 @@ def _render_run_delete_confirmation(service: ExperimentService, plan: DeletePlan
         st.caption("Par type : " + ", ".join(
             f"{JOB_LABELS.get(kind, kind)} : {count}" for kind, count in plan.by_type
         ))
+        st.caption("Périmètre confirmé : " + ", ".join(plan.run_ids))
         confirm, cancel, _ = st.columns([2.5, 1, 5])
         if confirm.button(
             "Confirmer la suppression définitive", type="primary",
             key=f"confirm-run-delete-{plan.run_id}",
         ):
             try:
-                service.delete_run(plan.run_id, expected_run_ids=plan.run_ids)
+                service.delete_run(plan.run_id, expected_run_ids=plan.run_ids,
+                                   expected_fingerprint=plan.fingerprint)
+            except DeletionCleanupPending as error:
+                st.session_state.pop("pending-run-delete", None)
+                st.warning(str(error))
             except (OSError, ValueError, RuntimeError) as error:
                 st.error(f"Suppression impossible : {error}")
             else:
@@ -6190,7 +6276,8 @@ def _submit_operational_job(
 def _selected_rows(event: object, row_count: int | None = None) -> list[int]:
     """Return current selection positions, dropping stale grid positions."""
 
-    selected = list(getattr(getattr(event, "selection", None), "rows", []))
+    selection = event.get("selection") if isinstance(event, dict) else getattr(event, "selection", None)
+    selected = list(selection.get("rows", []) if isinstance(selection, dict) else getattr(selection, "rows", []))
     if row_count is None:
         return selected
     return [

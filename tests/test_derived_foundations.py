@@ -247,3 +247,45 @@ def test_derived_manifest_rejects_changed_lineage_and_dependencies(tmp_path):
     manifest["stages"][3]["dependency_run_ids"] = []
     with pytest.raises(ValueError, match="dependencies mismatch"):
         validate_pipeline_manifest(manifest, root_run_id="new-root")
+
+
+
+@pytest.mark.parametrize("include_source", [False, True])
+def test_global_deletion_preserves_inherited_sources_unless_explicitly_selected(tmp_path, include_source):
+    from rstock.application.run_delete import RunDeletionService
+    repository, source_spec, source_id, source_manifest, manifest_sha = _source(tmp_path)
+    derived_spec = _derived(repository, source_spec, source_id, source_manifest,
+                            manifest_sha, "threshold_calibration")
+    derived_id = repository.create(derived_spec)
+    manifest = build_pipeline_manifest(repository, derived_id, derived_spec)
+    (repository.run_directory(derived_id) / "orchestration").mkdir()
+    repository.write_json(derived_id, PIPELINE_MANIFEST, manifest)
+    owned = set()
+    inherited = set()
+    for stage in manifest["stages"]:
+        if stage.get("mode") == "inherited":
+            inherited.add(stage["source_run_id"])
+        child = stage.get("child_run_id")
+        if child:
+            repository.create(replace(derived_spec, job_type=JobType(stage["expected_job_type"]),
+                                      derivation=None), run_id=child,
+                              metadata=RunMetadata(parent_run_id=derived_id,
+                                                   relation_key=stage["stage_key"], relation_type="pipeline_stage"))
+            repository.transition(child, JobStatus.RUNNING)
+            repository.transition(child, JobStatus.COMPLETED)
+            owned.add(child)
+    repository.transition(derived_id, JobStatus.RUNNING)
+    repository.transition(derived_id, JobStatus.COMPLETED)
+    service = RunDeletionService(repository)
+    assert not service.eligibility(source_id).eligible
+    plan = service.preview_many((source_id, derived_id) if include_source else (derived_id,))
+    assert owned <= set(plan.run_ids)
+    assert bool(inherited & set(plan.run_ids)) == include_source
+    service.delete_many(plan)
+    assert not repository.run_directory(derived_id).exists()
+    if include_source:
+        assert repository.list_run_ids() == []
+    else:
+        assert repository.run_directory(source_id).exists()
+        assert all(repository.run_directory(child).exists() for child in inherited)
+        assert service.eligibility(source_id).eligible

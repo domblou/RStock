@@ -79,7 +79,7 @@ def test_run_creation_persists_required_files_and_reloadable_configuration(tmp_p
     assert restored.config.xgb_seed == 987
     snapshot = repository.read_json(run_id, "config.json")
     assert snapshot["schema_version"] == 1
-    assert snapshot["pipeline_version"] == 3
+    assert snapshot["pipeline_version"] == spec.pipeline_version
     assert snapshot["calibration_sampling_policy_version"] == 2
 
 
@@ -509,7 +509,7 @@ def test_disabled_predictor_prefilter_keeps_the_existing_walk_forward_path(
     assert "total_combinations" not in summary
 
 
-def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
+def test_historical_embedded_prefilter_feeds_only_retained_predictors_to_final_generation(
     monkeypatch, tmp_path
 ):
     index = pd.bdate_range("2026-01-01", periods=10)
@@ -580,6 +580,7 @@ def test_enabled_prefilter_feeds_only_retained_predictors_to_final_generation(
     )
     spec = replace(
         spec,
+        prefilter_execution_version=1,
         symbols=("T", "A", "B"),
         target_symbols=("T",),
         context_symbols=("A", "B"),

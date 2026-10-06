@@ -451,6 +451,9 @@ class RunStorageService:
                     if (stage.get("stage_key") == "forward_simulation"
                             and not self.repository.run_directory(child_id).exists()):
                         continue  # Reserved best-effort Forward was never materialized.
+                    if (for_delete and not self.repository.run_directory(child_id).exists()
+                            and self.repository.status(parent_id).get("status") == JobStatus.COMPLETED.value):
+                        return f"Enfant {child_id} absent du pipeline completed {parent_id}."
                     expected = stage.get("expected_job_type")
                     try:
                         expected_type = JobType(str(expected)) if expected else None

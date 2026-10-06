@@ -59,6 +59,19 @@ class SimulationRepository:
         parameters: dict[str, Any],
         models: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        from .run_integrity import graph_lock, validate_publication
+        runs_root = self.root.parent / "runs"
+        with graph_lock(runs_root):
+            validate_publication(runs_root, {"parameters": parameters, "models": models})
+            return self._save(result, parameters=parameters, models=models)
+
+    def _save(
+        self,
+        result: SimulationResult,
+        *,
+        parameters: dict[str, Any],
+        models: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         simulation_id = self._simulation_id()
         directory = self._directory(simulation_id)
         directory.mkdir(parents=True, exist_ok=False)

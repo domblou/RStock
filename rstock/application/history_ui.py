@@ -513,6 +513,8 @@ def _lineage_text(
         return f"Pipeline : {parent}"
     if parent:
         return f"Parent : {parent}"
+    if job_type == "walk_forward" and configuration.get("source_prefilter_run"):
+        return f"Préfiltre source : {configuration['source_prefilter_run']}"
     if root and str(root) == run_id:
         return "Run racine"
 

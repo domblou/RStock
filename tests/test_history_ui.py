@@ -141,6 +141,20 @@ def test_today_excludes_utc_timestamp_that_is_still_previous_local_day():
     assert [run["run_id"] for run in filtered] == ["current-local-day"]
 
 
+def test_standalone_walk_forward_lineage_displays_prefilter_source():
+    from rstock.application.history_ui import _lineage_text
+
+    arguments = dict(run_id="wf", job_type="walk_forward",
+                     metadata={"root_run_id": "wf"})
+    assert _lineage_text(**arguments, configuration={"source_prefilter_run": "prefilter"}) == "Préfiltre source : prefilter"
+    assert _lineage_text(**arguments, configuration={}) == "Run racine"
+    assert _lineage_text(
+        run_id="wf", job_type="walk_forward",
+        configuration={"source_prefilter_run": "prefilter"},
+        metadata={"parent_run_id": "pipeline", "relation_key": "pipeline_stage:walk_forward"},
+    ) == "Pipeline : pipeline"
+
+
 def test_history_rows_display_run_id_and_lineage():
     normal = history_row(
         _run("opaque-guid", "market_update"),

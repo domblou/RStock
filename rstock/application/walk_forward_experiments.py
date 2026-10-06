@@ -190,6 +190,9 @@ def build_derived_walk_forward_spec(
     except OSError as error:
         raise ValueError("Source Walk-forward prepared snapshot is missing") from error
     anchor = str(pd.Timestamp(trace["prepared_market_last_date"]).date())
+    if source.source_prefilter_run:
+        from .prefilter_contract import load
+        anchor = str(load(repository, source)["cutoff"])
     frozen = replace(
         source, historical_data_cutoff=anchor,
         source_walk_forward_run=source_run_id,

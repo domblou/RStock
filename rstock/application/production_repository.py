@@ -50,6 +50,21 @@ class ProductionRepository:
 
     @staticmethod
     def _atomic_text(path: Path, text: str) -> None:
+        from .run_integrity import graph_lock, text_references, validate_publication
+        production = next((parent for parent in path.parents if parent.name == "production"), None)
+        if production is None:
+            ProductionRepository._write_atomic_text(path, text)
+            return
+        runs_root = production.parent / "runs"
+        with graph_lock(runs_root):
+            if (runs_root / ".deletions").exists():
+                validate_publication(runs_root, {"dependency_run_ids": [
+                    target for _, target in text_references(path.name, text)
+                ]})
+            ProductionRepository._write_atomic_text(path, text)
+
+    @staticmethod
+    def _write_atomic_text(path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         for attempt in range(WRITE_ATTEMPTS):
             descriptor, temporary_name = tempfile.mkstemp(
@@ -142,10 +157,14 @@ class ProductionRepository:
             "schema_version": 1,
             "models": [model.to_dict() for model in models],
         }
-        self._atomic_text(
-            self.registry_path,
-            json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n",
-        )
+        from .run_integrity import graph_lock, validate_publication
+        runs_root = self.root.parent / "runs"
+        with graph_lock(runs_root):
+            validate_publication(runs_root, payload)
+            self._atomic_text(
+                self.registry_path,
+                json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n",
+            )
 
     def add(self, model: ProductionModel) -> ProductionModel:
         with self.transaction():
@@ -296,7 +315,9 @@ class ProductionRepository:
 
         if not updates:
             return {}
-        with self.transaction():
+        from .run_integrity import graph_lock, references, validate_publication
+        runs_root = self.root.parent / "runs"
+        with self.transaction(), graph_lock(runs_root):
             if expected_models is not None:
                 current = {model.model_id: model for model in self.models()}
                 for expected in expected_models:
@@ -369,6 +390,9 @@ class ProductionRepository:
                         # This lets derived quality detect late corrected
                         # realized outcomes without duplicating a trade.
                         combined = combined.drop_duplicates(key, keep="last")
+                    if (runs_root / ".deletions").exists():
+                        columns = [column for column in combined if any(references({str(column): "candidate"}))]
+                        validate_publication(runs_root, combined[columns].to_dict("records"))
                     combined.to_csv(staged_path, index=False)
                     combined_tables[name] = combined
                 if self.history_root.exists():

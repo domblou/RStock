@@ -935,6 +935,7 @@ def build_stage_spec(
                        source_prefilter_contract_sha256=_sha256(path),
                        source_prepared_dataset_sha256=contract["prepared_dataset_sha256"],
                        historical_data_cutoff=contract["cutoff"],
+                       resolved_market_session_cutoff=contract["cutoff"],
                        prepared_snapshot_required=True, prepared_dataset_digest_required=True,
                        prefilter_execution_version=2, evaluate_final_holdout=False)
         from .prefilter_contract import plan
