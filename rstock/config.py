@@ -41,6 +41,14 @@ class RStockConfig:
     model_history_days: int = 730
     prediction_history_days: int = 10
 
+    # Optional descriptive context; never affects training or qualification.
+    market_context_enabled: bool = False
+    market_context_trend_sessions: int = 63
+    market_context_drawdown_sessions: int = 252
+    market_context_volatility_sessions: int = 21
+    market_context_terciles: bool = True
+    market_context_protocol_version: str = "spy_adjusted_context_v1"
+
     intraday_target_threshold: float = 0.01
     intraday_down_threshold: float = 0.01
     lag_depth: int = 3
@@ -161,6 +169,12 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if self.market_context_protocol_version != "spy_adjusted_context_v1":
+            raise ValueError("Unsupported market context protocol version")
+        for name in ("market_context_trend_sessions", "market_context_drawdown_sessions", "market_context_volatility_sessions"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+                raise ValueError(f"{name} must be an integer >= 2")
         if self.prefilter_selection_mode not in {"single_origin", "temporal_stability", "temporal_consensus"}:
             raise ValueError("Unsupported prefilter selection mode")
         for name in ("temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"):
@@ -356,6 +370,13 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    # Historical runs had no context protocol. Windows are inert until explicit activation.
+    "market_context_enabled": False,
+    "market_context_trend_sessions": 63,
+    "market_context_drawdown_sessions": 252,
+    "market_context_volatility_sessions": 21,
+    "market_context_terciles": True,
+    "market_context_protocol_version": "spy_adjusted_context_v1",
     # Absent mode never activates a new scientific policy on an old snapshot.
     "prefilter_selection_mode": "single_origin",
     "temporal_consensus_origins": 4,

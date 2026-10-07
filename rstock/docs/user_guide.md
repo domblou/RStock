@@ -1584,6 +1584,13 @@ explicite. Le réentraînement d’un modèle en observation est refusé; il fau
 d’abord arrêter le suivi pour éviter de changer silencieusement la version
 observée.
 
+Les métriques de la grille et du détail concernent la version d’artefact courante.
+Après un réentraînement, le prochain traitement qualité réconcilie automatiquement
+le snapshot avec le registre, même sans nouveau signal. Les observations des
+anciennes versions et les références de promotion restent conservées, mais ne
+sont pas intégrées aux résultats de la nouvelle version. Une baseline d’une
+autre version n’est pas utilisée pour la comparaison.
+
 Le **Détail du modèle** présente la même analyse pour les modèles en observation
 et actifs. Son tableau **Historique par période** distingue les signaux créés
 pendant l’observation, ceux créés en production active et l’historique complet.

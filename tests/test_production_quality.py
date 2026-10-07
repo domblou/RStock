@@ -64,7 +64,7 @@ def _model(model_id="model_A"):
         source_threshold_calibration_run=None,
         development_metrics={},
         holdout_metrics={},
-        created_at=utc_now(),
+        created_at="2026-08-28T00:00:00+00:00",
     )
 
 

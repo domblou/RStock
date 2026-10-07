@@ -167,14 +167,28 @@ def synchronize_production_quality(
                 model_id, fingerprints, expected_observation_generation=generation,
             )
     manifest = quality.reconcile_published_models()
-    dirty = list(manifest.get("dirty_model_ids", []))
+    dirty = set(manifest.get("dirty_model_ids", []))
+    # Registry transitions do not alter observation generations. Reconcile their
+    # derived identity even when no new operational event arrived (also on resume).
+    for model in production.models():
+        if model.model_id not in manifest.get("observation_generations", {}):
+            continue
+        snapshot = quality.load_model_snapshot(model.model_id)
+        if (
+            snapshot is None
+            or (snapshot.get("identity") or {}).get("model_version") != model.artifact_version
+            or (model.artifact_version is not None and
+                (snapshot.get("metadata") or {}).get("version_scope_policy_version") != 1)
+        ):
+            dirty.add(model.model_id)
+    dirty = sorted(dirty)
     updates: dict[str, tuple[dict[str, Any], pd.DataFrame]] = {}
     for model_id in dirty:
         check_cancellation(cancellation_check)
         snapshot, series = compute_model_quality(
             quality.load_observations(str(model_id)),
             quality.load_baseline(str(model_id)),
-            quality.load_lineage(str(model_id)),
+            quality.load_current_lineage(str(model_id)),
             as_of_session,
         )
         snapshot["model_id"] = str(model_id)

@@ -26,9 +26,11 @@ CHECKPOINT_NAME = "quality_rebuild_checkpoint.json"
 REBUILD_SCHEMA_VERSION = 1
 
 
-def _source_digest(manifest: dict[str, Any]) -> str:
+def _source_digest(manifest: dict[str, Any], versions: dict[str, Any]) -> str:
     encoded = json.dumps(
-        manifest.get("observation_generations", {}), sort_keys=True, separators=(",", ":")
+        {"observations": manifest.get("observation_generations", {}),
+         "registry_versions": versions, "version_scope_policy_version": 1},
+        sort_keys=True, separators=(",", ":")
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -71,7 +73,11 @@ class ProductionQualityRebuildRunner:
     def _load_or_start(self) -> dict[str, Any]:
         manifest = self.quality.reconcile_manifest()
         models = sorted(manifest.get("observation_generations", {}))
-        digest = _source_digest(manifest)
+        versions = {
+            model_id: (self.quality.load_current_lineage(model_id) or {}).get("model_version")
+            for model_id in models
+        }
+        digest = _source_digest(manifest, versions)
         path = self.runs.run_directory(self.run_id) / CHECKPOINT_NAME
         if path.exists():
             checkpoint = self.runs.read_json(self.run_id, CHECKPOINT_NAME)
@@ -122,7 +128,7 @@ class ProductionQualityRebuildRunner:
                 snapshot, series = compute_model_quality(
                     observations,
                     self.quality.load_baseline(model_id),
-                    self.quality.load_lineage(model_id),
+                    self.quality.load_current_lineage(model_id),
                     as_of_session,
                 )
                 snapshot["model_id"] = model_id
@@ -168,10 +174,21 @@ class ProductionQualityRebuildRunner:
                 raise ValueError("Quality rebuild generation already exists")
             if workspace != final:
                 os.replace(self.stage, final)
+            # Reload persistent sources before publishing staged/resumed output.
+            current_manifest = self.quality.reconcile_manifest()
+            current_versions = {
+                model_id: (self.quality.load_current_lineage(model_id) or {}).get("model_version")
+                for model_id in sorted(current_manifest.get("observation_generations", {}))
+            }
+            if _source_digest(current_manifest, current_versions) != checkpoint["source_observation_digest"]:
+                raise ValueError("Quality rebuild sources changed before publication")
             self.quality.publish_generation(self.final_name)
             # Only the atomically published generation can clear source dirt.
             for model_id in model_ids:
-                self.quality.mark_model_clean(model_id)
+                self.quality.mark_model_clean(
+                    model_id, expected_observation_generation=
+                    checkpoint["source_observation_generations"].get(model_id),
+                )
             checkpoint.update(status="completed", completed_at=utc_now(), current_model=None)
             self._persist(checkpoint)
             return {

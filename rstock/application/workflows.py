@@ -3410,4 +3410,15 @@ class WorkflowRegistry:
         handler = self.handlers.get(spec.job_type)
         if handler is None:
             raise ValueError(f"No workflow is registered for {spec.job_type.value}")
-        return handler(spec, output, progress_callback, cancellation_check)
+        result = handler(spec, output, progress_callback, cancellation_check)
+        if spec.config.market_context_enabled:
+            from .market_context_runtime import optional_context_diagnostic
+
+            diagnostic = optional_context_diagnostic(spec, output)
+            if diagnostic is not None:
+                result["market_context_diagnostic"] = {
+                    "status": diagnostic["status"],
+                    "protocol_id": diagnostic.get("protocol_id"),
+                    "reason": diagnostic.get("reason"),
+                }
+        return result

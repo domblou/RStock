@@ -264,7 +264,7 @@ def test_incremental_metrics_match_full_reconstruction(tmp_path):
         )
         expected, expected_series = compute_model_quality(
             reference[reference["model_id"] == model_id],
-            None, quality.load_lineage(model_id), "2026-09-02",
+            None, quality.load_current_lineage(model_id), "2026-09-02",
         )
         actual = quality.load_model_snapshot(model_id)
         for field in ("window_20", "window_63", "window_126", "since_promotion"):

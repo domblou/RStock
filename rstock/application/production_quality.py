@@ -631,6 +631,15 @@ def compute_model_quality(
     *,
     calendar_name: str = "XNYS",
 ) -> tuple[dict[str, Any], pd.DataFrame]:
+    # An absent historical version retains the legacy aggregate semantics.
+    # An explicit version must never include another version or unknown rows.
+    version = (lineage or {}).get("model_version")
+    if version is not None:
+        observations = observations[
+            observations["model_version"].eq(version).fillna(False)
+        ].copy()
+        if baseline and baseline.get("model_version") != version:
+            baseline = {**baseline, "availability_status": "unavailable_version_mismatch"}
     as_of = _market_sessions(as_of_session, 1, calendar_name)[-1]
     live = eligible_live_observations(observations)
     live = live[live["session_date"] <= as_of].copy()
@@ -688,7 +697,7 @@ def compute_model_quality(
         "excluded_observations": since["excluded_observations"], "pending_observations": since["pending_observations"],
         "evaluability_rate": since["evaluability_rate"], "baseline_comparison": _baseline_comparison(since, baseline),
         "health_status": "not_evaluated", "health_policy": None,
-        "metadata": {"promotion_date_convention": "lineage_promotion_date", "notional": MONITORING_NOTIONAL,
+        "metadata": {"version_scope_policy_version": 1, "promotion_date_convention": "lineage_promotion_date", "notional": MONITORING_NOTIONAL,
                      "notional_policy_version": NOTIONAL_POLICY_VERSION, "drawdown_policy_version": DRAW_DOWN_POLICY_VERSION,
                      "window_policy_version": WINDOW_POLICY_VERSION},
     }
@@ -734,7 +743,7 @@ class ProductionQualityMetricsService:
     def rebuild_model(self, model_id: str, as_of_session: object) -> dict[str, Any]:
         observations = self.repository.load_observations(model_id)
         baseline = self.repository.load_baseline(model_id)
-        lineage = self.repository.load_lineage(model_id)
+        lineage = self.repository.load_current_lineage(model_id)
         snapshot, series = compute_model_quality(observations, baseline, lineage, as_of_session, calendar_name=self.calendar_name)
         if snapshot["model_id"] is None:
             snapshot["model_id"] = model_id

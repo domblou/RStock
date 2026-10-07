@@ -1441,6 +1441,13 @@ def _settings() -> None:
     if load_warning:
         st.warning(load_warning)
     current = st.session_state.lab_config
+    with st.expander("Diagnostic de contexte de marché — paramètres avancés"):
+        context_enabled = st.checkbox("Activer le diagnostic descriptif SPY", value=current.market_context_enabled)
+        st.caption("Protocole standard : 63 / 252 / 21 séances. Les variantes sont persistées et identifiées ; ces paramètres ne doivent pas être choisis selon les résultats des modèles.")
+        context_trend = st.number_input("Tendance SPY (séances)", min_value=2, value=current.market_context_trend_sessions)
+        context_drawdown = st.number_input("Drawdown SPY (séances)", min_value=2, value=current.market_context_drawdown_sessions)
+        context_volatility = st.number_input("Volatilité SPY (séances)", min_value=2, value=current.market_context_volatility_sessions)
+        context_terciles = st.checkbox("Terciles descriptifs figés sur le développement initial", value=current.market_context_terciles)
     with st.expander("Valeurs RStock par défaut"):
         defaults = asdict(DEFAULT_CONFIG)
         defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
@@ -1926,6 +1933,11 @@ def _settings() -> None:
                 current,
                 **prefilter_xgboost_values,
                 **prefilter_temporal_values,
+                market_context_enabled=context_enabled,
+                market_context_trend_sessions=int(context_trend),
+                market_context_drawdown_sessions=int(context_drawdown),
+                market_context_volatility_sessions=int(context_volatility),
+                market_context_terciles=context_terciles,
                 model_history_days=int(history),
                 permutation_depth=int(permutation),
                 max_generated_sets=int(max_sets),
@@ -5136,6 +5148,10 @@ def _render_job_detail_tabs(
         _render_standard_job_tabs(run_id, job_type, status, detail)
     else:
         _render_standard_job_tabs(run_id, job_type, status, detail)
+
+    from rstock.application.market_context_ui import render_context_diagnostic
+    render_context_diagnostic(st, st.session_state.lab_config.project_root / "runs" / run_id / "results",
+                              st.session_state.lab_config.project_root / "runs")
 
 
 def _render_run_detail_view(
