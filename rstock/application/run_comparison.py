@@ -586,5 +586,5 @@ def comparison_types(types: Sequence[str]) -> str | None:
         return None
     kind = set(types)
     return next(iter(kind)) if len(kind) == 1 and kind <= {
-        "walk_forward", "end_to_end", "predictor_prefilter",
+        "walk_forward", "end_to_end", "predictor_prefilter", "forward_simulation",
     } else None

@@ -71,6 +71,7 @@ def test_forward_secondary_views_use_persisted_metrics_and_column_help(tmp_path,
                                       NumberColumn=lambda **kwargs: kwargs),
     )
     monkeypatch.setattr(app, "st", fake)
+    monkeypatch.setattr(app, "render_dataframe", dataframe)
     app._render_forward_temporal_results("forward-one", {"total_signals": 1})
     assert seen["frames"]
     assert seen["charts"]

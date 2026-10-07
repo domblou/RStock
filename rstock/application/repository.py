@@ -336,8 +336,10 @@ class RunRepository:
         *,
         tolerate_progress_failure: bool = True,
     ) -> bool:
-        from .run_integrity import graph_lock, validate_publication
+        from .run_integrity import graph_lock, validate_publication, reference_free_run_document, references
         with graph_lock(self.root):
+            if reference_free_run_document(Path(name)) and any(references(values)):
+                raise ValueError("Run references must be published in a provenance/configuration/manifest document, not a numerical checkpoint or diagnostic.")
             validate_publication(self.root, values, run_id)
             return self._write_json(run_id, name, values,
                                     tolerate_progress_failure=tolerate_progress_failure)
@@ -533,14 +535,11 @@ class RunRepository:
 
     def list_run_ids(self) -> list[str]:
         from .run_integrity import graph_lock
-        from .run_delete import RunDeletionService, DeletionCleanupPending
+        from .run_delete import RunDeletionService
         with graph_lock(self.root):
-            try:
-                RunDeletionService(self)._recover_locked()
-            except DeletionCleanupPending:
-                # Every run has already left the live graph. A disk cleanup
-                # failure must not make the remaining history unavailable.
-                pass
+            # Restore interrupted moves before exposing the live graph. Physical
+            # cleanup of committed operations belongs to the explicit recovery.
+            RunDeletionService(self)._reconcile_staging_locked()
             return self._list_run_ids()
 
     def _list_run_ids(self) -> list[str]:

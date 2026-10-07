@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -619,7 +620,9 @@ def run_forward_simulation(
     }
     for filename, values in analysis_files.items():
         _write_csv_atomic(values, output / filename)
-    _write_json_atomic({
+    analysis_manifest_path = output / "forward_analysis_manifest.json"
+    analysis_manifest = _read_json(analysis_manifest_path) if analysis_manifest_path.is_file() else {}
+    analysis_manifest.update({
         "schema_version": 1,
         "forward_run_id": output.parent.name,
         "source_e2e_run_id": spec.source_end_to_end_run,
@@ -638,7 +641,8 @@ def run_forward_simulation(
                 "forward_observations.csv", EXCLUSIONS_FILENAME, *analysis_files
             )
         },
-    }, output / "forward_analysis_manifest.json")
+    })
+    _write_json_atomic(analysis_manifest, analysis_manifest_path)
     signals = frame[frame.get("signal", pd.Series(dtype=bool)).astype(bool)] if not frame.empty else frame
     notional_per_signal = 10_000.0
     unique_issues = exclusion_frame.drop_duplicates(
@@ -650,4 +654,10 @@ def run_forward_simulation(
     summary["horizon_max"] = len(sessions)
     summary["model_count_t0"] = len(snapshot["models"])
     (output / "forward_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    # Derived analysis is independent of scientific evaluation and its checkpoints.
+    from .forward_diagnostic import materialize_forward_diagnostic
+    try:
+        materialize_forward_diagnostic(output)
+    except (OSError, ValueError, KeyError) as error:
+        logging.getLogger(__name__).warning("Forward diagnostic unavailable: %s", error)
     return summary

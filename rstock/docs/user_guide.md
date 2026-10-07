@@ -956,7 +956,7 @@ en conservant sa configuration, sa provenance et sa ligne dans l’Historique.
 
 **Supprimer définitivement** efface le dossier entier d’un run `completed`,
 `failed` ou `cancelled`, même déjà purgé, individuellement ou avec une sélection
-multiple. La confirmation indique les identifiants, le volume estimé et le nombre
+multiple. La confirmation indique les identifiants et le nombre
 de runs concernés par type. Les enfants propriétaires sont
 inclus récursivement, même lorsqu’ils sont `completed`; une simple source
 référencée ne l’est jamais. La suppression est refusée si un worker est encore
@@ -974,10 +974,23 @@ un changement exige une nouvelle prévisualisation.
 Les dossiers passent d’abord dans une quarantaine locale sous `runs/.deletions`.
 Un journal versionné permet de restaurer tous les dossiers si le déplacement
 n’était pas entièrement validé, ou de terminer le nettoyage après validation.
-La réconciliation reprend à la prochaine lecture de l’Historique ou via le service
-de suppression. Si une erreur disque empêche la réconciliation, elle est signalée
+La restauration d’un déplacement interrompu reprend à la prochaine lecture de
+l’Historique ou préparation de suppression. Le nettoyage d’une ancienne quarantaine
+déjà validée se reprend séparément via `RunDeletionService.recover()` ; il ne bloque
+pas la préparation d’une nouvelle confirmation. Si une erreur disque empêche la
+restauration, elle est signalée
 et doit être résolue avant de poursuivre. Les journaux terminés restent conservés
 pour empêcher une écriture périmée de recréer un run ou une référence supprimée.
+
+La préparation construit une seule vue temporaire des propriétaires et références,
+sans index persistant. Elle ne mesure pas le volume des dossiers et ne lit pas les
+exports numériques de diagnostics ni les marqueurs de lots des checkpoints : ces
+schémas ne portent pas de provenance. Les fichiers inconnus restent contrôlés, et
+les CSV sans colonnes de références nécessitent seulement une lecture de l’en-tête.
+La confirmation reconstruit cette vue sous verrou, vérifie à nouveau les workers,
+propriétaires et références externes, puis contrôle les chemins de tous les dossiers
+avant leur déplacement. L’empreinte compare les documents d’admissibilité et de
+propriété ainsi que la provenance ; les changements de métriques seuls ne l’invalident pas.
 
 ---
 
@@ -1681,3 +1694,53 @@ pas de sa date de création.
 Le comparateur distingue les occurrences **internes** au consensus et le
 Jaccard des populations finales **entre runs**. Les sources Prefilter encore
 référencées par un WF non purgé sont protégées contre la purge.
+
+### Diagnostic de qualification T0 → Forward
+
+Les nouvelles Forward Simulations produisent une analyse descriptive aux jalons
+de +21, +42 et +63 séances, en cumulatif et par intervalle. Dans **Résultats**,
+la vue **Modèles** relie la qualité WF/Holdout à T0 aux performances Forward,
+avec AUC, Brier, deltas, effectifs et tranches de probabilité. La vue
+**Évolution population** compare les trajectoires selon les métriques T0 et
+l'origine des candidats. **Historique → Comparer** accepte de 2 à 6 Forward
+Simulations et exporte les nouvelles mesures, sans lancer de calcul scientifique.
+
+La référence partagée `forward_t0_reference.json` est conservée auprès du
+snapshot E2E. Elle ne modifie pas ce snapshot, les boosters, ni les décisions
+WF/Holdout/qualification. Le Holdout comparable utilise les probabilités déjà
+persistées avec la règle `P(Up) >= seuil Up` et `P(Down) < seuil Down` du Forward.
+Il représente la qualité de qualification, pas une évaluation indépendante du
+booster final réentraîné jusqu'à T0. Les agrégats de qualification originaux
+restent visibles séparément. L'AUC utilise toutes les observations évaluables ;
+le rendement et la précision utilisent les signaux combinés effectivement émis.
+Le Brier et les écarts sont descriptifs : un Brier croissant est défavorable,
+mais sa variation dépend aussi de la discrimination et de la prévalence.
+
+Pour un dérivé, les candidats communs au parent, supplémentaires admis et retirés
+sont distingués par identité scientifique. Les paramètres modifiés et les
+motifs de qualification sont conservés dans la référence. Les candidats retirés
+n'ont aucune performance Forward imputée dans le dérivé ; le Forward du parent
+peut être sélectionné dans Comparer. Une trajectoire favorable d'un candidat
+supplémentaire constitue un indice de faux négatif du parent, sans changer une
+règle de qualification ni déclarer automatiquement un gagnant.
+
+Les résultats économiques existants restent la source des rendements, P&L et
+drawdowns (notionnel de 10 000 par signal, sans frais ni contraintes de capital).
+Les nouveaux fichiers `forward_diagnostic_metrics.csv`,
+`forward_probability_bins.csv` et `forward_diagnostic_manifest.json` sont
+dérivés des observations persistées. Le manifest d'analyse référence la T0
+partagée et le diagnostic avec leurs empreintes. Leur génération est atomique,
+rejouable après interruption, et ne modifie pas les checkpoints de simulation.
+Les fichiers de diagnostic dans `results/` sont conservés par la politique
+actuelle de purge, qui supprime seulement les fichiers explicitement listés.
+
+Les runs historiques ne sont pas recalculés lors de l'affichage. Lorsque les
+artefacts temporels et observations sont conservés, un bouton permet de
+matérialiser explicitement le diagnostic. Une référence absente, ambiguë ou
+incompatible reste indisponible ; les données ne sont pas retéléchargées.
+Sans signal, la précision est indisponible ; avec une seule classe, l'AUC est
+indisponible. Les effectifs faibles, particulièrement à +21, et les modèles
+corrélés limitent l'interprétation des comparaisons.
+
+**Roadmap scientifique :** drift des features et régimes de marché restent
+différés jusqu'à la définition d'un protocole de référence et de persistance.

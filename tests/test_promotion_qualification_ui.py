@@ -134,7 +134,7 @@ def test_shared_grid_shows_panel_only_for_selected_candidate(monkeypatch, tmp_pa
         rows = [0] if len(displayed) == 1 else []
         return SimpleNamespace(selection=SimpleNamespace(rows=rows))
 
-    monkeypatch.setattr(streamlit_app.st, "dataframe", dataframe)
+    monkeypatch.setattr(streamlit_app, "render_dataframe", dataframe)
     monkeypatch.setattr(
         streamlit_app, "_render_upstream_qualification_diagnostic",
         lambda chosen, **kwargs: panels.append((chosen["Combinaison"], kwargs)),

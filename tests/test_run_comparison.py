@@ -201,6 +201,7 @@ def test_homogeneous_comparison_modes_and_mixed_rejection(count):
     assert comparison_types(["walk_forward"] * count) == "walk_forward"
     assert comparison_types(["end_to_end"] * count) == "end_to_end"
     assert comparison_types(["predictor_prefilter"] * count) == "predictor_prefilter"
+    assert comparison_types(["forward_simulation"] * count) == "forward_simulation"
     assert comparison_types(["walk_forward", "end_to_end"]) is None
     assert comparison_types(["predictor_prefilter", "walk_forward"]) is None
     assert comparison_types(["predictor_prefilter", "end_to_end"]) is None
@@ -565,6 +566,7 @@ def test_comparison_ui_keeps_mixed_wf_contract_separate_from_holdout_population(
     )
     monkeypatch.setattr(streamlit_app, "st", fake_st)
     monkeypatch.setattr(streamlit_app, "load_end_to_end_comparison", lambda _root, run_id: analyses[run_id])
+    monkeypatch.setattr(streamlit_app, "render_dataframe", fake_st.dataframe)
 
     streamlit_app._render_end_to_end_comparison(["pit-old", "pit-new"])
 

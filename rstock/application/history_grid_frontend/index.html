@@ -18,13 +18,35 @@ input { accent-color: var(--primary, #ff4b4b); cursor: pointer; }
 .pager { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 12px; }
 .pager button { color: inherit; background: var(--secondary, #f5f6f8); border: 1px solid var(--border, #ddd); border-radius: 4px; padding: 4px 8px; cursor: pointer; }
 .empty { padding: 16px; opacity: .65; }
+.toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 0 8px; }
+.toolbar input { flex: 1; min-width: 120px; padding: 6px; color: inherit; background: var(--bg, white); border: 1px solid var(--border, #ddd); border-radius: 4px; }
+.toolbar button, dialog button { color: inherit; background: var(--secondary, #f5f6f8); border: 1px solid var(--border, #ddd); border-radius: 4px; padding: 5px 8px; cursor: pointer; }
+.help { margin-left: 6px; border: 0; background: transparent; color: inherit; cursor: help; }
+.header-label { display: inline-block; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.resize { position: absolute; right: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
+td.range { outline: 1px solid var(--primary, #ff4b4b); outline-offset: -1px; background: var(--secondary, #f5f6f8); }
+.progress-track { min-width: 100px; height: 6px; background: var(--secondary, #eee); border-radius: 3px; margin-top: 4px; }
+.progress-fill { height: 100%; background: var(--primary, #ff4b4b); border-radius: 3px; }
+.sparkline { width: 160px; height: 28px; display: block; }
+.pinned { position: sticky; left: 0; z-index: 1; background: var(--bg, white); }
+th.pinned { z-index: 3; background: var(--secondary, #f5f6f8); }
+dialog { color: var(--text, #31333f); background: var(--bg, white); border: 1px solid var(--border, #ddd); border-radius: 6px; max-width: min(90vw, 700px); max-height: 75vh; overflow: auto; }
+dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.status { font-size: 11px; opacity: .65; }
+:fullscreen { padding: 10px; background: var(--bg, white); }
 @media (max-width: 600px) { th, td { padding: 5px 7px; } .pager { flex-wrap: wrap; } }
 </style></head>
-<body><div class="grid" id="grid" role="region" aria-label="Grille de données"><table><thead></thead><tbody></tbody></table></div><div class="pager" id="pager"></div>
+<body><div class="toolbar" id="toolbar"></div><div class="grid" id="grid" role="region" aria-label="Grille de données"><table><thead></thead><tbody></tbody></table></div><div class="pager" id="pager"></div><dialog id="detail"></dialog><div class="status" id="status" aria-live="polite"></div>
+<script src="grid_tools.js"></script>
 <script>
 const selected = new Set();
 let rows = [], columns = [], signature = null, sortColumn = null, descending = false;
 let options = {}, rowId = "Run ID", mode = "multi", pageSize = null, page = 0, maxHeight = 520, emptyMessage = "Aucune donnée à afficher.";
+let allColumns = [], cellStyles = {}, toolbarEnabled = true, query = "", range = null, pageView = [], activeColumns = [];
+const hiddenColumns = new Set();
+const resizedColumns = new Map();
+let userColumnOrder = null;
+let lastServerSelection = null;
 function identity(row) { return String(row[rowId]); }
 function toggle(id) {
   if (mode === "none") return;
@@ -45,18 +67,21 @@ function publish() { send("streamlit:setComponentValue", {value: [...selected], 
 function draw() {
   const head = document.querySelector("thead"), body = document.querySelector("tbody");
   head.replaceChildren(); body.replaceChildren();
-  const visible = [...rows];
+  const viewColumns = columns.filter(column => !hiddenColumns.has(column));
+  activeColumns = viewColumns;
+  const visible = rows.filter(row => !query || viewColumns.some(column => String(displayValue(row, column)).toLocaleLowerCase('fr').includes(query.toLocaleLowerCase('fr'))));
   if (sortColumn) visible.sort((a,b) => {
     const left = a[sortColumn], right = b[sortColumn];
     const result = typeof left === "number" && typeof right === "number" ? left - right : String(left ?? "").localeCompare(String(right ?? ""), "fr", {numeric:true});
     return result * (descending ? -1 : 1);
   });
-  const pages = pageSize ? Math.max(1, Math.ceil(rows.length / pageSize)) : 1;
+  const pages = pageSize ? Math.max(1, Math.ceil(visible.length / pageSize)) : 1;
   page = Math.min(page, pages - 1);
   const pageRows = pageSize ? visible.slice(page * pageSize, (page + 1) * pageSize) : visible;
+  pageView = pageRows;
   const header = document.createElement("tr"), selectionHeader = document.createElement("th");
   selectionHeader.className = "selection";
-  const all = document.createElement("input"); all.type = "checkbox"; all.ariaLabel = "Sélectionner tous les runs de cette page";
+  const all = document.createElement("input"); all.type = "checkbox"; all.ariaLabel = "Sélectionner toutes les lignes de cette page";
   all.checked = pageRows.length > 0 && pageRows.every(row => selected.has(identity(row)));
   all.indeterminate = selected.size > 0 && !all.checked;
   all.addEventListener("change", () => {
@@ -65,27 +90,38 @@ function draw() {
   });
   if (mode === "multi") selectionHeader.append(all);
   if (mode !== "none") header.append(selectionHeader);
-  columns.forEach(column => {
+  viewColumns.forEach(column => {
     const option = options[column] || {};
-    const cell = document.createElement("th"); cell.textContent = option.label || column;
+    const cell = document.createElement("th"), label = document.createElement("span");
+    label.className = "header-label"; label.textContent = option.label || column;
+    if (option.max_width) label.style.maxWidth = Math.max(35, option.max_width - (option.help ? 35 : 10)) + "px";
+    cell.append(label);
     cell.title = option.help || ""; styleColumn(cell, option);
+    if (option.pinned) cell.classList.add("pinned");
+    if (option.help) {
+      const help = document.createElement("button"); help.className = "help"; help.textContent = "ⓘ";
+      help.title = option.help; help.ariaLabel = "Aide : " + (option.label || column);
+      help.addEventListener("click", event => { event.stopPropagation(); showDetail(option.label || column, option.help); });
+      cell.append(help);
+    }
+    addResize(cell, column);
     cell.tabIndex = 0; cell.ariaSort = sortColumn === column ? (descending ? "descending" : "ascending") : "none";
-    function sort() { descending = sortColumn === column ? !descending : false; sortColumn = column; page = 0; draw(); }
+    function sort() { descending = sortColumn === column ? !descending : false; sortColumn = column; page = 0; range = null; draw(); }
     cell.addEventListener("click", sort);
-    cell.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); sort(); } });
+    cell.addEventListener("keydown", event => { if (event.target === cell && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); sort(); } });
     header.append(cell);
   });
   head.append(header);
-  pageRows.forEach(row => {
+  pageRows.forEach((row, rowIndex) => {
     const tr = document.createElement("tr"), id = identity(row);
     if (selected.has(id)) tr.className = "selected";
     const selectionCell = document.createElement("td"); selectionCell.className = "selection";
     const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(id);
     check.ariaLabel = "Sélectionner " + id;
     check.addEventListener("click", event => event.stopPropagation());
-    check.addEventListener("change", () => toggle(id));
+    check.addEventListener("change", () => { range = null; toggle(id); });
     selectionCell.append(check); if (mode !== "none") tr.append(selectionCell);
-    columns.forEach(column => {
+    viewColumns.forEach((column, columnIndex) => {
       const cell = document.createElement("td");
       const option = options[column] || {};
       const secondaryKey = option.secondary_key;
@@ -103,47 +139,61 @@ function draw() {
         cell.append(text); cell.title = value;
       }
       styleColumn(cell, option);
+      renderSpecialCell(cell, row, column, option);
+      applyCellStyle(cell, (cellStyles[id] || {})[column] || {});
+      if (option.pinned) cell.classList.add("pinned");
+      cell.dataset.row = rowIndex; cell.dataset.column = columnIndex;
+      cell.addEventListener("pointerdown", event => { if (event.button === 0) range = {start: [rowIndex, columnIndex], end: [rowIndex, columnIndex], dragged: false}; });
+      cell.addEventListener("pointerenter", event => { if (event.buttons === 1 && range) { range.end = [rowIndex, columnIndex]; range.dragged = true; paintRange(); } });
+      cell.addEventListener("dblclick", event => { event.stopPropagation(); showDetail(option.label || column, String(displayValue(row, column))); });
       if (secondaryKey && option.max_width) for (const child of cell.children) child.style.maxWidth = option.max_width + "px";
       tr.append(cell);
     });
     if (mode !== "none") {
       tr.tabIndex = 0; tr.ariaSelected = selected.has(id);
-      tr.addEventListener("click", () => toggle(id));
+      tr.addEventListener("click", () => { if (range && range.dragged) return; toggle(id); });
       tr.addEventListener("keydown", event => { if (event.target === tr && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); toggle(id); } });
     }
     body.append(tr);
   });
-  if (!rows.length) { const tr = document.createElement("tr"), cell = document.createElement("td"); cell.colSpan = columns.length + (mode === "none" ? 0 : 1); cell.className = "empty"; cell.textContent = emptyMessage; tr.append(cell); body.append(tr); }
+  if (!visible.length) { const tr = document.createElement("tr"), cell = document.createElement("td"); cell.colSpan = viewColumns.length + (mode === "none" ? 0 : 1); cell.className = "empty"; cell.textContent = rows.length ? "Aucun résultat pour cette recherche." : emptyMessage; tr.append(cell); body.append(tr); }
   const pager = document.getElementById("pager"); pager.replaceChildren();
   if (pageSize && rows.length) {
     const previous = document.createElement("button"), next = document.createElement("button"), label = document.createElement("span");
     previous.textContent = "Précédent"; next.textContent = "Suivant";
     previous.disabled = page === 0; next.disabled = page === pages - 1;
-    previous.onclick = () => { page--; draw(); }; next.onclick = () => { page++; draw(); };
-    label.textContent = `${rows.length} lignes · page ${page + 1} / ${pages}`;
+    previous.onclick = () => { page--; range = null; draw(); }; next.onclick = () => { page++; range = null; draw(); };
+    label.textContent = `${visible.length} lignes · page ${page + 1} / ${pages}`;
     pager.append(previous, label, next);
   }
-  const height = Math.min(maxHeight, 55 + Math.max(1, pageRows.length) * 45);
+  const height = document.fullscreenElement ? window.innerHeight - 95 : Math.min(maxHeight, 55 + Math.max(1, pageRows.length) * 45);
   document.getElementById("grid").style.height = (height - 2) + "px";
-  send("streamlit:setFrameHeight", {height: height + (pageSize && rows.length ? 36 : 0)});
+  paintRange();
+  send("streamlit:setFrameHeight", {height: height + (pageSize && rows.length ? 36 : 0) + (toolbarEnabled ? 48 : 0) + 20});
 }
 window.addEventListener("message", event => {
   if (event.source !== window.parent || event.data.type !== "streamlit:render") return;
   const args = event.data.args, nextRows = args.rows || [];
   rowId = args.row_id || "Run ID"; mode = args.selection_mode || "multi";
   options = args.column_options || {}; pageSize = args.page_size || null;
+  for (const [column, width] of resizedColumns) if (options[column]) options[column] = {...options[column], width, min_width: width, max_width: width};
+  allColumns = args.all_columns || args.columns; cellStyles = args.cell_styles || {}; toolbarEnabled = args.toolbar !== false;
   maxHeight = args.max_height || 520; emptyMessage = args.empty_message || "Aucune donnée à afficher.";
   const nextSignature = JSON.stringify([rowId, mode, pageSize, nextRows.map(identity)]);
-  if (signature !== nextSignature) {
+  const serverSelection = JSON.stringify(args.selected_ids || []);
+  if (signature !== nextSignature || lastServerSelection !== serverSelection) {
     selected.clear(); (args.selected_ids || []).forEach(id => { if (nextRows.some(row => identity(row) === id) && mode !== "none" && (mode !== "single" || !selected.size)) selected.add(id); });
-    sortColumn = null; page = 0; signature = nextSignature;
+    if (signature !== nextSignature) { sortColumn = null; page = 0; range = null; }
+    signature = nextSignature; lastServerSelection = serverSelection;
   }
   rows = nextRows; columns = args.columns;
+  if (userColumnOrder) columns = [...userColumnOrder.filter(c => allColumns.includes(c)), ...columns.filter(c => !userColumnOrder.includes(c))];
   const theme = event.data.theme || {};
   for (const [key, value] of Object.entries({text:theme.textColor, bg:theme.backgroundColor, secondary:theme.secondaryBackgroundColor, primary:theme.primaryColor})) {
     if (value) document.documentElement.style.setProperty("--" + key, value);
   }
   if (theme.font) document.body.style.fontFamily = theme.font;
+  drawToolbar();
   draw();
 });
 send("streamlit:componentReady", {apiVersion: 1});

@@ -23,6 +23,9 @@ dev = ["pytest>=8.0"]
 [tool.setuptools.packages.find]
 include = ["rstock*"]
 
+[tool.setuptools.package-data]
+"rstock.application" = ["history_grid_frontend/*.html", "history_grid_frontend/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

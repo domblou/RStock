@@ -1,5 +1,10 @@
 # Standardisation des grilles RStock
 
+> Migration du plan approuvé réalisée : les 82 points de rendu utilisent maintenant
+> `grid_dataframe.dataframe`, au-dessus du même composant que la grille Historique.
+> Voir [le compte rendu de migration](grid_migration_report.md).
+> L'inventaire et le plan ci-dessous décrivent l'état avant cette migration.
+
 ## Périmètre et état
 
 Inventaire par analyse AST de `rstock/application/streamlit_app.py` et recherche dans

@@ -121,6 +121,12 @@ def test_completed_scientific_runs_purge_only_explicit_heavy_artifacts(
     heavy.write_bytes(b"x" * 37)
     unknown = directory / "results" / "future_unknown_artifact.bin"
     unknown.write_bytes(b"keep")
+    diagnostic_files = [directory / "results" / name for name in (
+        "forward_t0_reference.json", "forward_diagnostic_manifest.json",
+        "forward_diagnostic_metrics.csv", "forward_probability_bins.csv",
+    )]
+    for path in diagnostic_files:
+        path.write_bytes(b"diagnostic evidence")
     checkpoint = directory / "checkpoints" / "batches" / "payload.pkl"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"checkpoint")
@@ -143,6 +149,7 @@ def test_completed_scientific_runs_purge_only_explicit_heavy_artifacts(
     assert not (directory / "checkpoints").exists()
     assert not (directory / "_working").exists()
     assert unknown.read_bytes() == b"keep"
+    assert all(path.read_bytes() == b"diagnostic evidence" for path in diagnostic_files)
     for name in ESSENTIALS[job_type]:
         assert (directory / "results" / name).exists()
     assert (directory / "config.json").exists()

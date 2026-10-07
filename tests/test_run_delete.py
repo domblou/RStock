@@ -391,11 +391,11 @@ def test_crashed_staging_is_reconciled_on_next_history_read(tmp_path, monkeypatc
             raise KeyboardInterrupt("crash")
         return original(path, target)
 
-    def skip_post_crash_recovery():
+    def skip_post_crash_recovery(**kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
-            original_recover()
+            original_recover(**kwargs)
 
     monkeypatch.setattr(Path, "rename", crash)
     monkeypatch.setattr(service, "_recover_locked", skip_post_crash_recovery)

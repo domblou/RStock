@@ -132,6 +132,10 @@ def test_complete_target_observation_remains_binary_and_evaluated(tmp_path, monk
     assert summary["evaluability_rate"] == 1.0
     assert observations.loc[0, "outcome"] == expected
     assert bool(observations.loc[0, "correct_direction"]) is (expected == 1)
+    from rstock.application.forward_diagnostic import load_forward_diagnostic
+    reference, diagnostics, _bins = load_forward_diagnostic(output)
+    assert reference["models"][0]["holdout_comparable"]["availability"] == "unavailable_missing_holdout_predictions"
+    assert diagnostics.loc[0, "auc_status"] == "unavailable_single_class"
 
 
 def test_non_finite_calculated_metric_has_a_distinct_reason():
