@@ -23,7 +23,7 @@ from .domain import (
     JobStatus,
     JobType,
 )
-from .processes import process_alive
+from .processes import process_alive, process_creation_time
 from .prefilter_experiments import prefilter_checkpoint_batch_sizes
 from .repository import RunRepository, utc_now
 from rstock.checkpoints import (
@@ -244,6 +244,7 @@ class RunService:
                 )
                 status = self.repository.status(run_id)
                 status["launcher_pid"] = pid
+                status["launcher_pid_created_at"] = process_creation_time(pid)
                 self.repository.write_json(run_id, "status.json", status)
             except Exception as error:
                 self.repository.append_log(run_id, f"Worker launch failed: {error}")
@@ -290,6 +291,7 @@ class RunService:
                 )
                 status = self.repository.status(run_id)
                 status["launcher_pid"] = pid
+                status["launcher_pid_created_at"] = process_creation_time(pid)
                 self.repository.write_json(run_id, "status.json", status)
             except Exception as error:
                 self.repository.append_log(run_id, f"Worker launch failed: {error}")
@@ -320,6 +322,7 @@ class RunService:
                 )
                 status = self.repository.status(run_id)
                 status["launcher_pid"] = pid
+                status["launcher_pid_created_at"] = process_creation_time(pid)
                 self.repository.write_json(run_id, "status.json", status)
             except Exception as error:
                 self.repository.append_log(run_id, f"Worker launch failed: {error}")
@@ -382,6 +385,7 @@ class RunService:
                 )
                 status = self.repository.status(run_id)
                 status["launcher_pid"] = pid
+                status["launcher_pid_created_at"] = process_creation_time(pid)
                 self.repository.write_json(run_id, "status.json", status)
             except Exception as error:
                 self.repository.append_log(run_id, f"Worker launch failed: {error}")
@@ -504,6 +508,7 @@ class RunService:
         latest = self.repository.status(run_id)
         latest.update(
             launcher_pid=pid,
+            launcher_pid_created_at=process_creation_time(pid),
             dispatch_state="launched",
             dispatch_launched_at=utc_now(),
             dispatch_last_error=None,
@@ -626,6 +631,7 @@ class RunService:
                 )
                 status = self.repository.status(run_id)
                 status["launcher_pid"] = pid
+                status["launcher_pid_created_at"] = process_creation_time(pid)
                 self.repository.write_json(run_id, "status.json", status)
             except Exception as error:
                 self.repository.append_log(run_id, f"Worker launch failed: {error}")
@@ -704,6 +710,7 @@ class RunService:
             )
             resumed = self.repository.status(run_id)
             resumed["launcher_pid"] = pid
+            resumed["launcher_pid_created_at"] = process_creation_time(pid)
             resumed["resume_requested"] = True
             self.repository.write_json(run_id, "status.json", resumed)
             return SubmissionResult(run_id, False)
@@ -750,6 +757,7 @@ class RunService:
             )
             status = self.repository.status(new_run_id)
             status["launcher_pid"] = pid
+            status["launcher_pid_created_at"] = process_creation_time(pid)
             status["restarted_from_run"] = run_id
             self.repository.write_json(new_run_id, "status.json", status)
             return SubmissionResult(new_run_id, True)

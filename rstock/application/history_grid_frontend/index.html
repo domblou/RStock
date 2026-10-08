@@ -46,7 +46,7 @@ let allColumns = [], cellStyles = {}, toolbarEnabled = true, query = "", range =
 const hiddenColumns = new Set();
 const resizedColumns = new Map();
 let userColumnOrder = null;
-let lastServerSelection = null;
+let lastServerSelection = null, lastRenderSignature = null;
 function identity(row) { return String(row[rowId]); }
 function toggle(id) {
   if (mode === "none") return;
@@ -65,6 +65,9 @@ function send(type, data) {
 }
 function publish() { send("streamlit:setComponentValue", {value: [...selected], dataType: "json"}); }
 function draw() {
+  const grid = document.getElementById("grid");
+  const scroll = [grid.scrollLeft, grid.scrollTop];
+  const focused = grid.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const head = document.querySelector("thead"), body = document.querySelector("tbody");
   head.replaceChildren(); body.replaceChildren();
   const viewColumns = columns.filter(column => !hiddenColumns.has(column));
@@ -81,7 +84,7 @@ function draw() {
   pageView = pageRows;
   const header = document.createElement("tr"), selectionHeader = document.createElement("th");
   selectionHeader.className = "selection";
-  const all = document.createElement("input"); all.type = "checkbox"; all.ariaLabel = "Sélectionner toutes les lignes de cette page";
+  const all = document.createElement("input"); all.type = "checkbox"; all.dataset.focus = "select-all"; all.ariaLabel = "Sélectionner toutes les lignes de cette page";
   all.checked = pageRows.length > 0 && pageRows.every(row => selected.has(identity(row)));
   all.indeterminate = selected.size > 0 && !all.checked;
   all.addEventListener("change", () => {
@@ -95,11 +98,13 @@ function draw() {
     const cell = document.createElement("th"), label = document.createElement("span");
     label.className = "header-label"; label.textContent = option.label || column;
     if (option.max_width) label.style.maxWidth = Math.max(35, option.max_width - (option.help ? 35 : 10)) + "px";
+    cell.dataset.focus = "header:" + column;
     cell.append(label);
     cell.title = option.help || ""; styleColumn(cell, option);
     if (option.pinned) cell.classList.add("pinned");
     if (option.help) {
       const help = document.createElement("button"); help.className = "help"; help.textContent = "ⓘ";
+      help.dataset.focus = "help:" + column;
       help.title = option.help; help.ariaLabel = "Aide : " + (option.label || column);
       help.addEventListener("click", event => { event.stopPropagation(); showDetail(option.label || column, option.help); });
       cell.append(help);
@@ -114,9 +119,11 @@ function draw() {
   head.append(header);
   pageRows.forEach((row, rowIndex) => {
     const tr = document.createElement("tr"), id = identity(row);
+    tr.dataset.identity = id; tr.dataset.focus = "row:" + id;
     if (selected.has(id)) tr.className = "selected";
     const selectionCell = document.createElement("td"); selectionCell.className = "selection";
     const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(id);
+    check.dataset.focus = "check:" + id;
     check.ariaLabel = "Sélectionner " + id;
     check.addEventListener("click", event => event.stopPropagation());
     check.addEventListener("change", () => { range = null; toggle(id); });
@@ -169,6 +176,8 @@ function draw() {
   const height = document.fullscreenElement ? window.innerHeight - 95 : Math.min(maxHeight, 55 + Math.max(1, pageRows.length) * 45);
   document.getElementById("grid").style.height = (height - 2) + "px";
   paintRange();
+  grid.scrollLeft = scroll[0]; grid.scrollTop = scroll[1];
+  if (focused) [...grid.querySelectorAll("[data-focus]")].find(el => el.dataset.focus === focused)?.focus({preventScroll: true});
   send("streamlit:setFrameHeight", {height: height + (pageSize && rows.length ? 36 : 0) + (toolbarEnabled ? 48 : 0) + 20});
 }
 window.addEventListener("message", event => {
@@ -183,7 +192,10 @@ window.addEventListener("message", event => {
   const serverSelection = JSON.stringify(args.selected_ids || []);
   if (signature !== nextSignature || lastServerSelection !== serverSelection) {
     selected.clear(); (args.selected_ids || []).forEach(id => { if (nextRows.some(row => identity(row) === id) && mode !== "none" && (mode !== "single" || !selected.size)) selected.add(id); });
-    if (signature !== nextSignature) { sortColumn = null; page = 0; range = null; }
+    if (signature !== nextSignature) {
+      if (!args.preserve_interactions) sortColumn = null;
+      page = 0; range = null;
+    }
     signature = nextSignature; lastServerSelection = serverSelection;
   }
   rows = nextRows; columns = args.columns;
@@ -193,8 +205,22 @@ window.addEventListener("message", event => {
     if (value) document.documentElement.style.setProperty("--" + key, value);
   }
   if (theme.font) document.body.style.fontFamily = theme.font;
-  drawToolbar();
-  draw();
+  const nextRenderSignature = JSON.stringify([rows, columns, options, allColumns, cellStyles, toolbarEnabled, pageSize, maxHeight, emptyMessage, mode, rowId, theme]);
+  if (lastRenderSignature !== nextRenderSignature) {
+    drawToolbar(); draw(); lastRenderSignature = nextRenderSignature;
+  } else {
+    // Selection acknowledgements and identical server renders preserve the DOM.
+    document.querySelectorAll("tbody tr[data-identity]").forEach(tr => {
+      const checked = selected.has(tr.dataset.identity);
+      tr.classList.toggle("selected", checked); tr.ariaSelected = checked;
+      const input = tr.querySelector(".selection input"); if (input) input.checked = checked;
+    });
+    const all = document.querySelector("thead .selection input");
+    if (all) {
+      all.checked = pageView.length > 0 && pageView.every(row => selected.has(identity(row)));
+      all.indeterminate = selected.size > 0 && !all.checked;
+    }
+  }
 });
 send("streamlit:componentReady", {apiVersion: 1});
 </script></body></html>

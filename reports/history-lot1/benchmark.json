@@ -1,0 +1,74 @@
+{
+  "python": "3.12.10",
+  "root": "C:\\Dev\\RStock\\runs",
+  "terminal_runs": 562,
+  "measurement": "index + filters + pagination + grid row formatting",
+  "results": {
+    "before": {
+      "median_seconds": 3.294452900066972,
+      "samples": [
+        {
+          "seconds": 1.5590420998632908,
+          "json_reads": 1837,
+          "bytes_read": 154157968,
+          "summary_reads": 373
+        },
+        {
+          "seconds": 3.294452900066972,
+          "json_reads": 1837,
+          "bytes_read": 154157968,
+          "summary_reads": 373
+        },
+        {
+          "seconds": 4.329939200077206,
+          "json_reads": 1837,
+          "bytes_read": 154157968,
+          "summary_reads": 373
+        }
+      ],
+      "filtered_runs": 215,
+      "visible_rows": 25
+    },
+    "after_cold": {
+      "median_seconds": 1.1092203999869525,
+      "samples": [
+        {
+          "seconds": 1.1067600999958813,
+          "json_reads": 1142,
+          "bytes_read": 16358133,
+          "summary_reads": 25
+        },
+        {
+          "seconds": 1.1092203999869525,
+          "json_reads": 1142,
+          "bytes_read": 16358133,
+          "summary_reads": 25
+        },
+        {
+          "seconds": 1.112379799829796,
+          "json_reads": 1142,
+          "bytes_read": 16358133,
+          "summary_reads": 25
+        }
+      ],
+      "filtered_runs": 215,
+      "visible_rows": 25
+    },
+    "after_cached": {
+      "median_seconds": 0.6313444999977946,
+      "samples": [
+        {
+          "seconds": 0.6198066000360996
+        },
+        {
+          "seconds": 0.6313444999977946
+        },
+        {
+          "seconds": 0.6376801000442356
+        }
+      ],
+      "filtered_runs": 215,
+      "visible_rows": 25
+    }
+  }
+}

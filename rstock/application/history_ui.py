@@ -702,3 +702,14 @@ def already_promoted(
         if model_id == scientific_id:
             return model
     return None
+
+
+def reconcile_history_selection(previous, visible_ids, selected_ids, filtered_ids):
+    """Keep off-page selections, while dropping filtered/removed runs."""
+    if isinstance(previous, str):
+        previous = [previous]
+    visible, allowed = set(visible_ids), set(filtered_ids)
+    return list(dict.fromkeys(
+        [run_id for run_id in previous if run_id not in visible and run_id in allowed]
+        + [run_id for run_id in selected_ids if run_id in visible and run_id in allowed]
+    ))

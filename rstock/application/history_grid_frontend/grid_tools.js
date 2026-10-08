@@ -114,8 +114,8 @@ function columnMenu() {
   const close = document.createElement("button"); close.textContent="Fermer"; close.onclick=()=>dialog.close(); dialog.append(close); dialog.showModal();
 }
 function drawToolbar() {
-  const bar = document.getElementById("toolbar"); bar.replaceChildren(); bar.hidden = !toolbarEnabled;
-  if (!toolbarEnabled) return;
+  const bar = document.getElementById("toolbar"); bar.hidden = !toolbarEnabled;
+  if (!toolbarEnabled || bar.childElementCount) return;
   const search = document.createElement("input"); search.type="search"; search.placeholder="Rechercher dans la grille"; search.ariaLabel=search.placeholder; search.value=query;
   search.oninput = () => { query=search.value; page=0; range=null; draw(); }; bar.append(search);
   for (const [name, action] of [["Exporter CSV",exportCSV], ["Copier",()=>copyText(copyMatrix())], ["Colonnes",columnMenu], ["Plein écran",async()=>{ try { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); } catch (_) { document.getElementById('status').textContent='Le navigateur ne permet pas le plein écran.'; } }]]) {

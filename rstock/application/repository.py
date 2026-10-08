@@ -440,11 +440,14 @@ class RunRepository:
         if target == JobStatus.RUNNING:
             status["started_at"] = now
             status["pid"] = pid
+            from .processes import process_creation_time
+            status["pid_created_at"] = process_creation_time(pid)
             status["finished_at"] = None
             status["error"] = None
             status["cancellation_requested"] = False
         if target == JobStatus.PENDING:
             status["pid"] = None
+            status["pid_created_at"] = None
             status["finished_at"] = None
             status["error"] = None
             status["cancellation_requested"] = False

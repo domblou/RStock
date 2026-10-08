@@ -71,6 +71,23 @@ def test_completed_purged_root_can_be_deleted(tmp_path):
     assert run_id not in repository.list_run_ids()
 
 
+def test_delete_accepts_proven_reused_pid_in_historical_status(tmp_path, monkeypatch):
+    from datetime import datetime
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _run(repository, JobType.WALK_FORWARD, JobStatus.COMPLETED)
+    status = repository.status(run_id)
+    status.pop("pid_created_at", None)
+    status.update(pid=123, launcher_pid=123)
+    repository.write_json(run_id, "status.json", status)
+    monkeypatch.setattr("rstock.application.run_storage.process_alive", lambda pid: pid == 123)
+    finished = datetime.fromisoformat(status["finished_at"]).timestamp()
+    monkeypatch.setattr("rstock.application.processes.process_creation_time", lambda _: finished + 60)
+    service = RunDeletionService(repository)
+    plan = service.preview(run_id)
+    service.delete_many(plan)
+    assert not repository.run_directory(run_id).exists()
+
+
 @pytest.mark.parametrize("root_status", [JobStatus.FAILED, JobStatus.COMPLETED])
 def test_pipeline_deletes_completed_owned_temporal_forced_and_scientific_children(tmp_path, root_status):
     repository = RunRepository(tmp_path / "runs")

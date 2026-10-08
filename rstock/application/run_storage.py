@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .domain import JobStatus, JobType
-from .processes import process_alive
+from .processes import process_alive, process_identity_matches
 from .repository import RunRepository, utc_now
 
 
@@ -696,14 +696,20 @@ class RunStorageService:
         self, run_id: str, status: Mapping[str, object]
     ) -> bool:
         for key in ("pid", "launcher_pid"):
-            if process_alive(status.get(key)):
+            if process_alive(status.get(key)) and process_identity_matches(
+                status.get(key), expected_created_at=status.get(f"{key}_created_at"),
+                existed_by=status.get("finished_at"),
+            ):
                 return True
         owner = self.repository.run_directory(run_id) / ".worker.lock" / "owner.json"
         if not owner.is_file():
             return False
         try:
             values = json.loads(owner.read_text(encoding="utf-8"))
-            return values.get("run_id") == run_id and process_alive(values.get("pid"))
+            return (values.get("run_id") == run_id and process_alive(values.get("pid"))
+                    and process_identity_matches(values.get("pid"),
+                        expected_created_at=values.get("pid_created_at"),
+                        existed_by=values.get("acquired_at")))
         except (OSError, ValueError):
             return False
 

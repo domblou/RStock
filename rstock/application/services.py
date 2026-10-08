@@ -308,6 +308,11 @@ class ExperimentService:
     def runs(self) -> list[dict[str, object]]:
         return self.run_service.list()
 
+    def history_index(self, *, job_types: frozenset[str] | None = None):
+        """Return lazy display records with file-level cache invalidation."""
+        from .history_index import history_index
+        return history_index(self.run_service, job_types=job_types)
+
     def history_runs(
         self, *, job_types: frozenset[str] | None = None
     ) -> list[HistoryRunSummary]:

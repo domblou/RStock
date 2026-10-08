@@ -1,10 +1,10 @@
 """Presentation used exclusively by the main History grid."""
 from collections.abc import Mapping
-import json
 from pathlib import Path
 
 import pandas as pd
 from .grid import _component, render_grid
+from .history_index import cached_display_json
 
 from .history_ui import JOB_LABELS, _derived_changes_text, _history_universe_label, _prepared_market_last_date
 
@@ -62,7 +62,7 @@ def _associated_lineage(run_id, job_type, config, metadata, related_details, run
         # A source may be outside the grid's type filter. Read only its small status/config record.
         for filename in ("status.json", "config.json"):
             try:
-                values = json.loads((Path(runs_root) / associated / filename).read_text(encoding="utf-8"))
+                values = cached_display_json(Path(runs_root) / associated / filename)
                 associated_type = values.get("job_type") if isinstance(values, Mapping) else None
             except (OSError, ValueError, TypeError):
                 continue
@@ -83,7 +83,7 @@ def history_grid_row(row, detail, *, universe_labels, related_details, runs_root
         # Display only persisted information. Purged/missing legacy sources use the run snapshot.
         if Path(source).name == source and source not in {".", ".."}:
             try:
-                contract = json.loads((Path(runs_root) / source / "results/prefilter_contract.json").read_text(encoding="utf-8"))
+                contract = cached_display_json(Path(runs_root) / source / "results/prefilter_contract.json")
                 cutoff = _date(contract.get("cutoff")) if isinstance(contract, Mapping) else None
             except (OSError, ValueError, TypeError):
                 pass
@@ -115,6 +115,6 @@ def render_history_grid(records, *, key, selected_ids=()):
             "Run ID": {"secondary_key": "_lineage", "min_width": 250, "max_width": 300},
             "Univers": {"min_width": 170, "max_width": 250},
             "Dérivé": {"min_width": 140, "max_width": 230},
-        }, component=_component,
+        }, component=_component, preserve_interactions=True,
     )
     return {"selection": result["selection"]}

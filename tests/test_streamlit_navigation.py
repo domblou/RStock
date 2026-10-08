@@ -1373,7 +1373,7 @@ def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
         "def _experiments_page", 1
     )[0]
 
-    assert 'st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]' in history
+    assert 'st.session_state[selected_key] = reconcile_history_selection(' in history
     assert 'if selected_rows:' not in history
     assert 'actions = st.columns([1.2, 2.4, 2.6, 4])' in history
     assert '"Purger les données lourdes"' in history
@@ -1409,7 +1409,7 @@ def test_history_grid_uses_lightweight_records_and_defers_purge_eligibility():
     )[0]
     grid_setup = history.split("selection = render_history_grid", 1)[0]
 
-    assert "service.history_runs(job_types=allowed_types)" in history
+    assert "service.history_index(job_types=allowed_types)" in history
     assert "details_by_run_id" in history
     assert "service.run(" not in grid_setup
     assert "service.purge_eligibility" not in history

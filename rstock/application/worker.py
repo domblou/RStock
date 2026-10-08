@@ -21,7 +21,7 @@ from rstock.checkpoints import CheckpointManager
 
 from .domain import JobStatus, JobType
 from .orchestration_runtime import child_executor_context
-from .processes import process_alive
+from .processes import process_alive, process_creation_time, process_identity_matches
 from .prefilter_experiments import prefilter_checkpoint_batch_sizes
 from .repository import RunRepository
 from .runner import LocalProcessBackend, ProgressReporter, RunService
@@ -551,7 +551,10 @@ class RunLease:
                     owner, state = _read_owner(owner_path)
                     if state == "valid":
                         try:
-                            if _process_alive(int(owner["pid"])):
+                            if (_process_alive(int(owner["pid"])) and process_identity_matches(
+                                owner["pid"], expected_created_at=owner.get("pid_created_at"),
+                                existed_by=owner.get("acquired_at"),
+                            )):
                                 continue
                         except (TypeError, ValueError, KeyError):
                             pass
@@ -566,6 +569,7 @@ class RunLease:
                 claim_token = uuid.uuid4().hex
                 _atomic_owner_write(owner_path, {
                     "pid": os.getpid(), "run_id": self.run_id,
+                    "pid_created_at": process_creation_time(os.getpid()),
                     "token": claim_token,
                     "acquired_at": datetime.now(timezone.utc).isoformat(),
                 })

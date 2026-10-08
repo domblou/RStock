@@ -5649,7 +5649,8 @@ def _history_runs_panel(
     delete_result = st.session_state.pop(f"{key_prefix}-batch-delete-result", None)
     if isinstance(delete_result, BatchDeleteOutcome):
         _render_batch_delete_outcome(delete_result)
-    history_runs = service.history_runs(job_types=allowed_types)
+    st.button("Actualiser", key=f"{key_prefix}-refresh")
+    history_runs = service.history_index(job_types=allowed_types)
     runs = [record.status for record in history_runs]
     details_by_run_id = {
         str(record.status["run_id"]): record.detail() for record in history_runs
@@ -5698,7 +5699,13 @@ def _history_runs_panel(
     )
     selected_rows = _selected_rows(selection, len(rows))
     selected_key = f"{key_prefix}-selected-runs"
-    st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]
+    from rstock.application.history_ui import reconcile_history_selection
+    st.session_state[selected_key] = reconcile_history_selection(
+        st.session_state.get(selected_key, []),
+        [row.run_id for row in rows],
+        [rows[index].run_id for index in selected_rows],
+        [str(run["run_id"]) for run in filtered],
+    )
     selected = st.session_state.get(selected_key, [])
     if isinstance(selected, str):
         selected = [selected]
@@ -5801,6 +5808,11 @@ def _history_runs_panel(
             _history_navigation("comparison", selected)
         return
     st.warning("Sélectionnez au maximum 6 runs pour une comparaison.")
+
+
+# Widget interactions update History alone; no periodic timer is installed.
+if hasattr(st, "fragment"):
+    _history_runs_panel = st.fragment(_history_runs_panel)
 
 
 def _format_storage_size(size_bytes: int) -> str:
