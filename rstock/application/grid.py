@@ -44,7 +44,8 @@ def _value(value):
 def render_grid(records, *, columns, key, row_id, selected_ids=(),
                 selection_mode="multi", column_options=None, page_size=None,
                 max_height=520, empty_message="Aucune donnée à afficher.", component=None,
-                all_columns=None, toolbar=True, cell_styles=None, preserve_interactions=False):
+                all_columns=None, toolbar=True, cell_styles=None, preserve_interactions=False,
+                selection_sync=None):
     """Render the shared grid and return IDs plus original input row positions.
 
     column_options: per-column label, width/min_width/max_width, align, help,
@@ -73,7 +74,12 @@ def render_grid(records, *, columns, key, row_id, selected_ids=(),
         all_columns=list(all_columns) if all_columns is not None else list(columns),
         toolbar=toolbar, cell_styles=cell_styles or {}, preserve_interactions=preserve_interactions,
         default=[], key=key,
+        **({"selection_sync": selection_sync} if selection_sync is not None else {}),
     )
+    # Controlled History selection has already consumed the widget event before
+    # this render. Never reapply its (possibly obsolete-page) return value.
+    if selection_sync is not None:
+        selected = list(selected_ids)
     selected = set(selected) if isinstance(selected, list) and all(isinstance(item, str) for item in selected) else set()
     positions = [index for index, identity in enumerate(ids) if identity in selected]
     if selection_mode == "none":

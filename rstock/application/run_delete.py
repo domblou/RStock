@@ -15,6 +15,7 @@ from .domain import JobStatus, JobType, RunMetadata
 from .production_repository import ProductionRepository
 from .repository import RunRepository
 from .run_storage import RunStorageService
+from .dependency_index import DependencyIndex
 from .run_integrity import (
     graph_lock, journals, references, file_references, reference_free_run_document,
 )
@@ -57,37 +58,53 @@ def _walk_error(error: OSError) -> None:
     raise error
 
 
-def _reference_paths(directory: Path, *, scientific_run: bool = False) -> Iterator[Path]:
+def _reference_paths(directory: Path, *, scientific_run: bool = False, observer=None) -> Iterator[Path]:
     """Never silently skip unreadable folders or filesystem references."""
     if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
         raise ValueError(f"Lien interdit pendant le contrôle des références : {directory}")
     if not directory.exists():
+        if observer is not None and directory.parent.exists():
+            observer(directory.parent)
         return
-    for base, directories, files in os.walk(directory, followlinks=False, onerror=_walk_error):
-        for name in (*directories, *files):
-            path = Path(base) / name
-            if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
-                raise ValueError(f"Lien interdit pendant le contrôle des références : {path}")
-        relative = Path(base).relative_to(directory)
+    pending = [directory]
+    while pending:
+        base = pending.pop()
+        if observer is not None:
+            observer(base)
+        # DirEntry retains the filesystem's metadata. Avoid constructing and
+        # lstat-ing a Path for every numerical/checkpoint payload.
+        with os.scandir(base) as entries:
+            files = []
+            folders = []
+            for entry in entries:
+                if entry.is_symlink() or getattr(entry, "is_junction", lambda: False)():
+                    raise ValueError(f"Lien interdit pendant le contrôle des références : {entry.path}")
+                if entry.is_dir(follow_symlinks=False):
+                    folders.append(Path(entry.path))
+                else:
+                    files.append(entry.name)
+        pending.extend(reversed(sorted(folders)))
+        relative = base.relative_to(directory)
         for name in sorted(files):
-            path = Path(base) / name
             if scientific_run and reference_free_run_document(relative / name):
-                # These published schemas cannot carry references. Unknown
-                # JSON/checkpoint files and CSV lineage columns remain checked.
                 continue
-            if path.suffix in {".json", ".csv"}:
-                yield path
+            if Path(name).suffix in {".json", ".csv"}:
+                yield base / name
+
 
 
 class _DeletionGraph(RunRepository):
     """One read-only operation snapshot, shared by ownership and reference scans.
 
-    Nothing is cached between preparation and confirmation. Existing manifest
+    Source identities are rechecked at preparation and confirmation. Existing manifest
     validators and ownership traversal operate on this repository view unchanged.
     """
 
-    def __init__(self, repository: RunRepository) -> None:
+    def __init__(self, repository: RunRepository, *, force_index: bool = False, persist_index: bool = True) -> None:
         super().__init__(repository.root)
+        self.index = DependencyIndex(repository, force=force_index, persist=persist_index)
+        if self.root.exists():
+            self.index.observe(self.root)
         self.directories = tuple(sorted(
             path for path in self.root.iterdir() if path.is_dir() and path.name != ".deletions"
         )) if self.root.exists() else ()
@@ -99,7 +116,9 @@ class _DeletionGraph(RunRepository):
 
     def document(self, path: Path) -> Any:
         if path not in self.documents:
+            self.index.observe(path)
             self.documents[path] = json.loads(path.read_bytes().decode("utf-8"))
+            self.index.observe(path)
         return self.documents[path]
 
     def read_json(self, run_id: str, name: str) -> dict[str, Any]:
@@ -125,23 +144,23 @@ class _DeletionGraph(RunRepository):
 
     def file_edges(self, path: Path) -> tuple[tuple[str, str], ...]:
         if path not in self.edges:
+            values = self.index.iter_edges(path, lambda: (
+                references(self.document(path)) if path.suffix == ".json" else file_references(path)
+            ))
             if path.suffix == ".json":
-                self.edges[path] = tuple(references(self.document(path)))
+                self.edges[path] = tuple(values)
             else:
-                # Repeated rows do not define additional dependencies. Keep
-                # only column/target pairs in the confirmation fingerprint.
                 self.edges[path] = tuple(sorted({
-                    (field.rsplit(" : ", 1)[-1], target) for field, target in file_references(path)
+                    (field.rsplit(" : ", 1)[-1], target) for field, target in values
                 }))
         return self.edges[path]
 
-    def iter_file_edges(self, path: Path) -> Iterator[tuple[str, str]]:
+    def iter_file_edges(self, path: Path, targets: set[str] | None = None) -> Iterator[tuple[str, str]]:
         if path.suffix == ".json":
-            yield from self.file_edges(path)
+            yield from ((field, target) for field, target in self.file_edges(path)
+                        if targets is None or target in targets)
         else:
-            # External CSVs are not fingerprinted; stop at the first blocker
-            # instead of materializing a potentially very large table.
-            yield from file_references(path)
+            yield from self.index.iter_edges(path, lambda: file_references(path), targets=targets)
 
     def fingerprint(self, run_ids: tuple[str, ...]) -> str:
         digest = hashlib.sha256(b"deletion-graph-v2")
@@ -159,7 +178,7 @@ class _DeletionGraph(RunRepository):
             )
             if not full_state and not self.edges[path]:
                 continue
-            value = self.documents[path] if full_state else self.edges[path]
+            value = self.document(path) if full_state else self.edges[path]
             digest.update(json.dumps([relative.as_posix(), value], sort_keys=True, default=str,
                                      separators=(",", ":")).encode("utf-8"))
         return digest.hexdigest()
@@ -182,12 +201,12 @@ class RunDeletionService:
         for directory in graph.directories:
             other_id = directory.name
             self._directory(other_id)
-            for path in _reference_paths(directory, scientific_run=True):
+            for path in _reference_paths(directory, scientific_run=True, observer=graph.index.observe):
                 try:
                     if other_id in run_ids:
                         graph.file_edges(path)
                         continue
-                    for field, target in graph.iter_file_edges(path):
+                    for field, target in graph.iter_file_edges(path, run_ids):
                         if target in run_ids:
                             return (f"Le run conservé {other_id} référence {target} "
                                     f"({path.relative_to(directory)} : {field}).")
@@ -209,22 +228,31 @@ class RunDeletionService:
         for model in production.models():
             if _references(model.to_dict(), run_ids):
                 return f"Le modèle Production {model.model_id} référence ce périmètre."
-        for path in _reference_paths(production.root):
+        for path in _reference_paths(production.root, observer=graph.index.observe):
             try:
-                for field, target in graph.iter_file_edges(path):
+                for field, target in graph.iter_file_edges(path, run_ids):
                     if target in run_ids:
                         return f"Production référence {target} ({path.relative_to(production.root)} : {field})."
             except (OSError, ValueError) as error:
                 raise ValueError(f"Dépendances Production illisibles : {path}") from error
         simulations = self.repository.root.parent / "simulations"
-        for path in _reference_paths(simulations):
+        for path in _reference_paths(simulations, observer=graph.index.observe):
             try:
-                for field, target in graph.iter_file_edges(path):
+                for field, target in graph.iter_file_edges(path, run_ids):
                     if target in run_ids:
                         return f"La simulation conservée {path.parent.name} référence {target} ({field})."
             except (OSError, ValueError) as error:
                 raise ValueError(f"Dépendances de simulation illisibles : {path}") from error
         return None
+
+    def rebuild_dependency_index(self) -> dict[str, int]:
+        """Explicit full reconstruction, including files with preserved timestamps."""
+        with graph_lock(self.repository.root):
+            self._reconcile_staging_locked()
+            graph = _DeletionGraph(self.repository, force_index=True)
+            self._external_dependency(set(), graph)
+            graph.index.publish(complete=True)
+            return dict(graph.index.stats)
 
     def eligibility(self, run_id: str) -> DeleteEligibility:
         try:
@@ -246,6 +274,17 @@ class RunDeletionService:
         if not requested:
             raise ValueError("Sélection de suppression vide.")
         graph = _DeletionGraph(self.repository)
+        try:
+            plan = self._plan_from_graph(requested, graph)
+        except ValueError:
+            # Retain only completed per-file analyses even when a blocker was
+            # found. Partially consumed CSVs never enter the index.
+            graph.index.publish(complete=False)
+            raise
+        graph.index.publish(complete=True)
+        return plan
+
+    def _plan_from_graph(self, requested: tuple[str, ...], graph: _DeletionGraph) -> DeletePlan:
         storage = RunStorageService(graph)
         selected = set(requested)
         existing = set(graph.list_run_ids())

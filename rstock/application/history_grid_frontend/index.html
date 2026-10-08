@@ -47,6 +47,11 @@ const hiddenColumns = new Set();
 const resizedColumns = new Map();
 let userColumnOrder = null;
 let lastServerSelection = null, lastRenderSignature = null;
+// History is controlled by Streamlit. Local clicks are optimistic until the
+// server acknowledges their revision; older renders cannot undo newer clicks.
+const selectionClientId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+let selectionSync = null, selectionRevision = 0, pendingSelectionRevision = 0;
+let lastSelectionServerVersion = -1;
 function identity(row) { return String(row[rowId]); }
 function toggle(id) {
   if (mode === "none") return;
@@ -63,7 +68,15 @@ function styleColumn(cell, option) {
 function send(type, data) {
   window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
 }
-function publish() { send("streamlit:setComponentValue", {value: [...selected], dataType: "json"}); }
+function publish() {
+  let value = [...selected];
+  if (selectionSync) {
+    pendingSelectionRevision = ++selectionRevision;
+    value = {client_id: selectionClientId, revision: selectionRevision,
+             context: selectionSync.context, selected_ids: value};
+  }
+  send("streamlit:setComponentValue", {value, dataType: "json"});
+}
 function draw() {
   const grid = document.getElementById("grid");
   const scroll = [grid.scrollLeft, grid.scrollTop];
@@ -183,6 +196,15 @@ function draw() {
 window.addEventListener("message", event => {
   if (event.source !== window.parent || event.data.type !== "streamlit:render") return;
   const args = event.data.args, nextRows = args.rows || [];
+  const nextSync = args.selection_sync || null;
+  if (nextSync && nextSync.version < lastSelectionServerVersion) return;
+  const contextChanged = nextSync && (!selectionSync || nextSync.context !== selectionSync.context);
+  if (nextSync) {
+    lastSelectionServerVersion = nextSync.version;
+    if (contextChanged || (nextSync.ack?.client_id === selectionClientId &&
+        nextSync.ack.revision >= pendingSelectionRevision)) pendingSelectionRevision = 0;
+  }
+  selectionSync = nextSync;
   rowId = args.row_id || "Run ID"; mode = args.selection_mode || "multi";
   options = args.column_options || {}; pageSize = args.page_size || null;
   for (const [column, width] of resizedColumns) if (options[column]) options[column] = {...options[column], width, min_width: width, max_width: width};
@@ -190,8 +212,10 @@ window.addEventListener("message", event => {
   maxHeight = args.max_height || 520; emptyMessage = args.empty_message || "Aucune donnée à afficher.";
   const nextSignature = JSON.stringify([rowId, mode, pageSize, nextRows.map(identity)]);
   const serverSelection = JSON.stringify(args.selected_ids || []);
-  if (signature !== nextSignature || lastServerSelection !== serverSelection) {
-    selected.clear(); (args.selected_ids || []).forEach(id => { if (nextRows.some(row => identity(row) === id) && mode !== "none" && (mode !== "single" || !selected.size)) selected.add(id); });
+  if (nextSync || signature !== nextSignature || lastServerSelection !== serverSelection) {
+    if (!nextSync || !pendingSelectionRevision) {
+      selected.clear(); (args.selected_ids || []).forEach(id => { if (nextRows.some(row => identity(row) === id) && mode !== "none" && (mode !== "single" || !selected.size)) selected.add(id); });
+    }
     if (signature !== nextSignature) {
       if (!args.preserve_interactions) sortColumn = null;
       page = 0; range = null;

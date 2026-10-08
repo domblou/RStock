@@ -1367,14 +1367,12 @@ def test_history_can_duplicate_one_walk_forward_run_into_experiments():
     assert "st.switch_page(target_page)" in source
 
 
-def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
+def test_history_uses_compact_actions():
     source = APP.read_text(encoding="utf-8")
     history = source.split("def _history_runs_panel", 1)[1].split(
         "def _experiments_page", 1
     )[0]
 
-    assert 'st.session_state[selected_key] = reconcile_history_selection(' in history
-    assert 'if selected_rows:' not in history
     assert 'actions = st.columns([1.2, 2.4, 2.6, 4])' in history
     assert '"Purger les données lourdes"' in history
     assert "_history_purge_preview(service, selected_run_id)" in history
@@ -1407,7 +1405,7 @@ def test_history_grid_uses_lightweight_records_and_defers_purge_eligibility():
     history = source.split("def _history_runs_panel", 1)[1].split(
         "def _experiments_page", 1
     )[0]
-    grid_setup = history.split("selection = render_history_grid", 1)[0]
+    grid_setup = history.split("render_history_grid(", 1)[0]
 
     assert "service.history_index(job_types=allowed_types)" in history
     assert "details_by_run_id" in history

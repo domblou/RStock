@@ -28,3 +28,6 @@ __pycache__/
 .pytest_*/
 *.egg-info/
 .venv/
+
+# Reconstructible local dependency index
+.rstock-dependency-index/

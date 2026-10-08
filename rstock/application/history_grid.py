@@ -107,14 +107,32 @@ def history_grid_row(row, detail, *, universe_labels, related_details, runs_root
     }
 
 
-def render_history_grid(records, *, key, selected_ids=()):
-    """Return native-selection-shaped row indices, using stable IDs across sorting/pages."""
+def render_history_grid(records, *, key, selected_ids=(), selection_key=None, filtered_ids=None):
+    """Render stable run IDs, with an optional authoritative session selection.
+
+    selection_key enables the History protocol and requires the full filtered
+    population. Its widget event is consumed before emitting any render args.
+    The legacy uncontrolled contract remains available to other callers.
+    """
+    selection_sync = None
+    if selection_key is not None:
+        import streamlit as st
+        from .history_selection import prepare_history_selection
+
+        records = list(records)
+        state_key = f"{key}-selection-protocol"
+        selected_ids, state, selection_sync = prepare_history_selection(
+            st.session_state.get(selection_key, []), st.session_state.get(state_key),
+            st.session_state.get(key), [str(row["Run ID"]) for row in records], filtered_ids,
+        )
+        st.session_state[selection_key] = selected_ids
+        st.session_state[state_key] = state
     result = render_grid(
         records, columns=COLUMNS, key=key, row_id="Run ID", selected_ids=selected_ids,
         column_options={
             "Run ID": {"secondary_key": "_lineage", "min_width": 250, "max_width": 300},
             "Univers": {"min_width": 170, "max_width": 250},
             "Dérivé": {"min_width": 140, "max_width": 230},
-        }, component=_component, preserve_interactions=True,
+        }, component=_component, preserve_interactions=True, selection_sync=selection_sync,
     )
     return {"selection": result["selection"]}

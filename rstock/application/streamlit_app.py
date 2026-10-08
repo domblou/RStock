@@ -5668,6 +5668,12 @@ def _history_runs_panel(
     )
     if not filtered:
         st.session_state[f"{key_prefix}-selected-runs"] = []
+        from rstock.application.history_selection import prepare_history_selection
+        protocol_key = f"{key_prefix}-grid-selection-protocol"
+        _, state, _ = prepare_history_selection(
+            [], st.session_state.get(protocol_key), None, [], [],
+        )
+        st.session_state[protocol_key] = state
         st.info("Aucun run ne correspond aux filtres.")
         return
     page_controls = st.columns([1, 1, 4])
@@ -5693,18 +5699,11 @@ def _history_runs_panel(
         row, details_by_run_id[row.run_id], universe_labels=universe_labels,
         related_details=details_by_run_id, runs_root=st.session_state.lab_config.project_root / "runs",
     ) for row in rows]
-    selection = render_history_grid(
-        grid_rows, key=f"{key_prefix}-grid",
-        selected_ids=st.session_state.get(f"{key_prefix}-selected-runs", []),
-    )
-    selected_rows = _selected_rows(selection, len(rows))
     selected_key = f"{key_prefix}-selected-runs"
-    from rstock.application.history_ui import reconcile_history_selection
-    st.session_state[selected_key] = reconcile_history_selection(
-        st.session_state.get(selected_key, []),
-        [row.run_id for row in rows],
-        [rows[index].run_id for index in selected_rows],
-        [str(run["run_id"]) for run in filtered],
+    render_history_grid(
+        grid_rows, key=f"{key_prefix}-grid",
+        selection_key=selected_key,
+        filtered_ids=[str(run["run_id"]) for run in filtered],
     )
     selected = st.session_state.get(selected_key, [])
     if isinstance(selected, str):
@@ -5734,8 +5733,11 @@ def _history_runs_panel(
         "Supprimer définitivement les runs sélectionnés",
         key=f"delete-selected-{key_prefix}",
     ):
-        st.session_state[f"{key_prefix}-pending-batch-delete"] = preview_batch_delete(service, selected)
-        st.rerun()
+        with st.spinner("Vérification des dépendances…"):
+            review = preview_batch_delete(service, selected)
+        st.session_state[f"{key_prefix}-pending-batch-delete"] = review
+        _render_batch_delete_confirmation(service, review, key_prefix=key_prefix)
+        return
     action = selected_run_action(selected)
     if action == "detail":
         selected_run_id = selected[0]
@@ -5784,11 +5786,10 @@ def _history_runs_panel(
             "Supprimer définitivement", key=f"delete-history-{key_prefix}",
         ):
             try:
-                st.session_state["pending-run-delete"] = service.delete_preview(selected_run_id)
+                with st.spinner("Vérification des dépendances…"):
+                    st.session_state["pending-run-delete"] = service.delete_preview(selected_run_id)
             except (OSError, ValueError, RuntimeError) as error:
                 st.error(f"Suppression impossible : {error}")
-            else:
-                st.rerun()
         pending_run_delete = st.session_state.get("pending-run-delete")
         if isinstance(pending_run_delete, DeletePlan) and pending_run_delete.run_id == selected_run_id:
             _render_run_delete_confirmation(service, pending_run_delete)

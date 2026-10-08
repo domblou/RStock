@@ -210,7 +210,7 @@ def test_orchestration_csv_fingerprints_lineage_without_metric_payload(tmp_path)
     assert not repository.run_directory(selected).exists()
 
 
-def test_preparation_never_measures_file_sizes(tmp_path, monkeypatch):
+def test_preparation_only_uses_file_sizes_for_index_identity(tmp_path, monkeypatch):
     from rstock.application.repository import RunRepository
     repository = RunRepository(tmp_path / "runs")
     selected = _run(repository, JobType.WALK_FORWARD, JobStatus.COMPLETED)
@@ -222,7 +222,11 @@ def test_preparation_never_measures_file_sizes(tmp_path, monkeypatch):
 
         def __getattr__(self, name):
             if name == "st_size":
-                raise AssertionError("File size queried during deletion preparation")
+                import inspect
+                from rstock.application.dependency_index import identity
+                assert inspect.currentframe().f_back.f_code is identity.__code__, (
+                    "File sizes must not be used for storage estimation during preparation"
+                )
             return getattr(self.attributes, name)
 
     def safety_stat(path, *args, **kwargs):
