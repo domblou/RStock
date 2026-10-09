@@ -56,6 +56,63 @@ def test_unknown_os_identity_keeps_worker_protected(monkeypatch):
     assert processes.process_identity_matches(123, expected_created_at=90.0)
 
 
+@pytest.mark.parametrize("present,alive", [(False, False), (True, True), (None, True)])
+def test_windows_access_denied_requires_independent_pid_check(monkeypatch, present, alive):
+    import ctypes
+    from types import SimpleNamespace
+
+    def open_process(*_):
+        return None
+    def unused(*_):
+        pytest.fail("No handle was opened")
+    kernel = SimpleNamespace(OpenProcess=open_process, GetExitCodeProcess=unused, CloseHandle=unused)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel, raising=False)
+    monkeypatch.setattr(ctypes, "set_last_error", lambda _: None, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    checked = []
+    monkeypatch.setattr(processes, "_windows_process_list_contains", lambda pid: checked.append(pid) or present)
+    assert processes._windows_process_alive(1316) is alive
+    assert checked == [1316]
+
+
+@pytest.mark.parametrize("pid,expected", [(1316, True), (9999, False)])
+def test_windows_pid_enumeration_grows_full_buffer(monkeypatch, pid, expected):
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    calls = []
+    def enumerate_processes(buffer, size, written):
+        calls.append(size)
+        if len(calls) == 1:
+            # The PID sought could be beyond the first buffer's capacity.
+            written._obj.value = size
+        else:
+            buffer[0], buffer[1] = 12, 1316
+            written._obj.value = 2 * ctypes.sizeof(wintypes.DWORD)
+        return True
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: SimpleNamespace(EnumProcesses=enumerate_processes), raising=False)
+    assert processes._windows_process_list_contains(pid) is expected
+    assert len(calls) == 2
+    assert calls[1] == 2 * calls[0]
+
+
+@pytest.mark.parametrize("failure", ["api_failure", "load_failure", "invalid_size"])
+def test_windows_pid_enumeration_failure_is_unknown(monkeypatch, failure):
+    import ctypes
+    from types import SimpleNamespace
+
+    def enumerate_processes(buffer, size, written):
+        written._obj.value = size + 1
+        return failure == "invalid_size"
+    def load(*_args, **_kwargs):
+        if failure == "load_failure":
+            raise OSError("Enumeration unavailable")
+        return SimpleNamespace(EnumProcesses=enumerate_processes)
+    monkeypatch.setattr(ctypes, "WinDLL", load, raising=False)
+    assert processes._windows_process_list_contains(1316) is None
+
+
 def test_run_lease_reclaims_reused_pid_and_old_release_cannot_erase_new_owner(tmp_path, monkeypatch):
     import json
     from types import SimpleNamespace

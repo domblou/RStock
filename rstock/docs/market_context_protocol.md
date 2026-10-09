@@ -66,7 +66,8 @@ En l'absence des seuils, AUC/Brier restent calculables mais précision et taux
 de signaux sont indisponibles. Les signaux combinés concernent les modèles
 haussiers actuellement évalués par le diagnostic Forward.
 
-Forward réutilise ses périodes existantes : cumul et intervalles à +21/+42/+63.
+Forward réutilise toutes ses périodes persistées : plein run, cumuls et intervalles,
+y compris +84/+126 et fins personnalisées lorsqu’ils sont présents.
 Le modèle est relié par le snapshot scientifique vérifié, et l'origine
 `normal/common/additional/removed` par la référence T0 existante, si disponible.
 Les modèles retirés n'ont aucune observation Forward inventée. Les références
@@ -113,6 +114,35 @@ rétroactivement recalculés. Si leurs probabilités, fenêtres ou identités
 manquent, le diagnostic est indisponible. Aucun enrichissement silencieux au
 moment de l'affichage et aucune nouvelle mécanique de comparaison multi-runs.
 
+## Disponibilité dans l'export Forward
+
+Le protocole est optionnel : `rstock_config.market_context_enabled=false`
+signifie qu'aucun diagnostic SPY n'a été demandé. Inclure SPY dans les
+prédicteurs ne l'active pas. L'absence du champ dans une configuration
+historique conserve le comportement désactivé ; les snapshots ne sont pas
+réécrits pour activer rétroactivement le diagnostic.
+
+L'export ZIP recherche séparément le diagnostic Forward et ceux des étapes
+physiques WF, calibration et Holdout résolues dans le pipeline E2E. Les étapes
+héritées d'un dérivé sont donc réutilisées, même si le diagnostic Forward est
+absent ou en échec. Il conserve les empreintes, protocoles et révisions, et
+documente la disponibilité de chaque étape dans `context_coverage`. Les
+cohortes exportées sont celles du Forward concerné, y compris les candidats
+retirés à T0, sans leur attribuer de performances Forward.
+
+Les agrégats `stage=holdout` utilisent la règle combinée de seuils figés
+(`signal_rule=frozen_combined_up_down`) : ils décrivent le Holdout comparable,
+pas les métriques de qualification Holdout. Le WF et le développement calibré
+conservent leurs règles propres. Les valeurs de robustesse non étayées restent
+indisponibles avec leurs effectifs et statuts.
+
+L'export reste une lecture des artefacts : aucun téléchargement, recalcul ou
+recours au cache courant. Une reconstruction diagnostique hors pipeline serait
+possible uniquement avec une série SPY ajustée figée, son historique de chauffe,
+la référence de développement et les prédictions/seuils/identités nécessaires.
+Les rendements OHLC et les lags des snapshots préparés ne remplacent pas cette
+preuve ajustée. Sans elle, aucune reconstruction historique fidèle n'est faite.
+
 ## Validation descriptive des fenêtres
 
 `scripts/validate_market_context_protocol.py` accepte uniquement un snapshot
@@ -139,6 +169,9 @@ plus longtemps. Le standard 63/252/21 conserve donc un rôle de tendance
 intermédiaire, mémoire annuelle de drawdown et réactivité mensuelle de volatilité,
 avec ces limites explicitement documentées.
 
-La classification économique versionnée (normal, forte hausse, stress, bear
-important, reprise), ses priorités/hystérésis, le drift, breadth/dispersion et
-les tests statistiques indépendants restent hors V1.
+La classification économique et le suivi des épisodes sont maintenant décrits
+dans [Diagnostic de sélection et régimes SPY](selection_diagnostic.md), sous
+le protocole distinct `rstock_spy_regimes_v1`. Les anciens snapshots gardent
+leur comportement. Le formulaire des nouveaux E2E propose explicitement la
+capture SPY activée. Le drift, breadth/dispersion et les tests statistiques
+indépendants restent hors périmètre.

@@ -37,6 +37,31 @@ def _paths(spec, output):
     return runs, owner, stages, wf, store_owner / "diagnostics/market_context"
 
 
+def prediction_groups(path, chunksize=100_000):
+    """Read bounded contiguous scientific sets; reject ambiguous historical layout.
+
+    RStock writers concatenate complete sets. Carry across CSV chunk boundaries,
+    including both directions, so no probability pairing is lost.
+    """
+    column = "source_model_id" if "source_model_id" in pd.read_csv(path, nrows=0) else "Set"
+    pending = pd.DataFrame()
+    seen = set()
+    for chunk in pd.read_csv(path, chunksize=chunksize):
+        chunk = pd.concat([pending, chunk], ignore_index=True) if not pending.empty else chunk
+        blocks = chunk[column].ne(chunk[column].shift()).cumsum()
+        groups = list(chunk.groupby(blocks, sort=False))
+        for _, group in groups[:-1]:
+            key = str(group[column].iloc[0])
+            if key in seen: raise ValueError("context_noncontiguous_model_predictions")
+            seen.add(key)
+            yield group
+        pending = groups[-1][1] if groups else pd.DataFrame()
+    if not pending.empty:
+        key = str(pending[column].iloc[0])
+        if key in seen: raise ValueError("context_noncontiguous_model_predictions")
+        yield pending
+
+
 def materialize_context_diagnostic(spec, output: Path, *, provider=None):
     if not spec.config.market_context_enabled or spec.job_type.value not in INPUTS:
         return None
@@ -54,12 +79,11 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
         raise ValueError("context_development_reference_unavailable")
     reference_start = pd.to_datetime(windows.TrainStart).min().strftime("%Y-%m-%d")
     reference_end = pd.to_datetime(windows.TestStart).min().strftime("%Y-%m-%d")
-    predictions = pd.read_csv(source)
     date_column = "session_date" if stage == "forward" else "Date"
-    if predictions.empty:
-        raise ValueError("context_predictions_empty")
-    last = pd.to_datetime(predictions[date_column]).max().normalize()
-    first = min(pd.Timestamp(reference_start), pd.to_datetime(predictions[date_column]).min().normalize())
+    ranges = [pd.to_datetime(chunk[date_column]).agg(["min", "max"]) for chunk in pd.read_csv(source, usecols=[date_column], chunksize=100_000)]
+    if not ranges: raise ValueError("context_predictions_empty")
+    last = max(part["max"] for part in ranges).normalize()
+    first = min(pd.Timestamp(reference_start), min(part["min"] for part in ranges).normalize())
     inputs = {str(source.relative_to(runs)): digest(source), str(windows_path.relative_to(runs)): digest(windows_path)}
     threshold_path = output / "selected_thresholds_by_set.json"
     if not threshold_path.exists():
@@ -69,15 +93,9 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
         thresholds = _json(threshold_path)
         inputs[str(threshold_path.relative_to(runs))] = digest(threshold_path)
     periods_path = output / "forward_period_metrics.csv"
-    horizons = None
+    persisted_periods = None
     if stage == "forward" and periods_path.exists():
-        periods = pd.read_csv(periods_path)
-        horizons = {}
-        for horizon, group in periods.loc[periods.period_kind.eq("cumulative") & periods.horizon.isin([21, 42, 63])].groupby("horizon"):
-            pairs = group[["session_start", "session_end"]].drop_duplicates()
-            if len(pairs) != 1:
-                raise ValueError("context_ambiguous_forward_periods")
-            horizons[int(horizon)] = tuple(pairs.iloc[0])
+        persisted_periods = pd.read_csv(periods_path)
         inputs[str(periods_path.relative_to(runs))] = digest(periods_path)
     manifest_path = output / DIAGNOSTIC_MANIFEST
     candidates = []
@@ -96,7 +114,7 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
             acquisition_start = frozen.index.max() - pd.Timedelta(days=30)
             first = min(first, pd.Timestamp(parent[2]["first_session"]))
         else:
-            acquisition_start = first - pd.Timedelta(days=2 * max(protocol.trend_sessions, protocol.drawdown_sessions, protocol.volatility_sessions) + 100)
+            acquisition_start = first - pd.Timedelta(days=2 * max(protocol.trend_sessions, protocol.drawdown_sessions, protocol.volatility_sessions, 252 if protocol.regime_version else 0) + 100)
         service = provider or YahooFinanceProvider()
         # Explicit dedicated SPY acquisition, independent of the predictor universe
         # and of the mutable market cache. No raw-price fallback.
@@ -106,7 +124,6 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
             parent_manifest=parent[1] if parent else None, provider=service.source_name)
     context_meta = validate_context(context_manifest)
     context = pd.read_csv(context_manifest.parent / "market_context.csv")
-    rows = normalize_predictions(predictions, signal_rule=rule, thresholds=thresholds)
     snapshot_path = owner / "results/forward_model_snapshot.json"
     reference_path = owner / "results" / REFERENCE
     origins = {}
@@ -119,9 +136,6 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
             raise ValueError("context_forward_model_snapshot_integrity_error")
         models = _json(snapshot_path).get("models", [])
         identities = {model["source_model_id"]: _key(model["set"], model["direction"]) for model in models}
-        rows["model_key"] = rows.source_model_id.map(identities)
-        if rows.model_key.isna().any():
-            raise ValueError("context_forward_model_identity_unavailable")
         inputs[str(snapshot_path.relative_to(runs))] = digest(snapshot_path)
     if reference_path.exists() and snapshot_path.exists():
         reference = _json(reference_path)
@@ -136,7 +150,29 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
                 return load_context_diagnostic(output, runs)[0]
             except (ValueError, OSError):
                 pass  # Interrupted publication: rebuild from verified evidence.
-    metrics, robustness = aggregate_context(rows, context, stage=stage, signal_rule=rule, horizons=horizons)
+    metric_parts, summary_parts = [], []
+    for raw in prediction_groups(source):
+        rows = normalize_predictions(raw, signal_rule=rule, thresholds=thresholds)
+        if stage == "forward":
+            rows["model_key"] = rows.source_model_id.map(identities)
+            if rows.model_key.isna().any(): raise ValueError("context_forward_model_identity_unavailable")
+        if persisted_periods is None:
+            parts = [("full_run", 0, rows)]
+        else:
+            model_id = str(raw.source_model_id.iloc[0])
+            table = persisted_periods.loc[persisted_periods.scope.eq("model") & persisted_periods.source_model_id.astype(str).eq(model_id)]
+            parts = []
+            for record in table.to_dict("records"):
+                start, end = record.get("session_start"), record.get("session_end")
+                subset = rows.loc[pd.to_datetime(rows.Date).between(pd.Timestamp(start), pd.Timestamp(end))] if pd.notna(start) and pd.notna(end) else rows.iloc[:0]
+                if not subset.empty: parts.append((record["period_kind"], record["horizon"], subset))
+        for kind, horizon, subset in parts:
+            metric, summary = aggregate_context(subset, context, stage=stage, signal_rule=rule)
+            for table in (metric, summary):
+                if not table.empty: table["period_kind"], table["horizon"] = kind, horizon
+            metric_parts.append(metric); summary_parts.append(summary)
+    metrics = pd.concat(metric_parts, ignore_index=True) if metric_parts else pd.DataFrame()
+    robustness = pd.concat(summary_parts, ignore_index=True) if summary_parts else pd.DataFrame()
     if metrics.empty:
         raise ValueError("context_no_evaluable_models")
     metrics["qualification_origin"] = metrics.model_key.map(origins).fillna("unavailable")
@@ -160,14 +196,18 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
                 pass
         _publish(output / METRICS_FILE, metrics)
         _publish(output / ROBUSTNESS_FILE, robustness)
-        manifest = {"schema_version": 1, "status": "available", "stage": stage, "protocol_id": protocol.identifier,
+        manifest = {**existing, "schema_version": 1, "status": "available", "stage": stage, "protocol_id": protocol.identifier,
             "protocol": asdict(protocol), "standard_protocol": protocol.standard,
             "context_manifest": str(context_manifest.relative_to(runs)), "context_manifest_sha256": digest(context_manifest),
-            "context_revision": context_meta["revision"], "input_digests": inputs,
+            "context_revision": context_meta["revision"],
+            "comparability": {"context_store": str(store.relative_to(runs)), "reference_context_sha256": context_meta.get("reference_context_sha256"), "protocol_id": context_meta["protocol_id"], "reference_start": context_meta["reference_start"], "reference_end_exclusive": context_meta["reference_end_exclusive"], "boundaries": context_meta["boundaries"], "regime_version": protocol.regime_version},
+            "input_digests": inputs,
             "stage_references": references, "source_e2e_run_id": owner.name,
             "t0_reference": t0_reference,
             "artifact_digests": {name: digest(output / name) for name in (METRICS_FILE, ROBUSTNESS_FILE)},
             "interpretation": "Descriptive terciles, not economic regimes. Calibration-selected thresholds are not independent WF evaluation."}
+        if any(not (runs / name).is_file() or digest(runs / name) != sha for name,sha in inputs.items()):
+            raise ValueError("context_inputs_changed_during_generation")
         _publish(manifest_path, manifest)
     return manifest
 
@@ -188,7 +228,7 @@ def optional_context_diagnostic(spec, output):
         return {"status": "unavailable", "reason": str(exc)}
 
 
-def load_context_diagnostic(output: Path, runs: Path):
+def _load_context_diagnostic(output: Path, runs: Path):
     manifest = _json(output / DIAGNOSTIC_MANIFEST)
     if manifest.get("status") != "available":
         return manifest, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -200,3 +240,26 @@ def load_context_diagnostic(output: Path, runs: Path):
         if digest(output / name) != manifest.get("artifact_digests", {}).get(name):
             raise ValueError("context_diagnostic_integrity_error")
     return manifest, pd.read_csv(path.parent / "market_context.csv"), pd.read_csv(output / METRICS_FILE), pd.read_csv(output / ROBUSTNESS_FILE)
+
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=8)
+def _cached_context(output, runs, stamps):
+    return _load_context_diagnostic(Path(output), Path(runs))
+
+
+def load_context_diagnostic(output: Path, runs: Path):
+    """Validate once per persisted revision; never load predictions for display."""
+    output, runs = Path(output), Path(runs)
+    meta = _json(output / DIAGNOSTIC_MANIFEST)
+    paths = [output / DIAGNOSTIC_MANIFEST]
+    if meta.get("status") == "available":
+        context_path = (runs / meta["context_manifest"]).resolve()
+        if not context_path.is_relative_to(runs.resolve()): raise ValueError("context_manifest_integrity_error")
+        paths += [context_path, *[output / name for name in (METRICS_FILE, ROBUSTNESS_FILE)]]
+        context_meta = _json(context_path)
+        paths += [context_path.parent / name for name in context_meta.get("artifact_digests",{})]
+    stamps = tuple((str(path),path.stat().st_mtime_ns,path.stat().st_size) for path in paths)
+    return _cached_context(str(output),str(runs),stamps)

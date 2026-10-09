@@ -153,6 +153,10 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
         "fixed candidate evaluation child id",
     ),
     RunTabDefinition(
+        "selection_diagnostic", "Diagnostic de sélection", frozenset({JobType.END_TO_END}),
+        "selection_diagnostic", "selection_diagnostic_manifest.json",
+    ),
+    RunTabDefinition(
         "temporal_validation",
         "Validation temporelle",
         frozenset({JobType.END_TO_END}),
@@ -220,6 +224,7 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "thresholds",
         "holdout_evaluation",
         "promotion_qualification",
+        "selection_diagnostic",
         "temporal_validation",
         "promotion",
         "technical",

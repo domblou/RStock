@@ -75,6 +75,35 @@ def process_identity_matches(pid: object, *, expected_created_at: object = None,
     return True
 
 
+def _windows_process_list_contains(pid: int) -> bool | None:
+    """Confirm PID presence independently; None means enumeration unavailable."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        enumerate_processes = psapi.EnumProcesses
+        enumerate_processes.argtypes = (ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                                       ctypes.POINTER(wintypes.DWORD))
+        enumerate_processes.restype = wintypes.BOOL
+        capacity = 1024
+        while capacity <= 1_048_576:
+            identifiers = (wintypes.DWORD * capacity)()
+            written = wintypes.DWORD()
+            size = ctypes.sizeof(identifiers)
+            if not enumerate_processes(identifiers, size, ctypes.byref(written)):
+                return None
+            if written.value > size or written.value % ctypes.sizeof(wintypes.DWORD):
+                return None
+            if written.value < size:
+                return pid in identifiers[:written.value // ctypes.sizeof(wintypes.DWORD)]
+            # A full buffer may be truncated: grow before claiming absence.
+            capacity *= 2
+    except OSError:
+        return None
+    return None
+
+
 def _windows_process_alive(pid: int) -> bool:
     """Query a Windows process without sending it a terminating signal."""
 
@@ -99,9 +128,12 @@ def _windows_process_alive(pid: int) -> bool:
     ctypes.set_last_error(0)
     handle = open_process(process_query_limited_information, False, pid)
     if not handle:
-        # Access denied still proves that the process exists. Other failures,
-        # notably ERROR_INVALID_PARAMETER for an absent PID, mean not alive.
-        return ctypes.get_last_error() == access_denied
+        if ctypes.get_last_error() != access_denied:
+            return False
+        # Access denied does not prove that a worker is still running. Only
+        # successful, complete enumeration may rule out an inaccessible PID;
+        # preserve protection when the independent check is unavailable.
+        return _windows_process_list_contains(pid) is not False
     try:
         exit_code = wintypes.DWORD()
         if not get_exit_code(handle, ctypes.byref(exit_code)):

@@ -22,10 +22,15 @@ def render_context_diagnostic(st, output: Path, runs: Path):
         st.caption("Les terciles sont descriptifs et ne définissent pas des régimes économiques. Ces mesures ne modifient pas la qualification.")
         protocol = manifest["protocol"]
         st.caption(f"Tendance {protocol['trend_sessions']} séances · drawdown {protocol['drawdown_sessions']} · volatilité {protocol['volatility_sessions']}")
-        axis = st.selectbox("Variable de contexte", list(AXES), key=f"context-axis-{output.parent.name}")
+        axes = [*AXES, "regime", "episode"] if "regime" in context else list(AXES)
+        axis = st.selectbox("Variable de contexte", axes, key=f"context-axis-{output.parent.name}")
         timeline = context.copy()
         timeline["session_date"] = pd.to_datetime(timeline.session_date)
-        st.line_chart(timeline.set_index("session_date")[[axis]])
+        if axis in AXES:
+            st.line_chart(timeline.set_index("session_date")[[axis]])
+        else:
+            st.dataframe(timeline[[c for c in ("session_date","regime","episode_id","episode_drawdown","episode_max_severity","episode_duration_sessions","recovery") if c in timeline]],hide_index=True)
+            st.caption("Régimes RStock V1 déterministes, connus à J−1. Gravité et durée d’épisode conservées pendant la reprise; aucun seuil optimisé selon les modèles.")
         tables = [(manifest["stage"], metrics, robustness)]
         from .forward_diagnostic import _json, digest
         origins = {}
@@ -43,7 +48,7 @@ def render_context_diagnostic(st, output: Path, runs: Path):
                 continue
             try:
                 other, _, table, summary = load_context_diagnostic(path.parent, runs)
-                if other.get("protocol_id") == manifest["protocol_id"]:
+                if contexts_comparable(other, manifest):
                     tables.append((stage, table, summary))
                 else:
                     st.caption(f"{stage} : protocole différent, comparaison indisponible.")
@@ -58,3 +63,13 @@ def render_context_diagnostic(st, output: Path, runs: Path):
             if not summary.empty:
                 st.dataframe(summary.loc[summary.axis.eq(axis)], hide_index=True)
         st.caption("AUC étayée : ≥30 observations et ≥10 dans chaque classe ; signaux étayés : ≥10. Robustesse : trois bandes étayées et au moins deux fenêtres en WF. Les fenêtres et épisodes ne sont pas indépendants.")
+
+
+
+def contexts_comparable(left, right):
+    """Protocol equality alone does not imply equal learned boundaries/reference."""
+    if left.get("protocol_id") != right.get("protocol_id"): return False
+    a,b=left.get("comparability"),right.get("comparability")
+    if a is not None or b is not None: return a is not None and a==b
+    # Legacy manifests cannot establish shared boundaries across unrelated stores.
+    return left.get("context_manifest")==right.get("context_manifest") and left.get("context_manifest_sha256")==right.get("context_manifest_sha256")

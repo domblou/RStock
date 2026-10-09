@@ -55,6 +55,7 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
         "thresholds",
         "holdout_evaluation",
         "promotion_qualification",
+        "selection_diagnostic",
         "temporal_validation",
         "promotion",
         "technical",

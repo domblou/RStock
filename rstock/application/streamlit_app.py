@@ -1207,6 +1207,13 @@ def _experiments(service: ExperimentService) -> None:
             else:
                 st.caption("Les cutoffs seront résolus à partir de la dernière séance disponible au lancement.")
     if selected_job_type is JobType.END_TO_END:
+        capture_context = st.checkbox(
+            "Capturer le diagnostic SPY et les régimes de marché", value=True,
+            help="Calcul descriptif après les étapes scientifiques, sans modifier les décisions. Les snapshots historiques restent inchangés.",
+            key="e2e-capture-market-context",
+        )
+        run_config = replace(run_config, market_context_enabled=capture_context,
+                             market_context_regime_version="rstock_spy_regimes_v1")
         if requested_historical_cutoff is not None:
             forward_simulation_enabled = st.checkbox(
                 "Lancer une Forward Simulation après succès", value=False
@@ -3421,6 +3428,8 @@ def _forward_precision_chart(rows: pd.DataFrame, checkpoints: Sequence[int]) -> 
 
 def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object]) -> None:
     root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    from rstock.application.forward_export import render_forward_export
+    render_forward_export(st, root)
     manifest = _read_light_json(root / "forward_analysis_manifest.json")
     if manifest is None:
         st.info("Analyse temporelle détaillée indisponible pour ce run.")
@@ -4978,6 +4987,7 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
 def _render_end_to_end_tabs(
     service: ExperimentService, run_id: str, detail: dict[str, object]
 ) -> None:
+    from rstock.application.selection_diagnostic_ui import render_selection_diagnostic
     child_renderers = {
         renderer_key: (
             lambda renderer_key=renderer_key: _render_pipeline_child(
@@ -4999,6 +5009,9 @@ def _render_end_to_end_tabs(
             "resources": lambda: _render_run_resources(run_id),
             **child_renderers,
             "promotion": lambda: _render_pipeline_promotion(detail),
+            "selection_diagnostic": lambda: render_selection_diagnostic(
+                st, st.session_state.lab_config.project_root / "runs" / run_id
+            ),
             "temporal_validation": lambda: _render_temporal_validation(
                 service, run_id, detail
             ),
@@ -8455,16 +8468,8 @@ def _models_page() -> None:
         _live_job_panel(_service(), domain="model")
         return
     window = st.selectbox("Fenêtre d’analyse", (20, 63, 126), index=1, format_func=lambda value: f"{value} séances", key="models-quality-window")
-    values = global_quality_kpis(master, window=window)
     _render_models_kpi_density_style()
-    with st.container(key="models-kpis"):
-        kpis = st.columns(6, gap="small")
-        _render_models_kpi_card(kpis[0], "Modèles actifs", int(values["active_models"]), "model_training")
-        _render_models_kpi_card(kpis[1], "Données insuffisantes", int(values["data_insufficient"]), "info")
-        _render_models_kpi_card(kpis[2], f"Rendement moyen {window} séances", _models_percent(values["mean_return"]), "trending_up")
-        _render_models_kpi_card(kpis[3], "P&L cumulé", _models_currency(values["pnl"]), "payments", help="P&L théorique basé sur un notionnel de 10 000 $ par signal et par modèle.")
-        _render_models_kpi_card(kpis[4], "Trades gagnants", _models_percent(values["win_rate"]), "target")
-        _render_models_kpi_card(kpis[5], f"Signaux {window} séances", int(values["signals"]), "notifications")
+    kpi_container = st.container(key="models-kpis")
 
     filters = st.columns((1, 1, 1.35, 1, 1.35), gap="small")
     status_options = [
@@ -8485,6 +8490,16 @@ def _models_page() -> None:
     query = filters[4].text_input("Recherche", placeholder="Cible ou prédicteur", key="models-predictor-filter")
     visible = filter_quality_models(master, statuses=statuses, universes=universes, sources=sources, health=health, query=query)
     visible = sort_quality_models(visible, window=window)
+    values = global_quality_kpis(visible, window=window)
+    with kpi_container:
+        kpis = st.columns(6, gap="small")
+        _render_models_kpi_card(kpis[0], "Modèles actifs", int(values["active_models"]), "model_training")
+        _render_models_kpi_card(kpis[1], "Données insuffisantes", int(values["data_insufficient"]), "info")
+        _render_models_kpi_card(kpis[2], f"Rendement moyen {window} séances", _models_percent(values["mean_return"]), "trending_up")
+        _render_models_kpi_card(kpis[3], "P&L cumulé", _models_currency(values["pnl"]), "payments", help="P&L théorique basé sur un notionnel de 10 000 $ par signal et par modèle.")
+        _render_models_kpi_card(kpis[4], "Trades gagnants", _models_percent(values["win_rate"]), "target")
+        _render_models_kpi_card(kpis[5], f"Signaux {window} séances", int(values["signals"]), "notifications")
+
     updated = pd.to_datetime(master["quality_updated_at"], errors="coerce", utc=True).max()
     st.caption("Qualité non calculée" if pd.isna(updated) else f"Dernière mise à jour qualité modèles : {updated.tz_convert('America/Toronto').strftime('%Y-%m-%d %H:%M')}")
     pagination = st.columns((0.8, 0.45, 2.75), gap="small")

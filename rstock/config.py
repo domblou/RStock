@@ -48,6 +48,7 @@ class RStockConfig:
     market_context_volatility_sessions: int = 21
     market_context_terciles: bool = True
     market_context_protocol_version: str = "spy_adjusted_context_v1"
+    market_context_regime_version: str | None = "rstock_spy_regimes_v1"
 
     intraday_target_threshold: float = 0.01
     intraday_down_threshold: float = 0.01
@@ -169,6 +170,8 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if self.market_context_regime_version not in {None, "rstock_spy_regimes_v1"}:
+            raise ValueError("Unsupported market regime protocol version")
         if self.market_context_protocol_version != "spy_adjusted_context_v1":
             raise ValueError("Unsupported market context protocol version")
         for name in ("market_context_trend_sessions", "market_context_drawdown_sessions", "market_context_volatility_sessions"):
@@ -371,6 +374,7 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
     # Historical runs had no context protocol. Windows are inert until explicit activation.
+    "market_context_regime_version": None,
     "market_context_enabled": False,
     "market_context_trend_sessions": 63,
     "market_context_drawdown_sessions": 252,

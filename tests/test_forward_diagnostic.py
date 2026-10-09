@@ -313,6 +313,7 @@ def test_forward_models_view_shows_cohort_and_t0_grid(tmp_path, monkeypatch):
         frames.append(frame)
         return SimpleNamespace(selection=SimpleNamespace(rows=[0]))
     st = SimpleNamespace(session_state=SimpleNamespace(lab_config=SimpleNamespace(project_root=tmp_path)),
+        download_button=lambda *a, **k: None,
         caption=lambda *a, **k: None, subheader=lambda *a: None, info=lambda *a: None,
         error=lambda text: pytest.fail(text),
         radio=lambda label, options, **kw: "Modèles" if label == "Analyse Forward" else options[0],

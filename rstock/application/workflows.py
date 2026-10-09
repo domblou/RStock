@@ -3421,4 +3421,9 @@ class WorkflowRegistry:
                     "protocol_id": diagnostic.get("protocol_id"),
                     "reason": diagnostic.get("reason"),
                 }
+        if spec.job_type in {JobType.END_TO_END, JobType.FORWARD_SIMULATION}:
+            from .selection_diagnostic import optional_selection_diagnostic
+            selection_diagnostic = optional_selection_diagnostic(spec, output)
+            if selection_diagnostic is not None:
+                result["selection_diagnostic"] = {key: selection_diagnostic.get(key) for key in ("status", "reason", "protocol")}
         return result

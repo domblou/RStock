@@ -44,8 +44,11 @@ class ContextProtocol:
     benchmark: str = "SPY"
     price_convention: str = "yahoo_adjusted_close_return_index"
     calendar: str = "XNYS"
+    regime_version: str | None = None
 
     def __post_init__(self):
+        if self.regime_version not in {None, "rstock_spy_regimes_v1"}:
+            raise ValueError("context_unsupported_regime_version")
         if self.version != "spy_adjusted_context_v1":
             raise ValueError("context_unsupported_protocol_version")
         if self.benchmark != "SPY" or self.calendar != "XNYS":
@@ -58,12 +61,15 @@ class ContextProtocol:
     def from_config(cls, config: RStockConfig):
         return cls(config.market_context_trend_sessions, config.market_context_drawdown_sessions,
                    config.market_context_volatility_sessions, config.market_context_terciles,
-                   version=config.market_context_protocol_version)
+                   version=config.market_context_protocol_version, regime_version=config.market_context_regime_version)
 
     @property
     def identifier(self):
         import hashlib
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:20]
+        values = asdict(self)
+        if self.regime_version is None:
+            values.pop("regime_version")  # Preserve immutable V1 protocol identifiers.
+        return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:20]
 
     @property
     def standard(self):
@@ -103,6 +109,9 @@ def build_context(snapshot: pd.DataFrame, sessions: pd.DatetimeIndex, protocol: 
     }, index=complete)
     # Do not bridge a missing session when calculating trend.
     historical.loc[values.rolling(protocol.trend_sessions + 1).count() != protocol.trend_sessions + 1, "trend"] = np.nan
+    if protocol.regime_version:
+        from .market_regimes import classify_regimes
+        historical = historical.join(classify_regimes(values))
     shifted = historical.shift(1)
     shifted["context_as_of_date"] = pd.Series(complete, index=complete).shift(1)
     if boundaries is None:
@@ -113,6 +122,9 @@ def build_context(snapshot: pd.DataFrame, sessions: pd.DatetimeIndex, protocol: 
             cuts = usable.quantile([1/3, 2/3]).tolist()
             boundaries[axis] = cuts if protocol.terciles and len(usable) >= 60 and len(cuts) == 2 and cuts[0] < cuts[1] else None
     context = shifted.reindex(dates).copy()
+    if protocol.regime_version:
+        context["regime"] = context.regime.fillna("Indisponible")
+        context["regime_availability"] = context.regime_availability.fillna("unavailable_history_or_gap")
     context.insert(0, "session_date", dates.strftime("%Y-%m-%d"))
     context["context_as_of_date"] = pd.to_datetime(context["context_as_of_date"]).dt.strftime("%Y-%m-%d")
     for axis in AXES:
@@ -191,23 +203,32 @@ def publish_context(store: Path, snapshot: pd.DataFrame, sessions: pd.DatetimeIn
         payload.index.name = "Date"
         _publish(directory / "spy_adjusted_snapshot.csv", payload.reset_index())
         _publish(directory / "market_context.csv", context)
+        extra_artifacts = {}
+        regime_rules = None
+        if protocol.regime_version:
+            from .market_regimes import episode_table, RULES
+            regime_rules = RULES
+            _publish(directory / "market_episodes.csv", episode_table(context))
+            extra_artifacts["market_episodes.csv"] = digest(directory / "market_episodes.csv")
         _publish(manifest_path, {
             "schema_version": 1, "protocol": asdict(protocol), "protocol_id": protocol.identifier,
             "standard_protocol": protocol.standard, "revision": revision, "provider": provider,
             "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "acquisition_kind": acquisition_kind,
             "historical_vintage": "retrospective_adjusted_history_not_point_in_time_archive",
             "reference_start": reference_start, "reference_end_exclusive": reference_end,
+            "reference_context_sha256": prior.get("reference_context_sha256") if prior and prior.get("reference_context_sha256") else hashlib.sha256(context.loc[context.session_date.ge(reference_start) & context.session_date.lt(reference_end), [c for c in ("session_date", *AXES, "regime", "episode_id", "reference_peak", "episode_max_drawdown") if c in context]].to_csv(index=False).encode()).hexdigest(),
+            "regime_rules": regime_rules,
             "boundaries": boundaries, "band_semantics": "descriptive_terciles_not_economic_regimes",
             "parent_revision": prior["revision"] if prior else None,
             "first_session": context.session_date.min(), "last_session": context.session_date.max(),
-            "artifact_digests": {name: digest(directory / name) for name in ("spy_adjusted_snapshot.csv", "market_context.csv")},
+            "artifact_digests": {name: digest(directory / name) for name in ("spy_adjusted_snapshot.csv", "market_context.csv")} | extra_artifacts,
         })
     return manifest_path
 
 
 def validate_context(path: Path) -> dict[str, Any]:
     manifest = _json(path)
-    if set(manifest.get("artifact_digests", {})) != {"spy_adjusted_snapshot.csv", "market_context.csv"}:
+    if not {"spy_adjusted_snapshot.csv", "market_context.csv"}.issubset(manifest.get("artifact_digests", {})):
         raise ValueError("context_manifest_incomplete")
     for name, expected in manifest["artifact_digests"].items():
         if not (path.parent / name).is_file() or digest(path.parent / name) != expected:
@@ -277,10 +298,16 @@ def aggregate_context(rows: pd.DataFrame, context: pd.DataFrame, *, stage: str,
             periods.append(("cumulative", horizon, joined.loc[joined.session_date.between(start, end)]))
             periods.append(("interval", horizon, joined.loc[joined.session_date.between(start if previous_end is None else previous_end, end) & (True if previous_end is None else joined.session_date.gt(previous_end))]))
             previous_end = end
+    axes = (*AXES, "regime", "episode") if "regime" in context else AXES
+    if "regime" in context:
+        joined["regime_band"] = joined.regime.fillna("Indisponible")
+        joined["regime_episode"] = joined.get("episode_id", pd.Series(index=joined.index, dtype=object))
+        joined["episode_band"] = joined.get("episode_id", pd.Series(index=joined.index, dtype=object)).fillna("Hors épisode")
+        joined["episode_episode"] = joined["episode_band"]
     records = []
     for kind, horizon, observations in periods:
         for (model, window), model_rows in observations.groupby(["model_key", "Window"], dropna=False):
-            for axis in AXES:
+            for axis in axes:
                 bands = model_rows[f"{axis}_band"].fillna("unavailable")
                 for band, group in model_rows.groupby(bands, dropna=False):
                     valid = group.loc[group.signal.notna()]
@@ -291,16 +318,25 @@ def aggregate_context(rows: pd.DataFrame, context: pd.DataFrame, *, stage: str,
                     signals = valid.loc[_bool(valid.signal)]
                     returns = pd.to_numeric(signals.directional_return, errors="coerce")
                     n, positives, negatives = len(valid), probability.get("positives", 0), probability.get("negatives", 0)
+                    calendar = context.loc[context.session_date.between(model_rows.session_date.min(), model_rows.session_date.max())]
+                    calendar_bands = (calendar[f"{axis}_band"] if axis in AXES else calendar["regime"] if axis == "regime" else calendar.get("episode_id", pd.Series(index=calendar.index, dtype=object)).fillna("Hors épisode"))
+                    market_share = float(calendar_bands.eq(band).mean()) if len(calendar) else None
+                    model_signals = _bool(model_rows.signal.fillna(False)).sum()
+                    signal_share = len(signals) / model_signals if model_signals and len(valid) == len(group) else None
+                    known_band = band not in {"unavailable", "Indisponible"}
                     records.append({"model_key": model, "stage": stage, "signal_rule": signal_rule,
                         "Window": window, "period_kind": kind, "horizon": horizon, "axis": axis, "band": band,
                         "observations": len(group), "evaluated_observations": n, "missing_signal_rule": len(group)-n,
                         "unique_dates": group.session_date.nunique(), "total_model_observations": len(model_rows),
                         "episodes": group[f"{axis}_episode"].nunique(),
-                        "context_coverage": float(model_rows[axis].notna().mean()),
+                        "market_sessions": int(calendar_bands.eq(band).sum()), "market_exposure_share": market_share,
+                        "observation_share": len(group) / len(model_rows), "signal_share": signal_share,
+                        "exposure_adjusted_signal_concentration": signal_share / market_share if signal_share is not None and market_share else None,
+                        "context_coverage": float(model_rows[axis].notna().mean()) if axis in AXES else float(model_rows.regime.fillna("Indisponible").ne("Indisponible").mean()),
                         **{k:v for k,v in probability.items() if k != "observations"},
                         "mean_return": float(returns.mean()) if len(returns) and np.isfinite(returns).all() else None,
-                        "auc_supported": band != "unavailable" and probability.get("availability") == "available" and len(group) >= 30 and positives >= 10 and negatives >= 10,
-                        "signal_supported": band != "unavailable" and n == len(group) and len(signals) >= 10,
+                        "auc_supported": known_band and probability.get("availability") == "available" and len(group) >= 30 and positives >= 10 and negatives >= 10,
+                        "signal_supported": known_band and n == len(group) and len(signals) >= 10,
                         "signal_count": len(signals) if n == len(group) else None,
                         "signal_return_sum": float(returns.sum()) if len(returns) and np.isfinite(returns).all() else None})
     metrics = pd.DataFrame(_clean(records))
@@ -308,12 +344,15 @@ def aggregate_context(rows: pd.DataFrame, context: pd.DataFrame, *, stage: str,
     if metrics.empty:
         return metrics, pd.DataFrame()
     for keys, group in metrics.groupby(["model_key", "stage", "period_kind", "horizon", "axis"]):
-        known = group.loc[group.band.isin(LABELS)]
+        if keys[-1] == "episode":
+            continue
+        known = group.loc[group.band.isin(LABELS)] if keys[-1] in AXES else group.loc[group.band.ne("Indisponible")]
         supported = known.loc[known.auc_supported]
         medians = supported.groupby("band").auc.median() if "auc" in supported else pd.Series(dtype=float)
         counts = supported.groupby("band").Window.nunique()
         minimum_windows = 2 if stage in {"walk_forward", "development_calibrated"} else 1
-        robust = len(medians) == 3 and len(counts) == 3 and counts.ge(minimum_windows).all()
+        required_bands = 3 if keys[-1] in AXES else known.band.nunique()
+        robust = required_bands >= 2 and len(medians) == required_bands and counts.ge(minimum_windows).all()
         signal_counts = known.groupby("band").signal_count.sum()
         dominant = signal_counts.idxmax() if len(signal_counts) and signal_counts.sum() else None
         outside = known.loc[known.band.ne(dominant)]

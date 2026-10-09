@@ -61,6 +61,7 @@ def test_forward_secondary_views_use_persisted_metrics_and_column_help(tmp_path,
 
     fake = SimpleNamespace(
         session_state=SimpleNamespace(lab_config=SimpleNamespace(project_root=tmp_path)),
+        download_button=lambda *args, **kwargs: None,
         radio=radio, dataframe=dataframe, altair_chart=chart,
         metric=lambda *args, **kwargs: seen["labels"].append(args[0]),
         subheader=lambda *args, **_kwargs: None,
@@ -85,6 +86,7 @@ def test_legacy_forward_does_not_recompute_when_analysis_missing(tmp_path, monke
     fake = SimpleNamespace(
         session_state=SimpleNamespace(lab_config=SimpleNamespace(project_root=tmp_path)),
         info=messages.append,
+        download_button=lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(app, "st", fake)
     app._render_forward_temporal_results("old-forward", {})
