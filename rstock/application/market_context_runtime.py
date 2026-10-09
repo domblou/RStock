@@ -1,6 +1,7 @@
 """Optional post-science context diagnostics; immutable shared benchmark evidence."""
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from .market_context import (
     publish_context, validate_context,
 )
 from rstock.data import YahooFinanceProvider
+
+
+LOGGER = logging.getLogger(__name__)
+ATTEMPT_MANIFEST = "context_diagnostic_attempt.json"
 
 
 INPUTS = {
@@ -62,6 +67,19 @@ def prediction_groups(path, chunksize=100_000):
         yield pending
 
 
+def _acquisition_end(spec, owner, observed_end, wf):
+    """Prefetch the known E2E period; aggregates still use only their own dates."""
+    if spec.job_type.value == "forward_simulation" or not (owner / "orchestration/pipeline.json").is_file():
+        return observed_end
+    saved = _json(owner / "config.json")
+    cutoff = (getattr(spec, "resolved_market_session_cutoff", None)
+              or getattr(spec, "historical_data_cutoff", None)
+              or saved.get("resolved_market_session_cutoff") or saved.get("historical_data_cutoff"))
+    if not cutoff:
+        cutoff = _json(wf / "run_configuration.json").get("traceability", {}).get("prepared_market_last_date")
+    return max(observed_end, pd.Timestamp(cutoff).normalize()) if cutoff else observed_end
+
+
 def materialize_context_diagnostic(spec, output: Path, *, provider=None):
     if not spec.config.market_context_enabled or spec.job_type.value not in INPUTS:
         return None
@@ -98,19 +116,20 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
         persisted_periods = pd.read_csv(periods_path)
         inputs[str(periods_path.relative_to(runs))] = digest(periods_path)
     manifest_path = output / DIAGNOSTIC_MANIFEST
+    acquisition_end = _acquisition_end(spec, owner, last, wf)
     candidates = []
     for path in (store / protocol.identifier / "revisions").glob("*/" + CONTEXT_MANIFEST):
         manifest = validate_context(path)
         if manifest["reference_start"] == reference_start and manifest["reference_end_exclusive"] == reference_end:
             candidates.append((manifest["last_session"], path, manifest))
     candidates.sort(key=lambda row: (row[0], str(row[1])))
-    containing = next((row for row in candidates if row[0] >= last.strftime("%Y-%m-%d") and row[2]["first_session"] <= first.strftime("%Y-%m-%d")), None)
+    containing = next((row for row in candidates if row[0] >= acquisition_end.strftime("%Y-%m-%d") and row[2]["first_session"] <= first.strftime("%Y-%m-%d")), None)
     if containing:
         context_manifest = containing[1]
     else:
         parent = candidates[-1] if candidates else None
         if parent:
-            frozen = pd.read_csv(parent[1].parent / "spy_adjusted_snapshot.csv", index_col="Date", parse_dates=True)
+            frozen = pd.read_csv(parent[1].parent / "spy_adjusted_snapshot.csv", index_col="Date", parse_dates=True, float_precision="round_trip")
             acquisition_start = frozen.index.max() - pd.Timedelta(days=30)
             first = min(first, pd.Timestamp(parent[2]["first_session"]))
         else:
@@ -118,10 +137,12 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
         service = provider or YahooFinanceProvider()
         # Explicit dedicated SPY acquisition, independent of the predictor universe
         # and of the mutable market cache. No raw-price fallback.
-        snapshot = adjusted_snapshot(service.fetch("SPY", acquisition_start.date(), last.date()))
-        sessions = pd.DatetimeIndex(xcals.get_calendar("XNYS").sessions_in_range(first, last)).tz_localize(None)
+        from .market_context_acquisition import acquire_spy
+        snapshot, acquisition = acquire_spy(service, acquisition_start.date(), acquisition_end.date(),
+            store / protocol.identifier / "acquisitions", runs, parent=parent[1] if parent else None)
+        sessions = pd.DatetimeIndex(xcals.get_calendar("XNYS").sessions_in_range(first, acquisition_end)).tz_localize(None)
         context_manifest = publish_context(store, snapshot, sessions, protocol, reference_start, reference_end,
-            parent_manifest=parent[1] if parent else None, provider=service.source_name)
+            parent_manifest=parent[1] if parent else None, provider=service.source_name, acquisition=acquisition)
     context_meta = validate_context(context_manifest)
     context = pd.read_csv(context_manifest.parent / "market_context.csv")
     snapshot_path = owner / "results/forward_model_snapshot.json"
@@ -199,7 +220,7 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
         manifest = {**existing, "schema_version": 1, "status": "available", "stage": stage, "protocol_id": protocol.identifier,
             "protocol": asdict(protocol), "standard_protocol": protocol.standard,
             "context_manifest": str(context_manifest.relative_to(runs)), "context_manifest_sha256": digest(context_manifest),
-            "context_revision": context_meta["revision"],
+            "context_revision": context_meta["revision"], "acquisition": context_meta.get("acquisition"),
             "comparability": {"context_store": str(store.relative_to(runs)), "reference_context_sha256": context_meta.get("reference_context_sha256"), "protocol_id": context_meta["protocol_id"], "reference_start": context_meta["reference_start"], "reference_end_exclusive": context_meta["reference_end_exclusive"], "boundaries": context_meta["boundaries"], "regime_version": protocol.regime_version},
             "input_digests": inputs,
             "stage_references": references, "source_e2e_run_id": owner.name,
@@ -213,19 +234,36 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
 
 
 def optional_context_diagnostic(spec, output):
-    """Diagnostic failures are explicit and never invalidate scientific results."""
+    """Every diagnostic failure is nonfatal, including failure to save its warning."""
     try:
-        return materialize_context_diagnostic(spec, output)
+        result = materialize_context_diagnostic(spec, output)
+        if result is not None:
+            from .runner import _try_submission_mutex
+            with _try_submission_mutex(Path(output) / ".context_diagnostic.lock") as acquired:
+                if not acquired: raise ValueError("context_diagnostic_already_building")
+                path = Path(output) / ATTEMPT_MANIFEST
+                _publish(path, {**_json(path), "status": "available", "reason": None,
+                    "protocol_id": result.get("protocol_id"), "acquisition": result.get("acquisition")})
+        return result
     except Exception as exc:
-        from .runner import _try_submission_mutex
-        with _try_submission_mutex(output / ".context_diagnostic.lock") as acquired:
-            if acquired:
-                path = output / DIAGNOSTIC_MANIFEST
-                current = _json(path) if path.exists() else {}
-                if current.get("status") != "available":
-                    _publish(path, {"schema_version": 1, "status": "unavailable", "reason": str(exc),
-                        "protocol_id": ContextProtocol.from_config(spec.config).identifier})
-        return {"status": "unavailable", "reason": str(exc)}
+        reason = str(exc)
+        LOGGER.warning("Diagnostic SPY incomplet; traitement scientifique conservé: %s", reason)
+        result = {"schema_version": 1, "status": "unavailable", "reason": reason,
+            "warning": "SPY diagnostic incomplete; scientific results are unaffected",
+            "protocol_id": ContextProtocol.from_config(spec.config).identifier,
+            "acquisition": getattr(exc, "evidence", None)}
+        try:
+            from .runner import _try_submission_mutex
+            with _try_submission_mutex(Path(output) / ".context_diagnostic.lock") as acquired:
+                if acquired:
+                    path = Path(output) / DIAGNOSTIC_MANIFEST
+                    current = _json(path)
+                    _publish(Path(output) / ATTEMPT_MANIFEST, {**_json(Path(output) / ATTEMPT_MANIFEST), **result})
+                    if current.get("status") != "available":
+                        _publish(path, {**current, **result})
+        except Exception:
+            LOGGER.warning("Unable to persist SPY diagnostic warning", exc_info=True)
+        return result
 
 
 def _load_context_diagnostic(output: Path, runs: Path):

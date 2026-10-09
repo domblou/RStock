@@ -175,3 +175,60 @@ le protocole distinct `rstock_spy_regimes_v1`. Les anciens snapshots gardent
 leur comportement. Le formulaire des nouveaux E2E propose explicitement la
 capture SPY activée. Le drift, breadth/dispersion et les tests statistiques
 indépendants restent hors périmètre.
+## Acquisition unique et extensions auditables
+
+Pour un E2E, la première acquisition dédiée SPY couvre la période connue du
+pipeline, jusqu’au cutoff persisté (ou à la dernière date du jeu préparé).
+WF, calibration et Holdout réutilisent cette même révision. Chaque observation
+reste associée exclusivement au contexte connu à J−1 ; les frontières des
+terciles restent calculées sur la première référence de développement.
+L’acquisition anticipée ne change ni les observations évaluées ni les critères.
+
+Pour le Forward, seules les dates nécessaires et 30 jours calendaires de
+chevauchement de contrôle sont demandés. Le chevauchement sert à contrôler la
+cohérence et à identifier l’échelle des clôtures ajustées ; il ne remplace aucune
+ligne figée. La queue est raccordée par :
+`P_figé(T) × P_nouveau(t) / P_nouveau(T)`, pour `t > T` uniquement.
+Les anciennes révisions, les frontières statistiques et les épisodes restent
+immuables. La lecture CSV utilise une précision de round-trip ; les valeurs du
+préfixe et l’état des épisodes sont vérifiés avant publication.
+
+Le contrôle `spy_extension_float32_precision_v1` distingue prix identiques,
+écarts compatibles avec la précision, changement uniforme d’échelle et révision
+matérielle. Les prix ajustés Yahoo observés étant quantifiés en float32, une
+incertitude fixe de quatre ULP par prix est propagée aux rapports et rendements.
+Une ULP représente l’écart entre deux nombres float32 voisins à ce niveau de
+prix. Le test vérifie à la fois les rendements et la compatibilité de tous les
+prix avec un facteur unique ; il ne laisse pas passer une dérive cumulative
+simplement parce que chaque rendement varie peu. Toute séance manquante dans
+le chevauchement attendu est signalée. Cette convention est enregistrée dans
+l’audit et indépendante des performances des modèles ; elle ne démontre pas
+qu’un petit écart provient réellement d’un arrondi fournisseur.
+
+Chaque acquisition est archivée sous :
+`runs/<wf>/diagnostics/market_context/<protocole>/acquisitions/<identifiant>/`.
+
+- `response.csv` : données retournées par le fournisseur, avant interprétation,
+  avec clôture brute et ajustée lorsqu’elles sont disponibles ;
+- `overlap_comparison.csv` : prix, rapports d’échelle, rendements, écarts,
+  tolérances et résultats de contrôle par date, lors d’une extension ;
+- `acquisition_manifest.json` : fournisseur, versions des bibliothèques, dates
+  demandées et reçues, horodatages, référence parent, empreintes, classification
+  et statut requested/received/validated/rejected.
+
+Les réponses rejetées sont conservées. Une reprise crée une nouvelle tentative
+sans écraser les précédentes. Les ZIP existants incluent les preuves référencées
+avec leurs chemins et octets originaux, sans nouveau téléchargement.
+
+Une divergence matérielle **bloque uniquement l’extension du diagnostic SPY**.
+Les étapes WF, Holdout et Forward conservent leurs résultats scientifiques et
+continuent normalement. Le log, le résumé et le panneau de contexte indiquent
+que le diagnostic SPY est incomplet et pourquoi. Une révision valide antérieure
+n’est jamais remplacée par un statut d’échec ; la dernière tentative est inscrite
+séparément dans `context_diagnostic_attempt.json`. Même un échec de persistance
+de cet avertissement ne doit pas faire échouer le traitement scientifique.
+Le cache de marché courant ne sert jamais de remplacement automatique.
+
+Les snapshots et diagnostics historiques déjà produits ne sont pas reconstruits
+ni réécrits. Une réponse Holdout rejetée avant cette instrumentation ne peut pas
+être reconstituée fidèlement à partir d’un nouveau téléchargement.

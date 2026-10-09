@@ -4950,6 +4950,11 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
     root = st.session_state.lab_config.project_root / "runs"
     run_root = root / run_id
     st.caption(f"Parent run_id : {run_id}")
+    error = (detail.get("status") or {}).get("error")
+    if error:
+        st.error(error)
+    st.subheader("Logs du parent")
+    _render_run_logs(detail)
     st.subheader("Métadonnées et provenance")
     st.json(detail.get("metadata", {}))
     pipeline = _read_light_json(run_root / "orchestration" / "pipeline.json")

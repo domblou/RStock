@@ -248,3 +248,34 @@ def test_zip_rejects_changed_scientific_window_source(tmp_path):
     path=source.parent/"wf/results/windows.csv"
     with path.open("a",encoding="utf-8") as stream:stream.write("\n")
     with pytest.raises(ValueError):build_selection_export(source)
+
+
+def test_e2e_posthook_uses_working_directory_until_publication(tmp_path):
+    source,output=fixture(tmp_path)
+    working=source/"_working"
+    (source/"results").rename(working)
+    spec=SimpleNamespace(job_type=SimpleNamespace(value="end_to_end"))
+    meta=sd.optional_selection_diagnostic(spec,working)
+    assert meta["status"]=="available"
+    assert (working/sd.MANIFEST).is_file()
+    assert not (source/"results").exists()
+    assert (working/"forward_model_snapshot.json").is_file()
+    working.rename(source/"results")
+    published=load_table(source/"results",meta,"selection_candidates.csv")
+    assert len(published)==3
+
+
+def test_forward_links_remain_valid_after_working_directory_publication(tmp_path):
+    source,output=fixture(tmp_path);sd.materialize_selection(source)
+    working=output.parent/"_working"
+    output.rename(working)
+    sd.materialize_generalization(working)
+    ref=_json(source/"results/selection_forward_index.json")["runs"][output.parent.name]
+    assert "/_working/" not in ref["manifest"]
+    assert "/results/" in ref["manifest"]
+    meta=_json(working/"selection_generalization_manifest.json")
+    assert not any("/_working/" in name for name in meta["sources"])
+    working.rename(output)
+    table,_,unavailable=forward_tables(source)
+    assert not table.empty and not unavailable
+    assert build_selection_export(source)

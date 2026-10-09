@@ -44,6 +44,7 @@ class _Evidence:
         self.runs = runs.resolve()
         self.sources = {}
         self.unavailable = {}
+        self.attachments = {}
 
     def read(self, path: Path, expected: str | None = None) -> bytes:
         resolved = path.resolve()
@@ -68,6 +69,18 @@ class _Evidence:
 
     def frame(self, path: Path, expected: str | None = None):
         return pd.read_csv(io.BytesIO(self.read(path, expected)), dtype=STRING_COLUMNS)
+
+    def acquisition(self, reference):
+        if not reference:
+            return None
+        path = self.runs / reference["manifest"]
+        document = self.document(path, reference["sha256"])
+        self.attachments["runs/" + path.resolve().relative_to(self.runs).as_posix()] = self.read(path, reference["sha256"])
+        for name, sha in document.get("artifact_digests", {}).items():
+            artifact = path.parent / name
+            raw = self.read(artifact, sha)
+            self.attachments["runs/" + artifact.resolve().relative_to(self.runs).as_posix()] = raw
+        return document
 
     def unchanged(self):
         for name, source in self.sources.items():
@@ -208,9 +221,14 @@ def _context_exports(evidence, output, run_id, source_id, models, frames, metada
         label = path.parent.parent.name
         try:
             manifest = evidence.document(path, expected)
+            attempt_path = path.parent / "context_diagnostic_attempt.json"
+            attempt = evidence.document(attempt_path) if attempt_path.exists() else {}
+            acquisition = evidence.acquisition(attempt.get("acquisition") or manifest.get("acquisition"))
+            if attempt:
+                evidence.attachments["runs/"+attempt_path.resolve().relative_to(evidence.runs).as_posix()] = evidence.read(attempt_path)
             if manifest.get("status") != "available":
                 evidence.unavailable[f"context:{label}"] = manifest.get("reason", "unavailable")
-                coverage[stage] = {"status": "unavailable", "reason": manifest.get("reason", "unavailable"), "source_run_id": label}
+                coverage[stage] = {"status": "unavailable", "reason": manifest.get("reason", "unavailable"), "source_run_id": label, "acquisition": acquisition}
                 continue
             if manifest.get("stage") != stage:
                 raise ValueError("export_context_stage_mismatch")
@@ -241,9 +259,12 @@ def _context_exports(evidence, output, run_id, source_id, models, frames, metada
                 source["origin"] = source.model_key.map(canonical_to_origin)
                 source["context_source_run_id"] = label
                 destination.append(_annotate(source.assign(**keys), models, run_id=run_id, source_id=source_id))
-            metadata.append({"source_run_id": label, "diagnostic": manifest, "context": context_meta})
+            evidence.acquisition(context_meta.get("acquisition"))
+            metadata.append({"source_run_id": label, "diagnostic": manifest, "context": context_meta, "latest_attempt": attempt})
             coverage[stage] = {"status": "available", "source_run_id": label,
                                "protocol_id": manifest["protocol_id"], "context_revision": manifest["context_revision"]}
+            if attempt.get("status") == "unavailable":
+                coverage[stage].update(status="partial", reason=attempt.get("reason"), acquisition=acquisition)
             for key, reference in manifest.get("stage_references", {}).items():
                 reference_stage = {"threshold_calibration": "development_calibrated", "holdout_evaluation": "holdout"}.get(key, key)
                 reference_path = evidence.runs / reference["path"]
@@ -488,6 +509,9 @@ def build_forward_export(output: Path) -> bytes:
             raw = frame.to_csv(index=False).encode("utf-8")
             archive.writestr(name, raw)
             manifest["files"][name] = {"rows": len(frame), "columns": list(frame.columns), "sha256": _hash(raw)}
+        for name,raw in evidence.attachments.items():
+            archive.writestr(name,raw)
+            manifest["files"][name] = {"sha256": _hash(raw), "size_bytes": len(raw)}
         readme = _readme(frames, evidence.unavailable).encode("utf-8")
         archive.writestr("README.md", readme)
         manifest["files"]["README.md"] = {"sha256": _hash(readme)}
@@ -536,11 +560,17 @@ def build_selection_export(run: Path) -> bytes:
         path=directory/DIAGNOSTIC_MANIFEST
         if not path.exists(): return
         document=evidence.document(path);add(path)
+        attempt_path=directory/"context_diagnostic_attempt.json"
+        attempt=evidence.document(attempt_path) if attempt_path.exists() else {}
+        if attempt: add(attempt_path)
+        evidence.acquisition(document.get("acquisition"))
+        evidence.acquisition(attempt.get("acquisition"))
         for name,sha in document.get("artifact_digests",{}).items(): add(directory/name,sha)
         if document.get("status")=="available":
             ref=evidence.runs/document["context_manifest"]
             context_meta=evidence.document(ref,document["context_manifest_sha256"])
             add(ref,document["context_manifest_sha256"])
+            evidence.acquisition(context_meta.get("acquisition"))
             for name,sha in context_meta.get("artifact_digests",{}).items(): add(ref.parent/name,sha)
     identity(run);add(run/"results"/SELECTION)
     for name in FILES: add(run/"results"/name,meta.get("artifact_digests",{}).get(name))
@@ -572,6 +602,7 @@ def build_selection_export(run: Path) -> bytes:
             for name in (ANALYSIS,MANIFEST,"forward_summary.json","forward_daily_metrics.csv","forward_period_metrics.csv","forward_population_metrics.csv",METRICS,BINS):
                 if (path.parent/name).exists(): add(path.parent/name)
             context(path.parent)
+    included.update(evidence.attachments)
     export_manifest={"schema_version":1,"kind":"compact_selection_diagnostic","source_e2e_run_id":run.name,
         "scope":"all_persisted_diagnostic_candidates_and_linked_forward_periods_independent_of_ui_filters",
         "missing":meta.get("missing",{}),"limitations":meta.get("limitations",[]),"unavailable":evidence.unavailable,

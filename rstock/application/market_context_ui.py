@@ -7,16 +7,22 @@ from .market_context_runtime import load_context_diagnostic
 
 
 def render_context_diagnostic(st, output: Path, runs: Path):
-    if not (output / DIAGNOSTIC_MANIFEST).exists():
+    from .forward_diagnostic import _json
+    attempt = _json(output / "context_diagnostic_attempt.json")
+    if not (output / DIAGNOSTIC_MANIFEST).exists() and not attempt:
         return
     with st.expander("Contexte de marché SPY — diagnostic descriptif", expanded=False):
+        if attempt.get("status") == "unavailable":
+            st.warning(_incomplete_message(attempt.get("reason")))
+        if not (output / DIAGNOSTIC_MANIFEST).exists(): return
         try:
             manifest, context, metrics, robustness = load_context_diagnostic(output, runs)
         except (ValueError, OSError, KeyError) as exc:
             st.warning(f"Diagnostic de contexte indisponible : {exc}")
             return
         if manifest.get("status") != "available":
-            st.info(f"Diagnostic indisponible : {manifest.get('reason', 'données absentes')}")
+            if attempt.get("status") != "unavailable":
+                st.warning(_incomplete_message(manifest.get("reason", "données absentes")))
             return
         st.caption(f"Protocole {'standard' if manifest['standard_protocol'] else 'personnalisé'} : {manifest['protocol_id']} · SPY ajusté · contexte à J−1")
         st.caption("Les terciles sont descriptifs et ne définissent pas des régimes économiques. Ces mesures ne modifient pas la qualification.")
@@ -73,3 +79,12 @@ def contexts_comparable(left, right):
     if a is not None or b is not None: return a is not None and a==b
     # Legacy manifests cannot establish shared boundaries across unrelated stores.
     return left.get("context_manifest")==right.get("context_manifest") and left.get("context_manifest_sha256")==right.get("context_manifest_sha256")
+
+
+def _incomplete_message(reason):
+    if reason == "context_extension_historical_returns_changed":
+        explanation = "Les rendements ou facteurs d’ajustement SPY diffèrent matériellement de la référence figée. L’extension a été refusée."
+    else:
+        explanation = str(reason or "données absentes")
+    return ("Diagnostic SPY incomplet : " + explanation +
+            " La dernière révision valide est conservée. Le traitement et les résultats scientifiques ne sont pas remis en cause.")

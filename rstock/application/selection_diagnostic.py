@@ -88,9 +88,10 @@ def _context_compatibility_columns(table):
     return table
 
 
-def materialize_selection(run: Path):
+def materialize_selection(run: Path, *, output: Path | None = None):
     """One compact sidecar per E2E, resolving physical inherited stages."""
-    started = perf_counter(); run = Path(run); output = run / "results"
+    started = perf_counter(); run = Path(run)
+    output = Path(output) if output is not None else run / "results"
     stages = _stage_ids(run); runs = run.parent
     if not (run / "orchestration/pipeline.json").is_file():
         raise ValueError("selection_pipeline_manifest_missing")
@@ -276,6 +277,13 @@ def materialize_selection(run: Path):
     return manifest
 
 
+def _published_relative(path: Path, runs: Path) -> str:
+    """Persist final addresses while the worker still owns _working."""
+    parts = list(path.relative_to(runs).parts)
+    if len(parts) > 1 and parts[1] == "_working": parts[1] = "results"
+    return Path(*parts).as_posix()
+
+
 def materialize_generalization(output: Path):
     """Forward-owned compact links; reconcile a tiny parent index under mutex."""
     output=Path(output); analysis=_json(output/"forward_analysis_manifest.json")
@@ -356,20 +364,20 @@ def materialize_generalization(output: Path):
         if any(not path.exists() or digest(path) != sha for path,sha in source_inputs.items()):
             raise ValueError("selection_forward_sources_changed_during_generation")
         current = _json(output/"selection_generalization_manifest.json")
-        payload={**current,"sources":{str(path.relative_to(runs)):sha for path,sha in source_inputs.items()},"context_status":context_status,"schema_version":1,"protocol":PROTOCOL,"source_e2e_run_id":source_id,"forward_run_id":output.parent.name,"source_snapshot_sha256":analysis.get("source_snapshot_sha256"),"t0_manifest_sha256":source_inputs[source/"results"/MANIFEST],"artifact_digests":{n:digest(output/n) for n in FORWARD_FILES}}
+        payload={**current,"sources":{_published_relative(path,runs):sha for path,sha in source_inputs.items()},"context_status":context_status,"schema_version":1,"protocol":PROTOCOL,"source_e2e_run_id":source_id,"forward_run_id":output.parent.name,"source_snapshot_sha256":analysis.get("source_snapshot_sha256"),"t0_manifest_sha256":source_inputs[source/"results"/MANIFEST],"artifact_digests":{n:digest(output/n) for n in FORWARD_FILES}}
         _publish(output/"selection_generalization_manifest.json",payload)
     with _try_submission_mutex(source/"results/.selection_forward_index.lock") as acquired:
         if not acquired: raise ValueError("selection_forward_index_busy_retry")
         path=source/"results/selection_forward_index.json"
         index=_json(path);refs=dict(index.get("runs",{}))
-        refs[output.parent.name]={"manifest":str((output/"selection_generalization_manifest.json").relative_to(runs)),"sha256":digest(output/"selection_generalization_manifest.json")}
+        refs[output.parent.name]={"manifest":_published_relative(output/"selection_generalization_manifest.json",runs),"sha256":digest(output/"selection_generalization_manifest.json")}
         _publish(path,{**index,"source_e2e_run_id":source_id,"runs":refs})
     return {"status":"available"}
 
 
 def optional_selection_diagnostic(spec, output):
     try:
-        if spec.job_type.value=="end_to_end": return materialize_selection(Path(output).parent)
+        if spec.job_type.value=="end_to_end": return materialize_selection(Path(output).parent, output=Path(output))
         if spec.job_type.value=="forward_simulation": return materialize_generalization(Path(output))
     except Exception as exc:
         # Diagnostic failures never alter original scientific results. Persistent

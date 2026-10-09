@@ -134,30 +134,75 @@ def build_context(snapshot: pd.DataFrame, sessions: pd.DatetimeIndex, protocol: 
     return context.reset_index(drop=True), boundaries
 
 
-def extend_adjusted_snapshot(frozen: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
-    """Keep the frozen prefix byte-for-byte numerically, splice only new returns.
+EXTENSION_COMPARISON_PROTOCOL = "spy_extension_float32_precision_v1"
+# Yahoo adjusted prices are quantized to float32. Four ULPs per observed price
+# accommodate the arithmetic of adjustment factors, independently of outcomes.
+EXTENSION_PRICE_ULPS = 4
 
-    A uniform adjustment-factor revision cancels in ratios. A revision to past
-    returns is rejected, rather than silently changing the T0 reference.
-    """
+
+def extension_comparison(frozen: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     last = frozen.index.max()
     overlap = frozen.index.intersection(incoming.index)
     if last not in overlap or len(overlap) < 2:
         raise ValueError("context_extension_missing_overlap")
-    old = frozen.loc[overlap, "adjusted_close"].pct_change(fill_method=None).iloc[1:]
-    new = incoming.loc[overlap, "adjusted_close"].pct_change(fill_method=None).iloc[1:]
-    if not np.allclose(old, new, rtol=1e-5, atol=1e-7):
+    expected = frozen.index[(frozen.index >= incoming.index.min()) & (frozen.index <= last)]
+    old = frozen.reindex(expected).adjusted_close
+    new = incoming.reindex(expected).adjusted_close
+    ratio = old / new
+    factor = float(ratio.median())
+    def uncertainty(prices):
+        values = prices.to_numpy(dtype=float)
+        with np.errstate(invalid="ignore", over="ignore"):
+            step = np.abs(np.spacing(values.astype(np.float32))).astype(float)
+        return pd.Series(EXTENSION_PRICE_ULPS * step / prices.to_numpy(), index=prices.index)
+    relative = uncertainty(old) + uncertainty(new)
+    old_return = old.pct_change(fill_method=None)
+    new_return = new.pct_change(fill_method=None)
+    return_tolerance = (1 + old_return.abs()) * (relative + relative.shift(1)) + 1e-12
+    scale_residual = (ratio / factor - 1).abs()
+    # Both dates and levels must match a SINGLE factor, not just adjacent returns.
+    scale_tolerance = relative + float(relative.max()) + 1e-12
+    return_ok = (old_return - new_return).abs().le(return_tolerance)
+    return_ok.iloc[0] = True
+    report = pd.DataFrame({"Date": expected, "frozen_adjusted_close": old.to_numpy(),
+        "incoming_adjusted_close": new.to_numpy(), "scale_ratio": ratio.to_numpy(),
+        "frozen_return": old_return.to_numpy(), "incoming_return": new_return.to_numpy(),
+        "return_delta": (new_return-old_return).to_numpy(), "return_tolerance": return_tolerance.to_numpy(),
+        "scale_residual": scale_residual.to_numpy(), "scale_tolerance": scale_tolerance.to_numpy(),
+        "consistent": (new.notna() & scale_residual.le(scale_tolerance) & return_ok).to_numpy()})
+    consistent = bool(report.consistent.all())
+    exact = old.equals(new)
+    report.attrs = {"protocol": EXTENSION_COMPARISON_PROTOCOL, "price_ulps": EXTENSION_PRICE_ULPS,
+        "scale_factor": factor, "overlap_start": str(expected.min().date()),
+        "overlap_end": str(expected.max().date()), "compared_sessions": len(expected),
+        "inconsistent_sessions": int((~report.consistent).sum()),
+        "classification": "material_revision" if not consistent else "identical" if exact else
+            "precision_compatible" if abs(factor-1) <= float(scale_tolerance.max()) else "uniform_scale_with_precision",
+        "max_absolute_return_delta": float(report.return_delta.abs().max()),
+        "max_scale_residual": float(scale_residual.max())}
+    return report
+
+
+def extend_adjusted_snapshot(frozen: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    """Preserve the prefix; only append a checked, anchored tail."""
+    report = extension_comparison(frozen, incoming)
+    if not report.consistent.all():
         raise ValueError("context_extension_historical_returns_changed")
+    last = frozen.index.max()
     additions = incoming.loc[incoming.index > last].copy()
     if not additions.empty:
         additions["adjusted_close"] *= frozen.at[last, "adjusted_close"] / incoming.at[last, "adjusted_close"]
-    return pd.concat([frozen, additions])
+    result = pd.concat([frozen, additions])
+    if not result.iloc[:len(frozen)].equals(frozen):
+        raise ValueError("context_extension_prefix_changed")
+    return result
 
 
 def publish_context(store: Path, snapshot: pd.DataFrame, sessions: pd.DatetimeIndex,
                     protocol: ContextProtocol, reference_start: str, reference_end: str,
                     *, parent_manifest: Path | None = None, provider: str = "Yahoo Finance",
-                    acquisition_kind: str = "explicit_provider_acquisition") -> Path:
+                    acquisition_kind: str = "explicit_provider_acquisition",
+                    acquisition: dict[str, Any] | None = None) -> Path:
     """Immutable revisions; a final manifest is the only commit marker."""
     import hashlib
     prior = None
@@ -168,10 +213,10 @@ def publish_context(store: Path, snapshot: pd.DataFrame, sessions: pd.DatetimeIn
         validate_context(parent_manifest)
         if prior["protocol_id"] != protocol.identifier:
             raise ValueError("context_extension_protocol_changed")
-        frozen = pd.read_csv(parent_manifest.parent / "spy_adjusted_snapshot.csv", index_col="Date", parse_dates=True)
+        frozen = pd.read_csv(parent_manifest.parent / "spy_adjusted_snapshot.csv", index_col="Date", parse_dates=True, float_precision="round_trip")
         snapshot = extend_adjusted_snapshot(frozen, snapshot)
         boundaries = prior["boundaries"]
-        frozen_context = pd.read_csv(parent_manifest.parent / "market_context.csv")
+        frozen_context = pd.read_csv(parent_manifest.parent / "market_context.csv", float_precision="round_trip")
         reference_start, reference_end = prior["reference_start"], prior["reference_end_exclusive"]
     context, boundaries = build_context(snapshot, sessions, protocol, reference_start, reference_end, boundaries)
     if frozen_context is not None:
@@ -180,6 +225,12 @@ def publish_context(store: Path, snapshot: pd.DataFrame, sessions: pd.DatetimeIn
         for axis in AXES:
             if not np.allclose(context.loc[common, axis], old[axis], equal_nan=True, rtol=1e-10, atol=1e-12):
                 raise ValueError("context_extension_prefix_changed")
+        if protocol.regime_version:
+            for column in frozen_context.columns.difference(["session_date", *AXES]):
+                actual = context.loc[common, column].reset_index(drop=True)
+                expected = old[column].reset_index(drop=True)
+                equal = actual.eq(expected) | (actual.isna() & expected.isna())
+                if not equal.all(): raise ValueError("context_extension_episode_prefix_changed")
         # Preserve exact serialized values, including availability and labels.
         context.loc[common, frozen_context.columns] = old.reset_index().to_numpy()
     identity = json.dumps({"protocol": asdict(protocol), "reference_start": reference_start,
@@ -214,6 +265,7 @@ def publish_context(store: Path, snapshot: pd.DataFrame, sessions: pd.DatetimeIn
             "schema_version": 1, "protocol": asdict(protocol), "protocol_id": protocol.identifier,
             "standard_protocol": protocol.standard, "revision": revision, "provider": provider,
             "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "acquisition_kind": acquisition_kind,
+            "acquisition": acquisition,
             "historical_vintage": "retrospective_adjusted_history_not_point_in_time_archive",
             "reference_start": reference_start, "reference_end_exclusive": reference_end,
             "reference_context_sha256": prior.get("reference_context_sha256") if prior and prior.get("reference_context_sha256") else hashlib.sha256(context.loc[context.session_date.ge(reference_start) & context.session_date.lt(reference_end), [c for c in ("session_date", *AXES, "regime", "episode_id", "reference_peak", "episode_max_drawdown") if c in context]].to_csv(index=False).encode()).hexdigest(),

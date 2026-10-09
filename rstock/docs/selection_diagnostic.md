@@ -182,3 +182,9 @@ de volumes historiques arbitraires ni le coût du post-traitement scientifique.
 La validation utilise uniquement des séries et artefacts synthétiques ainsi
 que des lectures de formats existants. Aucun End-to-End ni Forward nouveau
 n’a été lancé pour développer ou tester cette fonctionnalité.
+
+
+Les acquisitions SPY et leurs divergences sont désormais archivées avant
+validation. L’acquisition E2E unique, les contrôles de précision et le
+comportement non bloquant sont décrits dans
+[le protocole de contexte](market_context_protocol.md#acquisition-unique-et-extensions-auditables).

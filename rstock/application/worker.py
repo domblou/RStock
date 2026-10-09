@@ -614,6 +614,21 @@ class RunLease:
             return False
 
 
+def _validate_publication_recovery(run: Path, summary: dict) -> None:
+    """A diagnostic directory alone cannot prove successful publication."""
+    working, results = run / "_working", run / "results"
+    if working.is_dir() and any(working.iterdir()):
+        raise ValueError("publication_incomplete_working_not_reconciled")
+    if not results.is_dir():
+        raise ValueError("publication_results_missing")
+    for name in summary.get("result_files", []):
+        path = (results / name).resolve()
+        if not path.is_relative_to(results.resolve()) or not path.is_file():
+            raise ValueError(f"publication_result_missing:{name}")
+    if summary.get("forward_simulation") and not (results / "forward_model_snapshot.json").is_file():
+        raise ValueError("publication_forward_snapshot_missing")
+
+
 def _publishing_completed(repository: RunRepository, run_id: str) -> bool:
     progress = repository.progress(run_id)
     return progress.get("stage") == "completed" and any(
@@ -797,6 +812,7 @@ def execute_run(
         working = repository.run_directory(run_id) / "_working"
         results = repository.run_directory(run_id) / "results"
         if results.exists() and repository.summary(run_id):
+            _validate_publication_recovery(repository.run_directory(run_id), repository.summary(run_id))
             reporter.phase_started("publishing")
             reporter.phase_completed("publishing")
             reporter.complete_workflow()
