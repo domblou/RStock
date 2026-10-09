@@ -1,15 +1,195 @@
-"""Shared XGBoost fitting and inference with the project's fixed parameters."""
+"""Shared XGBoost parameters, chronological round selection and inference."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
 
 from .config import RStockConfig
+
+
+ROUND_SELECTION_FIELDS = (
+    "xgb_round_selection_mode", "xgb_early_stopping_max_rounds",
+    "xgb_early_stopping_validation_sessions", "xgb_early_stopping_patience",
+    "xgb_early_stopping_min_train_observations", "xgb_early_stopping_metric",
+    "xgb_round_selection_protocol_version",
+)
+
+
+def round_selection_snapshot(config: RStockConfig) -> dict[str, object]:
+    return {**{name: getattr(config, name) for name in ROUND_SELECTION_FIELDS},
+            "fallback_rounds": config.xgb_rounds, "fallback_source": "xgb_rounds",
+            "minimum_usable_observations": config.xgb_early_stopping_validation_sessions + config.xgb_early_stopping_min_train_observations,
+            "probability_loss_epsilon": 1e-15}
+
+
+def fit_chronological_booster(
+    train: pd.DataFrame, predictor_names: Sequence[str], outcome_name: str,
+    config: RStockConfig, *, parameters: XGBoostParameters,
+    cancellation_check: Any = None,
+) -> tuple[Any, dict[str, object]]:
+    """Select rounds using only the supplied train, then fit a fresh booster.
+
+    Every downstream fit uses this policy through fit_booster. The prefilter
+    explicitly retains its fixed fitting primitive and dedicated parameters.
+    """
+    from dataclasses import replace
+    from .progress import check_cancellation
+
+    names = list(predictor_names)
+    if not isinstance(train.index, pd.DatetimeIndex) or not train.index.is_monotonic_increasing or not train.index.is_unique or train.index.hasnans:
+        raise ValueError("Chronological fitting requires ordered, unique dates")
+    if train[[*names, outcome_name]].isna().any().any():
+        raise ValueError("Chronological fitting requires complete usable observations")
+    validation_size = config.xgb_early_stopping_validation_sessions
+    internal = train.iloc[:-validation_size]
+    validation = train.iloc[-validation_size:]
+    diagnostics: dict[str, object] = {
+        "RoundSelectionMode": "chronological", "RoundSelectionUsed": False,
+        "EarlyStoppingTriggered": False, "RoundSelectionFallbackReason": None,
+        "RoundsRetained": config.xgb_rounds, "SelectionRoundsRun": 0,
+        "BestIteration": None, "BestValidationLogLoss": None,
+        "SelectionCapReached": False,
+        "InternalTrainObservations": len(internal),
+        "ValidationObservations": len(validation),
+    }
+    for prefix, frame in (("InternalTrain", internal), ("Validation", validation)):
+        diagnostics[f"{prefix}Start"] = None if frame.empty else frame.index.min()
+        diagnostics[f"{prefix}End"] = None if frame.empty else frame.index.max()
+        diagnostics[f"{prefix}PositiveOutcomes"] = int(frame[outcome_name].sum())
+    reason = None
+    if len(train) < validation_size + config.xgb_early_stopping_min_train_observations:
+        reason = "insufficient_history"
+    elif validation[outcome_name].nunique() != 2:
+        reason = "validation_single_class"
+    elif internal[outcome_name].nunique() != 2:
+        reason = "internal_train_single_class"
+    else:
+        xgb = xgboost_module()
+
+        class CancellationCallback(xgb.callback.TrainingCallback):
+            def after_iteration(self, model, epoch, evals_log):
+                check_cancellation(cancellation_check)
+                return False
+
+        check_cancellation(cancellation_check)
+        history: dict[str, Any] = {}
+        selector = None
+        try:
+            selector = xgb.train(
+                {**parameters.training_parameters(config), "eval_metric": "logloss"},
+                xgb.DMatrix(internal[names], label=internal[outcome_name], feature_names=names),
+                num_boost_round=config.xgb_early_stopping_max_rounds,
+                evals=[(xgb.DMatrix(validation[names], label=validation[outcome_name], feature_names=names), "validation")],
+                early_stopping_rounds=config.xgb_early_stopping_patience,
+                maximize=False, evals_result=history, verbose_eval=False,
+                callbacks=[CancellationCallback()],
+            )
+            losses = np.asarray(history["validation"]["logloss"], dtype=float)
+            diagnostics["SelectionRoundsRun"] = len(losses)
+            best = int(selector.best_iteration)
+            score = float(selector.best_score)
+            if not len(losses) or len(losses) > config.xgb_early_stopping_max_rounds or not np.isfinite(losses).all() or not np.isfinite(score) or not 0 <= best < len(losses):
+                reason = "invalid_selection_result"
+            else:
+                diagnostics.update(
+                    RoundSelectionUsed=True, RoundsRetained=best + 1,
+                    SelectionRoundsRun=len(losses), BestIteration=best,
+                    BestValidationLogLoss=score,
+                    EarlyStoppingTriggered=len(losses) < config.xgb_early_stopping_max_rounds,
+                    SelectionCapReached=len(losses) == config.xgb_early_stopping_max_rounds,
+                )
+        except (AttributeError, KeyError, ValueError, TypeError):
+            if selector is None:
+                raise
+            reason = "selection_result_unavailable"
+        finally:
+            del selector
+    diagnostics["RoundSelectionFallbackReason"] = reason
+    diagnostics.update(TrainingIdentity=training_identity(train, names, outcome_name, config, parameters),
+        TrainingStart=train.index.min(), TrainingEnd=train.index.max(), TrainingObservations=len(train),
+        Outcome=outcome_name, PredictorColumns=names, Parameters=parameters.as_dict(),
+        RoundSelectionPolicy=round_selection_snapshot(config))
+    check_cancellation(cancellation_check)
+    selected = replace(parameters, num_boost_round=int(diagnostics["RoundsRetained"]))
+    # Final fitting has no validation set and never continues the internal model.
+    booster = _fit_fixed_booster(train, names, outcome_name, config, parameters=selected,
+                         cancellation_check=cancellation_check)
+    check_cancellation(cancellation_check)
+    return booster, diagnostics
+
+
+def round_selection_coverage(windows: pd.DataFrame) -> dict[str, object]:
+    """Coverage is counted per candidate/window and separately per direction."""
+    result = {}
+    for direction in ("Up", "Down"):
+        key = f"{direction}RoundSelectionUsed"
+        if key not in windows:
+            result[direction] = {"available": False}
+            continue
+        used = windows[key].fillna(False).astype(bool)
+        chronological = windows[f"{direction}RoundSelectionMode"].eq("chronological")
+        rounds = pd.to_numeric(windows[f"{direction}RoundsRetained"], errors="coerce")
+        reasons = windows.loc[chronological & ~used, f"{direction}RoundSelectionFallbackReason"].value_counts()
+        result[direction] = {
+            "available": True, "windows": len(windows), "optimized_windows": int(used.sum()),
+            "optimized_percent": float(100 * used.mean()) if len(used) else 0.0,
+            "fallback_windows": int((chronological & ~used).sum()),
+            "fallback_percent": float(100 * (chronological & ~used).mean()) if len(used) else 0.0,
+            "fallback_reasons": {str(k): int(v) for k, v in reasons.items()},
+            "rounds_histogram": {str(int(k)): int(v) for k, v in rounds.value_counts().items()},
+            "optimized_rounds_histogram": {str(int(k)): int(v) for k, v in rounds[used].value_counts().items()},
+            "rounds_distribution": {str(k): float(v) for k, v in rounds.describe().items()} if len(rounds) else {},
+        }
+    return result
+
+
+def round_selection_coverage_batches(frames: Any) -> dict[str, object]:
+    """Reduce coverage without materializing all candidate-window diagnostics."""
+    totals: dict[str, dict[str, Any]] = {}
+    for frame in frames:
+        for direction, values in round_selection_coverage(frame).items():
+            if not values["available"]:
+                continue
+            target = totals.setdefault(direction, {"available": True, "windows": 0,
+                "optimized_windows": 0, "fallback_windows": 0,
+                "fallback_reasons": {}, "rounds_histogram": {}, "optimized_rounds_histogram": {}})
+            for name in ("windows", "optimized_windows", "fallback_windows"):
+                target[name] += values[name]
+            for name in ("fallback_reasons", "rounds_histogram", "optimized_rounds_histogram"):
+                for key, count in values[name].items():
+                    target[name][key] = target[name].get(key, 0) + count
+    for direction in ("Up", "Down"):
+        target = totals.setdefault(direction, {"available": False})
+        if not target["available"]:
+            continue
+        n = target["windows"]
+        target["optimized_percent"] = 100 * target["optimized_windows"] / n if n else 0.0
+        target["fallback_percent"] = 100 * target["fallback_windows"] / n if n else 0.0
+        histogram = sorted((int(k), v) for k, v in target["rounds_histogram"].items())
+        count = sum(v for _, v in histogram)
+        def quantile(q):
+            # Linear interpolation matches pandas' default sample quantiles.
+            position = q * (count - 1)
+            lower, upper = int(np.floor(position)), int(np.ceil(position))
+            found, cumulative = [], 0
+            for value, frequency in histogram:
+                if cumulative <= lower < cumulative + frequency:
+                    found.append(value)
+                if cumulative <= upper < cumulative + frequency:
+                    found.append(value)
+                cumulative += frequency
+            return found[0] + (found[-1] - found[0]) * (position - lower)
+        target["rounds_distribution"] = ({"count": count, "min": histogram[0][0],
+            "25%": quantile(.25), "50%": quantile(.5), "75%": quantile(.75),
+            "max": histogram[-1][0]} if count else {})
+    return totals
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +249,14 @@ class DirectionalXGBoostParameters:
 
 def selected_xgboost_parameters(
     selected: Mapping[str, Any],
+    *, config: RStockConfig | None = None,
 ) -> dict[str, dict[str, int | float]]:
     """Extract and validate Up/Down parameters from a calibration artifact."""
 
+    if config is not None and config.xgb_round_selection_mode == "chronological":
+        expected = round_selection_snapshot(config)
+        if any(selected[direction].get("round_selection_policy") != expected for direction in ("Up", "Down")):
+            raise ValueError("Chronological calibration policy missing or incompatible")
     return {
         direction: XGBoostParameters(
             **dict(selected[direction]["parameters"])
@@ -93,7 +278,7 @@ def resolve_directional_xgboost_parameters(
         values = {direction: dict(frozen[direction]) for direction in ("Up", "Down")}
         source = "frozen_snapshot"
     elif referenced is not None:
-        values = selected_xgboost_parameters(referenced)
+        values = selected_xgboost_parameters(referenced, config=config)
         source = "referenced_calibration"
     elif legacy_fallback is not None:
         values = {direction: legacy_fallback.as_dict() for direction in ("Up", "Down")}
@@ -157,13 +342,121 @@ def xgboost_module() -> Any:
     return xgb
 
 
+def training_identity(train: pd.DataFrame, names: Sequence[str], outcome: str,
+                      config: RStockConfig, parameters: XGBoostParameters) -> str:
+    """Exact training identity; a different origin always requires reselection."""
+    data = train[[*names, outcome]]
+    digest = hashlib.sha256(pd.util.hash_pandas_object(data, index=True).values.tobytes())
+    digest.update(json.dumps({"features": list(names), "outcome": outcome,
+        "parameters": parameters.training_parameters(config),
+        "policy": round_selection_snapshot(config)}, sort_keys=True).encode())
+    return digest.hexdigest()
+
+
+def booster_training_record(booster: Any) -> dict[str, object]:
+    value = booster.attr("rstock_round_selection") if hasattr(booster, "attr") else None
+    return json.loads(value) if value else {}
+
+
+def append_training_record(records: list[dict[str, object]], start: int, booster: Any) -> None:
+    """Store one audit record per origin, without duplicating it per prediction."""
+    record = booster_training_record(booster)
+    if record and len(records) > start:
+        records[start]["RoundSelectionRecord"] = json.dumps(record, default=str, sort_keys=True)
+
+
+def probability_training_records(predictions: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    if "RoundSelectionRecord" in predictions:
+        for _, row in predictions.dropna(subset=["RoundSelectionRecord"]).iterrows():
+            rows.append({**{key: row[key] for key in ("Set", "Direction", "Window") if key in row},
+                         "PredictionOrigin": row.get("Date"),
+                         **json.loads(row["RoundSelectionRecord"])})
+    return pd.DataFrame(rows)
+
+
+def training_records_coverage(records: pd.DataFrame) -> dict[str, object]:
+    if records.empty:
+        return {}
+    result = {}
+    for direction, group in records.groupby("Direction"):
+        prefixed = group.rename(columns={key: f"{direction}{key}" for key in (
+            "RoundSelectionMode", "RoundSelectionUsed", "RoundsRetained", "RoundSelectionFallbackReason")})
+        result[direction] = round_selection_coverage(prefixed)[direction]
+    return result
+
+
+def write_probability_training_audit(predictions: pd.DataFrame, directory: Any,
+                                     configuration: dict[str, object]) -> None:
+    records = probability_training_records(predictions)
+    if records.empty:
+        return
+    records.to_csv(directory / "round_selection_training.csv", index=False)
+    configuration["round_selection_coverage"] = training_records_coverage(records)
+    configuration["round_selection_policy"] = records.iloc[0]["RoundSelectionPolicy"]
+
+
+def production_training_config(config: RStockConfig, model: Any) -> RStockConfig:
+    """A persisted model owns its future training policy, including the fallback."""
+    from dataclasses import replace
+    policy = model.round_selection_policy
+    if policy is None:
+        source = model.source_configuration.get("rstock_config", {})
+        if source.get("xgb_round_selection_mode") == "chronological":
+            raise ValueError("Chronological production model is missing its frozen policy")
+        changes = {"xgb_round_selection_mode": "fixed"}
+    else:
+        if any(key not in policy for key in (*ROUND_SELECTION_FIELDS, "fallback_rounds")):
+            raise ValueError("Incomplete frozen round selection policy")
+        changes = {key: policy[key] for key in ROUND_SELECTION_FIELDS}
+        changes["xgb_rounds"] = policy["fallback_rounds"]
+    return replace(config, **changes, xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads)
+
+
+def validate_production_round_contract(model: Any, metadata: Mapping[str, Any]) -> None:
+    policy = model.round_selection_policy
+    if policy is None:
+        if model.source_configuration.get("rstock_config", {}).get("xgb_round_selection_mode") == "chronological":
+            raise ValueError("Missing chronological production policy")
+        return
+    if policy.get("xgb_round_selection_mode") != "chronological":
+        return
+    records = metadata.get("round_selection_records", {})
+    if metadata.get("round_selection_policy") != policy or any(
+        not records.get(direction, {}).get("TrainingIdentity")
+        or records[direction].get("RoundSelectionPolicy") != policy
+        for direction in ("up", "down")
+    ):
+        raise ValueError("Incomplete or incompatible chronological production artifact")
+
+
 def fit_booster(
+    train: pd.DataFrame, predictor_names: Sequence[str], outcome_name: str,
+    config: RStockConfig, *, parameters: XGBoostParameters | None = None,
+    cancellation_check: Any = None,
+) -> Any:
+    """Apply the configured policy to every new training origin, then refit."""
+    selected = parameters or historical_xgboost_parameters(config)
+    if config.xgb_round_selection_mode == "chronological":
+        booster, record = fit_chronological_booster(
+            train, predictor_names, outcome_name, config, parameters=selected,
+            cancellation_check=cancellation_check)
+        if not hasattr(booster, "set_attr"):
+            raise ValueError("Chronological booster cannot persist its training contract")
+        booster.set_attr(rstock_round_selection=json.dumps(record, default=str, sort_keys=True))
+        return booster
+    return _fit_fixed_booster(train, predictor_names, outcome_name, config,
+        parameters=selected, cancellation_check=cancellation_check)
+
+
+def _fit_fixed_booster(
     train: pd.DataFrame,
     predictor_names: Sequence[str],
     outcome_name: str,
     config: RStockConfig,
     *,
     parameters: XGBoostParameters | None = None,
+    cancellation_check: Any = None,
 ) -> Any:
     """Fit one booster, defaulting to the established historical parameters."""
 
@@ -171,11 +464,20 @@ def fit_booster(
     selected = parameters or historical_xgboost_parameters(config)
     names = list(predictor_names)
     matrix = xgb.DMatrix(train[names], label=train[outcome_name], feature_names=names)
+    extra = {}
+    if cancellation_check is not None:
+        from .progress import check_cancellation
+        class CancellationCallback(xgb.callback.TrainingCallback):
+            def after_iteration(self, model, epoch, evals_log):
+                check_cancellation(cancellation_check)
+                return False
+        extra["callbacks"] = [CancellationCallback()]
     return xgb.train(
         selected.training_parameters(config),
         matrix,
         num_boost_round=selected.num_boost_round,
         verbose_eval=False,
+        **extra,
     )
 
 

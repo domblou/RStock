@@ -23,7 +23,7 @@ from .calibration_sampling import (
 )
 from .checkpoints import CheckpointManager, _atomic_json
 from .config import RStockConfig
-from .modeling import XGBoostParameters
+from .modeling import XGBoostParameters, round_selection_snapshot, write_probability_training_audit
 from .parallel import iter_ordered_process_results
 from .progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from .threshold_calibration import (
@@ -424,6 +424,14 @@ def run_threshold_parameter_calibration(
     )
     sample_ids = [str(value) for value in sample.manifest["selected_set_ids"]]
     prediction_key = hashlib.sha256("|".join(sample_ids).encode("utf-8")).hexdigest()
+    if config.xgb_round_selection_mode == "chronological":
+        identity = {"sample": sample_ids, "policy": round_selection_snapshot(config),
+            "parameters": {direction: params.as_dict() for direction, params in (xgboost_parameters_by_direction or {}).items()},
+            "seed": config.xgb_seed, "features": list(development.columns),
+            "data": hashlib.sha256(pd.util.hash_pandas_object(development, index=True).values.tobytes()).hexdigest(),
+            "geometry": [config.walk_forward_window_mode, config.walk_forward_min_train_size,
+                         config.walk_forward_train_size, config.walk_forward_test_size, config.walk_forward_step_size]}
+        prediction_key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     prediction_reused = False
     if checkpoint_manager is not None and checkpoint_manager.artifact_exists("development_probabilities"):
         stored = checkpoint_manager.load_artifact("development_probabilities")
@@ -680,6 +688,7 @@ def write_threshold_parameter_calibration_results(
     result: ThresholdParameterCalibrationResult, directory: Path
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    write_probability_training_audit(result.development_predictions, directory, result.run_configuration)
     result.tested_configurations.to_csv(
         directory / "tested_threshold_parameter_configurations.csv", index=False
     )

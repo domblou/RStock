@@ -14,7 +14,7 @@ from .combinations import symbol_set_id, symbols_from_set
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics, outcome_error
 from .features import intraday_target_column, predictor_columns
-from .modeling import fit_booster, predict_probabilities
+from .modeling import fit_booster, predict_probabilities, booster_training_record
 from .persistence import ModelMetadata, model_store_transaction, save_model_bundle
 
 
@@ -121,6 +121,7 @@ def train_models(
                     target_threshold=config.intraday_target_threshold,
                     lag_depth=config.lag_depth,
                     classification_metrics=metrics.as_dict(),
+                    round_selection_record=booster_training_record(booster),
                 )
                 save_model_bundle(
                     booster, metadata, staging_directory, f"model_{ordinal:06d}"

@@ -60,6 +60,13 @@ class RStockConfig:
     xgb_eta: float = 1.0
     xgb_nthread: int = 2
     xgb_rounds: int = 4
+    xgb_round_selection_mode: str = "fixed"
+    xgb_early_stopping_max_rounds: int = 500
+    xgb_early_stopping_validation_sessions: int = 63
+    xgb_early_stopping_patience: int = 30
+    xgb_early_stopping_min_train_observations: int = 252
+    xgb_early_stopping_metric: str = "logloss"
+    xgb_round_selection_protocol_version: str = "chronological_v1"
     xgb_min_child_weight: float = 1.0
     xgb_subsample: float = 1.0
     xgb_colsample_bytree: float = 1.0
@@ -170,6 +177,14 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if self.xgb_round_selection_mode not in {"fixed", "chronological"}:
+            raise ValueError("Unsupported XGBoost round selection mode")
+        if self.xgb_early_stopping_metric != "logloss" or self.xgb_round_selection_protocol_version != "chronological_v1":
+            raise ValueError("Unsupported XGBoost round selection protocol")
+        for name in ("xgb_early_stopping_max_rounds", "xgb_early_stopping_validation_sessions", "xgb_early_stopping_patience", "xgb_early_stopping_min_train_observations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         if self.market_context_regime_version not in {None, "rstock_spy_regimes_v1"}:
             raise ValueError("Unsupported market regime protocol version")
         if self.market_context_protocol_version != "spy_adjusted_context_v1":
@@ -373,6 +388,15 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    # Old snapshots always trained with their recorded xgb_rounds. The other
+    # fields are inert until chronological selection is explicitly requested.
+    "xgb_round_selection_mode": "fixed",
+    "xgb_early_stopping_max_rounds": 500,
+    "xgb_early_stopping_validation_sessions": 63,
+    "xgb_early_stopping_patience": 30,
+    "xgb_early_stopping_min_train_observations": 252,
+    "xgb_early_stopping_metric": "logloss",
+    "xgb_round_selection_protocol_version": "chronological_v1",
     # Historical runs had no context protocol. Windows are inert until explicit activation.
     "market_context_regime_version": None,
     "market_context_enabled": False,
@@ -652,4 +676,3 @@ def save_user_settings(
             temporary_path.unlink(missing_ok=True)
         raise
     return path
-

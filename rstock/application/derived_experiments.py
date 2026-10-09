@@ -161,7 +161,7 @@ def build_derived_spec(
             raise ValueError("predictor_prefilter_top_n must be a positive integer")
         if not isinstance(enabled, bool):
             raise ValueError("predictor_prefilter_enabled must be boolean")
-        if not enabled:
+        if not enabled and any(field.startswith("predictor_prefilter_") for field in config_changes):
             raise ValueError("Walk-forward / préfiltre requires an enabled prefilter")
     source_path = repository.run_directory(source_end_to_end_run_id) / PIPELINE_MANIFEST
     derivation = Derivation(
@@ -191,8 +191,17 @@ def build_derived_spec(
         temporal_validation_enabled=False,
         auto_promote_candidates=False,
         forward_simulation_enabled=forward_enabled,
+        e2e_xgboost_protocol_version=(2 if fork_stage in {"prefilter", "walk_forward", "xgboost_calibration"}
+                                     else source_spec.e2e_xgboost_protocol_version),
         **other_changes,
     )
+    if fork_stage == "walk_forward" and derived.config.xgb_round_selection_mode == "chronological":
+        # Prove exact candidate/snapshot reuse before creating any child job.
+        from .walk_forward_experiments import freeze_walk_forward_input
+        freeze_walk_forward_input(repository, replace(derived, job_type=JobType.WALK_FORWARD,
+            derivation=None, evaluate_final_holdout=False, prefilter_method="single_origin",
+            stability_origin_count=5, stability_step_sessions=1), walk_forward_id,
+            str(derivation.prepared_snapshot_sha256))
     if (
         forward_enabled
         and derived.forward_simulation_mode == "custom_end_date"

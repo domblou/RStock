@@ -21,7 +21,10 @@ def test_classification_metrics_include_confusion_matrix_and_auc():
         probabilities=[0.1, 0.8, 0.4, 0.9],
     )
 
-    assert metrics.as_columns() == {
+    values = metrics.as_columns()
+    assert np.isclose(values.pop("LogLoss"), -np.log([0.9, 0.2, 0.4, 0.9]).mean())
+    assert np.isclose(values.pop("Brier"), np.mean(np.square([0.1, 0.8, -0.6, -0.1])))
+    assert values == {
         "TN": 1,
         "FP": 1,
         "FN": 1,

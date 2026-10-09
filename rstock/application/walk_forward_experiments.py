@@ -13,7 +13,7 @@ from rstock.checkpoints import CheckpointManager
 from rstock.combination_planning import CombinationPlan
 from rstock.config import RStockConfig
 from rstock.model_selection import model_selection_parameters
-from rstock.modeling import historical_xgboost_parameters
+from rstock.modeling import historical_xgboost_parameters, ROUND_SELECTION_FIELDS
 
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
@@ -26,6 +26,7 @@ WF_GEOMETRY_FIELDS = (
     "walk_forward_step_size", "final_holdout_size",
 )
 WF_XGBOOST_FIELDS = (
+    *ROUND_SELECTION_FIELDS,
     "xgb_max_depth", "xgb_eta", "xgb_rounds", "xgb_min_child_weight",
     "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma",
     "xgb_reg_alpha", "xgb_reg_lambda", "xgb_seed",
@@ -81,6 +82,34 @@ def _candidate_source(repository: RunRepository, run_id: str, spec: ExperimentSp
     raw = (repository.run_directory(run_id) / "checkpoints" / "artifacts"
            / f"{name}.pkl").read_bytes()
     return name, hashlib.sha256(raw).hexdigest()
+
+
+def freeze_walk_forward_input(repository: RunRepository, child: ExperimentSpec,
+                              source_id: str, snapshot_sha: str) -> ExperimentSpec:
+    """Reuse the WF derivation input contract inside the existing E2E graph."""
+    source = repository.load_spec(source_id)
+    if repository.status(source_id).get("status") != "completed" or repository.storage(source_id)["state"] != "full":
+        raise ValueError("Source Walk-forward is incomplete or purged")
+    trace = repository.summary(source_id).get("traceability", {})
+    name, digest = _candidate_source(repository, source_id, source)
+    provenance = {"schema_version": 1, "source_run_id": source_id,
+        "source_fingerprint": repository.configuration_fingerprint(source_id),
+        "prepared_snapshot_sha256": snapshot_sha,
+        "prepared_dataset_sha256": trace["prepared_dataset_sha256"],
+        "prepared_dataset_as_of": str(pd.Timestamp(trace["prepared_market_last_date"]).date()),
+        "candidate_artifact": name, "candidate_sha256": digest}
+    frozen = replace(child, config=replace(source.config, **{
+        field: getattr(child.config, field) for field in WF_DERIVATION_CONFIG_FIELDS}),
+        source_experiment_run=source_id, source_walk_forward_run=source_id,
+        requested_historical_cutoff=source.requested_historical_cutoff,
+        resolved_market_session_cutoff=source.resolved_market_session_cutoff,
+        historical_data_cutoff=provenance["prepared_dataset_as_of"],
+        walk_forward_derivation=provenance,
+        source_prepared_dataset_sha256=trace["prepared_dataset_sha256"],
+        prepared_snapshot_required=True, prepared_dataset_digest_required=True)
+    load_source_prepared_snapshot(repository, frozen, expected_snapshot_sha256=snapshot_sha)
+    load_frozen_walk_forward_candidates(repository, frozen)
+    return frozen
 
 
 def load_frozen_walk_forward_candidates(
@@ -140,6 +169,9 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, Any]) -> dic
         field: value for field, value in effective.items()
         if field in WF_DERIVATION_CONFIG_FIELDS
     })
+    if config.xgb_round_selection_mode == "chronological":
+        if any(name not in ROUND_SELECTION_FIELDS and name != "evaluate_final_holdout" for name in effective):
+            raise ValueError("Chronological comparison must preserve reference geometry, qualification and XGBoost parameters including xgb_rounds")
     historical_xgboost_parameters(config)
     model_selection_parameters(config)
     for field in (

@@ -29,6 +29,9 @@ from .modeling import (
     XGBoostParameters,
     fit_booster,
     fit_booster_matrix,
+    fit_chronological_booster,
+    round_selection_snapshot,
+    round_selection_coverage,
     historical_xgboost_parameters,
     prefilter_xgboost_parameters,
     predict_probabilities,
@@ -159,6 +162,7 @@ def _walk_forward_combination(
     *,
     include_down: bool = True,
     parameters: XGBoostParameters | None = None,
+    round_selection_enabled: bool = True,
 ) -> _WalkForwardCombinationResult:
     """Evaluate one combination; its chronological windows remain sequential."""
 
@@ -231,12 +235,19 @@ def _walk_forward_combination(
         train_features = train[names]
         test_features = test[names]
         test_matrix = xgb.DMatrix(test_features, feature_names=names)
-        up_train_matrix = xgb.DMatrix(
-            train_features, label=train[up_outcome_name], feature_names=names
-        )
-        up_booster = fit_booster_matrix(
-            up_train_matrix, config, parameters=effective_parameters
-        )
+        selection_diagnostics = {}
+        if round_selection_enabled and config.xgb_round_selection_mode == "chronological":
+            up_booster, up_selection = fit_chronological_booster(
+                train, names, up_outcome_name, config, parameters=effective_parameters,
+                cancellation_check=cancellation_check,
+            )
+        else:
+            up_train_matrix = xgb.DMatrix(train_features, label=train[up_outcome_name], feature_names=names)
+            up_booster = fit_booster_matrix(up_train_matrix, config, parameters=effective_parameters)
+            up_selection = {"RoundSelectionMode": "fixed", "RoundSelectionUsed": False,
+                            "RoundsRetained": effective_parameters.num_boost_round,
+                            "RoundSelectionFallbackReason": None}
+        selection_diagnostics.update({f"Up{k}": v for k, v in up_selection.items()})
         up_probabilities = predict_probabilities_matrix(up_booster, test_matrix)
         up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
         up_actual = test[up_outcome_name].astype(int).to_numpy()
@@ -259,12 +270,18 @@ def _walk_forward_combination(
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
         down_predicted = down_probabilities = None
         if include_down:
-            down_train_matrix = xgb.DMatrix(
-                train_features, label=train[down_outcome_name], feature_names=names
-            )
-            down_booster = fit_booster_matrix(
-                down_train_matrix, config, parameters=effective_parameters
-            )
+            if round_selection_enabled and config.xgb_round_selection_mode == "chronological":
+                down_booster, down_selection = fit_chronological_booster(
+                    train, names, down_outcome_name, config, parameters=effective_parameters,
+                    cancellation_check=cancellation_check,
+                )
+            else:
+                down_train_matrix = xgb.DMatrix(train_features, label=train[down_outcome_name], feature_names=names)
+                down_booster = fit_booster_matrix(down_train_matrix, config, parameters=effective_parameters)
+                down_selection = {"RoundSelectionMode": "fixed", "RoundSelectionUsed": False,
+                                  "RoundsRetained": effective_parameters.num_boost_round,
+                                  "RoundSelectionFallbackReason": None}
+            selection_diagnostics.update({f"Down{k}": v for k, v in down_selection.items()})
             down_probabilities = predict_probabilities_matrix(
                 down_booster, test_matrix
             )
@@ -278,6 +295,7 @@ def _walk_forward_combination(
                     "Down", down_actual, down_predicted, down_probabilities
                 )
             )
+        window_record.update(selection_diagnostics)
         window_records.append(window_record)
         for position, date in enumerate(test.index):
             prediction = {
@@ -337,6 +355,7 @@ def _prefilter_combination(
         result = _walk_forward_combination(
             row_values, training_context, cancellation_check, include_down=False,
             parameters=prefilter_xgboost_parameters(config),
+            round_selection_enabled=False,
         )
     except InsufficientWalkForwardObservations as error:
         _, _, _, market_calendars, _, _, _ = context
@@ -1172,6 +1191,9 @@ def evaluate_walk_forward(
 ) -> WalkForwardResult:
     """Qualify on development windows, then confirm on an untouched final holdout."""
 
+    if config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+        raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
+
     _validate_prepared_index(prepared)
     ordered = prepared.sort_index()
     min_train = (
@@ -1300,6 +1322,8 @@ def evaluate_walk_forward(
     )
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     run_configuration: dict[str, object] = {
+        "round_selection": {**round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__},
+        "round_selection_coverage": round_selection_coverage(windows_frame),
         "target": "intraday_return >= intraday_target_threshold",
         "down_target": "intraday_return <= -intraday_down_threshold",
         "intraday_target_threshold": config.intraday_target_threshold,

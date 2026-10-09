@@ -236,7 +236,10 @@ def test_walk_forward_derivation_ui_inherits_and_submits_scientific_fields(tmp_p
     streamlit_app._render_walk_forward_derived_creation(
         parent, {"status": {"status": "completed"}, "summary": {}}, service,
     )
-    assert set(shown) == WF_DERIVATION_CONFIG_FIELDS - {"walk_forward_window_mode"}
+    assert set(shown) == WF_DERIVATION_CONFIG_FIELDS - {
+        "walk_forward_window_mode", "xgb_round_selection_mode",
+        "xgb_early_stopping_metric", "xgb_round_selection_protocol_version",
+    }
     assert all(shown[field] == getattr(source.config, field) for field in shown)
     assert submitted == [(parent, "walk_forward", {"xgb_eta": 0.2})]
 

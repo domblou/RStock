@@ -358,6 +358,11 @@ class RunService:
                 raise ValueError("Forward period must be strictly after the source cutoff")
             specification = replace(
                 source, job_type=JobType.FORWARD_SIMULATION,
+                # Match automatic Forward tasks: discovery-only method settings
+                # must not leak into the frozen-model evaluation specification.
+                prefilter_method="single_origin",
+                stability_origin_count=5,
+                stability_step_sessions=1,
                 derivation=None,
                 source_end_to_end_run=source_end_to_end_run,
                 source_forward_model_snapshot_sha256=_sha256(snapshot),

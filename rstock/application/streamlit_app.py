@@ -1729,6 +1729,16 @@ def _settings() -> None:
         max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
         eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f")
         rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds)
+        round_modes = ("fixed", "chronological")
+        round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
+            index=round_modes.index(current.xgb_round_selection_mode),
+            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique")
+        st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
+        round_controls = st.columns(4)
+        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds)
+        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions)
+        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience)
+        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations)
         child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight)
         subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample)
         colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree)
@@ -1987,6 +1997,11 @@ def _settings() -> None:
                 xgb_max_depth=int(max_depth),
                 xgb_eta=float(eta),
                 xgb_rounds=int(rounds),
+                xgb_round_selection_mode=round_mode,
+                xgb_early_stopping_max_rounds=int(round_max),
+                xgb_early_stopping_validation_sessions=int(round_validation),
+                xgb_early_stopping_patience=int(round_patience),
+                xgb_early_stopping_min_train_observations=int(round_min_train),
                 xgb_min_child_weight=float(child),
                 xgb_subsample=float(subsample),
                 xgb_colsample_bytree=float(colsample),
@@ -2709,6 +2724,11 @@ def _render_xgboost_calibration_selection(run_id: str) -> None:
         st.caption("Les artefacts de sélection XGBoost ne sont pas disponibles pour ce run historique.")
         return
     st.subheader("Sélection et validation XGBoost")
+    if any(payload.get("round_selection_policy", {}).get("xgb_round_selection_mode") == "chronological"
+           for payload in selected.values() if isinstance(payload, dict)):
+        st.caption("Mode chronologique : num_boost_round est nominal dans les paramètres de calibration. "
+                   "Les tours effectifs sont sélectionnés par direction et origine ; consulter l’audit des entraînements. "
+                   "Dans le nouveau protocole E2E, le holdout est évalué à son étape dédiée.")
     st.caption("Stabilité développement = écart-type ROC-AUC entre les fenêtres.")
     render_dataframe(
         xgboost_calibration_selection_display_table(table),
@@ -3647,6 +3667,99 @@ def _render_walk_forward_metrics(analytics: RunAnalytics) -> None:
     metrics[5].metric("Fenetres (mediane)", _format_metric(windows))
 
 
+def _render_round_selection_summary(run_id: str, detail: dict[str, object]) -> None:
+    configuration = detail.get("configuration", {}).get("rstock_config", {})
+    mode = configuration.get("xgb_round_selection_mode", "fixed")
+    st.caption(f"Tours XGBoost : {'chronologique' if mode == 'chronological' else 'fixe'} · repli / tours fixes : {configuration.get('xgb_rounds', '—')}")
+    if mode != "chronological":
+        return
+    minimum = configuration.get("xgb_early_stopping_validation_sessions", 63) + configuration.get("xgb_early_stopping_min_train_observations", 252)
+    st.caption(f"Minimum : {minimum} observations utilisables (315 avec les paramètres par défaut). Les fenêtres sont comptées par candidat, séparément pour Up et Down. Les résultats globaux incluent les replis ; le sous-ensemble optimisé dispose de davantage d'historique.")
+    root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    effective = _read_light_json(root / "run_configuration.json") or {}
+    coverage = effective.get("round_selection_coverage", {})
+    rows = []
+    for direction in ("Up", "Down"):
+        values = coverage.get(direction, {})
+        if not values.get("available"):
+            st.caption(f"{direction} : couverture indisponible")
+            continue
+        distribution = values.get("rounds_distribution", {})
+        rows.append({"Direction": direction, "Fenêtres": values["windows"],
+            "Optimisées": values["optimized_windows"], "% optimisées": values["optimized_percent"],
+            "Replis": values["fallback_windows"], "% replis": values["fallback_percent"],
+            "Tours médians": distribution.get("50%"), "Tours Q1": distribution.get("25%"),
+            "Tours Q3": distribution.get("75%"), "Tours minimum": distribution.get("min"),
+            "Tours maximum": distribution.get("max")})
+        histogram = values.get("rounds_histogram", {})
+        if histogram:
+            st.caption(f"{direction} — distribution des tours retenus, replis inclus")
+            optimized_histogram = values.get("optimized_rounds_histogram", {})
+            st.bar_chart(pd.DataFrame({"Toutes les fenêtres": {int(k): v for k, v in histogram.items()},
+                "Fenêtres optimisées": {int(k): v for k, v in optimized_histogram.items()}}).fillna(0).sort_index())
+        reasons = values.get("fallback_reasons", {})
+        if reasons:
+            reason_labels = {"insufficient_history": "Historique utilisable insuffisant",
+                "validation_single_class": "Une seule classe en validation interne",
+                "internal_train_single_class": "Une seule classe en apprentissage interne",
+                "invalid_selection_result": "Résultat de sélection inexploitable",
+                "selection_result_unavailable": "Résultat de sélection indisponible"}
+            render_dataframe(pd.DataFrame({"Raison du repli": [reason_labels.get(reason, reason) for reason in reasons], "Fenêtres": list(reasons.values())}), hide_index=True, width="stretch")
+    if rows:
+        render_dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    audit = root / "round_selection_training.csv"
+    if audit.is_file():
+        with st.expander("Tours retenus et validations internes par entraînement"):
+            render_dataframe(pd.read_csv(audit), hide_index=True, width="stretch")
+
+
+def _render_paired_round_comparison(details: list[dict[str, object]], run_ids: list[str]) -> None:
+    if len(details) != 2:
+        return
+    modes = [d.get("configuration", {}).get("rstock_config", {}).get("xgb_round_selection_mode", "fixed") for d in details]
+    if set(modes) != {"fixed", "chronological"}:
+        return
+    from rstock.application.round_selection_comparison import compare_round_selection
+    st.subheader("Comparaison appariée des tours XGBoost")
+    try:
+        summary, pairs = compare_round_selection(st.session_state.lab_config.project_root,
+            run_ids[modes.index("fixed")], run_ids[modes.index("chronological")])
+    except (OSError, ValueError, KeyError) as error:
+        st.warning(f"Comparaison appariée indisponible : {error}")
+        return
+    st.caption(summary["scope"])
+    rows = []
+    for key, label in (("all_windows", "Toutes les fenêtres comparables"), ("optimized_windows", "Fenêtres réellement optimisées")):
+        values = summary[key]
+        inference = values["inference"]
+        interval = inference["interval"]
+        rows.append({"Population": label, "Fenêtres candidat-direction": values["candidate_direction_windows"],
+            "Δ log loss": values.get("delta_LogLoss"), "Δ Brier": values.get("delta_Brier"),
+            "Δ AUC": values.get("delta_ROCAUC"), "Gain relatif log loss": values.get("relative_log_loss_improvement"),
+            "IC 95 % log loss": "indisponible" if interval is None else f"[{interval[0]:.5f}, {interval[1]:.5f}]",
+            "Validité": inference["status"]})
+    render_dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("Δ = chronologique − fixe. Log loss et Brier : plus faible est meilleur. L'IC utilise des blocs temporels communs à tous les candidats, avec contrôle du chevauchement et sensibilité à la taille des blocs.")
+    st.caption(summary["optimized_subset_caveat"])
+    inference = summary["all_windows"]["inference"]
+    if inference["interval"] is None:
+        st.info("Résultat exploratoire : les données ne permettent pas une estimation fiable de l'IC 95 %. Aucune supériorité démontrée.")
+    elif summary["all_windows"].get("additional_validation_warranted"):
+        st.info("Les critères proposés sont satisfaits sur cette population sélectionnée : une validation indépendante supplémentaire est justifiée.")
+    else:
+        st.info("Les critères proposés pour une validation supplémentaire ne sont pas tous satisfaits. Aucune supériorité démontrée.")
+    st.caption("Critères : gain de log loss ≥ 1 %, borne supérieure IC < 0, dégradation AUC ≤ 0,01 et Brier ≤ 0,005 ; gain dans deux tiers temporels et après retrait du tiers le plus favorable.")
+    with st.expander("Détails par direction et stabilité temporelle"):
+        for key in ("all_windows", "optimized_windows"):
+            values = summary[key]
+            st.caption("Toutes les fenêtres comparables" if key == "all_windows" else "Fenêtres réellement optimisées")
+            render_dataframe(pd.DataFrame(values.get("directions", {})).T, width="stretch")
+            render_dataframe(pd.DataFrame(values.get("performance_dispersion", {})), width="stretch")
+        st.line_chart(pairs.groupby("TestStart")[["DeltaLogLoss", "DeltaBrier", "DeltaROCAUC"]].mean())
+    st.download_button("Exporter les différences appariées (CSV)", pairs.to_csv(index=False).encode("utf8"),
+        file_name="comparaison_tours_xgboost.csv", mime="text/csv", key="round-selection-paired-export")
+
+
 def _render_walk_forward_summary(
     run_id: str, status: dict[str, object], detail: dict[str, object]
 ) -> None:
@@ -3657,6 +3770,7 @@ def _render_walk_forward_summary(
         else {}
     )
     config = raw_config if isinstance(raw_config, Mapping) else {}
+    _render_round_selection_summary(run_id, detail)
     mode = str(config.get("walk_forward_window_mode", "expanding"))
     train = (
         f"train fixe {int(config.get('walk_forward_train_size', 252))}"
@@ -4006,6 +4120,10 @@ def _render_derived_creation(
         if modes[stage] == "recomputed"
         for field in sorted(parameter_fields.get(stage, ()))
     ]
+    if modes.get("xgboost_calibration") == "recomputed":
+        st.info("Protocole E2E : la calibration XGBoost utilise le développement uniquement. "
+                "Le holdout reste réservé à l’étape Évaluation holdout, en mode fixe comme chronologique. "
+                "Les reprises des anciens runs conservent leur protocole enregistré.")
     changes: dict[str, object] = {}
     with st.container(border=True):
         if forward_enabled:
@@ -4037,7 +4155,12 @@ def _render_derived_creation(
                 ).isoformat()
                 if selected_end != original_end:
                     changes["forward_simulation_end_date"] = selected_end
+        last_stage = None
         for field in fields:
+            owner = next(stage for stage in fork_keys if field in parameter_fields.get(stage, ()))
+            if owner != last_stage:
+                st.subheader(labels[owner])
+                last_stage = owner
             try:
                 original = source_parameter_value(
                     repository, source_spec, source_manifest, field
@@ -4045,7 +4168,18 @@ def _render_derived_creation(
             except (OSError, ValueError, KeyError) as error:
                 st.error(f"Valeur source indisponible pour {field} : {error}")
                 return
-            if field == "prefilter_method":
+            if field == "xgb_round_selection_mode":
+                value = st.selectbox("Sélection des tours XGBoost (Walk-forward et aval)",
+                    ("fixed", "chronological"), index=(0 if original == "fixed" else 1),
+                    format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique",
+                    key=f"derive-value-{run_id}-{fork}-{field}")
+                st.caption("Préfiltre à tours fixes. Sélection interne dans chaque entraînement aval, "
+                           "sans accès au holdout. Minimum par défaut : 315 observations utilisables (252 + 63). "
+                           "Forward conserve ses modèles figés.")
+            elif field in {"xgb_early_stopping_metric", "xgb_round_selection_protocol_version"}:
+                st.caption(f"{field} : {original}")
+                value = original
+            elif field == "prefilter_method":
                 modes = ("single_origin", "temporal_stability", "temporal_consensus")
                 value = st.selectbox("Mode de sélection", modes, index=modes.index(original),
                                      key=f"derive-value-{run_id}-{fork}-{field}")
@@ -4248,6 +4382,13 @@ def _render_walk_forward_derived_creation(
     )
     labels = {
         "walk_forward_window_mode": "Mode de fenêtre",
+        "xgb_round_selection_mode": "Sélection des tours (WF)",
+        "xgb_early_stopping_max_rounds": "Tours internes maximum",
+        "xgb_early_stopping_validation_sessions": "Séances utilisables de validation interne",
+        "xgb_early_stopping_patience": "Patience (tours)",
+        "xgb_early_stopping_min_train_observations": "Observations minimales d'apprentissage interne",
+        "xgb_early_stopping_metric": "Métrique de sélection",
+        "xgb_round_selection_protocol_version": "Version du protocole de sélection",
         "walk_forward_min_train_size": "Train minimal (expansive)",
         "walk_forward_train_size": "Train fixe (glissante)",
         "walk_forward_test_size": "Taille du test",
@@ -4272,12 +4413,21 @@ def _render_walk_forward_derived_creation(
         if field == "walk_forward_window_mode":
             modes = ("expanding", "rolling")
             value = widget.selectbox(label, modes, index=modes.index(original), key=widget_key)
+        elif field == "xgb_round_selection_mode":
+            modes = ("fixed", "chronological")
+            value = widget.selectbox("Sélection des tours (WF)", modes, index=modes.index(original), key=widget_key,
+                format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique")
+        elif field in {"xgb_early_stopping_metric", "xgb_round_selection_protocol_version"}:
+            widget.caption(f"{label} : {original}")
+            return
         elif field in {
             "walk_forward_min_train_size", "walk_forward_train_size",
             "walk_forward_test_size", "walk_forward_step_size",
             "final_holdout_size", "xgb_max_depth", "xgb_rounds",
             "qualification_min_windows", "qualification_min_positive_observations",
             "xgb_seed",
+            "xgb_early_stopping_max_rounds", "xgb_early_stopping_validation_sessions",
+            "xgb_early_stopping_patience", "xgb_early_stopping_min_train_observations",
         }:
             minimum = 0 if field in {
                 "qualification_min_positive_observations", "xgb_seed",
@@ -4311,6 +4461,7 @@ def _render_walk_forward_derived_creation(
         columns = st.columns(3)
         for index, field in enumerate(WF_XGBOOST_FIELDS):
             field_input(field, columns[index % 3])
+        st.caption("Chronologique : conserver tous les autres paramètres de référence, désactiver le holdout final. Repli = xgb_rounds hérité ; minimum par défaut 315 observations utilisables.")
         st.subheader("Qualification et classement")
         for field in (*WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS):
             field_input(field, st)
@@ -4451,6 +4602,8 @@ def _render_pipeline_child(
         )
         return
     child_detail = service.run(str(effective_run_id))
+    if stage_key != "walk_forward":
+        _render_round_selection_summary(str(effective_run_id), child_detail)
     child_status = child_detail["status"]
     st.caption(
         f"Run : {effective_run_id} - statut : {child_status.get('status', '-')} · "
@@ -5219,6 +5372,23 @@ def _render_run_detail_view(
     _render_job_detail_tabs(service, run_id, status=status, detail=detail)
     return
 def _render_end_to_end_comparison(run_ids: list[str]) -> None:
+    # Reuse the same WF comparison, preserving every inherited input candidate.
+    repository = RunRepository(st.session_state.lab_config.project_root / "runs")
+    wf_ids, wf_details = [], []
+    for parent_id in run_ids:
+        parent_manifest = load_pipeline_manifest(repository, parent_id)
+        if parent_manifest:
+            from rstock.application.end_to_end import effective_stage_run_id
+            wf_id = effective_stage_run_id(parent_manifest, "walk_forward")
+            if wf_id:
+                wf_ids.append(wf_id)
+                wf_details.append({"configuration": repository.load_spec(wf_id).to_dict()})
+    if len(wf_ids) == len(run_ids):
+        for wf_id, wf_detail in zip(wf_ids, wf_details):
+            _render_round_selection_summary(wf_id, wf_detail)
+        _render_paired_round_comparison(wf_details, wf_ids)
+    st.caption("La comparaison WF porte sur les candidats d’entrée ; les étapes aval suivent "
+               "la qualification propre à chaque run. Les métriques aval ne démontrent pas seules une supériorité statistique.")
     analyses = [
         load_end_to_end_comparison(st.session_state.lab_config.project_root, run_id)
         for run_id in run_ids
@@ -5577,6 +5747,9 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
         render_dataframe(comparison_display_table(summary), hide_index=True, width="stretch")
     with tabs[1]:
         quality, durations = comparison_chart_frames(analytics, labels)
+        for run_id, detail in zip(run_ids, details):
+            _render_round_selection_summary(run_id, detail)
+        _render_paired_round_comparison(details, run_ids)
         st.subheader("Qualité prédictive")
         quality_long = quality.melt(
             id_vars=["Run", "Date / heure"],
@@ -8425,6 +8598,7 @@ def _render_model_quality_detail(model_id: str) -> None:
             "down_threshold": model.down_threshold,
             "cutoff_date": lineage.get("cutoff_date"),
             "source_configuration": model.source_configuration,
+            "round_selection_policy": model.round_selection_policy,
             "training_metadata": model.training_metadata,
             "watching_started_at": model.watching_started_at,
             "activated_at": model.activated_at,

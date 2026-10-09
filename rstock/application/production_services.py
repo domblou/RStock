@@ -30,6 +30,10 @@ from rstock.features import (
 from rstock.modeling import (
     XGBoostParameters,
     fit_booster,
+    booster_training_record,
+    production_training_config,
+    round_selection_snapshot,
+    validate_production_round_contract,
     predict_probabilities,
     resolve_directional_xgboost_parameters,
 )
@@ -315,6 +319,7 @@ class PromotionService:
             xgboost_seed=xgboost_seed,
             xgboost_threads=xgboost_threads,
             source_configuration=spec.to_dict(),
+            round_selection_policy=round_selection_snapshot(provenance_spec.config),
             calibrated_signal_threshold=calibrated_signal_threshold,
             calibration_source_run=threshold_calibration_run,
             calibration_metrics=calibration_metrics,
@@ -399,6 +404,7 @@ class PromotionService:
             "lag_depth",
             "intraday_target_threshold",
             "intraday_down_threshold",
+            "xgb_round_selection_mode",
         )
         mismatched = [
             name
@@ -409,6 +415,10 @@ class PromotionService:
             raise ValueError(
                 f"{label} is methodologically incompatible: {', '.join(mismatched)}"
             )
+        if walk_forward.config.xgb_round_selection_mode == "chronological" and (
+            round_selection_snapshot(walk_forward.config) != round_selection_snapshot(calibration.config)
+        ):
+            raise ValueError(f"{label} has an incompatible chronological policy")
 
 
 class ProductionTrainingService:
@@ -424,6 +434,7 @@ class ProductionTrainingService:
         cancellation_check: CancellationCheck | None = None,
     ) -> ProductionModel:
         model = self.repository.get(model_id)
+        config = production_training_config(config, model)
         if model.status == ProductionModelStatus.RETIRED:
             raise ValueError("A retired model cannot be trained")
         if model.status in {ProductionModelStatus.ACTIVE, ProductionModelStatus.WATCHING}:
@@ -448,12 +459,15 @@ class ProductionTrainingService:
         frozen_configuration.pop("training_metadata", None)
         frozen_configuration["artifact_version"] = version
         with model_store_transaction(destination) as staging:
+            training_records = {}
             for direction, outcome in outcomes.items():
                 check_cancellation(cancellation_check)
                 booster = fit_booster(
                     training, names, outcome, config,
                     parameters=directional_parameters[direction],
+                    cancellation_check=cancellation_check,
                 )
+                training_records[direction] = booster_training_record(booster)
                 booster.save_model(staging / f"{direction}.ubj")
             check_cancellation(cancellation_check)
             metadata = {
@@ -468,6 +482,8 @@ class ProductionTrainingService:
                 "observations": len(training),
                 "trained_at": utc_now(),
                 "configuration": frozen_configuration,
+                "round_selection_policy": round_selection_snapshot(config),
+                "round_selection_records": training_records,
             }
             (staging / "production.metadata.json").write_text(
                 json.dumps(metadata, indent=2, ensure_ascii=False, default=str) + "\n",
@@ -495,6 +511,7 @@ class ProductionLifecycleService:
 
     def _validate_artifacts(self, model: ProductionModel) -> None:
         directory = self.repository.artifact_directory(model.model_id)
+        production_training_config(RStockConfig(project_root=directory), model)
         required = [directory / "up.ubj", directory / "down.ubj", directory / "production.metadata.json"]
         if model.feature_version not in SUPPORTED_FEATURE_VERSIONS:
             raise ValueError("The production feature version is not supported")
@@ -505,6 +522,7 @@ class ProductionLifecycleService:
         if model.artifact_version is None or not all(path.is_file() for path in required):
             raise ValueError("Production artifacts are missing or incomplete")
         metadata = json.loads(required[-1].read_text(encoding="utf-8"))
+        validate_production_round_contract(model, metadata)
         predictor_names = metadata.get("predictor_columns") or []
         required_lags = {
             intraday_lag_column(symbol, lag)
@@ -822,11 +840,7 @@ class DailyPredictionService:
                 }
                 training_config = training_config_by_model.setdefault(
                     model.model_id,
-                    replace(
-                        config,
-                        xgb_seed=model.xgboost_seed,
-                        xgb_nthread=model.xgboost_threads,
-                    ),
+                    production_training_config(config, model),
                 )
                 target_dates = prepared.index[
                     (prepared.index >= start) & (prepared.index <= end)
@@ -917,6 +931,8 @@ class DailyPredictionService:
                             "model_version": model.artifact_version,
                             "up_probability": probabilities["up"],
                             "down_probability": probabilities["down"],
+                            "round_selection_records": json.dumps({direction: booster_training_record(booster)
+                                for direction, booster in boosters.items()}, default=str),
                             "up_threshold": model.signal_threshold,
                             "down_threshold": model.down_threshold,
                             "signal_status": (
@@ -967,6 +983,7 @@ class DailyPredictionService:
         metadata = json.loads(
             (directory / "production.metadata.json").read_text(encoding="utf-8")
         )
+        validate_production_round_contract(model, metadata)
         if (
             metadata.get("model_id") != model.model_id
             or metadata.get("artifact_version") != model.artifact_version
@@ -1041,6 +1058,7 @@ class DailyPredictionService:
         metadata = json.loads(
             (directory / "production.metadata.json").read_text(encoding="utf-8")
         )
+        validate_production_round_contract(model, metadata)
         if (
             metadata.get("model_id") != model.model_id
             or metadata.get("artifact_version") != model.artifact_version

@@ -30,7 +30,8 @@ from .features import (
     mfe_column,
     predictor_columns,
 )
-from .modeling import XGBoostParameters, fit_booster, predict_probabilities
+from .modeling import (XGBoostParameters, fit_booster, predict_probabilities,
+                      append_training_record, write_probability_training_audit)
 from .parallel import process_cancellation_requested, run_combination_tasks
 from .progress import (
     CancellationCheck,
@@ -171,9 +172,11 @@ def _threshold_development_combination(
             raise AssertionError("Threshold calibration leaked future test data")
         for direction, outcome in outcomes.items():
             booster = fit_booster(
-                train, names, outcome, config, parameters=parameters[direction]
+                train, names, outcome, config, parameters=parameters[direction],
+                **({"cancellation_check": cancellation_check} if cancellation_check is not None else {}),
             )
             probabilities = predict_probabilities(booster, test, names)
+            record_start = len(records)
             records.extend(
                 {
                     "Set": set_name, "Observation": observation, "Direction": direction,
@@ -185,6 +188,7 @@ def _threshold_development_combination(
                 }
                 for date, probability in zip(test.index, probabilities, strict=True)
             )
+            append_training_record(records, record_start, booster)
     return records
 
 
@@ -894,9 +898,11 @@ def generate_holdout_probabilities(
             raise AssertionError("Final holdout leaked into threshold training data")
         for direction, outcome in outcomes.items():
             booster = fit_booster(
-                train, names, outcome, config, parameters=directional[direction]
+                train, names, outcome, config, parameters=directional[direction],
+                **({"cancellation_check": cancellation_check} if cancellation_check is not None else {}),
             )
             probabilities = predict_probabilities(booster, test, names)
+            record_start = len(records)
             records.extend(
                 {
                     "Set": set_name,
@@ -915,6 +921,7 @@ def generate_holdout_probabilities(
                 }
                 for date, probability in zip(test.index, probabilities, strict=True)
             )
+            append_training_record(records, record_start, booster)
         report_progress(
             progress_callback,
             "final_holdout",
@@ -1266,6 +1273,7 @@ def write_threshold_calibration_results(
     result: ControlledThresholdCalibrationResult, directory: Path
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    write_probability_training_audit(result.development_predictions, directory, result.run_configuration)
     result.development_predictions.to_csv(
         directory / "development_probabilities.csv", index=False
     )

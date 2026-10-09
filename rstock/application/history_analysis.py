@@ -1329,6 +1329,10 @@ def configuration_differences(
     """Show only meaningful experiment settings that differ across compared runs."""
 
     fields = (
+        "xgb_round_selection_mode", "xgb_early_stopping_max_rounds",
+        "xgb_early_stopping_validation_sessions", "xgb_early_stopping_patience",
+        "xgb_early_stopping_min_train_observations", "xgb_early_stopping_metric",
+        "xgb_round_selection_protocol_version",
         "walk_forward_window_mode", "walk_forward_train_size", "walk_forward_min_train_size",
         "walk_forward_test_size", "walk_forward_step_size", "walk_forward_end_offset_sessions",
         "predictor_prefilter_enabled", "predictor_prefilter_top_n",

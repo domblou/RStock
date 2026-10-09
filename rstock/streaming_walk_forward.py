@@ -22,6 +22,8 @@ import pandas as pd
 from .checkpoints import CheckpointManager
 from .combinations import symbol_set_id
 from .config import RStockConfig
+from .evaluation import probability_losses
+from .modeling import round_selection_snapshot, round_selection_coverage_batches, xgboost_module
 from .model_selection import model_selection_parameters, score_qualified_models
 from .parallel import iter_indexed_combination_batches
 from .progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
@@ -248,6 +250,13 @@ def _sql_classification_metrics(
                 cumulative_positive / cumulative_total
             )
         pr_auc = area
+    loss_sum = brier_sum = 0.0
+    cursor = connection.execute(f"SELECT {target}, {probability} FROM predictions{suffix}", parameters)
+    while rows := cursor.fetchmany(8192):
+        values = np.asarray(rows, dtype=float)
+        losses, briers = probability_losses(values[:, 0], values[:, 1])
+        loss_sum += float(losses.sum())
+        brier_sum += float(briers.sum())
     return {
         "TN": tn,
         "FP": fp,
@@ -260,6 +269,8 @@ def _sql_classification_metrics(
         "ROCAUC": None if auc is None else float(auc),
         "PRAUC": None if pr_auc is None else float(pr_auc),
         "Prevalence": float(positives / total) if total else 0.0,
+        "LogLoss": loss_sum / total if total else None,
+        "Brier": brier_sum / total if total else None,
     }
 
 
@@ -591,6 +602,8 @@ def run_streamed_walk_forward(
 
     _validate_prepared_index(prepared)
     ordered = prepared.sort_index()
+    if config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+        raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
     holdout_size = config.final_holdout_size
     if holdout_size < 1 or holdout_size >= len(ordered):
         raise ValueError("final_holdout_size must leave non-empty development history")
@@ -1113,6 +1126,13 @@ def run_streamed_walk_forward(
             evaluate_holdout=evaluate_holdout,
         )
         run_configuration.update(dict(run_configuration_extras or {}))
+        run_configuration["round_selection"] = {
+            **round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__,
+        }
+        run_configuration["round_selection_coverage"] = round_selection_coverage_batches(
+            checkpoint.load_batch("walk_forward", value)["windows"]
+            for value in range(total_batches)
+        )
         metrics = {
             "aggregate_global": aggregate_global,
             "selection_results": selection_results,

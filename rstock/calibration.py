@@ -28,6 +28,9 @@ from .features import (
     predictor_columns,
 )
 from .modeling import (
+    booster_training_record,
+    round_selection_snapshot,
+    training_records_coverage,
     XGBoostParameters,
     fit_booster,
     fit_booster_matrix,
@@ -277,7 +280,10 @@ def _calibration_combination(
             train_matrix.set_label(train[outcome].astype(int).to_numpy())
             for configuration, parameters in lookup.items():
                 training_started_at = perf_counter()
-                booster = fit_booster_matrix(train_matrix, config, parameters=parameters)
+                booster = (fit_booster(train, names, outcome, config, parameters=parameters,
+                                       cancellation_check=cancellation_check)
+                           if config.xgb_round_selection_mode == "chronological"
+                           else fit_booster_matrix(train_matrix, config, parameters=parameters))
                 probabilities = predict_probabilities_matrix(booster, test_matrix)
                 training_seconds += perf_counter() - training_started_at
                 predicted = binary_predictions(probabilities, config.prediction_threshold)
@@ -290,6 +296,12 @@ def _calibration_combination(
                     train=train,
                     test=test,
                 )
+                record = booster_training_record(booster)
+                if record:
+                    buckets[(configuration, direction, window.number)].setdefault("round_selection_records", []).append(
+                        {"Set": symbol_set_id(row), "Direction": direction, "Window": window.number,
+                         "PredictionOrigin": test.index.min().isoformat(),
+                         "Configuration": configuration, **record})
     return _CalibrationCombinationResult(
         buckets,
         matrix_preparation_seconds=matrix_preparation_seconds,
@@ -330,6 +342,7 @@ def _merge_prediction_buckets(
         existing["actual"].extend(bucket["actual"])
         existing["predicted"].extend(bucket["predicted"])
         existing["probabilities"].extend(bucket["probabilities"])
+        existing.setdefault("round_selection_records", []).extend(bucket.get("round_selection_records", []))
         existing["sets"] = int(existing["sets"]) + int(bucket["sets"])
         existing["train_start"] = min(existing["train_start"], bucket["train_start"])
         existing["train_end"] = max(existing["train_end"], bucket["train_end"])
@@ -370,6 +383,7 @@ def _window_metric_rows(
                 "TestStart": bucket["test_start"],
                 "TestEnd": bucket["test_end"],
                 "Sets": bucket["sets"],
+                "RoundSelectionRecords": json.dumps(bucket.get("round_selection_records", []), default=str),
                 "Observations": len(actual),
                 "PositiveOutcomes": int(actual.sum()),
                 "PositivePredictions": int(predicted.sum()),
@@ -707,10 +721,19 @@ def run_controlled_calibration(
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
     checkpoint_manager: CheckpointManager | None = None,
+    evaluate_final_holdout: bool = True,
 ) -> CalibrationResult:
     """Calibrate on development, freeze selections, then open the holdout once."""
 
     candidate_list = list(candidates or default_parameter_candidates(config))
+    if config.xgb_round_selection_mode == "chronological":
+        # Nominal rounds are not a hyperparameter in this mode. Preserve baseline
+        # first, and evaluate each distinct structural configuration once.
+        unique = {}
+        for parameters in candidate_list:
+            key = json.dumps(parameters.training_parameters(config), sort_keys=True)
+            unique.setdefault(key, parameters)
+        candidate_list = list(unique.values())
     min_train = min_train_size or config.walk_forward_min_train_size
     test_window = test_size or config.walk_forward_test_size
     step = step_size or config.walk_forward_step_size
@@ -751,23 +774,22 @@ def run_controlled_calibration(
     )
     report_progress(progress_callback, "walk_forward", substage="completed", details={"phase_event": "completed", "windows": int(by_window["Window"].nunique())})
     selected_payload = _selected_payload(selected, by_configuration)
+    if config.xgb_round_selection_mode == "chronological":
+        for direction in ("Up", "Down"):
+            selected_payload[direction]["round_selection_policy"] = round_selection_snapshot(config)
     selection_json = json.dumps(selected_payload, sort_keys=True, separators=(",", ":"))
     selection_digest = hashlib.sha256(selection_json.encode()).hexdigest()
 
     # This is the first operation permitted to inspect holdout values. Selection
     # is immutable and fingerprinted before the call.
-    report_progress(progress_callback, "final_holdout", substage="started", details={"phase_event": "started"})
-    holdout_metrics, holdout_predictions = evaluate_locked_holdout(
-        development,
-        holdout,
-        sampled,
-        config,
-        selected,
-        selected_payload,
-        progress_callback,
-        cancellation_check,
-    )
-    report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed"})
+    holdout_metrics = pd.DataFrame(columns=["Direction", "Configuration", "ROCAUC", "PRAUC"])
+    holdout_predictions = pd.DataFrame(columns=["Set", "Observation", "Date", "UpProbability", "DownProbability"])
+    if evaluate_final_holdout:
+        report_progress(progress_callback, "final_holdout", substage="started", details={"phase_event": "started"})
+        holdout_metrics, holdout_predictions = evaluate_locked_holdout(
+            development, holdout, sampled, config, selected, selected_payload,
+            progress_callback, cancellation_check)
+        report_progress(progress_callback, "final_holdout", substage="completed", details={"phase_event": "completed"})
     report_progress(progress_callback, "metrics", substage="started", details={"phase_event": "started"})
     tested = parameter_table(candidate_list, config)
     sample_output = sampled.copy()
@@ -775,9 +797,11 @@ def run_controlled_calibration(
         0, "Set", [symbol_set_id(row) for _, row in sample_output.iterrows()]
     )
     run_configuration: dict[str, object] = {
-        "calibration_protocol": "development_select_freeze_then_single_holdout_evaluation",
+        "calibration_protocol": ("development_select_freeze_then_single_holdout_evaluation"
+                                 if evaluate_final_holdout else "development_select_freeze_only_v2"),
+        "round_selection_policy": round_selection_snapshot(config),
         "holdout_used_for_selection": False,
-        "holdout_evaluation_count": 1,
+        "holdout_evaluation_count": int(evaluate_final_holdout),
         "selection_digest_before_holdout": selection_digest,
         "selection_formula": SELECTION_FORMULA,
         "catastrophic_window_definition": (
@@ -839,11 +863,19 @@ def run_controlled_calibration(
 
 def write_calibration_results(result: CalibrationResult, directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    training_records = []
+    if "RoundSelectionRecords" in result.development_by_window:
+        for value in result.development_by_window["RoundSelectionRecords"]:
+            training_records.extend(json.loads(value))
+    if training_records:
+        records = pd.DataFrame(training_records)
+        records.to_csv(directory / "round_selection_training.csv", index=False)
+        result.run_configuration["round_selection_coverage"] = training_records_coverage(records)
     result.tested_parameters.to_csv(directory / "tested_parameters.csv", index=False)
     result.development_by_configuration.to_csv(
         directory / "development_metrics_by_configuration.csv", index=False
     )
-    result.development_by_window.to_csv(
+    result.development_by_window.drop(columns=["RoundSelectionRecords"], errors="ignore").to_csv(
         directory / "development_metrics_by_window.csv", index=False
     )
     result.baseline_comparison.to_csv(

@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
+from rstock.modeling import ROUND_SELECTION_FIELDS
 
 
 DERIVATION_SCHEMA_VERSION = 1
@@ -90,9 +91,13 @@ PARAMETER_OWNER = {
     for stage, fields in STAGE_PARAMETER_FIELDS.items()
     for field in fields
 }
+WALK_FORWARD_XGBOOST_FIELDS = frozenset({"xgb_max_depth", "xgb_eta", "xgb_rounds",
+    "xgb_min_child_weight", "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma",
+    "xgb_reg_alpha", "xgb_reg_lambda", "xgb_seed", *ROUND_SELECTION_FIELDS})
 SPLIT_STAGE_PARAMETER_FIELDS = {
     **{key: value for key, value in STAGE_PARAMETER_FIELDS.items()
        if key not in {"promotion", "forward_simulation"}},
+    "walk_forward": STAGE_PARAMETER_FIELDS["walk_forward"] | WALK_FORWARD_XGBOOST_FIELDS,
     "threshold_calibration": STAGE_PARAMETER_FIELDS["threshold_calibration"]
         | frozenset({"final_holdout_size"}),
     "holdout_evaluation": frozenset({"evaluate_final_holdout"}),
@@ -113,9 +118,7 @@ PREFILTER_STAGE_PARAMETER_FIELDS = {
         "prefilter_method", "stability_origin_count", "stability_step_sessions",
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }),
-    "walk_forward": frozenset({"xgb_max_depth", "xgb_eta", "xgb_rounds",
-        "xgb_min_child_weight", "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma",
-        "xgb_reg_alpha", "xgb_reg_lambda", "xgb_seed"}),
+    "walk_forward": WALK_FORWARD_XGBOOST_FIELDS,
 }
 
 

@@ -578,7 +578,8 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
         "Calibration et seuils": {key: value for key, value in scientific.items()
                                   if key.startswith(("threshold_calibration_", "xgb_"))
                                   or key in {"threshold_parameter_calibration_max_models", "xgboost_global_max_qualified_combinations"}},
-        "Version scientifique": {key: config.get(key) for key in ("pipeline_version", "calibration_sampling_policy_version")},
+        "Version scientifique": {**{key: config.get(key) for key in ("pipeline_version", "calibration_sampling_policy_version")},
+                                 "e2e_xgboost_protocol_version": config.get("e2e_xgboost_protocol_version", 1)},
     }
 def comparison_types(types: Sequence[str]) -> str | None:
     """Return the homogeneous comparison mode for two to six runs."""

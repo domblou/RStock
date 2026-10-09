@@ -1409,6 +1409,8 @@ def _xgboost_calibration(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
         checkpoint_manager=checkpoint,
+        evaluate_final_holdout=(not spec.source_end_to_end_run
+                               or spec.e2e_xgboost_protocol_version == 1),
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     traceability = _persist_prepared_traceability(
@@ -1617,6 +1619,8 @@ def _holdout_evaluation(
         "source_walk_forward_run": spec.source_walk_forward_run,
         "source_prepared_dataset_sha256": spec.source_prepared_dataset_sha256,
     }
+    from rstock.modeling import write_probability_training_audit
+    write_probability_training_audit(predictions, output, configuration)
     configuration["traceability"] = _persist_prepared_traceability(
         {}, prepared, spec
     )
@@ -1972,6 +1976,8 @@ def _fixed_candidate_evaluation(
     _phase(progress_callback, "result_writing", "started")
     output.mkdir(parents=True, exist_ok=True)
     generated.to_csv(output / "sampled_combinations.csv", index=False)
+    from rstock.modeling import write_probability_training_audit
+    write_probability_training_audit(holdout_predictions, output, run_configuration)
     holdout_predictions.to_csv(output / "holdout_predictions.csv", index=False)
     holdout_metrics.to_csv(output / "holdout_metrics.csv", index=False)
     (output / "selected_thresholds_by_set.json").write_text(

@@ -259,6 +259,8 @@ class ExperimentSpec:
     frozen_xgboost_parameters: dict[str, dict[str, int | float]] | None = None
     frozen_xgboost_parameters_sha256: str | None = None
     xgboost_resolution_version: int = 1
+    # v1 evaluated an intermediate holdout; v2 reserves it for the E2E stage.
+    e2e_xgboost_protocol_version: int = 2
     source_threshold_parameter_calibration_run: str | None = None
     frozen_threshold_calibration_parameters: dict[str, object] | None = None
     frozen_threshold_calibration_parameters_sha256: str | None = None
@@ -324,6 +326,17 @@ class ExperimentSpec:
             object.__setattr__(self, "prefilter_method", self.config.prefilter_selection_mode
                                if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}
                                else "single_origin")
+        if self.config.xgb_round_selection_mode == "chronological":
+            if self.e2e_xgboost_protocol_version != 2 and self.job_type not in {
+                JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH, JobType.PREDICTOR_PREFILTER,
+            }:
+                raise ValueError("Chronological XGBoost requires the complete v2 training contract")
+            if self.job_type is JobType.END_TO_END and self.pipeline_version < 3:
+                raise ValueError("Chronological E2E requires a dedicated holdout stage")
+            if self.job_type is JobType.WALK_FORWARD and self.evaluate_final_holdout:
+                raise ValueError("Chronological XGBoost WF requires evaluate_final_holdout=False")
+        if self.e2e_xgboost_protocol_version not in {1, 2}:
+            raise ValueError("Unsupported E2E XGBoost protocol version")
         if self.forward_policy != "FROZEN":
             raise ValueError("Unsupported forward policy")
         if self.forced_period_lock is not None and (
@@ -569,6 +582,7 @@ class ExperimentSpec:
             "frozen_xgboost_parameters": self.frozen_xgboost_parameters,
             "frozen_xgboost_parameters_sha256": self.frozen_xgboost_parameters_sha256,
             "xgboost_resolution_version": self.xgboost_resolution_version,
+            "e2e_xgboost_protocol_version": self.e2e_xgboost_protocol_version,
             "source_threshold_parameter_calibration_run": (
                 self.source_threshold_parameter_calibration_run
             ),
@@ -734,6 +748,7 @@ class ExperimentSpec:
                 else str(values["frozen_xgboost_parameters_sha256"])
             ),
             xgboost_resolution_version=int(values.get("xgboost_resolution_version", 0)),
+            e2e_xgboost_protocol_version=int(values.get("e2e_xgboost_protocol_version", 1)),
             source_threshold_parameter_calibration_run=(
                 None
                 if values.get("source_threshold_parameter_calibration_run") is None

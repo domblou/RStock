@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from rstock.modeling import selected_xgboost_parameters
+from rstock.modeling import selected_xgboost_parameters, round_selection_snapshot, ROUND_SELECTION_FIELDS
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation
 
 from .auto_promotion import PromotionCoordinator
@@ -87,8 +87,21 @@ def _stage_parameter_contract(spec: ExperimentSpec, stage_key: str) -> dict[str,
         field: getattr(spec.config, field)
         for field in SPLIT_STAGE_PARAMETER_FIELDS.get(stage_key, ())
     }
+    if stage_key == "walk_forward" and spec.e2e_xgboost_protocol_version == 1:
+        # Schema predating complete round selection owned only the prefilter
+        # controls here. Keep its persisted parameter contract byte-compatible.
+        from .derivation import STAGE_PARAMETER_FIELDS
+        values = {field: getattr(spec.config, field) for field in STAGE_PARAMETER_FIELDS[stage_key]}
     if stage_key == "holdout_evaluation":
         values["evaluate_final_holdout"] = spec.evaluate_final_holdout
+    if spec.e2e_xgboost_protocol_version >= 2:
+        if stage_key == "walk_forward":
+            values.update({field: getattr(spec.config, field) for field in ROUND_SELECTION_FIELDS})
+        if stage_key in {"walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
+                         "threshold_calibration", "holdout_evaluation"}:
+            values["round_selection_policy"] = round_selection_snapshot(spec.config)
+        if stage_key == "xgboost_calibration":
+            values["intermediate_holdout_evaluation"] = False
     return {
         key: list(value) if isinstance(value, tuple) else value
         for key, value in values.items()
@@ -857,6 +870,7 @@ def _base_child_spec(
     return replace(
         parent,
         job_type=job_type,
+        evaluate_final_holdout=False if job_type is JobType.WALK_FORWARD else parent.evaluate_final_holdout,
         config=replace(parent.config, walk_forward_end_offset_sessions=0) if job_type is JobType.PREDICTOR_PREFILTER else parent.config,
         derivation=None,
         experimental_overrides=(),
@@ -940,6 +954,11 @@ def build_stage_spec(
                        prefilter_execution_version=2, evaluate_final_holdout=False)
         from .prefilter_contract import plan
         plan(repository, child)  # Reject an empty selection before materializing a WF job.
+        if parent.derivation is not None and parent.derivation.fork_stage == "walk_forward":
+            from .walk_forward_experiments import freeze_walk_forward_input
+            child = freeze_walk_forward_input(repository, child,
+                str(parent.derivation.prepared_snapshot_source_run_id),
+                str(parent.derivation.prepared_snapshot_sha256))
         return child
     if stage_key == "walk_forward":
         child = replace(child, prefilter_execution_version=1)
@@ -959,6 +978,10 @@ def build_stage_spec(
             cutoff, dataset_digest = _walk_forward_traceability(repository, str(source_id))
             if dataset_digest != parent.source_prepared_dataset_sha256:
                 raise ValueError("Source Walk-forward dataset digest has changed")
+            if child.config.xgb_round_selection_mode == "chronological":
+                from .walk_forward_experiments import freeze_walk_forward_input
+                return freeze_walk_forward_input(repository, replace(child, evaluate_final_holdout=False),
+                    str(source_id), str(parent.derivation.prepared_snapshot_sha256))
             return replace(
                 child,
                 evaluate_final_holdout=False,
@@ -1068,7 +1091,7 @@ def build_stage_spec(
     selected = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
-    frozen_xgboost = selected_xgboost_parameters(selected)
+    frozen_xgboost = selected_xgboost_parameters(selected, config=child.config)
     child = replace(
         child,
         source_xgboost_calibration_run=xgboost_id,
@@ -1430,7 +1453,7 @@ def _forced_candidate_spec(
     reference_xgboost = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
-    frozen_xgboost = selected_xgboost_parameters(reference_xgboost)
+    frozen_xgboost = selected_xgboost_parameters(reference_xgboost, config=parent.config)
     threshold_parameter_selection = _read_result_json(
         repository,
         threshold_parameter_id,
