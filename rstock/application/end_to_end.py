@@ -201,6 +201,125 @@ def effective_stage_run_id(
     return None if child_id is None else str(child_id)
 
 
+def derivation_schema_for_manifest(manifest: dict[str, Any]) -> int:
+    """Resolve the scientific graph independently of initial/derived ownership."""
+    versions = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3}
+    if manifest.get("workflow_type") == JobType.FORCED_CANDIDATE_VALIDATION.value:
+        raise ValueError("Forced End-to-End derivation is deferred")
+    try:
+        return versions[manifest["schema_version"]]
+    except KeyError as error:
+        raise ValueError("Source End-to-End manifest is unavailable") from error
+
+
+def effective_threshold_calibration_parameters(repository: RunRepository, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Selected policy, including explicit overrides consumed by the threshold job."""
+    parameter_id = effective_stage_run_id(manifest, "threshold_parameter_calibration")
+    selection = _read_result_json(repository, str(parameter_id),
+                                  "selected_threshold_calibration_configuration.json")
+    parameters = selection.get("parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError("Selected threshold parameters are unavailable")
+    threshold_id = effective_stage_run_id(manifest, "threshold_calibration")
+    if threshold_id is not None:
+        threshold = repository.load_spec(threshold_id)
+        if threshold.frozen_threshold_calibration_parameters is not None:
+            if threshold.source_threshold_parameter_calibration_run != parameter_id:
+                raise ValueError("Threshold policy source differs from selected parameter stage")
+            return dict(threshold.frozen_threshold_calibration_parameters)
+    return dict(parameters)  # Historical jobs predate the frozen policy field.
+
+
+def validate_source_lineage(repository: RunRepository, lineage: dict[str, Any] | None) -> None:
+    """Verify recorded physical sources; never resolve replacements on resume."""
+    if lineage is None:
+        return  # Historical contracts did not freeze the ancestor chain.
+    verified_stages: dict[tuple[str, str], dict[str, str]] = {}
+    for run_id, lock in lineage.items():
+        if repository.storage(run_id)["state"] != "full":
+            raise ValueError(f"Frozen ancestor has been purged: {run_id}")
+        if repository.status(run_id).get("status") != "completed":
+            raise ValueError(f"Frozen ancestor is not completed: {run_id}")
+        path = repository.run_directory(run_id) / PIPELINE_MANIFEST
+        if not path.is_file() or _sha256(path) != lock["manifest_sha256"]:
+            raise ValueError(f"Frozen ancestor manifest is missing or changed: {run_id}")
+        if repository.configuration_fingerprint(run_id) != lock["configuration_fingerprint"]:
+            raise ValueError(f"Frozen ancestor configuration changed: {run_id}")
+        if _sha256(repository.run_directory(run_id) / "config.json") != lock["configuration_sha256"]:
+            raise ValueError(f"Frozen ancestor configuration file changed: {run_id}")
+        for key, reference in lock["stages"].items():
+            source_id = reference["source_run_id"]
+            if repository.storage(source_id)["state"] != "full":
+                raise ValueError(f"Frozen source has been purged: {key}")
+            if repository.status(source_id).get("status") != "completed":
+                raise ValueError(f"Frozen source is not completed: {key}")
+            if repository.configuration_fingerprint(source_id) != reference["configuration_fingerprint"]:
+                raise ValueError(f"Frozen source fingerprint differs: {key}")
+            if _sha256(repository.run_directory(source_id) / "config.json") != reference["configuration_sha256"]:
+                raise ValueError(f"Frozen source configuration file changed: {key}")
+            expected_job_type = JobType.PREDICTOR_PREFILTER if key == "prefilter" else JobType(key)
+            if repository.load_spec(source_id).job_type is not expected_job_type:
+                raise ValueError(f"Frozen source job type differs: {key}")
+            identity = (source_id, key)
+            if identity not in verified_stages:
+                verified_stages[identity] = artifact_digests(repository, source_id, key)
+            if verified_stages[identity] != reference["required_artifact_digests"]:
+                raise ValueError(f"Frozen source artifacts changed: {key}")
+        snapshot = lock.get("prepared_snapshot")
+        if snapshot is not None:
+            path = repository.run_directory(snapshot["source_run_id"]) / "checkpoints/artifacts/prepared_snapshot.pkl"
+            if not path.is_file() or _sha256(path) != snapshot["sha256"]:
+                raise ValueError(f"Frozen ancestor prepared snapshot has changed: {run_id}")
+
+
+def freeze_source_lineage(repository: RunRepository, parent_id: str) -> dict[str, Any]:
+    """Capture parents and their effective scientific sources at creation."""
+    lineage: dict[str, Any] = {}
+    current: str | None = parent_id
+    while current is not None:
+        if current in lineage:
+            raise ValueError("Cycle in End-to-End source lineage")
+        spec = repository.load_spec(current)
+        if spec.job_type is not JobType.END_TO_END:
+            raise ValueError("Lineage source is not an End-to-End")
+        manifest = load_pipeline_manifest(repository, current)
+        if manifest is None:
+            raise ValueError("Source End-to-End manifest is unavailable")
+        derivation_schema_for_manifest(manifest)
+        references = {}
+        for key, _, _ in _scientific_stages_for_manifest(manifest):
+            source_id = effective_stage_run_id(manifest, key)
+            if source_id is None:
+                continue
+            stage = _stage(manifest, key)
+            references[key] = {
+                "source_run_id": source_id,
+                "configuration_fingerprint": stage["expected_fingerprint"],
+                "configuration_sha256": _sha256(repository.run_directory(source_id) / "config.json"),
+                "required_artifact_digests": dict(stage["artifact_digests"]),
+            }
+        wf_id = effective_stage_run_id(manifest, "walk_forward")
+        snapshot_path = repository.run_directory(str(wf_id)) / "checkpoints/artifacts/prepared_snapshot.pkl"
+        lineage[current] = {
+            "manifest_sha256": _sha256(repository.run_directory(current) / PIPELINE_MANIFEST),
+            "configuration_fingerprint": repository.configuration_fingerprint(current),
+            "configuration_sha256": _sha256(repository.run_directory(current) / "config.json"),
+            "stages": references,
+            "prepared_snapshot": {"source_run_id": wf_id, "sha256": _sha256(snapshot_path)},
+        }
+        if spec.derivation is not None:
+            validate_source_lineage(repository, spec.derivation.source_lineage)
+            ancestor = spec.derivation.source_end_to_end_run_id
+            ancestor_path = repository.run_directory(ancestor) / PIPELINE_MANIFEST
+            if not ancestor_path.is_file() or _sha256(ancestor_path) != spec.derivation.source_manifest_sha256:
+                raise ValueError("Source ancestor manifest is missing or changed")
+            current = ancestor
+        else:
+            current = None
+    validate_source_lineage(repository, lineage)
+    return lineage
+
+
 def _build_derived_pipeline_manifest(
     repository: RunRepository,
     root_run_id: str,
@@ -211,6 +330,9 @@ def _build_derived_pipeline_manifest(
     derivation = spec.derivation
     if derivation is None:
         raise ValueError("Missing derivation plan")
+    validate_source_lineage(repository, derivation.source_lineage)
+    if derivation.source_lineage and root_run_id in derivation.source_lineage:
+        raise ValueError("An End-to-End cannot derive from its descendant")
     if derivation.source_end_to_end_run_id == root_run_id:
         raise ValueError("An End-to-End cannot derive from itself")
     if repository.status(derivation.source_end_to_end_run_id).get("status") != "completed":
@@ -224,9 +346,7 @@ def _build_derived_pipeline_manifest(
     source_manifest = load_pipeline_manifest(
         repository, derivation.source_end_to_end_run_id
     )
-    source_schema = (5 if derivation.schema_version == 3 else SPLIT_PIPELINE_SCHEMA_VERSION if derivation.schema_version == 2
-                     else PIPELINE_SCHEMA_VERSION)
-    if source_manifest is None or source_manifest["schema_version"] != source_schema:
+    if source_manifest is None or derivation_schema_for_manifest(source_manifest) != derivation.schema_version:
         raise ValueError("Derived sources are not supported in this pipeline version")
     if (
         derivation.source_temporal_validation_enabled is not None
@@ -240,7 +360,7 @@ def _build_derived_pipeline_manifest(
     )
     for stage_key, reference in derivation.inherited_stages.items():
         source_stage = _stage(source_manifest, stage_key)
-        if source_stage["child_run_id"] != reference.source_run_id:
+        if effective_stage_run_id(source_manifest, stage_key) != reference.source_run_id:
             raise ValueError(f"Inherited source run mismatch: {stage_key}")
         if repository.status(reference.source_run_id).get("status") != "completed":
             raise ValueError(f"Inherited source run is not completed: {stage_key}")
@@ -257,7 +377,7 @@ def _build_derived_pipeline_manifest(
             derivation.prepared_snapshot_source_run_id
             or derivation.inherited_stages["walk_forward"].source_run_id
         )
-        if walk_forward_id != str(_stage(source_manifest, "walk_forward")["child_run_id"]):
+        if walk_forward_id != effective_stage_run_id(source_manifest, "walk_forward"):
             raise ValueError("Derived prepared snapshot source differs from parent")
         snapshot_path = (
             repository.run_directory(walk_forward_id)
@@ -1129,6 +1249,9 @@ def build_stage_spec(
     if not isinstance(parameters, dict):
         raise ValueError("Paramètres de calibration des seuils absents")
     effective_parameters = dict(parameters)
+    if parent.derivation is not None and parent.derivation.fork_stage == "threshold_calibration":
+        source_manifest = load_pipeline_manifest(repository, parent.derivation.source_end_to_end_run_id)
+        effective_parameters = effective_threshold_calibration_parameters(repository, source_manifest)
     experimental_overrides = ()
     if parent.derivation is not None:
         from rstock.threshold_parameter_calibration import THRESHOLD_PARAMETER_FIELDS

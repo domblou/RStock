@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import replace
 from typing import Any, Mapping
 
@@ -15,7 +14,9 @@ from .derivation import (
 )
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
-from .end_to_end import PIPELINE_MANIFEST, artifact_digests, load_pipeline_manifest
+from .end_to_end import (PIPELINE_MANIFEST, artifact_digests, load_pipeline_manifest,
+                        effective_stage_run_id, derivation_schema_for_manifest,
+                        freeze_source_lineage, effective_threshold_calibration_parameters)
 from .repository import RunRepository, utc_now
 
 
@@ -32,16 +33,7 @@ def source_parameter_value(
     if field.startswith("forward_simulation_"):
         return getattr(source_spec, field)
     if field.startswith("threshold_calibration_"):
-        stage = next(
-            item for item in source_manifest["stages"]
-            if item["stage_key"] == "threshold_parameter_calibration"
-        )
-        path = (
-            repository.run_directory(str(stage["child_run_id"]))
-            / "results" / "selected_threshold_calibration_configuration.json"
-        )
-        selection = json.loads(path.read_text(encoding="utf-8"))
-        parameters = selection.get("parameters")
+        parameters = effective_threshold_calibration_parameters(repository, source_manifest)
         if not isinstance(parameters, dict) or field not in parameters:
             raise ValueError(f"Selected threshold parameter is unavailable: {field}")
         return parameters[field]
@@ -61,8 +53,6 @@ def build_derived_spec(
     source_spec = repository.load_spec(source_end_to_end_run_id)
     if source_spec.job_type is not JobType.END_TO_END:
         raise ValueError("Derivation requires an End-to-End source")
-    if source_spec.derivation is not None:
-        raise ValueError("Derivation of a derived End-to-End is deferred")
     if source_spec.forced_symbol_sets is not None:
         raise ValueError("Forced End-to-End derivation is deferred")
     if repository.status(source_end_to_end_run_id).get("status") != "completed":
@@ -70,11 +60,11 @@ def build_derived_spec(
     if repository.storage(source_end_to_end_run_id)["state"] != "full":
         raise ValueError("Source End-to-End has been purged")
     manifest = load_pipeline_manifest(repository, source_end_to_end_run_id)
-    if manifest is None or manifest["schema_version"] not in {1, 3, 5}:
+    if manifest is None:
         raise ValueError("Source End-to-End manifest is unavailable")
     if manifest.get("temporal_validation_enabled") is not source_spec.temporal_validation_enabled:
         raise ValueError("Source temporal validation provenance is inconsistent")
-    schema_version = 3 if manifest["schema_version"] == 5 else 2 if manifest["schema_version"] == 3 else 1
+    schema_version = derivation_schema_for_manifest(manifest)
     _, parameter_fields = derivation_graph(schema_version)
     parameter_owner = {field: stage for stage, fields in parameter_fields.items()
                        for field in fields}
@@ -86,7 +76,7 @@ def build_derived_spec(
         key = stage["stage_key"]
         if key not in scientific_keys or modes[key] != "inherited":
             continue
-        run_id = str(stage["child_run_id"])
+        run_id = str(effective_stage_run_id(manifest, key))
         if repository.status(run_id).get("status") != "completed":
             raise ValueError(f"Inherited stage is not completed: {key}")
         if repository.storage(run_id)["state"] != "full":
@@ -98,7 +88,7 @@ def build_derived_spec(
         if digests != stage.get("artifact_digests"):
             raise ValueError(f"Inherited stage artifact digests differ: {key}")
         inherited[key] = InheritedStage(run_id, fingerprint, digests)
-    walk_forward_id = str(next(stage["child_run_id"] for stage in manifest["stages"] if stage["stage_key"] == "walk_forward"))
+    walk_forward_id = str(effective_stage_run_id(manifest, "walk_forward"))
     traceability = repository.summary(walk_forward_id).get("traceability")
     if not isinstance(traceability, dict) or not traceability.get("prepared_dataset_sha256"):
         raise ValueError("Source Walk-forward digest is unavailable")
@@ -106,7 +96,7 @@ def build_derived_spec(
     snapshot_spec = replace(
         source_spec, job_type=JobType.XGBOOST_CALIBRATION,
         prefilter_method="single_origin", stability_origin_count=5, stability_step_sessions=1,
-        temporal_validation_enabled=False,
+        temporal_validation_enabled=False, derivation=None,
         source_walk_forward_run=walk_forward_id,
         source_prepared_dataset_sha256=expected_digest,
         prepared_dataset_digest_required=True,
@@ -164,6 +154,7 @@ def build_derived_spec(
         if not enabled and any(field.startswith("predictor_prefilter_") for field in config_changes):
             raise ValueError("Walk-forward / préfiltre requires an enabled prefilter")
     source_path = repository.run_directory(source_end_to_end_run_id) / PIPELINE_MANIFEST
+    source_lineage = freeze_source_lineage(repository, source_end_to_end_run_id)
     derivation = Derivation(
         schema_version=schema_version,
         source_end_to_end_run_id=source_end_to_end_run_id,
@@ -178,6 +169,7 @@ def build_derived_spec(
         ).read_bytes()).hexdigest(),
         prepared_snapshot_source_run_id=walk_forward_id,
         source_temporal_validation_enabled=source_spec.temporal_validation_enabled,
+        source_lineage=source_lineage,
     )
     derived = replace(
         source_spec,

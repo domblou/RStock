@@ -1157,6 +1157,21 @@ revalidé. Son manifest conserve explicitement cette provenance. Pour un ancien
 run, la date du dataset est reprise du snapshot et de la traçabilité du
 Walk-forward uniquement si ces deux sources concordent.
 
+Un End-to-end dérivé terminé peut lui-même servir de source avec le même bouton.
+Le nouveau dérivé conserve les changements de son parent immédiat et référence
+directement les jobs effectifs des étapes héritées, même lorsqu’ils appartiennent
+à un ancêtre. Dès la création, les IDs, fingerprints, empreintes de configuration,
+manifests, artefacts scientifiques et snapshots sources sont figés. Ils sont
+revérifiés au démarrage et à chaque reprise : une source ou un ancêtre modifié,
+manquant ou purgé provoque un échec explicite, sans source de remplacement.
+Les anciens contrats de dérivation restent lisibles sans réécriture.
+
+Les étapes conservées transmettent leurs résultats scientifiques sélectionnés :
+paramètres XGBoost Up/Down, politique effective de calibration des seuils et
+seuils Up/Down. La configuration initiale de recherche reste distincte de ces
+résultats. Une modification explicite de la politique des seuils dans un parent
+est conservée par les générations suivantes.
+
 Pour un nouveau run, une dérivation depuis **Seuils** recalcule seuils, holdout
 et qualification; depuis **Évaluation holdout**, elle recalcule holdout et
 qualification; depuis **Qualification promotion**, elle ne recalcule que la

@@ -280,10 +280,37 @@ class Derivation:
     prepared_snapshot_sha256: str | None = None
     prepared_snapshot_source_run_id: str | None = None
     source_temporal_validation_enabled: bool | None = None
+    # Absent in historical specs: retain their original serialized contract.
+    source_lineage: dict[str, dict[str, Any]] | None = None
     schema_version: int = DERIVATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         derivation_graph(self.schema_version)
+        if self.source_lineage is not None:
+            if not isinstance(self.source_lineage, dict) or not self.source_lineage:
+                raise ValueError("Invalid frozen source lineage")
+            if self.source_end_to_end_run_id not in self.source_lineage:
+                raise ValueError("Frozen source lineage has no immediate parent")
+            for run_id, lock in self.source_lineage.items():
+                _nonempty(run_id, "lineage run ID")
+                if not isinstance(lock, dict):
+                    raise ValueError("Invalid frozen source lock")
+                _digest(lock.get("manifest_sha256"), "lineage manifest digest")
+                _digest(lock.get("configuration_fingerprint"), "lineage configuration fingerprint")
+                _digest(lock.get("configuration_sha256"), "lineage configuration digest")
+                if not isinstance(lock.get("stages"), dict):
+                    raise ValueError("Invalid frozen lineage stages")
+                for reference in lock["stages"].values():
+                    InheritedStage.from_dict(reference)
+                    _digest(reference.get("configuration_sha256"), "lineage stage configuration digest")
+                snapshot = lock.get("prepared_snapshot")
+                if not isinstance(snapshot, dict):
+                    raise ValueError("Frozen lineage prepared snapshot is missing")
+                _nonempty(snapshot.get("source_run_id"), "lineage snapshot source")
+                _digest(snapshot.get("sha256"), "lineage snapshot digest")
+            if self.source_lineage[self.source_end_to_end_run_id]["manifest_sha256"] != self.source_manifest_sha256:
+                raise ValueError("Frozen parent manifest digest differs from derivation")
+            object.__setattr__(self, "source_lineage", deepcopy(self.source_lineage))
         _nonempty(self.source_end_to_end_run_id, "source_end_to_end_run_id")
         _digest(self.source_manifest_sha256, "source_manifest_sha256")
         if self.prepared_snapshot_sha256 is not None:
@@ -354,6 +381,8 @@ class Derivation:
             values["prepared_snapshot_source_run_id"] = self.prepared_snapshot_source_run_id
         if self.source_temporal_validation_enabled is not None:
             values["source_temporal_validation_enabled"] = self.source_temporal_validation_enabled
+        if self.source_lineage is not None:
+            values["source_lineage"] = deepcopy(self.source_lineage)
         return values
 
     @classmethod
@@ -391,4 +420,5 @@ class Derivation:
                                "prepared_snapshot_source_run_id")
             ),
             source_temporal_validation_enabled=values.get("source_temporal_validation_enabled"),
+            source_lineage=values.get("source_lineage"),
         )

@@ -247,6 +247,23 @@ def test_end_to_end_resume_and_derivations_keep_prefilter_source(tmp_path, monke
     assert repository.status(fork_id)["status"] == "completed", repository.status(fork_id).get("error")
     fork_manifest = end_to_end.load_pipeline_manifest(repository, fork_id)
     assert fork_manifest["stages"][0]["child_run_id"] != source
+    # A second generation keeps the first derivative's recalculated prefilter.
+    nested = build_derived_spec(repository, fork_id, "walk_forward", {"xgb_eta": .41})
+    nested_id = repository.create(nested)
+    nested_manifest = end_to_end.persist_or_validate_pipeline_manifest(repository, nested_id, nested)
+    effective_prefilter = fork_manifest["stages"][0]["child_run_id"]
+    assert nested.derivation.inherited_stages["prefilter"].source_run_id == effective_prefilter
+    nested_wf = end_to_end.build_stage_spec(repository, nested_id, nested, "walk_forward", nested_manifest)
+    assert nested_wf.source_prefilter_run == effective_prefilter
+    assert nested_wf.config.xgb_eta == .41
+    assert nested.config.predictor_prefilter_top_n == 2
+    nested_prefilter = build_derived_spec(repository, fork_id, "prefilter", {"predictor_prefilter_top_n": 3})
+    nested_prefilter_id = repository.create(nested_prefilter)
+    nested_prefilter_manifest = end_to_end.persist_or_validate_pipeline_manifest(
+        repository, nested_prefilter_id, nested_prefilter)
+    nested_prefilter_child = end_to_end.build_stage_spec(repository, nested_prefilter_id,
+        nested_prefilter, "prefilter", nested_prefilter_manifest)
+    assert nested_prefilter_child.prefilter_derivation["source_run_id"] == effective_prefilter
     # The same E2E derivation point exposes the dedicated chronological policy.
     chronological = build_derived_spec(repository, root, "prefilter", {
         "prefilter_xgb_round_selection_mode": "chronological",
@@ -263,6 +280,7 @@ def test_end_to_end_resume_and_derivations_keep_prefilter_source(tmp_path, monke
     with pytest.raises(ValueError, match="inherited"):
         build_derived_spec(repository, root, "walk_forward", {"prefilter_xgb_round_selection_mode": "chronological"})
     _check_existing_form(repository, root, monkeypatch)
+    _check_existing_form(repository, fork_id, monkeypatch)
 
 
 def _check_existing_form(repository, root, monkeypatch):

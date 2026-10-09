@@ -4100,7 +4100,6 @@ def _render_derived_creation(
                 "La validation temporelle du run source n’a été ni héritée ni "
                 "rejouée : ce dérivé n’est pas temporellement revalidé."
             )
-        return
     status = detail.get("status", {})
     if not isinstance(status, Mapping) or status.get("status") != "completed":
         return
@@ -4119,8 +4118,14 @@ def _render_derived_creation(
     repository = service.run_service.repository
     source_spec = repository.load_spec(run_id)
     source_manifest = load_pipeline_manifest(repository, run_id)
-    if source_manifest is None or source_manifest.get("schema_version") not in {1, 3, 5}:
+    if source_manifest is None:
         st.error("Le manifest source ne permet pas cette dérivation.")
+        return
+    from rstock.application.end_to_end import derivation_schema_for_manifest
+    try:
+        source_schema = derivation_schema_for_manifest(source_manifest)
+    except ValueError as error:
+        st.error(str(error))
         return
     labels = {
         "walk_forward": "Walk-forward / préfiltre",
@@ -4130,8 +4135,8 @@ def _render_derived_creation(
     }
     labels.update({"holdout_evaluation": "Évaluation holdout",
                    "promotion_qualification": "Qualification promotion"})
-    split = source_manifest["schema_version"] in {3, 5}
-    separated = source_manifest["schema_version"] == 5
+    split = source_schema >= 2
+    separated = source_schema == 3
     labels["prefilter"] = "Préfiltre"
     if separated:
         labels["walk_forward"] = "Walk-forward"
