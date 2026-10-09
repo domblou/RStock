@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 
@@ -27,6 +27,7 @@ from .features import (
 )
 from .modeling import (
     XGBoostParameters,
+    RoundSelectionPolicy,
     fit_booster,
     fit_booster_matrix,
     fit_chronological_booster,
@@ -34,6 +35,7 @@ from .modeling import (
     round_selection_coverage,
     historical_xgboost_parameters,
     prefilter_xgboost_parameters,
+    prefilter_xgboost_snapshot,
     predict_probabilities,
     predict_probabilities_matrix,
     xgboost_module,
@@ -102,6 +104,7 @@ class PrefilterWalkForwardResult:
     telemetry: dict[str, object]
     exploitable_targets: tuple[str, ...]
     excluded_targets: dict[str, str]
+    round_selection_training: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class InsufficientWalkForwardObservations(ValueError):
@@ -163,10 +166,13 @@ def _walk_forward_combination(
     include_down: bool = True,
     parameters: XGBoostParameters | None = None,
     round_selection_enabled: bool = True,
+    round_selection_policy: RoundSelectionPolicy | None = None,
 ) -> _WalkForwardCombinationResult:
     """Evaluate one combination; its chronological windows remain sequential."""
 
     ordered, config, holdout_start, market_calendars, min_train, test_window, step = context
+    mode = (round_selection_policy.values["xgb_round_selection_mode"]
+            if round_selection_policy else config.xgb_round_selection_mode)
     row = pd.Series(row_values)
     observation, feature_symbols = symbols_from_set(row)
     up_outcome_name = intraday_target_column(observation)
@@ -236,10 +242,11 @@ def _walk_forward_combination(
         test_features = test[names]
         test_matrix = xgb.DMatrix(test_features, feature_names=names)
         selection_diagnostics = {}
-        if round_selection_enabled and config.xgb_round_selection_mode == "chronological":
+        if round_selection_enabled and mode == "chronological":
             up_booster, up_selection = fit_chronological_booster(
                 train, names, up_outcome_name, config, parameters=effective_parameters,
                 cancellation_check=cancellation_check,
+                policy=round_selection_policy,
             )
         else:
             up_train_matrix = xgb.DMatrix(train_features, label=train[up_outcome_name], feature_names=names)
@@ -270,10 +277,11 @@ def _walk_forward_combination(
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
         down_predicted = down_probabilities = None
         if include_down:
-            if round_selection_enabled and config.xgb_round_selection_mode == "chronological":
+            if round_selection_enabled and mode == "chronological":
                 down_booster, down_selection = fit_chronological_booster(
                     train, names, down_outcome_name, config, parameters=effective_parameters,
                     cancellation_check=cancellation_check,
+                    policy=round_selection_policy,
                 )
             else:
                 down_train_matrix = xgb.DMatrix(train_features, label=train[down_outcome_name], feature_names=names)
@@ -355,7 +363,8 @@ def _prefilter_combination(
         result = _walk_forward_combination(
             row_values, training_context, cancellation_check, include_down=False,
             parameters=prefilter_xgboost_parameters(config),
-            round_selection_enabled=False,
+            round_selection_enabled=config.prefilter_xgb_round_selection_mode == "chronological",
+            round_selection_policy=RoundSelectionPolicy.from_config(config, scope="prefilter"),
         )
     except InsufficientWalkForwardObservations as error:
         _, _, _, market_calendars, _, _, _ = context
@@ -413,7 +422,21 @@ def _prefilter_combination(
         pd.DataFrame(result.prediction_records),
         context[1],
     )
-    return qualification.drop(columns="EligibleRank").iloc[0].to_dict()
+    record = qualification.drop(columns="EligibleRank").iloc[0].to_dict()
+    if config.prefilter_xgb_round_selection_mode == "chronological":
+        # Compact per-fit audit travels with the qualification in the same atomic
+        # checkpoint batch; prediction-level detail is still released by workers.
+        record["_round_selection_training"] = [
+            {key: value for key, value in window.items()
+             if key.startswith("UpRound") or key.startswith("UpInternal")
+             or key.startswith("UpValidation") or key.startswith("UpSelection")
+             or key in {"Set", "Observation", "Predictors", "Window", "TrainStart", "TrainEnd",
+                        "TrainObservations", "TestStart", "TestEnd", "TestObservations",
+                        "UpTrainingIdentity", "UpBestIteration", "UpBestValidationLogLoss",
+                        "UpEarlyStoppingTriggered", "UpRefitSeconds", "UpLogLoss", "UpBrier", "UpROCAUC", "UpPRAUC"}}
+            for window in result.window_records
+        ]
+    return record
 
 
 def _prefilter_population_diagnostics(
@@ -1008,6 +1031,23 @@ def _combine_selection_results(
     return combined
 
 
+def ensure_prefilter_training_policy(manager, config: RStockConfig) -> None:
+    """Fixed legacy checkpoints remain readable; chronological work is explicit."""
+    from .checkpoints import CheckpointIncompatibleError
+
+    name = "prefilter_round_selection_contract"
+    policy = {"schema_version": 1, "training": prefilter_xgboost_snapshot(config),
+              "policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot()}
+    if manager.artifact_exists(name):
+        if manager.load_artifact(name) != policy:
+            raise CheckpointIncompatibleError("Prefilter training policy differs from its checkpoint")
+    elif config.prefilter_xgb_round_selection_mode == "chronological":
+        if manager.completed_batch_ids("predictor_prefilter_walk_forward") or any(
+                manager.artifact_exists(key) for key in ("prefilter_qualification", "prefilter_selection")):
+            raise CheckpointIncompatibleError("Historical fixed Prefilter work cannot resume as chronological")
+        manager.commit_artifact(name, policy)
+
+
 def evaluate_prefilter_walk_forward(
     prepared: pd.DataFrame,
     generated_sets: pd.DataFrame,
@@ -1075,6 +1115,19 @@ def evaluate_prefilter_walk_forward(
     )
     batch_size = config.predictor_prefilter_batch_size
     total_batches = (len(task_rows) + batch_size - 1) // batch_size
+    training_records: list[dict[str, object]] = []
+
+    def unpack(records):
+        rows = []
+        for record in records:
+            row = dict(record)
+            for training in row.pop("_round_selection_training", []):
+                training_records.append({**training, "OriginCutoff": ordered.index.max()})
+            rows.append(row)
+        return rows
+
+    if checkpoint_manager is not None:
+        ensure_prefilter_training_policy(checkpoint_manager, config)
     if checkpoint_manager is None:
         batches = iter_combination_batches(
             task_rows,
@@ -1090,7 +1143,7 @@ def evaluate_prefilter_walk_forward(
             cancellation_check=cancellation_check,
             details={"combination_workers": config.combination_workers},
         )
-        records = [record for batch in batches for record in batch]
+        records = unpack(record for batch in batches for record in batch)
     else:
         manager = checkpoint_manager
         manager.set_total_batches("predictor_prefilter_walk_forward", total_batches)
@@ -1111,7 +1164,16 @@ def evaluate_prefilter_walk_forward(
             completed_batch_ids=completed_ids,
         ):
             checkpoint_started_at = perf_counter()
-            payload = {"qualification": pd.DataFrame(batch.results)}
+            first_training = len(training_records)
+            payload = {"qualification": pd.DataFrame(unpack(batch.results))}
+            if config.prefilter_xgb_round_selection_mode == "chronological":
+                payload["round_selection_training"] = pd.DataFrame(training_records[first_training:])
+            batch_costs = {
+                "selection_worker_seconds": sum(float(row.get("UpSelectionSeconds", 0)) for row in training_records[first_training:]),
+                "refit_worker_seconds": sum(float(row.get("UpRefitSeconds", 0)) for row in training_records[first_training:]),
+                "selection_rounds_run": sum(int(row.get("UpSelectionRoundsRun", 0)) for row in training_records[first_training:]),
+                "refit_rounds": sum(int(row.get("UpRoundsRetained", 0)) for row in training_records[first_training:]),
+            } if config.prefilter_xgb_round_selection_mode == "chronological" else {}
             manager.commit_batch(
                 "predictor_prefilter_walk_forward",
                 batch.batch_id,
@@ -1119,7 +1181,7 @@ def evaluate_prefilter_walk_forward(
                 first_index=batch.first_index,
                 last_index=batch.last_index,
                 combination_count=len(batch.results),
-                row_counts={"qualification": len(payload["qualification"])},
+                row_counts={name: len(frame) for name, frame in payload.items()},
             )
             report_progress(
                 progress_callback,
@@ -1139,17 +1201,26 @@ def evaluate_prefilter_walk_forward(
                     "calculation_seconds": batch.elapsed_seconds,
                     "parent_rss_bytes": process_rss_bytes(),
                     "checkpoint_written": True,
+                    **batch_costs,
                 },
             )
         records = []
+        training_records = []
         for batch_id in range(total_batches):
             payload = manager.load_batch("predictor_prefilter_walk_forward", batch_id)
             records.extend(payload["qualification"].to_dict("records"))
+            audit = payload.get("round_selection_training")
+            if config.prefilter_xgb_round_selection_mode == "chronological" and audit is None:
+                from .checkpoints import CheckpointIncompatibleError
+                raise CheckpointIncompatibleError("Chronological Prefilter batch has no training audit")
+            if audit is not None:
+                training_records.extend(audit.to_dict("records"))
     population_diagnostics, exploitable_targets, excluded_targets = (
         _prefilter_population_diagnostics(records, task_rows)
     )
     qualification = rank_qualified_combinations(pd.DataFrame(records))
     elapsed = perf_counter() - started_at
+    training = pd.DataFrame(training_records)
     telemetry = {
         "elapsed_seconds": elapsed,
         "combinations": len(task_rows),
@@ -1160,7 +1231,30 @@ def evaluate_prefilter_walk_forward(
         "combination_workers": config.combination_workers,
         "xgb_threads_per_worker": config.xgb_nthread,
         **population_diagnostics,
+        "round_selection_policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot(),
+        "round_selection_coverage": {**round_selection_coverage(training), "Down": {"available": False, "status": "not_applicable"}},
+        "selection_rounds_run": sum(int(row.get("UpSelectionRoundsRun", 0)) for row in training_records),
+        "refit_rounds": sum(int(row.get("UpRoundsRetained", 0)) for row in training_records),
+        "selection_worker_seconds": sum(float(row.get("UpSelectionSeconds", 0)) for row in training_records),
+        "refit_worker_seconds": sum(float(row.get("UpRefitSeconds", 0)) for row in training_records),
     }
+    if config.prefilter_xgb_round_selection_mode == "fixed":
+        # The historical fixed primitive does not measure individual fit costs.
+        # Keep its batch timings; absence must not imply zero training work.
+        for key in ("selection_rounds_run", "refit_rounds", "selection_worker_seconds", "refit_worker_seconds"):
+            telemetry.pop(key)
+    if checkpoint_manager is not None and config.prefilter_xgb_round_selection_mode == "chronological":
+        checkpoint_manager.commit_artifact("prefilter_round_selection_training", training)
+        # Scientific costs belong to the durable fits, not the current resume's
+        # wall time/RSS. Exporting volatile attempt telemetry would change the
+        # immutable Prefilter contract even when no model was retrained.
+        checkpoint_manager.commit_artifact("prefilter_round_selection_telemetry", {
+            "origin_cutoff": ordered.index.max().date().isoformat(),
+            **{key: value for key, value in telemetry.items() if key in {
+                "round_selection_policy", "round_selection_coverage", "selection_rounds_run",
+                "refit_rounds", "selection_worker_seconds", "refit_worker_seconds",
+                *population_diagnostics.keys()}},
+        })
     report_progress(
         progress_callback,
         "predictor_prefilter_walk_forward",
@@ -1172,6 +1266,7 @@ def evaluate_prefilter_walk_forward(
         telemetry,
         exploitable_targets,
         excluded_targets,
+        training,
     )
 
 

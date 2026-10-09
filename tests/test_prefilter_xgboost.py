@@ -232,11 +232,20 @@ def test_settings_ui_renders_edits_and_saves_prefilter_fields_in_prefilter_secti
         def number_input(self, label, *, key, value, **kwargs):
             field = key.removeprefix("settings-")
             shown[field] = (label, value)
-            return CUSTOM[field]
+            return CUSTOM.get(field, value)
+
+        def selectbox(self, label, choices, **kwargs):
+            return choices[kwargs["index"]]
+
+        def caption(self, *args):
+            pass
 
     monkeypatch.setattr(streamlit_app, "st", FakeStreamlit())
-    assert streamlit_app._prefilter_xgboost_settings(DEFAULT_CONFIG) == CUSTOM
-    assert set(shown) == set(PREFILTER_XGBOOST_FIELDS)
+    values = streamlit_app._prefilter_xgboost_settings(DEFAULT_CONFIG)
+    assert {field: values[field] for field in CUSTOM} == CUSTOM
+    assert values["prefilter_xgb_round_selection_mode"] == "fixed"
+    assert values["prefilter_xgb_early_stopping_max_rounds"] == 500
+    assert set(PREFILTER_XGBOOST_FIELDS) <= set(shown)
     assert all(shown[field] == (field.removeprefix("prefilter_xgb_"), value)
                for field, value in DEFAULTS.items())
     assert borders == [{"border": True}]

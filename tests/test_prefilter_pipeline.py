@@ -247,3 +247,70 @@ def test_end_to_end_resume_and_derivations_keep_prefilter_source(tmp_path, monke
     assert repository.status(fork_id)["status"] == "completed", repository.status(fork_id).get("error")
     fork_manifest = end_to_end.load_pipeline_manifest(repository, fork_id)
     assert fork_manifest["stages"][0]["child_run_id"] != source
+    # The same E2E derivation point exposes the dedicated chronological policy.
+    chronological = build_derived_spec(repository, root, "prefilter", {
+        "prefilter_xgb_round_selection_mode": "chronological",
+        "prefilter_xgb_early_stopping_max_rounds": 650})
+    chronological_id = repository.create(chronological)
+    chronological_manifest = end_to_end.build_pipeline_manifest(repository, chronological_id, chronological)
+    pref_spec = end_to_end.build_stage_spec(repository, chronological_id, chronological,
+        "prefilter", chronological_manifest)
+    assert pref_spec.config.prefilter_xgb_round_selection_mode == "chronological"
+    assert pref_spec.config.prefilter_xgb_early_stopping_max_rounds == 650
+    assert pref_spec.prefilter_method == mode
+    assert pref_spec.prefilter_derivation["source_run_id"] == source
+    assert pref_spec.prefilter_derivation["source_univariate_sets_sha256"]
+    with pytest.raises(ValueError, match="inherited"):
+        build_derived_spec(repository, root, "walk_forward", {"prefilter_xgb_round_selection_mode": "chronological"})
+    _check_existing_form(repository, root, monkeypatch)
+
+
+def _check_existing_form(repository, root, monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from rstock.application import streamlit_app
+    fields, buttons = [], []
+    selected_fork = ["prefilter"]
+    class UI:
+        session_state = {}
+        def button(self, label, **kwargs):
+            buttons.append(label)
+            return label == "Créer une expérience dérivée"
+        def selectbox(self, label, choices, **kwargs):
+            fields.append(kwargs.get("key", ""))
+            return selected_fork[0] if label == "Point de dérivation" else choices[kwargs.get("index", 0)]
+        def number_input(self, label, **kwargs):
+            fields.append(kwargs["key"])
+            return kwargs["value"]
+        def checkbox(self, label, **kwargs):
+            return kwargs["value"]
+        def text_input(self, label, **kwargs):
+            return kwargs["value"]
+        def container(self, **kwargs):
+            return nullcontext()
+        def subheader(self, *args):
+            pass
+        def caption(self, *args):
+            pass
+        def info(self, *args):
+            pass
+        def write(self, *args):
+            pass
+    monkeypatch.setattr(streamlit_app, "st", UI())
+    # The pipeline fixture mocks threshold calibration with a minimal artifact;
+    # supply its other controls to exercise the complete existing form.
+    resolve = streamlit_app.source_parameter_value
+    monkeypatch.setattr(streamlit_app, "source_parameter_value",
+        lambda repo, spec, manifest, field: getattr(spec.config, field)
+        if field.startswith("threshold_calibration_") else resolve(repo, spec, manifest, field))
+    detail = {"configuration": repository.load_spec(root).to_dict(), "status": {"status": "completed"}}
+    service = SimpleNamespace(run_service=SimpleNamespace(repository=repository))
+    streamlit_app._render_derived_creation(root, detail, service)
+    assert any(field.endswith("prefilter_xgb_round_selection_mode") for field in fields)
+    assert any(field.endswith("prefilter_xgb_early_stopping_max_rounds") for field in fields)
+    assert buttons == ["Créer une expérience dérivée", "Lancer l’expérience dérivée"]
+    selected_fork[0] = "walk_forward"
+    fields.clear()
+    buttons.clear()
+    streamlit_app._render_derived_creation(root, detail, service)
+    assert not any("prefilter_xgb_" in field for field in fields)

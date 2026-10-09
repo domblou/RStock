@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
-from rstock.modeling import ROUND_SELECTION_FIELDS
+from rstock.modeling import ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS
 
 
 DERIVATION_SCHEMA_VERSION = 1
@@ -115,6 +115,7 @@ PREFILTER_STAGE_PARAMETER_FIELDS = {
         "prefilter_xgb_min_child_weight", "prefilter_xgb_subsample",
         "prefilter_xgb_colsample_bytree", "prefilter_xgb_gamma", "prefilter_xgb_reg_alpha",
         "prefilter_xgb_reg_lambda", "prefilter_xgb_seed",
+        *PREFILTER_ROUND_SELECTION_FIELDS,
         "prefilter_method", "stability_origin_count", "stability_step_sessions",
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }),

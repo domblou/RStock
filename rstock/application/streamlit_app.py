@@ -18,6 +18,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from rstock.application.grid_dataframe import dataframe as render_dataframe
+from rstock.modeling import PREFILTER_ROUND_SELECTION_FIELDS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1408,9 +1409,39 @@ def _prefilter_temporal_settings(current):
                 temporal_consensus_step_sessions=step, temporal_consensus_min_occurrences=minimum)
 
 
-def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, int | float]:
+def _round_selection_input(field: str, original: object, key: str) -> object:
+    """One set of controls for settings and both existing derivation forms."""
+    suffix = field.removeprefix("prefilter_").removeprefix("xgb_")
+    if suffix == "round_selection_mode":
+        return st.selectbox("Sélection des tours XGBoost du préfiltre", ("fixed", "chronological"),
+            index=0 if original == "fixed" else 1, key=key,
+            format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique")
+    labels = {
+        "early_stopping_max_rounds": "Tours maximum (préfiltre)",
+        "early_stopping_validation_sessions": "Validation interne — séances utilisables distinctes",
+        "early_stopping_patience": "Patience — log loss (préfiltre)",
+        "early_stopping_min_train_observations": "Apprentissage interne minimum — séances utilisables distinctes",
+    }
+    if suffix in labels:
+        return int(st.number_input(labels[suffix], min_value=1, value=int(original), step=1, key=key))
+    st.caption(f"{suffix} : {original}")
+    return original
+
+
+def _prefilter_round_selection_inputs(config: RStockConfig, key_prefix: str) -> dict[str, object]:
+    values = {field: _round_selection_input(field, getattr(config, field), f"{key_prefix}{field}")
+              for field in PREFILTER_ROUND_SELECTION_FIELDS}
+    total = values["prefilter_xgb_early_stopping_validation_sessions"] + values["prefilter_xgb_early_stopping_min_train_observations"]
+    st.caption(f"Minimum : {total} séances utilisables distinctes, après retards et exclusions. "
+               "Validation strictement antérieure au test, sans holdout. "
+               "num_boost_round configure les tours fixes et le repli. "
+               "Le mode du préfiltre est indépendant du WF et peut changer les candidats retenus.")
+    return values
+
+
+def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, object]:
     """Edit dedicated training values within the predictor-prefilter section."""
-    values: dict[str, int | float] = {}
+    values: dict[str, object] = {}
     with st.container(border=True):
         st.subheader("XGBoost du préfiltre")
         columns = st.columns(3)
@@ -1439,6 +1470,7 @@ def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, int | float]:
                     key=f"settings-{field}", **bounds,
                 ))
             values[field] = value
+        values.update(_prefilter_round_selection_inputs(config, "settings-"))
     return values
 
 
@@ -3218,6 +3250,26 @@ def _render_standard_results(
             st.info("Classement indisponible tant que le préfiltre n'est pas terminé.")
         manifest = _read_light_json(result_dir / "predictor_prefilter.json")
         if manifest is not None:
+            coverage = manifest.get("round_selection_coverage", {}).get("Up", {})
+            policy = manifest.get("round_selection_policy", {})
+            st.caption("Tours XGBoost du préfiltre : " + str(policy.get("prefilter_xgb_round_selection_mode", "fixed"))
+                       + " · Up uniquement ; Down non applicable.")
+            if coverage.get("available"):
+                st.metric("Fenêtres Up optimisées", f"{coverage['optimized_windows']} / {coverage['windows']} ({coverage['optimized_percent']:.1f} %)")
+                st.caption(f"Repli : {coverage['fallback_windows']} fenêtres ({coverage['fallback_percent']:.1f} %). "
+                           f"Minimum : {policy.get('minimum_usable_observations', 315)} séances distinctes utilisables.")
+                st.caption("Les métriques de qualification portent sur toutes les fenêtres ; "
+                           "la couverture identifie celles effectivement optimisées. Résultat exploratoire : "
+                           "aucune supériorité statistique n'est déduite de cette couverture.")
+                render_dataframe(pd.DataFrame([
+                    {"Périmètre": "Toutes les fenêtres évaluées", **manifest.get("all_evaluated_windows", {})},
+                    {"Périmètre": "Fenêtres effectivement optimisées", **manifest.get("optimized_windows_only", {})},
+                ]), hide_index=True, width="stretch")
+                with st.expander("Tours, validation interne et motifs de repli"):
+                    audit_path = result_dir / "prefilter_round_selection_training.csv"
+                    if audit_path.is_file():
+                        render_dataframe(pd.read_csv(audit_path), hide_index=True, width="stretch")
+                    st.json(coverage)
             if manifest.get("prefilter_method") == "temporal_consensus":
                 st.metric("Candidats consensus retenus", manifest["retained_predictors"])
                 st.caption(f"Origines : {', '.join(manifest['origin_cutoffs'])} · minimum {manifest['min_occurrences']} occurrences")
@@ -4168,12 +4220,14 @@ def _render_derived_creation(
             except (OSError, ValueError, KeyError) as error:
                 st.error(f"Valeur source indisponible pour {field} : {error}")
                 return
-            if field == "xgb_round_selection_mode":
+            if field.startswith("prefilter_xgb_") and field in PREFILTER_ROUND_SELECTION_FIELDS:
+                value = _round_selection_input(field, original, f"derive-value-{run_id}-{fork}-{field}")
+            elif field == "xgb_round_selection_mode":
                 value = st.selectbox("Sélection des tours XGBoost (Walk-forward et aval)",
                     ("fixed", "chronological"), index=(0 if original == "fixed" else 1),
                     format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique",
                     key=f"derive-value-{run_id}-{fork}-{field}")
-                st.caption("Préfiltre à tours fixes. Sélection interne dans chaque entraînement aval, "
+                st.caption("Politique du préfiltre indépendante. Sélection interne dans chaque entraînement aval, "
                            "sans accès au holdout. Minimum par défaut : 315 observations utilisables (252 + 63). "
                            "Forward conserve ses modèles figés.")
             elif field in {"xgb_early_stopping_metric", "xgb_round_selection_protocol_version"}:
@@ -4306,7 +4360,7 @@ def _render_prefilter_derived_creation(
                                             key=f"prefilter-derive-{run_id}-{field}"))
                 if value != original:
                     changes[field] = value
-        for field in sorted(PREFILTER_DERIVATION_FIELDS - set(PREFILTER_XGBOOST_FIELDS) - {"temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"}):
+        for field in sorted(PREFILTER_DERIVATION_FIELDS - set(PREFILTER_XGBOOST_FIELDS) - set(PREFILTER_ROUND_SELECTION_FIELDS) - {"temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"}):
             original = getattr(source.config, field)
             if field == "predictor_prefilter_top_n":
                 value = int(st.number_input(
@@ -4340,6 +4394,9 @@ def _render_prefilter_derived_creation(
                     key=f"prefilter-derive-{run_id}-{field}", **bounds,
                 ))
             if value != original:
+                changes[field] = value
+        for field, value in _prefilter_round_selection_inputs(source.config, f"prefilter-derive-{run_id}-").items():
+            if value != getattr(source.config, field):
                 changes[field] = value
         submitted = st.button(
             "Lancer le préfiltre dérivé", disabled=not changes,

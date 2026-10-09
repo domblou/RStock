@@ -465,7 +465,8 @@ def _inherit_walk_forward_prefilter(
         contract = load(repository, spec)
         source = repository.run_directory(spec.source_prefilter_run) / "results"
         output.mkdir(parents=True, exist_ok=True)
-        for filename in ("predictor_prefilter.csv", "predictor_prefilter.json", "prefilter_contract.json"):
+        for filename in ("predictor_prefilter.csv", "predictor_prefilter.json", "prefilter_contract.json",
+                         "prefilter_round_selection_training.csv", "prefilter_round_selection.json"):
             path = source / filename
             if path.is_file():
                 (output / filename).write_bytes(path.read_bytes())
@@ -505,10 +506,13 @@ def _inherit_walk_forward_prefilter(
     }
 
 
-def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager) -> None:
+def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager, config: RStockConfig | None = None) -> None:
     """Reject only legacy prefilter work; full WF checkpoints remain compatible."""
 
     protocol_artifact = "prefilter_execution_protocol"
+    if config is not None:
+        from rstock.walk_forward import ensure_prefilter_training_policy
+        ensure_prefilter_training_policy(checkpoint, config)
     if checkpoint.artifact_exists(protocol_artifact):
         if checkpoint.load_artifact(protocol_artifact) != PREFILTER_POLICY_VERSION:
             raise CheckpointIncompatibleError(
@@ -769,6 +773,65 @@ def _walk_forward(
     return summary
 
 
+def _persist_prefilter_training(output: Path, checkpoints, config: RStockConfig) -> dict[str, object]:
+    """Export reconciled atomic batch audits through the existing result contract."""
+    from rstock.modeling import RoundSelectionPolicy, round_selection_coverage
+    frames = []
+    origins = []
+    for manager in checkpoints:
+        if manager.artifact_exists("prefilter_round_selection_training"):
+            frame = manager.load_artifact("prefilter_round_selection_training")
+            frames.append(frame)
+            if manager.artifact_exists("prefilter_round_selection_telemetry"):
+                origins.append(manager.load_artifact("prefilter_round_selection_telemetry"))
+    training = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    def losses(frame):
+        # Descriptive OOS losses retain the existing overlapping-window weighting;
+        # they are not an independent-sample significance test.
+        metrics = {}
+        if "TestObservations" not in frame:
+            return metrics
+        weights = pd.to_numeric(frame["TestObservations"], errors="coerce")
+        for metric in ("UpLogLoss", "UpBrier"):
+            if metric in frame:
+                values = pd.to_numeric(frame[metric], errors="coerce")
+                valid = values.notna() & weights.gt(0)
+                if valid.any():
+                    metrics[metric] = float((values[valid] * weights[valid]).sum() / weights[valid].sum())
+        for metric in ("UpROCAUC", "UpPRAUC"):
+            if metric in frame:
+                values = pd.to_numeric(frame[metric], errors="coerce").dropna()
+                if len(values):
+                    metrics[metric + "Median"] = float(values.median())
+                    metrics[metric + "Windows"] = int(len(values))
+        return metrics
+    summary = {
+        "round_selection_policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot(),
+        "round_selection_coverage": {**round_selection_coverage(training),
+            "Down": {"available": False, "status": "not_applicable"}},
+        "round_selection_origins": origins,
+        "selection_worker_seconds": sum(item.get("selection_worker_seconds", 0) for item in origins),
+        "refit_worker_seconds": sum(item.get("refit_worker_seconds", 0) for item in origins),
+        "selection_rounds_run": sum(item.get("selection_rounds_run", 0) for item in origins),
+        "refit_rounds": sum(item.get("refit_rounds", 0) for item in origins),
+        "all_evaluated_windows": losses(training),
+        "optimized_windows_only": losses(training.loc[training["UpRoundSelectionUsed"].eq(True)]) if "UpRoundSelectionUsed" in training else {},
+        "comparison_status": "résultat exploratoire",
+    }
+    if config.prefilter_xgb_round_selection_mode == "fixed":
+        for key in ("selection_rounds_run", "refit_rounds", "selection_worker_seconds", "refit_worker_seconds"):
+            summary.pop(key)
+    if config.prefilter_xgb_round_selection_mode == "chronological":
+        output.mkdir(parents=True, exist_ok=True)
+        # Schema remains readable even if every candidate was locally excluded.
+        if training.empty and not len(training.columns):
+            training = pd.DataFrame(columns=["Set", "Observation", "Predictors", "Window", "OriginCutoff", "UpRoundSelectionMode"])
+        training.to_csv(output / "prefilter_round_selection_training.csv", index=False)
+        (output / "prefilter_round_selection.json").write_text(
+            json.dumps(_json_value(summary), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return summary
+
+
 def _predictor_prefilter(spec, output, progress_callback, cancellation_check):
     result = _execute_predictor_prefilter(spec, output, progress_callback, cancellation_check)
     from .prefilter_contract import publish
@@ -798,7 +861,7 @@ def _execute_predictor_prefilter(
         ),
         batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
     )
-    _ensure_prefilter_checkpoint_protocol(checkpoint)
+    _ensure_prefilter_checkpoint_protocol(checkpoint, spec.config)
     if checkpoint.artifact_exists("prepared_snapshot"):
         prepared, preparation = checkpoint.load_snapshot()
         predictor_symbols = list(preparation["predictor_symbols"])
@@ -824,10 +887,13 @@ def _execute_predictor_prefilter(
     else:
         checkpoint.phase_started("predictor_prefilter_generation")
         _phase(progress_callback, "predictor_prefilter_generation", "started")
-        univariate_sets = generate_symbol_sets(
-            predictor_symbols, 1, target_symbols=target_symbols,
-            max_sets=spec.config.max_generated_sets,
-        )
+        from .prefilter_experiments import inherited_prefilter_input_sets
+        univariate_sets = inherited_prefilter_input_sets(repository, spec)
+        if univariate_sets is None:
+            univariate_sets = generate_symbol_sets(
+                predictor_symbols, 1, target_symbols=target_symbols,
+                max_sets=spec.config.max_generated_sets,
+            )
         checkpoint.commit_artifact("prefilter_univariate_sets", univariate_sets)
         checkpoint.phase_completed("predictor_prefilter_generation")
         _phase(progress_callback, "predictor_prefilter_generation", "completed",
@@ -874,6 +940,7 @@ def _execute_predictor_prefilter(
     manifest = {
         "schema_version": 1,
         "prepared_dataset_as_of": as_of,
+        **_persist_prefilter_training(output, [checkpoint], spec.config),
         "prepared_dataset_sha256": traceability["prepared_dataset_sha256"],
         "snapshot_source": (None if spec.prefilter_derivation is None
                             else spec.prefilter_derivation["source_run_id"]),
@@ -939,7 +1006,7 @@ def _temporal_stability_prefilter(
             ).hexdigest(),
             batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
         )
-        _ensure_prefilter_checkpoint_protocol(origin_checkpoint)
+        _ensure_prefilter_checkpoint_protocol(origin_checkpoint, spec.config)
         origin_checkpoints.append(origin_checkpoint)
     progress = TemporalPrefilterProgress(
         progress_callback, [o.date().isoformat() for o in origins], len(univariate_sets),
@@ -1001,6 +1068,7 @@ def _temporal_stability_prefilter(
     manifest = {
         "schema_version": 1,
         "prefilter_method": "temporal_stability",
+        **_persist_prefilter_training(output, origin_checkpoints, spec.config),
         "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
         "stability_origin_count": spec.stability_origin_count,
         "stability_step_sessions": spec.stability_step_sessions,
@@ -1158,7 +1226,7 @@ def _resumable_walk_forward(
         else:
             checkpoint.commit_artifact("generated_sets", generated)
     elif spec.config.predictor_prefilter_enabled:
-        _ensure_prefilter_checkpoint_protocol(checkpoint)
+        _ensure_prefilter_checkpoint_protocol(checkpoint, spec.config)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:
@@ -2417,7 +2485,7 @@ def _planned_effective_plan(
         digest = prefilter_digest(effective_plan.predictors_by_target)
     elif spec.config.predictor_prefilter_enabled:
         policy_version = PREFILTER_POLICY_VERSION
-        _ensure_prefilter_checkpoint_protocol(checkpoint)
+        _ensure_prefilter_checkpoint_protocol(checkpoint, spec.config)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:

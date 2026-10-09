@@ -170,14 +170,54 @@ Le préfiltre peut avoir utilisé les labels des périodes de développement ens
 Cette expérience compare donc deux méthodes **sur une population déjà
 sélectionnée**. Elle ne valide pas indépendamment toute la chaîne de découverte.
 
-## Périmètre et extensions futures
+## Politique indépendante du préfiltre
 
-Le préfiltre conserve ses paramètres XGBoost dédiés et son entraînement fixe,
-même si la configuration WF est chronologique. Son appel désactive explicitement
-la sélection de tours dans l'évaluateur partagé. Le composant de sélection et
-réentraînement est réutilisable, mais toute future activation du préfiltre devra
-avoir sa propre politique persistée, versionner ses contrats et invalider les
-résultats de sélection correspondants. Aucune activation n'est implémentée ici.
+Le préfiltre conserve le mode fixe par défaut, indépendamment du WF. Son mode
+chronologique utilise le même composant de sélection et de réentraînement,
+avec les champs dédiés `prefilter_xgb_round_selection_mode`,
+`prefilter_xgb_early_stopping_max_rounds` (500, configurable),
+`prefilter_xgb_early_stopping_validation_sessions` (63),
+`prefilter_xgb_early_stopping_patience` (30),
+`prefilter_xgb_early_stopping_min_train_observations` (252),
+`prefilter_xgb_early_stopping_metric` (`logloss`) et
+`prefilter_xgb_round_selection_protocol_version` (`chronological_v1`).
+Les tours fixes et le repli utilisent `prefilter_xgb_num_boost_round` enregistré,
+jamais les tours du WF. Les anciens snapshots sans politique préfiltre restent
+explicitement fixes, même lorsque leur WF est chronologique.
+
+Le préfiltre entraîne uniquement Up. Les 63 séances de validation et les au moins
+252 séances d'apprentissage interne sont des dates distinctes après préparation
+des retards et exclusion des lignes incomplètes. Elles sont disjointes et
+strictement ordonnées, avant le test externe et le holdout réservé. Des exclusions
+peuvent espacer ces séances ; aucune ligne calendaire fictive n'est ajoutée.
+Une fenêtre glissante de 252 séances utilise le repli et affiche une couverture
+d'optimisation nulle ; sa géométrie n'est jamais allongée automatiquement.
+
+La politique couvre les méthodes origine unique, stabilité et consensus.
+Chaque contexte candidat/fenêtre/origine sélectionne ses tours puis réentraîne
+sur son apprentissage admissible complet. Les lots terminés réutilisent leur
+audit atomique lors d'une reprise, sans entraînement supplémentaire. Les origines
+différentes ne partagent pas silencieusement une valeur de tours sélectionnés.
+
+Les formulaires existants Paramètres, dérivation Préfiltre et dérivation E2E
+exposent la politique. Une dérivation au préfiltre réutilise le snapshot et les
+paires candidates d'entrée figées ; elle peut modifier la population retenue et
+invalide les étapes aval. Une dérivation depuis le WF hérite du préfiltre figé.
+Aucun bouton ou parcours supplémentaire n'est créé.
+
+`prefilter_round_selection_training.csv` trace les périodes internes, tours,
+empreintes et motifs de repli par origine. `prefilter_round_selection.json`
+contient couverture Up (Down non applicable), coûts et pertes descriptives
+globales / fenêtres optimisées. Le contrat public chronologique est versionné
+(v2), avec empreintes des audits ; les anciens contrats fixes v1 restent lisibles.
+Les comparaisons restent exploratoires sans estimation tenant compte des
+chevauchements temporels et corrélations entre candidats.
+
+Le plafond 500 n'est pas une limite codée en dur. Le coût comprend la sélection
+puis un modèle neuf avec les tours retenus. La télémétrie actuelle distingue les
+secondes cumulées des workers de la durée murale et trace les tours de sélection
+et de réentraînement. Cache de données, matrices du chemin fixe, parallélisme,
+threads et reprises restent régis par les mécanismes existants.
 
 Holdout, calibration, E2E, snapshots Forward et réentraînements de production
 réutilisent le composant commun selon les frontières décrites ci-dessus.

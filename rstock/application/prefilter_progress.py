@@ -12,7 +12,10 @@ class TemporalPrefilterProgress:
         self.cutoffs = list(cutoffs)
         self.units = units_per_origin
         self.completed = []
+        self.training_costs = []
         for checkpoint in checkpoints:
+            self.training_costs.append(checkpoint.load_artifact("prefilter_round_selection_telemetry")
+                if checkpoint.artifact_exists("prefilter_round_selection_telemetry") else {})
             if checkpoint.artifact_exists("prefilter_selection"):
                 checkpoint.load_artifact("prefilter_selection")
                 checkpoint.load_artifact("prefilter_qualification")
@@ -29,6 +32,8 @@ class TemporalPrefilterProgress:
             callback(ProgressEvent(PHASE, details={"phase_event": "started"}))
 
     def emit(self, index, event):
+        if event.stage == PHASE and event.details.get("phase_event") == "completed":
+            self.training_costs[index] = event.details
         if event.stage == PHASE and event.completed_units is not None:
             self.completed[index] = max(self.completed[index], min(self.units, event.completed_units))
         details = dict(event.details)
@@ -59,5 +64,8 @@ class TemporalPrefilterProgress:
 
     def finish(self):
         if self.callback:
-            self.callback(ProgressEvent(PHASE, details={"phase_event": "completed"}))
+            keys = ("selection_worker_seconds", "refit_worker_seconds", "selection_rounds_run", "refit_rounds")
+            self.callback(ProgressEvent(PHASE, details={"phase_event": "completed",
+                **{key: sum(origin.get(key, 0) for origin in self.training_costs)
+                   for key in keys if any(key in origin for origin in self.training_costs)}}))
         self.emit(len(self.cutoffs) - 1, ProgressEvent(PHASE, "completed"))

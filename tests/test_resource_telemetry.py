@@ -39,6 +39,8 @@ def test_resource_recorder_keeps_simultaneous_peak_and_previous_attempt(tmp_path
     first.batch_completed("walk_forward", {
         "batch_id": 0, "checkpoint_written": True, "combinations": 7,
         "elapsed_seconds": 1.0,
+        "selection_worker_seconds": 1.2, "refit_worker_seconds": .3,
+        "selection_rounds_run": 45, "refit_rounds": 5,
     }, 7)
     first.close("interrupted")
     document = json.loads((run / "telemetry/resource_summary.json").read_text(encoding="utf-8"))
@@ -49,6 +51,10 @@ def test_resource_recorder_keeps_simultaneous_peak_and_previous_attempt(tmp_path
     assert attempt["phase_rows"][0]["completed_items"] == 7
     assert attempt["phase_rows"][0]["duration_seconds"] >= 0
     assert len((run / "telemetry/batches.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    costs = json.loads((run / "telemetry/batches.jsonl").read_text(encoding="utf-8"))
+    assert costs["selection_worker_seconds"] == 1.2
+    assert costs["refit_worker_seconds"] == .3
+    assert costs["selection_rounds_run"] == 45 and costs["refit_rounds"] == 5
 
     second = resource_telemetry.ResourceRecorder(run, "run", {"combination_workers": 3})
     second.close("completed")
@@ -236,6 +242,7 @@ def test_resource_view_shows_measured_cpu_phases_and_two_charts(tmp_path, monkey
         ),
     )
     monkeypatch.setattr(streamlit_app, "st", fake)
+    monkeypatch.setattr(streamlit_app, "render_dataframe", fake.dataframe)
     streamlit_app._render_run_resources("run")
     assert ("CPU moyen", "3.1 / 16 cœurs — 19 %") in metrics
     assert ("CPU max échantillonné", "5.0 / 16 cœurs — 31 %") in metrics
@@ -282,6 +289,7 @@ def test_resource_view_shows_aggregation_subphases(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(streamlit_app, "st", fake)
+    monkeypatch.setattr(streamlit_app, "render_dataframe", fake.dataframe)
     streamlit_app._render_run_resources("run")
     assert headings == ["Détail de la phase aggregation"]
     assert len(frames) == 2

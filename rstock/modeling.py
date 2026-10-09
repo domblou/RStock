@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 import hashlib
 import json
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -20,31 +21,65 @@ ROUND_SELECTION_FIELDS = (
     "xgb_early_stopping_min_train_observations", "xgb_early_stopping_metric",
     "xgb_round_selection_protocol_version",
 )
+PREFILTER_ROUND_SELECTION_FIELDS = tuple("prefilter_" + name for name in ROUND_SELECTION_FIELDS)
+
+
+@dataclass(frozen=True, slots=True)
+class RoundSelectionPolicy:
+    """Resolve one policy at the training boundary; selection stays shared."""
+
+    scope: str
+    values: Mapping[str, object]
+    fallback_rounds: int
+    fallback_source: str
+
+    @classmethod
+    def from_config(cls, config: RStockConfig, *, scope: str = "xgboost") -> RoundSelectionPolicy:
+        if scope not in {"xgboost", "prefilter"}:
+            raise ValueError("Unsupported round selection scope")
+        prefix = "prefilter_" if scope == "prefilter" else ""
+        source = "prefilter_xgb_num_boost_round" if prefix else "xgb_rounds"
+        return cls(scope, {name: getattr(config, prefix + name) for name in ROUND_SELECTION_FIELDS},
+                   getattr(config, source), source)
+
+    def training_config(self, config: RStockConfig) -> RStockConfig:
+        from dataclasses import replace
+        return replace(config, **self.values, xgb_rounds=self.fallback_rounds)
+
+    def snapshot(self) -> dict[str, object]:
+        prefix = "prefilter_" if self.scope == "prefilter" else ""
+        return {**{prefix + name: value for name, value in self.values.items()},
+                "fallback_rounds": self.fallback_rounds, "fallback_source": self.fallback_source,
+                "minimum_usable_observations": self.values["xgb_early_stopping_validation_sessions"] + self.values["xgb_early_stopping_min_train_observations"],
+                "probability_loss_epsilon": 1e-15}
 
 
 def round_selection_snapshot(config: RStockConfig) -> dict[str, object]:
-    return {**{name: getattr(config, name) for name in ROUND_SELECTION_FIELDS},
-            "fallback_rounds": config.xgb_rounds, "fallback_source": "xgb_rounds",
-            "minimum_usable_observations": config.xgb_early_stopping_validation_sessions + config.xgb_early_stopping_min_train_observations,
-            "probability_loss_epsilon": 1e-15}
+    return RoundSelectionPolicy.from_config(config).snapshot()
 
 
 def fit_chronological_booster(
     train: pd.DataFrame, predictor_names: Sequence[str], outcome_name: str,
     config: RStockConfig, *, parameters: XGBoostParameters,
     cancellation_check: Any = None,
+    policy: RoundSelectionPolicy | None = None,
 ) -> tuple[Any, dict[str, object]]:
     """Select rounds using only the supplied train, then fit a fresh booster.
 
-    Every downstream fit uses this policy through fit_booster. The prefilter
-    explicitly retains its fixed fitting primitive and dedicated parameters.
+    The caller supplies the admissible dates and the scope's resolved policy.
     """
     from dataclasses import replace
     from .progress import check_cancellation
 
+    policy = policy or RoundSelectionPolicy.from_config(config)
+    config = policy.training_config(config)
+    selection_started = perf_counter()
+
     names = list(predictor_names)
     if not isinstance(train.index, pd.DatetimeIndex) or not train.index.is_monotonic_increasing or not train.index.is_unique or train.index.hasnans:
         raise ValueError("Chronological fitting requires ordered, unique dates")
+    if not train.index.normalize().is_unique:
+        raise ValueError("Chronological fitting requires distinct trading sessions")
     if train[[*names, outcome_name]].isna().any().any():
         raise ValueError("Chronological fitting requires complete usable observations")
     validation_size = config.xgb_early_stopping_validation_sessions
@@ -112,16 +147,19 @@ def fit_chronological_booster(
         finally:
             del selector
     diagnostics["RoundSelectionFallbackReason"] = reason
-    diagnostics.update(TrainingIdentity=training_identity(train, names, outcome_name, config, parameters),
+    diagnostics["SelectionSeconds"] = perf_counter() - selection_started
+    diagnostics.update(TrainingIdentity=training_identity(train, names, outcome_name, config, parameters, policy=policy),
         TrainingStart=train.index.min(), TrainingEnd=train.index.max(), TrainingObservations=len(train),
         Outcome=outcome_name, PredictorColumns=names, Parameters=parameters.as_dict(),
-        RoundSelectionPolicy=round_selection_snapshot(config))
+        RoundSelectionPolicy=policy.snapshot())
     check_cancellation(cancellation_check)
     selected = replace(parameters, num_boost_round=int(diagnostics["RoundsRetained"]))
     # Final fitting has no validation set and never continues the internal model.
+    refit_started = perf_counter()
     booster = _fit_fixed_booster(train, names, outcome_name, config, parameters=selected,
                          cancellation_check=cancellation_check)
     check_cancellation(cancellation_check)
+    diagnostics["RefitSeconds"] = perf_counter() - refit_started
     return booster, diagnostics
 
 
@@ -343,13 +381,14 @@ def xgboost_module() -> Any:
 
 
 def training_identity(train: pd.DataFrame, names: Sequence[str], outcome: str,
-                      config: RStockConfig, parameters: XGBoostParameters) -> str:
+                      config: RStockConfig, parameters: XGBoostParameters, *,
+                      policy: RoundSelectionPolicy | None = None) -> str:
     """Exact training identity; a different origin always requires reselection."""
     data = train[[*names, outcome]]
     digest = hashlib.sha256(pd.util.hash_pandas_object(data, index=True).values.tobytes())
     digest.update(json.dumps({"features": list(names), "outcome": outcome,
         "parameters": parameters.training_parameters(config),
-        "policy": round_selection_snapshot(config)}, sort_keys=True).encode())
+        "policy": policy.snapshot() if policy else round_selection_snapshot(config)}, sort_keys=True).encode())
     return digest.hexdigest()
 
 

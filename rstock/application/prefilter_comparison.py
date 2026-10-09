@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from rstock.combinations import canonical_combination_id
-from rstock.config import historical_prefilter_config_values
+from rstock.config import historical_prefilter_config_values, HISTORICAL_MISSING_CONFIG_DEFAULTS
+from rstock.modeling import PREFILTER_ROUND_SELECTION_FIELDS
 
 
 ND = "N/D"
@@ -107,6 +108,8 @@ def _profile_parameters(config: Mapping[str, Any], manifest: Mapping[str, Any]) 
     }
     if scientific:
         settings.update(historical_prefilter_config_values(scientific))
+        settings.update({field: scientific.get(field, HISTORICAL_MISSING_CONFIG_DEFAULTS[field])
+                         for field in PREFILTER_ROUND_SELECTION_FIELDS})
     for key in ("prefilter_method", "stability_origin_count", "stability_step_sessions", "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"):
         value = config.get(key, manifest.get(key))
         if value is not None:
@@ -133,6 +136,7 @@ class PrefilterComparison:
     origin_evaluations: int | None
     occurrence_distribution: dict[str, int] = field(default_factory=dict)
     origin_count: int | None = None
+    round_selection_coverage: dict[str, Any] = field(default_factory=dict)
 
     @property
     def survival_rate(self) -> float | None:
@@ -142,6 +146,10 @@ class PrefilterComparison:
         return {
             **{f"Sélection {count}/{self.origin_count}": number for count, number in self.occurrence_distribution.items()},
             "Run ID": self.run_id,
+            "Mode tours XGBoost": self.settings.get("prefilter_xgb_round_selection_mode", "fixed"),
+            "Fenêtres Up optimisées": self.round_selection_coverage.get("Up", {}).get("optimized_windows", ND),
+            "% fenêtres Up optimisées": self.round_selection_coverage.get("Up", {}).get("optimized_percent", ND),
+            "Fenêtres Up en repli": self.round_selection_coverage.get("Up", {}).get("fallback_windows", ND),
             "Cutoff demandé": self.requested_cutoff or ND,
             "Cutoff résolu": self.resolved_cutoff or ND,
             "Profil / preset": self.profile or ND,
@@ -223,6 +231,7 @@ def load_prefilter_comparison(project_root: Path, run_id: str) -> PrefilterCompa
         candidates=candidates,
         occurrence_distribution=dict(manifest.get("occurrence_distribution", {})),
         origin_count=len(manifest["origin_cutoffs"]) if "origin_cutoffs" in manifest else None,
+        round_selection_coverage=dict(manifest.get("round_selection_coverage", {})),
         origin_evaluations=None if origin_rows is None else len(origin_rows),
     )
 

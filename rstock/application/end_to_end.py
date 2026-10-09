@@ -1179,6 +1179,10 @@ def artifact_digests(
     run_directory = repository.run_directory(run_id)
     values: dict[str, str] = {}
     required = REQUIRED_ARTIFACTS[stage_key]
+    if (stage_key == "prefilter"
+            and repository.load_spec(run_id).config.prefilter_xgb_round_selection_mode == "chronological"):
+        required = (*required, "results/prefilter_round_selection_training.csv",
+                    "results/prefilter_round_selection.json")
     if (
         stage_key == "threshold_calibration"
         and repository.load_spec(run_id).pipeline_version >= 3

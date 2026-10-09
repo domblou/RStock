@@ -319,6 +319,9 @@ class ResourceRecorder:
                 "duration_seconds": elapsed if isinstance(elapsed, (int, float)) else None,
                 "calculation_seconds": details.get("calculation_seconds"),
                 "rows": details.get("rows"), "checkpoint_written": True,
+                **{key: details[key] for key in (
+                    "selection_worker_seconds", "refit_worker_seconds",
+                    "selection_rounds_run", "refit_rounds") if key in details},
             })
 
     def wait_completed(self, name: str, seconds: float) -> None:

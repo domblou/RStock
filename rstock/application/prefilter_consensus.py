@@ -88,7 +88,7 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
             configuration_fingerprint=identity,
             batch_sizes=prefilter_checkpoint_batch_sizes(config),
         )
-        wf._ensure_prefilter_checkpoint_protocol(origin_checkpoint)
+        wf._ensure_prefilter_checkpoint_protocol(origin_checkpoint, config)
         origin_checkpoints.append(origin_checkpoint)
     progress = TemporalPrefilterProgress(
         progress_callback, [o.date().isoformat() for o in origins], len(sets),
@@ -176,6 +176,7 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
     trace = wf._persist_prepared_traceability({}, prepared, spec)
     manifest = {
         "schema_version": 2, "prefilter_method": "temporal_consensus",
+        **wf._persist_prefilter_training(output, origin_checkpoints, config),
         "prepared_dataset_as_of": spec.historical_data_cutoff,
         "prepared_dataset_sha256": trace["prepared_dataset_sha256"],
         "xgboost_parameters": wf.prefilter_xgboost_snapshot(config),
