@@ -45,7 +45,7 @@ WF_SELECTION_FIELDS = (
     "model_selection_sample_adequacy_weight",
 )
 WF_DERIVATION_CONFIG_FIELDS = frozenset(
-    (*WF_GEOMETRY_FIELDS, *WF_XGBOOST_FIELDS,
+    ("predictive_model_type", *WF_GEOMETRY_FIELDS, *WF_XGBOOST_FIELDS,
      *WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS)
 )
 WF_DERIVATION_FIELDS = WF_DERIVATION_CONFIG_FIELDS | {"evaluate_final_holdout"}
@@ -132,6 +132,8 @@ def load_frozen_walk_forward_candidates(
             or spec.historical_data_cutoff != provenance.get("prepared_dataset_as_of")):
         raise ValueError("Walk-forward derivation cutoff changed")
     frozen = {item.name for item in fields(RStockConfig)} - WF_DERIVATION_CONFIG_FIELDS
+    if source.config.predictive_model_type != spec.config.predictive_model_type:
+        frozen -= {"predictor_prefilter_enabled"}
     if any(getattr(source.config, field) != getattr(spec.config, field) for field in frozen):
         raise ValueError("Walk-forward derivation changed a frozen parameter")
     if any(getattr(source, field) != getattr(spec, field) for field in (
@@ -153,6 +155,19 @@ def load_frozen_walk_forward_candidates(
     if name != provenance.get("candidate_artifact") or sha != provenance.get("candidate_sha256"):
         raise ValueError("Walk-forward derivation candidates changed")
     payload = _source_checkpoint(repository, source_id, source).load_artifact(name)
+    if source.config.predictive_model_type != spec.config.predictive_model_type:
+        from rstock.combination_planning import build_combination_plan
+        from rstock.features import require_predictive_model_inputs
+        prepared, metadata = _source_checkpoint(repository, source_id, source).load_snapshot()
+        targets = metadata["target_symbols"]
+        predictors = metadata["predictor_symbols"]
+        require_predictive_model_inputs(prepared, targets, predictors, spec.config)
+        both_external = (source.config.predictive_model_type in {"external_only", "target_and_external"}
+                         and spec.config.predictive_model_type in {"external_only", "target_and_external"})
+        if not both_external:
+            plan = build_combination_plan(target_symbols=targets, predictor_symbols=predictors,
+                permutation_depth=spec.config.permutation_depth, predictive_model_type=spec.config.predictive_model_type)
+            return plan if name == "effective_combination_plan" else plan.slice(0, plan.count())
     return CombinationPlan.from_dict(payload) if name == "effective_combination_plan" else payload
 
 
@@ -169,7 +184,7 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, Any]) -> dic
         field: value for field, value in effective.items()
         if field in WF_DERIVATION_CONFIG_FIELDS
     })
-    if config.xgb_round_selection_mode == "chronological":
+    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and "predictive_model_type" not in effective:
         if any(name not in ROUND_SELECTION_FIELDS and name != "evaluate_final_holdout" for name in effective):
             raise ValueError("Chronological comparison must preserve reference geometry, qualification and XGBoost parameters including xgb_rounds")
     historical_xgboost_parameters(config)
@@ -231,9 +246,13 @@ def build_derived_walk_forward_spec(
         source_prepared_dataset_sha256=str(trace["prepared_dataset_sha256"]),
         prepared_dataset_digest_required=True, prepared_snapshot_required=True,
     )
-    load_source_prepared_snapshot(
+    prepared, predictors, targets, _ = load_source_prepared_snapshot(
         repository, frozen, expected_snapshot_sha256=snapshot_sha,
     )
+    if "predictive_model_type" in effective:
+        from rstock.features import require_predictive_model_inputs
+        require_predictive_model_inputs(prepared, targets, predictors, replace(source.config, **{
+            field: value for field, value in effective.items() if field in WF_DERIVATION_CONFIG_FIELDS}))
     name, candidate_sha = _candidate_source(repository, source_run_id, source)
     provenance = {
         "schema_version": 1, "source_run_id": source_run_id,
@@ -261,6 +280,8 @@ def build_derived_walk_forward_spec(
         source_end_to_end_run=None, historical_data_cutoff=anchor,
         source_prepared_dataset_sha256=str(trace["prepared_dataset_sha256"]),
         prepared_dataset_digest_required=True, prepared_snapshot_required=True,
+        source_prefilter_run=(source.source_prefilter_run if config_changes.get("predictive_model_type", source.config.predictive_model_type) not in {"constant_probability", "target_only"} else None),
+        source_prefilter_contract_sha256=(source.source_prefilter_contract_sha256 if config_changes.get("predictive_model_type", source.config.predictive_model_type) not in {"constant_probability", "target_only"} else None),
         forced_symbol_sets=None, forced_period_lock=None,
         auto_promote_candidates=False, forward_simulation_enabled=False,
         walk_forward_derivation=provenance,

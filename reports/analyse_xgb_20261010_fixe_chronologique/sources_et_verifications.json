@@ -1,0 +1,264 @@
+{
+  "e2e_runs": [
+    "20261009T115931_8bf594b3bd",
+    "20261010T001622_e7f734b61a"
+  ],
+  "wf_runs": [
+    "20261009T115931_e9013b1a13",
+    "20261010T001623_73fb23b91f"
+  ],
+  "prefilter_runs": [
+    "20261009T024818_3ce61407de",
+    "20261009T024818_3ce61407de"
+  ],
+  "source_files": {
+    "C:\\Dev\\RStock\\runs\\20261009T115931_8bf594b3bd\\orchestration\\pipeline.json": {
+      "bytes": 9633,
+      "sha256": "49d05879b7a042dba2de61ea140347034269045ec7b4e6a0748ecb36f43bcf37"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001622_e7f734b61a\\orchestration\\pipeline.json": {
+      "bytes": 23238,
+      "sha256": "56ba7d165e4de0c72408924568e2454b0ede0d7995df121ca72c0c62101a26ea"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_8bf594b3bd\\config.json": {
+      "bytes": 14612,
+      "sha256": "68d130523dad484f58bfd4901bfdb054a5f911a9c38764e8acd4a782c19be37d"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001622_e7f734b61a\\config.json": {
+      "bytes": 25499,
+      "sha256": "96c9f64a7f06865afb45181d59b8ec5c128970d0e742072a2386ca31c96f8577"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\config.json": {
+      "bytes": 12867,
+      "sha256": "1f6b318c2888392886f7e1ef8d202ca4b2f77a676ae6ee5b1df3e5ee74e54096"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\config.json": {
+      "bytes": 14269,
+      "sha256": "98e6f61371ab5ac47f4119047f9904b14bff25dcd324e0c3513153916885c6a8"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\results\\run_configuration.json": {
+      "bytes": 8956,
+      "sha256": "5bbf9a002d7b9bf761e65159d58b151030df9ef28c392e3c4b29001be5967699"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\results\\run_configuration.json": {
+      "bytes": 34775,
+      "sha256": "9b24ec6fbbb7e45bd463404d5d03f1647c08e31f0f05d9ca87b9b7ad238dc02a"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\summary.json": {
+      "bytes": 3372,
+      "sha256": "5ee5a87a56ded316b7370a70a5b5c953dc0d1a73a0a943ae995f5783531cdbae"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\checkpoints\\artifacts\\prepared_snapshot.json": {
+      "bytes": 265,
+      "sha256": "378b8b135a81c709bb1d4187ea937d0cbe8dd83fc629ac848cfb06e8c090c6bf"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\summary.json": {
+      "bytes": 4120,
+      "sha256": "79fe63ff20973df5cecd6e9dd90efe778597faf54a8b0430d0d2daf7d90d4f24"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\checkpoints\\artifacts\\prepared_snapshot.json": {
+      "bytes": 265,
+      "sha256": "2a167a3a6e92d0fd2ac73f03c6035d4988314f1891afaec77a7ae59251172d0d"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\checkpoints\\artifacts\\prepared_snapshot.pkl": {
+      "bytes": 9974608,
+      "sha256": "556929a86eade9aee73723e1369d1cbaf2afd8ee952e80fb1029fc4b4b342ab2"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\checkpoints\\artifacts\\prepared_snapshot.pkl": {
+      "bytes": 9974608,
+      "sha256": "556929a86eade9aee73723e1369d1cbaf2afd8ee952e80fb1029fc4b4b342ab2"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\results\\windows.csv": {
+      "bytes": 3890455,
+      "sha256": "b946b1d715e426fac93a12fabdef6cf601c73ab50465a933111b22f5e113f10f"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\results\\windows.csv": {
+      "bytes": 29402352,
+      "sha256": "6178f92acf5a3c4b3cf553607bdfe9ad0d0f17677cd9770b6851030ce6c9c77e"
+    },
+    "C:\\Dev\\RStock\\runs\\20261009T115931_e9013b1a13\\results\\predictions.csv": {
+      "bytes": 169582697,
+      "sha256": "eb7449334d1ffed9f3a6600480917dbf8be9d87358a1a367dec6d12e49bd3730"
+    },
+    "C:\\Dev\\RStock\\runs\\20261010T001623_73fb23b91f\\results\\predictions.csv": {
+      "bytes": 169584564,
+      "sha256": "f5fc3469de2e8c7826a67df8e1404e43009fbca31152103d1186d3bb8379e08c"
+    }
+  },
+  "source_files_unchanged_at_end": true,
+  "rstock_config_differences": {
+    "prefilter_xgb_early_stopping_max_rounds": {
+      "fixe": "<absent>",
+      "chronologique": 500
+    },
+    "prefilter_xgb_early_stopping_metric": {
+      "fixe": "<absent>",
+      "chronologique": "logloss"
+    },
+    "prefilter_xgb_early_stopping_min_train_observations": {
+      "fixe": "<absent>",
+      "chronologique": 252
+    },
+    "prefilter_xgb_early_stopping_patience": {
+      "fixe": "<absent>",
+      "chronologique": 30
+    },
+    "prefilter_xgb_early_stopping_validation_sessions": {
+      "fixe": "<absent>",
+      "chronologique": 63
+    },
+    "prefilter_xgb_round_selection_mode": {
+      "fixe": "<absent>",
+      "chronologique": "fixed"
+    },
+    "prefilter_xgb_round_selection_protocol_version": {
+      "fixe": "<absent>",
+      "chronologique": "chronological_v1"
+    },
+    "xgb_early_stopping_max_rounds": {
+      "fixe": "<absent>",
+      "chronologique": 500
+    },
+    "xgb_early_stopping_metric": {
+      "fixe": "<absent>",
+      "chronologique": "logloss"
+    },
+    "xgb_early_stopping_min_train_observations": {
+      "fixe": "<absent>",
+      "chronologique": 252
+    },
+    "xgb_early_stopping_patience": {
+      "fixe": "<absent>",
+      "chronologique": 30
+    },
+    "xgb_early_stopping_validation_sessions": {
+      "fixe": "<absent>",
+      "chronologique": 63
+    },
+    "xgb_round_selection_mode": {
+      "fixe": "<absent>",
+      "chronologique": "chronological"
+    },
+    "xgb_round_selection_protocol_version": {
+      "fixe": "<absent>",
+      "chronologique": "chronological_v1"
+    }
+  },
+  "traceability": [
+    {
+      "git_commit": "8a86fc75daac699d267e9011e9c9306402cbd3fa",
+      "prepared_market_last_date": "2026-07-06T00:00:00",
+      "symbols_used": 165,
+      "prepared_dataset_sha256": "205309fb7ce060643034406703871a0a4a223acc0ed81e0b46d6d486622a1ced",
+      "source_prepared_dataset_sha256": "205309fb7ce060643034406703871a0a4a223acc0ed81e0b46d6d486622a1ced",
+      "actual_prepared_dataset_sha256": "205309fb7ce060643034406703871a0a4a223acc0ed81e0b46d6d486622a1ced",
+      "prepared_dataset_digest_verified": true
+    },
+    {
+      "git_commit": "9e4da0dd0aa3c07f70653b9aeb9324b420c0074d",
+      "prepared_market_last_date": "2026-07-06T00:00:00",
+      "symbols_used": 165,
+      "prepared_dataset_sha256": "205309fb7ce060643034406703871a0a4a223acc0ed81e0b46d6d486622a1ced",
+      "source_prepared_dataset_sha256": "205309fb7ce060643034406703871a0a4a223acc0ed81e0b46d6d486622a1ced",
+      "actual_prepared_dataset_sha256": "205309fb7ce060643034406703871a0a4a223acc0ed81e0b46d6d486622a1ced",
+      "prepared_dataset_digest_verified": true
+    }
+  ],
+  "code_commits": [
+    "8a86fc75daac699d267e9011e9c9306402cbd3fa",
+    "9e4da0dd0aa3c07f70653b9aeb9324b420c0074d"
+  ],
+  "round_selection": {
+    "xgb_round_selection_mode": "chronological",
+    "xgb_early_stopping_max_rounds": 500,
+    "xgb_early_stopping_validation_sessions": 63,
+    "xgb_early_stopping_patience": 30,
+    "xgb_early_stopping_min_train_observations": 252,
+    "xgb_early_stopping_metric": "logloss",
+    "xgb_round_selection_protocol_version": "chronological_v1",
+    "fallback_rounds": 80,
+    "fallback_source": "xgb_rounds",
+    "minimum_usable_observations": 315,
+    "probability_loss_epsilon": 1e-15,
+    "xgboost_version": "3.4.1"
+  },
+  "rows_per_run": [
+    765078,
+    765078
+  ],
+  "paired_observations_per_direction": 765078,
+  "unmatched_observations": 0,
+  "duplicate_keys": 0,
+  "labels_identical": true,
+  "prepared_frames_equal": true,
+  "shared_window_fields_equal": [
+    "Observation",
+    "Predictors",
+    "MarketCalendar",
+    "TrainStart",
+    "TrainEnd",
+    "TestStart",
+    "TestEnd",
+    "TrainObservations",
+    "TestObservations",
+    "Predictions",
+    "RowsLostToLags",
+    "UpPositiveOutcomes",
+    "DownPositiveOutcomes"
+  ],
+  "feature_columns_and_training_parameters_verified": true,
+  "train_prevalence_verified_from_prepared_snapshot": true,
+  "calendar_cohorts": 2,
+  "probability_epsilon": 1e-15,
+  "analysis_versions": {
+    "python": "3.12.10",
+    "numpy": "2.5.2",
+    "pandas": "3.0.5"
+  },
+  "analysis_script_sha256": "a246bda8ccb4fb33346a79f1da55a3dbaabadff5a2b2530962b55a4ac3a0decd",
+  "scientific_envelope_fields_equal": [
+    "symbols",
+    "target_symbols",
+    "predictor_symbols",
+    "historical_data_cutoff",
+    "resolved_market_session_cutoff",
+    "evaluate_final_holdout",
+    "calendar",
+    "frozen_xgboost_parameters",
+    "frozen_threshold_calibration_parameters"
+  ],
+  "recorded_code_function_audit": {
+    "rstock/features.py:predictor_columns": {
+      "ast_sha256_fixed": "7cf9bfd375d587b119889b99cf100176c6f91ca609bb8161ef58425dfbcbdd76",
+      "ast_sha256_chrono": "7cf9bfd375d587b119889b99cf100176c6f91ca609bb8161ef58425dfbcbdd76",
+      "identical": true
+    },
+    "rstock/features.py:prepare_dataset": {
+      "ast_sha256_fixed": "e71542587fb2d888a414b70f0d4ba83fdcc8c64356e2c1a4521d38b85e303d59",
+      "ast_sha256_chrono": "e71542587fb2d888a414b70f0d4ba83fdcc8c64356e2c1a4521d38b85e303d59",
+      "identical": true
+    },
+    "rstock/modeling.py:training_parameters": {
+      "ast_sha256_fixed": "5eb12959132613a9eccaacfe2fb8c65594957ec9b329e61aec52034e8dc3ba9c",
+      "ast_sha256_chrono": "5eb12959132613a9eccaacfe2fb8c65594957ec9b329e61aec52034e8dc3ba9c",
+      "identical": true
+    },
+    "rstock/modeling.py:fit_booster_matrix": {
+      "ast_sha256_fixed": "031d393ca743a3eacaf527ec5fc9a2c62de3b070811c1729bad74ce426891200",
+      "ast_sha256_chrono": "031d393ca743a3eacaf527ec5fc9a2c62de3b070811c1729bad74ce426891200",
+      "identical": true
+    },
+    "rstock/modeling.py:predict_probabilities_matrix": {
+      "ast_sha256_fixed": "60304685e3b94145b2b9a397c23c06deb58891386b14aeabe027f251c5fe4c19",
+      "ast_sha256_chrono": "60304685e3b94145b2b9a397c23c06deb58891386b14aeabe027f251c5fe4c19",
+      "identical": true
+    }
+  },
+  "fallback_probability_equality": true,
+  "paired_predictions_file": {
+    "path": "C:\\Dev\\RStock\\reports\\analyse_xgb_20261010_fixe_chronologique\\predictions_appariees.csv.gz",
+    "rows": 1530156,
+    "bytes": 31228873,
+    "sha256": "9db159eee86f0c568e432f562aba9b5280c8ca4dbc6cc4467f3d3df673410e45"
+  }
+}

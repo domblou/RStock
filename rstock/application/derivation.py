@@ -57,7 +57,7 @@ STAGE_MODES = frozenset({"inherited", "recomputed", "not_executed"})
 # Other fields are added here only after their effective consumer is verified.
 STAGE_PARAMETER_FIELDS: dict[str, frozenset[str]] = {
     "walk_forward": frozenset({
-        "predictor_prefilter_enabled", "predictor_prefilter_top_n",
+        "predictive_model_type", "predictor_prefilter_enabled", "predictor_prefilter_top_n",
     }),
     "xgboost_calibration": frozenset({
         "xgboost_global_max_qualified_combinations",
@@ -107,7 +107,7 @@ SPLIT_STAGE_PARAMETER_FIELDS = {
 
 PREFILTER_STAGE_PARAMETER_FIELDS = {
     **SPLIT_STAGE_PARAMETER_FIELDS,
-    "prefilter": STAGE_PARAMETER_FIELDS["walk_forward"] | frozenset({
+    "prefilter": (STAGE_PARAMETER_FIELDS["walk_forward"] - {"predictive_model_type"}) | frozenset({
         "predictor_prefilter_min_median_auc", "predictor_prefilter_min_pct_above_random",
         "predictor_prefilter_min_worst_auc", "predictor_prefilter_max_auc_std",
         "predictor_prefilter_correlation_threshold",
@@ -119,7 +119,7 @@ PREFILTER_STAGE_PARAMETER_FIELDS = {
         "prefilter_method", "stability_origin_count", "stability_step_sessions",
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }),
-    "walk_forward": WALK_FORWARD_XGBOOST_FIELDS,
+    "walk_forward": WALK_FORWARD_XGBOOST_FIELDS | {"predictive_model_type"},
 }
 
 

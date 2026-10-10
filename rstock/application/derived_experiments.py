@@ -187,7 +187,10 @@ def build_derived_spec(
                                      else source_spec.e2e_xgboost_protocol_version),
         **other_changes,
     )
-    if fork_stage == "walk_forward" and derived.config.xgb_round_selection_mode == "chronological":
+    if "predictive_model_type" in config_changes:
+        from rstock.features import require_predictive_model_inputs
+        require_predictive_model_inputs(prepared, derived.target_symbols, derived.predictor_symbols, derived.config)
+    if fork_stage == "walk_forward" and derived.config.predictive_model_type != "constant_probability" and derived.config.xgb_round_selection_mode == "chronological":
         # Prove exact candidate/snapshot reuse before creating any child job.
         from .walk_forward_experiments import freeze_walk_forward_input
         freeze_walk_forward_input(repository, replace(derived, job_type=JobType.WALK_FORWARD,

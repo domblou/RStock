@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
@@ -326,7 +326,17 @@ class ExperimentSpec:
             object.__setattr__(self, "prefilter_method", self.config.prefilter_selection_mode
                                if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}
                                else "single_origin")
-        if self.config.xgb_round_selection_mode == "chronological":
+        if self.config.predictive_model_type != "external_only":
+            if self.job_type is JobType.PREDICTOR_PREFILTER:
+                object.__setattr__(self, "config", replace(self.config, predictive_model_type="external_only"))
+            elif self.forward_simulation_enabled or self.auto_promote_candidates or self.job_type in {
+                JobType.FORWARD_SIMULATION, JobType.PRODUCTION_TRAINING, JobType.FULL_TRAINING,
+                JobType.DAILY_PREDICTION,
+            }:
+                raise ValueError("New predictive model types are limited to research WF/E2E jobs")
+            if self.source_prefilter_run and self.config.predictive_model_type in {"constant_probability", "target_only"}:
+                raise ValueError("This predictive model type cannot consume a Prefilter reference")
+        if self.config.predictive_model_type != "constant_probability" and self.config.xgb_round_selection_mode == "chronological":
             if self.e2e_xgboost_protocol_version != 2 and self.job_type not in {
                 JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH, JobType.PREDICTOR_PREFILTER,
             }:
@@ -518,8 +528,9 @@ class ExperimentSpec:
             object.__setattr__(
                 self, "frozen_threshold_calibration_parameters_sha256", None
             )
-        if len(self.symbols) < 2:
-            raise ValueError("At least two symbols are required")
+        minimum_symbols = 1 if self.config.predictive_model_type in {"constant_probability", "target_only"} else 2
+        if len(self.symbols) < minimum_symbols:
+            raise ValueError("At least two symbols are required" if minimum_symbols == 2 else "At least one symbol is required")
         if self.combinations_per_target < 1:
             raise ValueError("combinations_per_target must be positive")
         if self.pipeline_version < 0:

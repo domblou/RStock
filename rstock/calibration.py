@@ -25,7 +25,7 @@ from .evaluation import binary_predictions, classification_metrics
 from .features import (
     intraday_down_target_column,
     intraday_target_column,
-    predictor_columns,
+    model_predictor_columns,
 )
 from .modeling import (
     booster_training_record,
@@ -245,9 +245,7 @@ def _calibration_combination(
     development, config, candidates, lookup, min_train_size, test_size, step_size = context
     row = pd.Series(row_values)
     observation, feature_symbols = symbols_from_set(row)
-    names = predictor_columns(
-        development, feature_symbols, config.lag_depth, config.date_feature_regex
-    )
+    names = model_predictor_columns(development, observation, feature_symbols, config)
     up_outcome = intraday_target_column(observation)
     down_outcome = intraday_down_target_column(observation)
     required = [*names, up_outcome, down_outcome]
@@ -623,9 +621,7 @@ def evaluate_locked_holdout(
         check_cancellation(cancellation_check)
         set_name = symbol_set_id(row)
         observation, feature_symbols = symbols_from_set(row)
-        names = predictor_columns(
-            development, feature_symbols, config.lag_depth, config.date_feature_regex
-        )
+        names = model_predictor_columns(development, observation, feature_symbols, config)
         outcomes = {
             "Up": intraday_target_column(observation),
             "Down": intraday_down_target_column(observation),

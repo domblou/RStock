@@ -219,6 +219,12 @@ def test_settings_ui_renders_edits_and_saves_prefilter_fields_in_prefilter_secti
     headings = []
 
     class FakeStreamlit:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
         def container(self, **kwargs):
             borders.append(kwargs)
             return nullcontext()
@@ -254,6 +260,6 @@ def test_settings_ui_renders_edits_and_saves_prefilter_fields_in_prefilter_secti
     settings = source.split("def _settings()", 1)[1].split("def _history_model_contexts", 1)[0]
     prefilter = settings.split('st.subheader("Pré-filtrage des prédicteurs")', 1)[1].split(
         'st.subheader("Walk-forward")', 1)[0]
-    assert "prefilter_xgboost_values = _prefilter_xgboost_settings(current)" in prefilter
+    assert "prefilter_xgboost_values = _prefilter_xgboost_settings(current, disabled=prefilter_disabled)" in prefilter
     assert "**prefilter_xgboost_values" in settings
     assert "save_user_settings(" in settings

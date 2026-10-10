@@ -18,7 +18,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from rstock.application.grid_dataframe import dataframe as render_dataframe
-from rstock.modeling import PREFILTER_ROUND_SELECTION_FIELDS
+from rstock.modeling import ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -720,6 +720,7 @@ def _combination_plan_preview(job_type: JobType, *, config=None, selection_mode=
             target_symbols=targets,
             predictor_symbols=predictors,
             permutation_depth=config.permutation_depth,
+            predictive_model_type=config.predictive_model_type,
         )
         preview = build_combination_preview(
             plan,
@@ -1096,11 +1097,20 @@ def _experiments(service: ExperimentService) -> None:
     choice = st.selectbox("Type de job", list(labels))
     selected_job_type = labels[choice]
     run_config = st.session_state.lab_config
+    if selected_job_type in {JobType.WALK_FORWARD, JobType.END_TO_END}:
+        model_type = _predictive_model_input(run_config.predictive_model_type, "launch-predictive-model-type")
+        run_config = replace(run_config, predictive_model_type=model_type)
+        uses_externals = model_type in {"external_only", "target_and_external"}
+        enabled = st.checkbox("Activer le pré-filtrage", value=run_config.predictor_prefilter_enabled,
+                              disabled=not uses_externals, key="launch-predictive-prefilter")
+        run_config = replace(run_config, predictor_prefilter_enabled=enabled and uses_externals)
+    elif selected_job_type is JobType.PREDICTOR_PREFILTER:
+        run_config = replace(run_config, predictive_model_type="external_only")
     prefilter_method = run_config.prefilter_selection_mode if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} else "single_origin"
     stability_origin_count = 5
     stability_step_sessions = 1
     valid_consensus = True
-    if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}:
+    if selected_job_type is JobType.PREDICTOR_PREFILTER or (selected_job_type is JobType.END_TO_END and run_config.predictor_prefilter_enabled):
         st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet."
                    if selected_job_type is JobType.PREDICTOR_PREFILTER else
                    "Le Préfiltre, lorsqu'il est activé, est une étape autonome avant le Walk-forward.")
@@ -1218,7 +1228,7 @@ def _experiments(service: ExperimentService) -> None:
         if requested_historical_cutoff is not None:
             forward_simulation_enabled = st.checkbox(
                 "Lancer une Forward Simulation après succès", value=False
-            )
+            , disabled=run_config.predictive_model_type != "external_only")
             if forward_simulation_enabled:
                 forward_simulation_mode = st.radio(
                     "Durée Forward", ["63_sessions", "126_sessions", "custom_end_date"],
@@ -1236,7 +1246,7 @@ def _experiments(service: ExperimentService) -> None:
                 "La promotion est une etape interne persistee du pipeline; "
                 "elle n'entraine et n'active aucun modele."
             ),
-        )
+         disabled=run_config.predictive_model_type != "external_only")
         if auto_promote_candidates and not st.session_state.lab_evaluate_holdout:
             st.error("La promotion automatique exige le holdout final.")
         temporal_validation_enabled = st.checkbox(
@@ -1385,13 +1395,13 @@ def _experiments(service: ExperimentService) -> None:
     _live_job_panel(service, domain="experiment")
 
 
-def _prefilter_temporal_settings(current):
+def _prefilter_temporal_settings(current, *, disabled: bool = False):
     with st.container(border=True):
         st.subheader("Sélection temporelle")
         modes = ("single_origin", "temporal_stability", "temporal_consensus")
         mode = st.selectbox("Mode de sélection", modes,
                             index=modes.index(current.prefilter_selection_mode),
-                            key="settings-prefilter-selection-mode")
+                            key="settings-prefilter-selection-mode", disabled=disabled)
         columns = st.columns(3)
         origins = int(columns[0].number_input("Nombre d'origines", min_value=1,
             value=current.temporal_consensus_origins, disabled=mode != "temporal_consensus",
@@ -1409,13 +1419,13 @@ def _prefilter_temporal_settings(current):
                 temporal_consensus_step_sessions=step, temporal_consensus_min_occurrences=minimum)
 
 
-def _round_selection_input(field: str, original: object, key: str) -> object:
+def _round_selection_input(field: str, original: object, key: str, *, disabled: bool = False) -> object:
     """One set of controls for settings and both existing derivation forms."""
     suffix = field.removeprefix("prefilter_").removeprefix("xgb_")
     if suffix == "round_selection_mode":
         return st.selectbox("Sélection des tours XGBoost du préfiltre", ("fixed", "chronological"),
             index=0 if original == "fixed" else 1, key=key,
-            format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique")
+            format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique", disabled=disabled)
     labels = {
         "early_stopping_max_rounds": "Tours maximum (préfiltre)",
         "early_stopping_validation_sessions": "Validation interne — séances utilisables distinctes",
@@ -1423,14 +1433,31 @@ def _round_selection_input(field: str, original: object, key: str) -> object:
         "early_stopping_min_train_observations": "Apprentissage interne minimum — séances utilisables distinctes",
     }
     if suffix in labels:
-        return int(st.number_input(labels[suffix], min_value=1, value=int(original), step=1, key=key))
+        return int(st.number_input(labels[suffix], min_value=1, value=int(original), step=1, key=key, disabled=disabled))
     st.caption(f"{suffix} : {original}")
     return original
 
 
-def _prefilter_round_selection_inputs(config: RStockConfig, key_prefix: str) -> dict[str, object]:
-    values = {field: _round_selection_input(field, getattr(config, field), f"{key_prefix}{field}")
-              for field in PREFILTER_ROUND_SELECTION_FIELDS}
+def _prefilter_round_selection_inputs(
+    config: RStockConfig, key_prefix: str, *, horizontal: bool = False, disabled: bool = False,
+) -> dict[str, object]:
+    if horizontal:
+        values = {}
+        for index, field in enumerate(PREFILTER_ROUND_SELECTION_FIELDS):
+            if index == 1:
+                columns = st.columns(4)
+            if 1 <= index <= 4:
+                with columns[index - 1]:
+                    values[field] = _round_selection_input(
+                        field, getattr(config, field), f"{key_prefix}{field}",
+                     disabled=disabled)
+            else:
+                values[field] = _round_selection_input(
+                    field, getattr(config, field), f"{key_prefix}{field}",
+                 disabled=disabled)
+    else:
+        values = {field: _round_selection_input(field, getattr(config, field), f"{key_prefix}{field}", disabled=disabled)
+                  for field in PREFILTER_ROUND_SELECTION_FIELDS}
     total = values["prefilter_xgb_early_stopping_validation_sessions"] + values["prefilter_xgb_early_stopping_min_train_observations"]
     st.caption(f"Minimum : {total} séances utilisables distinctes, après retards et exclusions. "
                "Validation strictement antérieure au test, sans holdout. "
@@ -1439,7 +1466,7 @@ def _prefilter_round_selection_inputs(config: RStockConfig, key_prefix: str) -> 
     return values
 
 
-def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, object]:
+def _prefilter_xgboost_settings(config: RStockConfig, *, disabled: bool = False) -> dict[str, object]:
     """Edit dedicated training values within the predictor-prefilter section."""
     values: dict[str, object] = {}
     with st.container(border=True):
@@ -1456,7 +1483,7 @@ def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, object]:
                 bounds["step"] = 1
                 value = int(columns[index % 3].number_input(
                     label, value=int(original), key=f"settings-{field}", **bounds,
-                ))
+                 disabled=disabled))
             else:
                 bounds["min_value"] = (
                     0.0001 if field == "prefilter_xgb_eta" else
@@ -1468,89 +1495,132 @@ def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, object]:
                 value = float(columns[index % 3].number_input(
                     label, value=float(original), format="%.4f",
                     key=f"settings-{field}", **bounds,
-                ))
+                 disabled=disabled))
             values[field] = value
-        values.update(_prefilter_round_selection_inputs(config, "settings-"))
+        values.update(_prefilter_round_selection_inputs(config, "settings-", horizontal=True, disabled=disabled))
     return values
 
 
+
+def _predictive_model_input(current: str, key: str, widget=None) -> str:
+    from rstock.application.predictive_model_ui import predictive_model_input
+    return predictive_model_input(current, key, widget=st if widget is None else widget)
+
+
+def _render_common_prediction_comparison(run_ids: list[str]) -> None:
+    from rstock.application.common_prediction_comparison import compare_common_predictions, STATE_LABELS
+    st.subheader("Métriques sur les observations communes")
+    audit, metrics = compare_common_predictions(st.session_state.lab_config.project_root, run_ids)
+    states = [{"Run": run_id, **{key: STATE_LABELS.get(value, value) for key, value in values.items()}}
+              for run_id, values in audit["availability"].items()]
+    render_dataframe(pd.DataFrame(states).rename(columns={"candidate_status": "Qualification",
+        "holdout_status": "Holdout", "data_status": "Prédictions individuelles"}), hide_index=True, width="stretch")
+    if audit["status"] != "available":
+        messages = {"unavailable": "Données individuelles indisponibles : aucune métrique commune calculée.",
+                    "no_common_observations": "Aucune observation réellement commune aux runs sélectionnés.",
+                    "label_mismatch": "Les labels des observations communes diffèrent entre les runs."}
+        st.info(messages[audit["status"]])
+        return
+    st.caption("Développement avant qualification. Même population de dates par cible et direction pour chaque combinaison. "
+               "Fenêtres chevauchantes : origine d’apprentissage la plus récente antérieure à la prédiction. "
+               "Aucune moyenne de probabilités entre modèles.")
+    render_dataframe(metrics.rename(columns={"PredictiveModelType": "Type de modèle",
+        "CommonObservations": "Observations communes", "ExcludedObservations": "Observations exclues"}),
+        hide_index=True, width="stretch")
+    holdout_audit, holdout_metrics = compare_common_predictions(st.session_state.lab_config.project_root, run_ids, phase="holdout")
+    if holdout_audit["status"] == "available":
+        st.subheader("Holdout sur les observations communes")
+        render_dataframe(holdout_metrics, hide_index=True, width="stretch")
+    else:
+        st.caption("Holdout commun indisponible : seules les prédictions individuelles effectivement exécutées sont comparables.")
+
 def _settings() -> None:
+    from rstock.application.predictive_model_ui import predictive_model_input as _predictive_model_input
     _page_header("Paramètres")
     load_warning = st.session_state.pop("_settings_load_warning", None)
     if load_warning:
         st.warning(load_warning)
     current = st.session_state.lab_config
-    with st.expander("Diagnostic de contexte de marché — paramètres avancés"):
-        context_enabled = st.checkbox("Activer le diagnostic descriptif SPY", value=current.market_context_enabled)
-        st.caption("Protocole standard : 63 / 252 / 21 séances. Les variantes sont persistées et identifiées ; ces paramètres ne doivent pas être choisis selon les résultats des modèles.")
-        context_trend = st.number_input("Tendance SPY (séances)", min_value=2, value=current.market_context_trend_sessions)
-        context_drawdown = st.number_input("Drawdown SPY (séances)", min_value=2, value=current.market_context_drawdown_sessions)
-        context_volatility = st.number_input("Volatilité SPY (séances)", min_value=2, value=current.market_context_volatility_sessions)
-        context_terciles = st.checkbox("Terciles descriptifs figés sur le développement initial", value=current.market_context_terciles)
-    with st.expander("Valeurs RStock par défaut"):
-        defaults = asdict(DEFAULT_CONFIG)
-        defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
-        st.json(defaults)
-    with st.container():
-        st.subheader("Préparation des données et génération")
+    # Use native Streamlit tabs as in the E2E details. Render all settings
+    # tabs eagerly so hidden widgets remain alive and feed the common save.
+    tabs = st.tabs([
+        "Univers et données", "Modèles et combinaisons", "Préfiltre",
+        "Walk-forward", "Calibrations", "Holdout et promotion",
+        "Forward et production", "Avancé",
+    ])
+    with tabs[0]:
+        st.subheader('Univers de titres')
+        st.caption('Les listes de titres se gèrent dans Univers ; les cibles et prédicteurs sont sélectionnés au lancement dans Expériences.')
+        st.subheader("Historique, calendrier et retards")
         calendar = st.text_input("Calendrier", value=st.session_state.lab_calendar)
-        c1, c2, c3 = st.columns(3)
+        c1, = st.columns(1)
         history = c1.number_input("Historique (jours)", min_value=1, value=current.model_history_days)
-        permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
-        max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
         lag = c1.number_input("Lag depth", min_value=1, value=current.lag_depth)
+    with tabs[1]:
+        st.subheader('Définition des cibles Up/Down')
+        c2, c3 = st.columns(2)
         up_threshold = c2.number_input("Seuil intraday hausse", min_value=0.0, value=current.intraday_target_threshold, format="%.4f")
         down_threshold = c3.number_input("Seuil intraday baisse", min_value=0.0, value=current.intraday_down_threshold, format="%.4f")
-
+        st.subheader('Génération des combinaisons')
+        c2, c3 = st.columns(2)
+        permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
+        max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
+        st.subheader('Types de modèles')
+        predictive_model_type = _predictive_model_input(current.predictive_model_type, "settings-predictive-model-type", widget=st)
+        st.caption("Un seul type par job. Les résultats se comparent dans Comparer.")
+    with tabs[2]:
         st.subheader("Pré-filtrage des prédicteurs")
         prefilter_enabled = st.checkbox(
             "Activer le pré-filtrage",
-            value=current.predictor_prefilter_enabled,
+            value=current.predictor_prefilter_enabled and predictive_model_type in {"external_only", "target_and_external"},
             help="Évalue les prédicteurs seuls avant de générer les combinaisons.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         p1, p2, p3 = st.columns(3)
         prefilter_top_n = p1.number_input(
             "Top N prédicteurs", min_value=1,
             value=current.predictor_prefilter_top_n,
             help="Nombre maximal de prédicteurs admissibles conservés par cible.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_median_auc = p2.number_input(
             "AUC médiane minimale", min_value=0.0, max_value=1.0,
             value=current.predictor_prefilter_min_median_auc,
             help="Performance médiane minimale sur les fenêtres de développement.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_pct_random = p3.number_input(
             "Part minimale de fenêtres > 0,50", min_value=0.0, max_value=1.0,
             value=current.predictor_prefilter_min_pct_above_random,
             help="Proportion minimale de fenêtres meilleures que le hasard.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_worst_auc = p1.number_input(
             "Worst AUC minimal", min_value=0.0, max_value=1.0,
             value=current.predictor_prefilter_min_worst_auc,
             help="AUC minimale tolérée parmi les fenêtres valides.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_auc_std = p2.number_input(
             "Dispersion AUC maximale", min_value=0.0,
             value=current.predictor_prefilter_max_auc_std,
             help="Écart-type maximal des AUC entre fenêtres.",
-        )
-        prefilter_correlation = p3.number_input(
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
+        st.subheader('Corrélation et déredondance')
+        p1, p2, p3 = st.columns(3)
+        prefilter_correlation = p1.number_input(
             "Seuil de corrélation", min_value=0.0,
             value=current.predictor_prefilter_correlation_threshold,
             help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
-        )
-
-        prefilter_temporal_values = _prefilter_temporal_settings(current)
-        prefilter_xgboost_values = _prefilter_xgboost_settings(current)
-
-        st.subheader("Walk-forward")
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
+        st.subheader('Stabilité et consensus')
+        prefilter_disabled = predictive_model_type in {"constant_probability", "target_only"}
+        prefilter_temporal_values = _prefilter_temporal_settings(current, disabled=prefilter_disabled)
+        prefilter_xgboost_values = _prefilter_xgboost_settings(current, disabled=prefilter_disabled)
+    with tabs[3]:
+        st.subheader('Fenêtres et calendrier')
         window_mode_label = st.selectbox(
             "Mode de fenêtre",
             ["Expansive", "Glissante"],
             index=0 if current.walk_forward_window_mode == "expanding" else 1,
         )
         window_mode = "expanding" if window_mode_label == "Expansive" else "rolling"
-        w1, w2, w3, w4, w5, w6 = st.columns(6)
+        w1, w2, w3, w4, w6 = st.columns(5)
         min_train = w1.number_input(
             "Train minimal",
             min_value=1,
@@ -1567,7 +1637,6 @@ def _settings() -> None:
         )
         test_size = w3.number_input("Taille test", min_value=1, value=current.walk_forward_test_size)
         step = w4.number_input("Step", min_value=1, value=current.walk_forward_step_size)
-        holdout = w5.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
         end_offset = w6.number_input(
             "Décalage de fin (jours de marché)",
             min_value=0,
@@ -1579,85 +1648,28 @@ def _settings() -> None:
                 "0 = données les plus récentes."
             ),
         )
-        b1, b2, b3, b4 = st.columns(4)
-        prefilter_batch_size = b1.number_input(
-            "Batch préfiltre",
-            min_value=1,
-            value=current.predictor_prefilter_batch_size,
-            help="Nombre de combinaisons univariées calculées avant chaque checkpoint.",
-        )
-        walk_forward_batch_size = b2.number_input(
-            "Batch walk-forward",
-            min_value=1,
-            value=current.walk_forward_batch_size,
-            help="Nombre de combinaisons détaillées conservées simultanément en mémoire.",
-        )
-        final_holdout_batch_size = b3.number_input(
-            "Batch holdout final",
-            min_value=1,
-            value=current.final_holdout_batch_size,
-            help="Nombre de modèles admissibles évalués entre deux checkpoints holdout.",
-        )
-        max_combinations_per_batch = b4.number_input(
-            "Taille maximale d’un batch de combinaisons",
-            min_value=1,
-            value=(
-                current.walk_forward_max_combinations_per_batch
-                if current.walk_forward_max_combinations_per_batch is not None
-                else DEFAULT_CONFIG.walk_forward_max_combinations_per_batch
-            ),
-            help=(
-                "Contrôle uniquement le découpage des combinaisons en batches; "
-                "ne change ni les combinaisons générées ni les critères du modèle."
-            ),
-        )
-
-        if False: """
-        st.subheader("Pré-filtrage des prédicteurs")
-        prefilter_enabled = st.checkbox(
-            "Activer le pré-filtrage",
-            value=current.predictor_prefilter_enabled,
-            help="Évalue les prédicteurs seuls avant de générer les combinaisons.",
-        )
-        p1, p2, p3 = st.columns(3)
-        prefilter_top_n = p1.number_input(
-            "Top N prédicteurs",
-            min_value=1,
-            value=current.predictor_prefilter_top_n,
-            help="Nombre maximal de prédicteurs admissibles conservés par cible.",
-        )
-        prefilter_median_auc = p2.number_input(
-            "AUC médiane minimale",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_min_median_auc,
-            help="Performance médiane minimale sur les fenêtres de développement.",
-        )
-        prefilter_pct_random = p3.number_input(
-            "Part minimale de fenêtres > 0,50",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_min_pct_above_random,
-            help="Proportion minimale de fenêtres meilleures que le hasard.",
-        )
-        prefilter_worst_auc = p1.number_input(
-            "Worst AUC minimal",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_min_worst_auc,
-            help="AUC minimale tolérée parmi les fenêtres valides.",
-        )
-        prefilter_auc_std = p2.number_input(
-            "Dispersion AUC maximale",
-            min_value=0.0,
-            value=current.predictor_prefilter_max_auc_std,
-            help="Écart-type maximal des AUC entre fenêtres.",
-        )
-        prefilter_correlation = p3.number_input(
-            "Seuil de corrélation",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_correlation_threshold,
-            help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
-        )
-
-        """
+        st.subheader("XGBoost")
+        x1, x2, x3 = st.columns(3)
+        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth, disabled=predictive_model_type == "constant_probability")
+        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f", disabled=predictive_model_type == "constant_probability")
+        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds, disabled=predictive_model_type == "constant_probability")
+        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight, disabled=predictive_model_type == "constant_probability")
+        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample, disabled=predictive_model_type == "constant_probability")
+        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree, disabled=predictive_model_type == "constant_probability")
+        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma, disabled=predictive_model_type == "constant_probability")
+        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha, disabled=predictive_model_type == "constant_probability")
+        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda, disabled=predictive_model_type == "constant_probability")
+        st.subheader('Sélection fixe ou chronologique des tours')
+        round_modes = ("fixed", "chronological")
+        round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
+            index=round_modes.index(current.xgb_round_selection_mode),
+            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique", disabled=predictive_model_type == "constant_probability")
+        st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
+        round_controls = st.columns(4)
+        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds, disabled=predictive_model_type == "constant_probability")
+        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions, disabled=predictive_model_type == "constant_probability")
+        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience, disabled=predictive_model_type == "constant_probability")
+        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations, disabled=predictive_model_type == "constant_probability")
         st.subheader("Qualification")
         q1, q2, q3 = st.columns(3)
         min_windows = q1.number_input(
@@ -1704,14 +1716,6 @@ def _settings() -> None:
                 "Une valeur plus faible exige une performance plus stable dans le temps."
             ),
         )
-        final_auc = q1.number_input(
-            "ROC-AUC confirmation finale", min_value=0.0, max_value=1.0,
-            value=current.final_confirmation_min_auc,
-            help=(
-                "ROC-AUC minimal requis lors de la confirmation finale du modèle. "
-                "Ce contrôle sert de barrière supplémentaire avant de poursuivre le pipeline."
-            ),
-        )
         prediction_threshold = q2.number_input(
             "Seuil de décision standard", min_value=0.0, max_value=1.0,
             value=current.prediction_threshold,
@@ -1720,94 +1724,12 @@ def _settings() -> None:
                 "décision binaire lorsqu’aucun seuil calibré spécifique n’est appliqué."
             ),
         )
-        evaluate_holdout = q3.checkbox(
-            "Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout,
-            help=(
-                "Active l’évaluation finale sur le jeu holdout, conservé hors des étapes de sélection "
-                "précédentes afin de mesurer la performance hors échantillon."
-            ),
-        )
-
-        st.subheader("Classement des modèles")
-        st.caption("Pondérations du score final; les composantes absentes sont exclues puis les poids disponibles sont renormalisés.")
-        s1, s2, s3 = st.columns(3)
-        selection_predictive_weight = s1.number_input(
-            "Poids qualité prédictive", min_value=0.0,
-            value=current.model_selection_predictive_quality_weight,
-            help="Poids de l’AUC médiane walk-forward.",
-        )
-        selection_stability_weight = s2.number_input(
-            "Poids stabilité", min_value=0.0,
-            value=current.model_selection_stability_weight,
-            help="Poids du Worst AUC, de la dispersion et de la constance entre fenêtres.",
-        )
-        selection_holdout_weight = s3.number_input(
-            "Poids holdout", min_value=0.0,
-            value=current.model_selection_holdout_weight,
-            help="Poids de l’AUC holdout et de l’écart développement-holdout.",
-        )
-        selection_signal_weight = s1.number_input(
-            "Poids qualité signal", min_value=0.0,
-            value=current.model_selection_signal_quality_weight,
-            help="Poids de la qualité, de la stabilité et du volume des signaux calibrés.",
-        )
-        selection_sample_weight = s2.number_input(
-            "Poids adéquation échantillon", min_value=0.0,
-            value=current.model_selection_sample_adequacy_weight,
-            help="Poids du nombre et de la validité des fenêtres et observations.",
-        )
-        st.subheader("XGBoost")
-        x1, x2, x3 = st.columns(3)
-        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
-        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f")
-        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds)
-        round_modes = ("fixed", "chronological")
-        round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
-            index=round_modes.index(current.xgb_round_selection_mode),
-            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique")
-        st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
-        round_controls = st.columns(4)
-        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds)
-        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions)
-        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience)
-        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations)
-        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight)
-        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample)
-        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree)
-        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma)
-        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha)
-        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda)
-
-        st.subheader("Calibration des seuils")
-        t1, t2, t3 = st.columns(3)
-        min_signals = t1.number_input(
-            "Signaux minimaux par fenêtre",
-            min_value=1,
-            value=current.threshold_calibration_min_signals_per_window,
-        )
-        min_window_fraction = t2.number_input(
-            "Fraction minimale de fenêtres",
-            min_value=0.01,
-            max_value=1.0,
-            value=current.threshold_calibration_min_window_fraction,
-        )
-        min_robust_signals = t3.number_input(
-            "Signaux totaux minimum pour un seuil robuste",
-            min_value=1,
-            value=current.threshold_calibration_min_robust_signals,
-            help=(
-                "Nombre minimal de signaux générés au total, toutes fenêtres de calibration "
-                "confondues, pour qu’un seuil admissible soit considéré comme suffisamment robuste. "
-                "Ce critère ne remplace pas la règle « Signaux minimaux par fenêtre × Fraction "
-                "minimale de fenêtres » : un seuil doit d’abord respecter la couverture temporelle "
-                "requise. `RobustSample` sert ensuite à privilégier les seuils disposant d’un "
-                "échantillon global suffisant parmi ceux déjà admissibles. "
-                "Exemple : avec 7 fenêtres, 5 signaux minimum par fenêtre et 60 % de fenêtres "
-                "requises, il faut au moins 5 fenêtres conformes, donc au moins 25 signaux "
-                "répartis dans le temps. Un seuil avec 25+ signaux au total mais mal répartis "
-                "peut quand même être rejeté."
-            ),
-        )
+    with tabs[4]:
+        st.subheader('Recherche des hyperparamètres XGBoost')
+        st.caption('Les grilles de recherche se configurent au lancement de la calibration XGBoost et dans les formulaires de dérivation existants.')
+        st.subheader('Calibration des probabilités')
+        st.caption("La calibration sigmoïde chronologique est prévue ; aucun réglage actif n'est disponible sur cette page.")
+        st.subheader('Calibration des paramètres de seuils')
         unlimited_threshold_parameter_models = st.checkbox(
             "Sans plafond de modèles directionnels",
             value=current.threshold_parameter_calibration_max_models is None,
@@ -1852,6 +1774,92 @@ def _settings() -> None:
                 "avant le départage économique. 0,01 = 1 point de pourcentage."
             ),
         )
+        st.subheader("Calibration des seuils")
+        t1, t2, t3 = st.columns(3)
+        min_signals = t1.number_input(
+            "Signaux minimaux par fenêtre",
+            min_value=1,
+            value=current.threshold_calibration_min_signals_per_window,
+        )
+        min_window_fraction = t2.number_input(
+            "Fraction minimale de fenêtres",
+            min_value=0.01,
+            max_value=1.0,
+            value=current.threshold_calibration_min_window_fraction,
+        )
+        min_robust_signals = t3.number_input(
+            "Signaux totaux minimum pour un seuil robuste",
+            min_value=1,
+            value=current.threshold_calibration_min_robust_signals,
+            help=(
+                "Nombre minimal de signaux générés au total, toutes fenêtres de calibration "
+                "confondues, pour qu’un seuil admissible soit considéré comme suffisamment robuste. "
+                "Ce critère ne remplace pas la règle « Signaux minimaux par fenêtre × Fraction "
+                "minimale de fenêtres » : un seuil doit d’abord respecter la couverture temporelle "
+                "requise. `RobustSample` sert ensuite à privilégier les seuils disposant d’un "
+                "échantillon global suffisant parmi ceux déjà admissibles. "
+                "Exemple : avec 7 fenêtres, 5 signaux minimum par fenêtre et 60 % de fenêtres "
+                "requises, il faut au moins 5 fenêtres conformes, donc au moins 25 signaux "
+                "répartis dans le temps. Un seuil avec 25+ signaux au total mais mal répartis "
+                "peut quand même être rejeté."
+            ),
+        )
+        st.subheader("Échantillonnage et reproductibilité")
+        sampling_1, sampling_2 = st.columns(2)
+        combinations = sampling_1.number_input(
+            "Combinaisons par cible (calibrations)", min_value=1,
+            value=st.session_state.lab_combinations_per_target,
+        )
+        seed = sampling_2.number_input("Seed", min_value=0, value=current.xgb_seed)
+    with tabs[5]:
+        st.subheader('Réserve Holdout et confirmation finale')
+        w5 = st.columns(1)[0]
+        holdout = w5.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
+        q1, q2, q3 = st.columns(3)
+        final_auc = q1.number_input(
+            "ROC-AUC confirmation finale", min_value=0.0, max_value=1.0,
+            value=current.final_confirmation_min_auc,
+            help=(
+                "ROC-AUC minimal requis lors de la confirmation finale du modèle. "
+                "Ce contrôle sert de barrière supplémentaire avant de poursuivre le pipeline."
+            ),
+        )
+        evaluate_holdout = q2.checkbox(
+            "Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout,
+            help=(
+                "Active l’évaluation finale sur le jeu holdout, conservé hors des étapes de sélection "
+                "précédentes afin de mesurer la performance hors échantillon."
+            ),
+        )
+        st.subheader("Classement des modèles")
+        st.caption("Pondérations du score final; les composantes absentes sont exclues puis les poids disponibles sont renormalisés.")
+        s1, s2, s3 = st.columns(3)
+        selection_predictive_weight = s1.number_input(
+            "Poids qualité prédictive", min_value=0.0,
+            value=current.model_selection_predictive_quality_weight,
+            help="Poids de l’AUC médiane walk-forward.",
+        )
+        selection_stability_weight = s2.number_input(
+            "Poids stabilité", min_value=0.0,
+            value=current.model_selection_stability_weight,
+            help="Poids du Worst AUC, de la dispersion et de la constance entre fenêtres.",
+        )
+        selection_holdout_weight = s3.number_input(
+            "Poids holdout", min_value=0.0,
+            value=current.model_selection_holdout_weight,
+            help="Poids de l’AUC holdout et de l’écart développement-holdout.",
+        )
+        selection_signal_weight = s1.number_input(
+            "Poids qualité signal", min_value=0.0,
+            value=current.model_selection_signal_quality_weight,
+            help="Poids de la qualité, de la stabilité et du volume des signaux calibrés.",
+        )
+        selection_sample_weight = s2.number_input(
+            "Poids adéquation échantillon", min_value=0.0,
+            value=current.model_selection_sample_adequacy_weight,
+            help="Poids du nombre et de la validité des fenêtres et observations.",
+        )
+        st.subheader('Analyse de sensibilité des seuils')
         sensitivity_1, sensitivity_2, sensitivity_3 = st.columns(3)
         sensitivity_threshold_min = sensitivity_1.number_input(
             "Seuil min — analyse de sensibilité",
@@ -1878,15 +1886,6 @@ def _settings() -> None:
             step=0.005,
             format="%.4f",
         )
-
-        st.subheader("Échantillonnage et reproductibilité")
-        sampling_1, sampling_2 = st.columns(2)
-        combinations = sampling_1.number_input(
-            "Combinaisons par cible (calibrations)", min_value=1,
-            value=st.session_state.lab_combinations_per_target,
-        )
-        seed = sampling_2.number_input("Seed", min_value=0, value=current.xgb_seed)
-
         st.subheader("Validation temporelle")
         st.caption(
             "Ces valeurs sont figées dans le snapshot End-to-end de référence. "
@@ -1924,7 +1923,6 @@ def _settings() -> None:
             value=current.temporal_max_ci_width,
             help="Ce paramètre ne s’applique pas au rendement directionnel.",
         )
-
         st.subheader("Promotion")
         st.caption(
             "La promotion automatique se choisit au lancement d’un run End-to-end. "
@@ -1958,8 +1956,14 @@ def _settings() -> None:
             value=current.promotion_max_opposite_movement_frequency,
             help="Fréquence maximale autorisée des mouvements opposés sur le holdout.",
         )
-
+    with tabs[6]:
+        st.subheader('Simulation Forward')
+        st.caption("L'horizon et les options de simulation se règlent dans les lancements Forward et End-to-End existants.")
+        st.subheader('Modèles et production')
+        st.caption('Le mode de réentraînement, les modèles figés et leur surveillance se gèrent dans les parcours de simulation, de promotion et de production existants.')
+    with tabs[7]:
         st.subheader("Exécution")
+        st.subheader('Parallélisme et threads')
         execution_1, execution_2, execution_3 = st.columns(3)
         workers = execution_1.number_input(
             "Workers marché", min_value=1, value=current.market_cache_workers
@@ -1974,129 +1978,177 @@ def _settings() -> None:
             "Jobs lourds concurrents", min_value=1,
             value=st.session_state.max_concurrent_heavy_jobs,
         )
-        if st.button("Enregistrer les paramètres", type="primary"):
-            parsed_quantiles = tuple(
-                float(item.strip()) for item in quantiles.split(",") if item.strip()
-            )
-            new_config = replace(
-                current,
-                **prefilter_xgboost_values,
-                **prefilter_temporal_values,
-                market_context_enabled=context_enabled,
-                market_context_trend_sessions=int(context_trend),
-                market_context_drawdown_sessions=int(context_drawdown),
-                market_context_volatility_sessions=int(context_volatility),
-                market_context_terciles=context_terciles,
-                model_history_days=int(history),
-                permutation_depth=int(permutation),
-                max_generated_sets=int(max_sets),
-                lag_depth=int(lag),
-                intraday_target_threshold=float(up_threshold),
-                intraday_down_threshold=float(down_threshold),
-                walk_forward_window_mode=window_mode,
-                walk_forward_min_train_size=int(min_train),
-                walk_forward_train_size=int(rolling_train),
-                walk_forward_test_size=int(test_size),
-                walk_forward_step_size=int(step),
-                final_holdout_size=int(holdout),
-                walk_forward_end_offset_sessions=int(end_offset),
-                predictor_prefilter_batch_size=int(prefilter_batch_size),
-                walk_forward_batch_size=int(walk_forward_batch_size),
-                final_holdout_batch_size=int(final_holdout_batch_size),
-                walk_forward_max_combinations_per_batch=int(
-                    max_combinations_per_batch
-                ),
-                temporal_min_candidate_yield_ratio=float(temporal_candidate_yield),
-                temporal_max_auc_degradation=float(temporal_auc_degradation),
-                temporal_min_precision_edge=float(temporal_precision_edge),
-                temporal_min_mean_directional_return=float(temporal_directional_return),
-                temporal_confidence_level=float(temporal_confidence),
-                temporal_max_ci_width=float(temporal_ci_width),
-                promotion_min_holdout_signals=int(promotion_min_signals),
-                promotion_min_holdout_auc=float(promotion_min_auc),
-                promotion_min_holdout_precision=float(promotion_min_precision),
-                promotion_min_mean_directional_return=float(promotion_min_return),
-                promotion_max_opposite_movement_frequency=float(promotion_max_opposite),
-                predictor_prefilter_enabled=bool(prefilter_enabled),
-                predictor_prefilter_top_n=int(prefilter_top_n),
-                predictor_prefilter_min_median_auc=float(prefilter_median_auc),
-                predictor_prefilter_min_pct_above_random=float(prefilter_pct_random),
-                predictor_prefilter_min_worst_auc=float(prefilter_worst_auc),
-                predictor_prefilter_max_auc_std=float(prefilter_auc_std),
-                predictor_prefilter_correlation_threshold=float(
-                    prefilter_correlation
-                ),
-                xgb_max_depth=int(max_depth),
-                xgb_eta=float(eta),
-                xgb_rounds=int(rounds),
-                xgb_round_selection_mode=round_mode,
-                xgb_early_stopping_max_rounds=int(round_max),
-                xgb_early_stopping_validation_sessions=int(round_validation),
-                xgb_early_stopping_patience=int(round_patience),
-                xgb_early_stopping_min_train_observations=int(round_min_train),
-                xgb_min_child_weight=float(child),
-                xgb_subsample=float(subsample),
-                xgb_colsample_bytree=float(colsample),
-                xgb_gamma=float(gamma),
-                xgb_reg_alpha=float(alpha),
-                xgb_reg_lambda=float(reg_lambda),
-                qualification_min_windows=int(min_windows),
-                qualification_min_median_auc=float(median_auc),
-                qualification_min_pct_windows_above_random=float(pct_random),
-                qualification_min_worst_window_auc=float(worst_auc),
-                qualification_min_positive_observations=int(min_positive),
-                qualification_max_auc_std=float(max_auc_std),
-                final_confirmation_min_auc=float(final_auc),
-                prediction_threshold=float(prediction_threshold),
-                model_selection_predictive_quality_weight=float(selection_predictive_weight),
-                model_selection_stability_weight=float(selection_stability_weight),
-                model_selection_holdout_weight=float(selection_holdout_weight),
-                model_selection_signal_quality_weight=float(selection_signal_weight),
-                model_selection_sample_adequacy_weight=float(selection_sample_weight),
-                market_cache_workers=int(workers),
-                combination_workers=int(combination_workers),
-                xgb_nthread=int(nthread),
-                xgb_seed=int(seed),
-                threshold_calibration_min_signals_per_window=int(min_signals),
-                threshold_calibration_min_robust_signals=int(min_robust_signals),
-                threshold_calibration_min_window_fraction=float(min_window_fraction),
-                threshold_calibration_precision_tolerance=float(precision_tolerance),
-                threshold_calibration_quantiles=parsed_quantiles,
-                threshold_parameter_calibration_max_models=(
-                    None
-                    if unlimited_threshold_parameter_models
-                    else int(threshold_parameter_calibration_max_models)
-                ),
-            )
-            st.session_state.lab_config = new_config
-            st.session_state.lab_calendar = calendar
-            st.session_state.lab_combinations_per_target = int(combinations)
-            st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
-            st.session_state.lab_evaluate_holdout = evaluate_holdout
-            st.session_state.sensitivity_threshold_min = float(sensitivity_threshold_min)
-            st.session_state.sensitivity_threshold_max = float(sensitivity_threshold_max)
-            st.session_state.sensitivity_threshold_step = float(sensitivity_threshold_step)
+        st.subheader('Gestion des lots et checkpoints')
+        b1, b2, b3, b4 = st.columns(4)
+        prefilter_batch_size = b1.number_input(
+            "Batch préfiltre",
+            min_value=1,
+            value=current.predictor_prefilter_batch_size,
+            help="Nombre de combinaisons univariées calculées avant chaque checkpoint.",
+        )
+        walk_forward_batch_size = b2.number_input(
+            "Batch walk-forward",
+            min_value=1,
+            value=current.walk_forward_batch_size,
+            help="Nombre de combinaisons détaillées conservées simultanément en mémoire.",
+        )
+        final_holdout_batch_size = b3.number_input(
+            "Batch holdout final",
+            min_value=1,
+            value=current.final_holdout_batch_size,
+            help="Nombre de modèles admissibles évalués entre deux checkpoints holdout.",
+        )
+        max_combinations_per_batch = b4.number_input(
+            "Taille maximale d’un batch de combinaisons",
+            min_value=1,
+            value=(
+                current.walk_forward_max_combinations_per_batch
+                if current.walk_forward_max_combinations_per_batch is not None
+                else DEFAULT_CONFIG.walk_forward_max_combinations_per_batch
+            ),
+            help=(
+                "Contrôle uniquement le découpage des combinaisons en batches; "
+                "ne change ni les combinaisons générées ni les critères du modèle."
+            ),
+        )
+        st.subheader('Cache, persistance et télémétrie')
+        st.caption('Les mécanismes de cache, de reprise et les diagnostics de ressources conservent leurs réglages existants dans les jobs et leurs résultats.')
+        st.subheader('Diagnostics techniques')
+        context_enabled = st.checkbox("Activer le diagnostic descriptif SPY", value=current.market_context_enabled)
+        st.caption("Protocole standard : 63 / 252 / 21 séances. Les variantes sont persistées et identifiées ; ces paramètres ne doivent pas être choisis selon les résultats des modèles.")
+        diagnostic_columns = st.columns(3)
+        context_trend = diagnostic_columns[0].number_input("Tendance SPY (séances)", min_value=2, value=current.market_context_trend_sessions)
+        context_drawdown = diagnostic_columns[1].number_input("Drawdown SPY (séances)", min_value=2, value=current.market_context_drawdown_sessions)
+        context_volatility = diagnostic_columns[2].number_input("Volatilité SPY (séances)", min_value=2, value=current.market_context_volatility_sessions)
+        context_terciles = st.checkbox("Terciles descriptifs figés sur le développement initial", value=current.market_context_terciles)
+        with st.expander("Valeurs RStock par défaut"):
+            defaults = asdict(DEFAULT_CONFIG)
+            defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
+            st.json(defaults)
+    if st.button("Enregistrer les paramètres", type="primary"):
+        parsed_quantiles = tuple(
+            float(item.strip()) for item in quantiles.split(",") if item.strip()
+        )
+        new_config = replace(
+            current,
+            **prefilter_xgboost_values,
+            **prefilter_temporal_values,
+            market_context_enabled=context_enabled,
+            market_context_trend_sessions=int(context_trend),
+            market_context_drawdown_sessions=int(context_drawdown),
+            market_context_volatility_sessions=int(context_volatility),
+            market_context_terciles=context_terciles,
+            model_history_days=int(history),
+            permutation_depth=int(permutation),
+            max_generated_sets=int(max_sets),
+            predictive_model_type=predictive_model_type,
+            lag_depth=int(lag),
+            intraday_target_threshold=float(up_threshold),
+            intraday_down_threshold=float(down_threshold),
+            walk_forward_window_mode=window_mode,
+            walk_forward_min_train_size=int(min_train),
+            walk_forward_train_size=int(rolling_train),
+            walk_forward_test_size=int(test_size),
+            walk_forward_step_size=int(step),
+            final_holdout_size=int(holdout),
+            walk_forward_end_offset_sessions=int(end_offset),
+            predictor_prefilter_batch_size=int(prefilter_batch_size),
+            walk_forward_batch_size=int(walk_forward_batch_size),
+            final_holdout_batch_size=int(final_holdout_batch_size),
+            walk_forward_max_combinations_per_batch=int(
+                max_combinations_per_batch
+            ),
+            temporal_min_candidate_yield_ratio=float(temporal_candidate_yield),
+            temporal_max_auc_degradation=float(temporal_auc_degradation),
+            temporal_min_precision_edge=float(temporal_precision_edge),
+            temporal_min_mean_directional_return=float(temporal_directional_return),
+            temporal_confidence_level=float(temporal_confidence),
+            temporal_max_ci_width=float(temporal_ci_width),
+            promotion_min_holdout_signals=int(promotion_min_signals),
+            promotion_min_holdout_auc=float(promotion_min_auc),
+            promotion_min_holdout_precision=float(promotion_min_precision),
+            promotion_min_mean_directional_return=float(promotion_min_return),
+            promotion_max_opposite_movement_frequency=float(promotion_max_opposite),
+            predictor_prefilter_enabled=bool(prefilter_enabled),
+            predictor_prefilter_top_n=int(prefilter_top_n),
+            predictor_prefilter_min_median_auc=float(prefilter_median_auc),
+            predictor_prefilter_min_pct_above_random=float(prefilter_pct_random),
+            predictor_prefilter_min_worst_auc=float(prefilter_worst_auc),
+            predictor_prefilter_max_auc_std=float(prefilter_auc_std),
+            predictor_prefilter_correlation_threshold=float(
+                prefilter_correlation
+            ),
+            xgb_max_depth=int(max_depth),
+            xgb_eta=float(eta),
+            xgb_rounds=int(rounds),
+            xgb_round_selection_mode=round_mode,
+            xgb_early_stopping_max_rounds=int(round_max),
+            xgb_early_stopping_validation_sessions=int(round_validation),
+            xgb_early_stopping_patience=int(round_patience),
+            xgb_early_stopping_min_train_observations=int(round_min_train),
+            xgb_min_child_weight=float(child),
+            xgb_subsample=float(subsample),
+            xgb_colsample_bytree=float(colsample),
+            xgb_gamma=float(gamma),
+            xgb_reg_alpha=float(alpha),
+            xgb_reg_lambda=float(reg_lambda),
+            qualification_min_windows=int(min_windows),
+            qualification_min_median_auc=float(median_auc),
+            qualification_min_pct_windows_above_random=float(pct_random),
+            qualification_min_worst_window_auc=float(worst_auc),
+            qualification_min_positive_observations=int(min_positive),
+            qualification_max_auc_std=float(max_auc_std),
+            final_confirmation_min_auc=float(final_auc),
+            prediction_threshold=float(prediction_threshold),
+            model_selection_predictive_quality_weight=float(selection_predictive_weight),
+            model_selection_stability_weight=float(selection_stability_weight),
+            model_selection_holdout_weight=float(selection_holdout_weight),
+            model_selection_signal_quality_weight=float(selection_signal_weight),
+            model_selection_sample_adequacy_weight=float(selection_sample_weight),
+            market_cache_workers=int(workers),
+            combination_workers=int(combination_workers),
+            xgb_nthread=int(nthread),
+            xgb_seed=int(seed),
+            threshold_calibration_min_signals_per_window=int(min_signals),
+            threshold_calibration_min_robust_signals=int(min_robust_signals),
+            threshold_calibration_min_window_fraction=float(min_window_fraction),
+            threshold_calibration_precision_tolerance=float(precision_tolerance),
+            threshold_calibration_quantiles=parsed_quantiles,
+            threshold_parameter_calibration_max_models=(
+                None
+                if unlimited_threshold_parameter_models
+                else int(threshold_parameter_calibration_max_models)
+            ),
+        )
+        st.session_state.lab_config = new_config
+        st.session_state.lab_calendar = calendar
+        st.session_state.lab_combinations_per_target = int(combinations)
+        st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
+        st.session_state.lab_evaluate_holdout = evaluate_holdout
+        st.session_state.sensitivity_threshold_min = float(sensitivity_threshold_min)
+        st.session_state.sensitivity_threshold_max = float(sensitivity_threshold_max)
+        st.session_state.sensitivity_threshold_step = float(sensitivity_threshold_step)
 
-            ui_settings = {
-                "lab_calendar": st.session_state.lab_calendar,
-                "lab_combinations_per_target": st.session_state.lab_combinations_per_target,
-                "lab_evaluate_holdout": st.session_state.lab_evaluate_holdout,
-                "max_concurrent_heavy_jobs": st.session_state.max_concurrent_heavy_jobs,
-                "sensitivity_threshold_min": st.session_state.sensitivity_threshold_min,
-                "sensitivity_threshold_max": st.session_state.sensitivity_threshold_max,
-                "sensitivity_threshold_step": st.session_state.sensitivity_threshold_step,
-            }
-            try:
-                save_user_settings(
-                    new_config, ui_settings, default_config=DEFAULT_CONFIG
-                )
-            except (OSError, TypeError, ValueError) as error:
-                st.error(
-                    "Paramètres appliqués à la session, mais la persistance a échoué : "
-                    f"{error}"
-                )
-            else:
-                st.success("Paramètres enregistrés.")
+        ui_settings = {
+            "lab_calendar": st.session_state.lab_calendar,
+            "lab_combinations_per_target": st.session_state.lab_combinations_per_target,
+            "lab_evaluate_holdout": st.session_state.lab_evaluate_holdout,
+            "max_concurrent_heavy_jobs": st.session_state.max_concurrent_heavy_jobs,
+            "sensitivity_threshold_min": st.session_state.sensitivity_threshold_min,
+            "sensitivity_threshold_max": st.session_state.sensitivity_threshold_max,
+            "sensitivity_threshold_step": st.session_state.sensitivity_threshold_step,
+        }
+        try:
+            save_user_settings(
+                new_config, ui_settings, default_config=DEFAULT_CONFIG
+            )
+        except (OSError, TypeError, ValueError) as error:
+            st.error(
+                "Paramètres appliqués à la session, mais la persistance a échoué : "
+                f"{error}"
+            )
+        else:
+            st.success("Paramètres enregistrés.")
 
 
 def _history_model_contexts(project_root) -> dict[str, str]:
@@ -2655,6 +2707,10 @@ def _render_history_detail(
     st.divider()
     st.subheader(summary_text if summary_text != "—" else "Détail du run")
     st.caption(f"ID technique : {run_id}")
+    if status.get("job_type") in {"walk_forward", "end_to_end"}:
+        from rstock.application.common_prediction_comparison import result_availability, STATE_LABELS
+        availability = result_availability(st.session_state.lab_config.project_root / "runs" / run_id)
+        st.caption(" · ".join(STATE_LABELS[value] for value in availability.values()))
     _render_resume_controls(run_id, status, detail)
     _render_job_detail_tabs(_service(), run_id, status=status, detail=detail)
     return
@@ -3721,6 +3777,9 @@ def _render_walk_forward_metrics(analytics: RunAnalytics) -> None:
 
 def _render_round_selection_summary(run_id: str, detail: dict[str, object]) -> None:
     configuration = detail.get("configuration", {}).get("rstock_config", {})
+    if configuration.get("predictive_model_type", "external_only") == "constant_probability":
+        st.caption("Tours XGBoost : non applicables. Probabilités issues des labels connus de l’apprentissage.")
+        return
     mode = configuration.get("xgb_round_selection_mode", "fixed")
     st.caption(f"Tours XGBoost : {'chronologique' if mode == 'chronological' else 'fixe'} · repli / tours fixes : {configuration.get('xgb_rounds', '—')}")
     if mode != "chronological":
@@ -4086,6 +4145,18 @@ def _render_walk_forward_tabs(
     )
 
 
+def _ordered_derivation_fields(fields: Sequence[str]) -> list[str]:
+    """Keep each mode followed by its controls, preserving other field ordering."""
+    ordered = sorted(fields, key=lambda field: (field != "predictive_model_type", field))
+    for policy in (ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS):
+        if policy[0] in ordered:
+            controls = [field for field in policy[1:] if field in ordered]
+            ordered = [field for field in ordered if field not in controls]
+            position = ordered.index(policy[0]) + 1
+            ordered[position:position] = controls
+    return ordered
+
+
 def _render_derived_creation(
     run_id: str, detail: dict[str, object], service: ExperimentService,
 ) -> None:
@@ -4175,7 +4246,7 @@ def _render_derived_creation(
     fields = [
         field for stage in fork_keys
         if modes[stage] == "recomputed"
-        for field in sorted(parameter_fields.get(stage, ()))
+        for field in _ordered_derivation_fields(parameter_fields.get(stage, ()))
     ]
     if modes.get("xgboost_calibration") == "recomputed":
         st.info("Protocole E2E : la calibration XGBoost utilise le développement uniquement. "
@@ -4225,8 +4296,14 @@ def _render_derived_creation(
             except (OSError, ValueError, KeyError) as error:
                 st.error(f"Valeur source indisponible pour {field} : {error}")
                 return
+            effective_type = changes.get("predictive_model_type", st.session_state.get(f"derive-value-{run_id}-{fork}-predictive_model_type", source_spec.config.predictive_model_type))
+            if (field.startswith("xgb_") and effective_type == "constant_probability") or (field.startswith(("prefilter_", "predictor_prefilter_", "temporal_consensus_", "stability_")) and effective_type in {"constant_probability", "target_only"}):
+                st.caption(f"{field} : non applicable")
+                continue
             if field.startswith("prefilter_xgb_") and field in PREFILTER_ROUND_SELECTION_FIELDS:
                 value = _round_selection_input(field, original, f"derive-value-{run_id}-{fork}-{field}")
+            elif field == "predictive_model_type":
+                value = _predictive_model_input(original, f"derive-value-{run_id}-{fork}-{field}")
             elif field == "xgb_round_selection_mode":
                 value = st.selectbox("Sélection des tours XGBoost (Walk-forward et aval)",
                     ("fixed", "chronological"), index=(0 if original == "fixed" else 1),
@@ -4437,9 +4514,9 @@ def _render_walk_forward_derived_creation(
     st.caption(
         f"Hérité et figé : snapshot préparé, cutoff demandé "
         f"{source.requested_historical_cutoff or 'N/D'}, séance {as_of}, "
-        "candidats/combinaisons d'entrée, préfiltre et offset "
+        "univers d'entrée et offset "
         f"{source.config.walk_forward_end_offset_sessions}. "
-        "Recalculé : Walk-forward, qualification, holdout interne s'il est activé, "
+        "Candidats reconstruits en cas de changement de type. Recalculé : Walk-forward, qualification, holdout interne s'il est activé, "
         "et classement. Aucune promotion ni Forward Simulation automatique."
     )
     labels = {
@@ -4470,9 +4547,14 @@ def _render_walk_forward_derived_creation(
 
     def field_input(field: str, widget: object) -> None:
         original = getattr(source.config, field)
+        if field.startswith("xgb_") and changes.get("predictive_model_type", source.config.predictive_model_type) == "constant_probability":
+            widget.caption(f"{field} : non applicable")
+            return
         label = labels.get(field, field.removeprefix("xgb_").removeprefix("model_selection_"))
         widget_key = f"wf-derive-{run_id}-{field}"
-        if field == "walk_forward_window_mode":
+        if field == "predictive_model_type":
+            value = _predictive_model_input(original, widget_key, widget)
+        elif field == "walk_forward_window_mode":
             modes = ("expanding", "rolling")
             value = widget.selectbox(label, modes, index=modes.index(original), key=widget_key)
         elif field == "xgb_round_selection_mode":
@@ -4516,13 +4598,17 @@ def _render_walk_forward_derived_creation(
             changes[field] = value
 
     with st.container(border=True):
+        field_input("predictive_model_type", st)
         st.subheader("Géométrie Walk-forward")
         for field in WF_GEOMETRY_FIELDS:
             field_input(field, st)
         st.subheader("XGBoost")
+        for field in ROUND_SELECTION_FIELDS:
+            field_input(field, st)
         columns = st.columns(3)
         for index, field in enumerate(WF_XGBOOST_FIELDS):
-            field_input(field, columns[index % 3])
+            if field not in ROUND_SELECTION_FIELDS:
+                field_input(field, columns[index % 3])
         st.caption("Chronologique : conserver tous les autres paramètres de référence, désactiver le holdout final. Repli = xgb_rounds hérité ; minimum par défaut 315 observations utilisables.")
         st.subheader("Qualification et classement")
         for field in (*WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS):
@@ -5430,10 +5516,15 @@ def _render_run_detail_view(
         if status["job_type"] == JobType.FORWARD_SIMULATION.value:
             policy = detail.get("configuration", {}).get("forward_policy") or "FROZEN"
             st.caption("Mode : Figé" if policy == "FROZEN" else f"Mode : {policy}")
+    if status.get("job_type") in {"walk_forward", "end_to_end"}:
+        from rstock.application.common_prediction_comparison import result_availability, STATE_LABELS
+        availability = result_availability(st.session_state.lab_config.project_root / "runs" / run_id)
+        st.caption(" · ".join(STATE_LABELS[value] for value in availability.values()))
     _render_resume_controls(run_id, status, detail)
     _render_job_detail_tabs(service, run_id, status=status, detail=detail)
     return
 def _render_end_to_end_comparison(run_ids: list[str]) -> None:
+    _render_common_prediction_comparison(run_ids)
     # Reuse the same WF comparison, preserving every inherited input candidate.
     repository = RunRepository(st.session_state.lab_config.project_root / "runs")
     wf_ids, wf_details = [], []
@@ -5776,6 +5867,7 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
     if st.button("← Retour à Historique", key="history-back-comparison"):
         _clear_history_navigation()
     st.subheader("Comparaison de runs — Walk-forward")
+    _render_common_prediction_comparison(run_ids)
     cards = st.columns(len(analytics))
     for index, (column, analysis, detail) in enumerate(
         zip(cards, analytics, details, strict=True), start=1
@@ -6570,7 +6662,7 @@ def _submit_operational_job(
         return
     spec = ExperimentSpec(
         job_type=job_type,
-        config=st.session_state.lab_config,
+        config=replace(st.session_state.lab_config, predictive_model_type="external_only"),
         symbols=symbols,
         calendar=st.session_state.lab_calendar,
         model_id=model_id,

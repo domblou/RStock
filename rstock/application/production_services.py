@@ -103,6 +103,8 @@ class PromotionService:
             raise ValueError("selected_threshold_direction must be Up or Down")
         self._require_completed_run(walk_forward_run, JobType.WALK_FORWARD)
         spec = self.runs.load_spec(walk_forward_run)
+        if spec.config.predictive_model_type != "external_only":
+            raise ValueError("This predictive model type is not enabled for Production")
         results = self.runs.run_directory(walk_forward_run) / "results"
         qualification = pd.read_csv(results / "qualification.csv")
         matched = qualification[qualification["Set"].astype(str) == set_name]

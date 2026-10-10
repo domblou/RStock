@@ -36,10 +36,18 @@ def generate_symbol_sets(
     *,
     target_symbols: list[str] | None = None,
     max_sets: int = 100_000,
+    predictive_model_type: str = "external_only",
 ) -> pd.DataFrame:
     """Generate target/feature sets after checking their combinatorial size."""
 
     symbols = list(symbols)
+    if predictive_model_type in {"constant_probability", "target_only"}:
+        targets = list(symbols if target_symbols is None else target_symbols)
+        if not targets or len(set(targets)) != len(targets) or not set(targets) <= set(symbols):
+            raise ValueError("Invalid target_symbols")
+        if len(targets) > max_sets:
+            raise ValueError("Generating targets exceeds max_generated_sets")
+        return pd.DataFrame({"V0": targets})
     if permutation_depth >= len(symbols):
         raise ValueError("permutation_depth must be lower than the number of symbols")
     if permutation_depth < 1:
@@ -196,3 +204,12 @@ def symbols_from_set(row: pd.Series) -> tuple[str, list[str]]:
         if not pd.isna(row[name]) and str(row[name]) != observation
     ]
     return observation, features
+
+
+def predictive_model_identity(set_id: str, model_type: str, direction: str) -> str:
+    symbols = json.loads(set_id)
+    if not isinstance(symbols, list) or not symbols or direction not in {"Up", "Down"}:
+        raise ValueError("Invalid predictive model identity")
+    return json.dumps({"version": 1, "type": model_type, "target": symbols[0],
+                       "externals": sorted(symbols[1:]), "direction": direction},
+                      ensure_ascii=False, sort_keys=True, separators=(",", ":"))

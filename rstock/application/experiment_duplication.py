@@ -277,6 +277,8 @@ def duplication_combination_count(
     predictor_count = len(tuple(draft.get("predictor_symbols", ())))
     target_count = len(tuple(draft.get("target_symbols", ())))
     depth = config.permutation_depth
+    if config.predictive_model_type in {"constant_probability", "target_only"}:
+        return target_count
     if predictor_count < 2 or depth < 1 or depth >= predictor_count:
         raise ValueError("Invalid frozen population or permutation depth")
     return target_count * sum(

@@ -457,6 +457,7 @@ def _workflow_configuration(
     evaluate_holdout: bool,
 ) -> dict[str, object]:
     values: dict[str, object] = {
+        "predictive_model_type": config.predictive_model_type,
         "target": "intraday_return >= intraday_target_threshold",
         "down_target": "intraday_return <= -intraday_down_threshold",
         "intraday_target_threshold": config.intraday_target_threshold,
@@ -573,7 +574,7 @@ def _sets_from_qualification(qualification: pd.DataFrame) -> pd.DataFrame:
     rows: list[list[object]] = []
     for raw in qualification.get("Set", pd.Series(dtype=object)):
         values = json.loads(str(raw))
-        if not isinstance(values, list) or len(values) < 2:
+        if not isinstance(values, list) or len(values) < 1:
             raise ValueError("Identifiant de combinaison walk-forward invalide")
         rows.append([str(value) for value in values])
     width = max((len(row) for row in rows), default=2)
@@ -602,7 +603,7 @@ def run_streamed_walk_forward(
 
     _validate_prepared_index(prepared)
     ordered = prepared.sort_index()
-    if config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
         raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
     holdout_size = config.final_holdout_size
     if holdout_size < 1 or holdout_size >= len(ordered):
@@ -1126,9 +1127,12 @@ def run_streamed_walk_forward(
             evaluate_holdout=evaluate_holdout,
         )
         run_configuration.update(dict(run_configuration_extras or {}))
-        run_configuration["round_selection"] = {
+        run_configuration["candidate_status"] = "qualified_candidates" if qualification["Eligible"].any() else "no_qualified_candidates"
+        run_configuration["holdout_status"] = "executed" if evaluate_holdout and len(final_holdout) else "not_executed"
+        run_configuration["data_status"] = "available"
+        run_configuration["round_selection"] = ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" else {
             **round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__,
-        }
+        })
         run_configuration["round_selection_coverage"] = round_selection_coverage_batches(
             checkpoint.load_batch("walk_forward", value)["windows"]
             for value in range(total_batches)

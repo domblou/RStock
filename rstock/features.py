@@ -269,3 +269,33 @@ def predictor_columns(
             and date_pattern.search(name)
         )
     ]
+
+
+def model_predictor_columns(dataset: pd.DataFrame, target: str, external_symbols: Sequence[str],
+                            config: object) -> list[str]:
+    """Resolve the information set without altering historical external features."""
+    kind = config.predictive_model_type
+    if kind == "constant_probability":
+        return []
+    symbols = ([target] if kind == "target_only" else
+               [target, *external_symbols] if kind == "target_and_external" else list(external_symbols))
+    if kind in {"external_only", "target_and_external"} and not external_symbols:
+        raise ValueError("External predictive models require external predictors")
+    names = predictor_columns(dataset, symbols, config.lag_depth,
+                              config.date_feature_regex if kind == "external_only" else "")
+    if kind != "external_only":
+        expected = {intraday_lag_column(symbol, lag) for symbol in symbols for lag in range(1, config.lag_depth + 1)}
+        missing = expected - set(names)
+        if missing:
+            raise ValueError(f"Predictive model input columns unavailable: {sorted(missing)}")
+    return names
+
+
+def require_predictive_model_inputs(dataset: pd.DataFrame, targets: Sequence[str],
+                                   external_symbols: Sequence[str], config: object) -> None:
+    """Reject a type change when the frozen scientific snapshot lacks its inputs."""
+    for target in targets:
+        outcomes = {intraday_target_column(target), intraday_down_target_column(target)}
+        if not outcomes <= set(dataset.columns):
+            raise ValueError(f"Predictive model labels unavailable for {target}")
+        model_predictor_columns(dataset, target, [symbol for symbol in external_symbols if symbol != target], config)

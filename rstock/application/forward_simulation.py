@@ -93,6 +93,8 @@ def validate_forward_snapshot(
     if snapshot.get("source_end_to_end_run_id") != spec.source_end_to_end_run:
         raise ValueError("forward_snapshot_source_mismatch")
     source_spec = repository.load_spec(spec.source_end_to_end_run)
+    if source_spec.config.predictive_model_type != "external_only":
+        raise ValueError("This predictive model type is not enabled for Forward")
     _validate_round_selection_contract(snapshot, source_spec)
     if source_spec.derivation is not None:
         if not expected:

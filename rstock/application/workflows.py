@@ -423,6 +423,7 @@ def _prepared_experiment(
         spec.config.permutation_depth,
         target_symbols=target_symbols,
         max_sets=spec.config.max_generated_sets,
+        predictive_model_type=spec.config.predictive_model_type,
     )
     _phase(progress_callback, "combination_generation", "completed", combinations=len(generated))
     return prepared, generated, calendars
@@ -557,6 +558,8 @@ def _qualified_sets_from_walk_forward_source(
     frozen_fields = (
         "target_symbols", "context_symbols", "predictor_symbols", "calendar",
     )
+    if source_spec.config.predictive_model_type != spec.config.predictive_model_type:
+        raise ValueError("Calibration source has a different predictive model type")
     if any(getattr(source_spec, name) != getattr(spec, name) for name in frozen_fields):
         raise ValueError("Threshold calibration source has a different frozen population")
     path = runs.run_directory(source_run) / "results" / "qualification.csv"
@@ -573,7 +576,7 @@ def _qualified_sets_from_walk_forward_source(
             symbols = json.loads(str(value))
         except json.JSONDecodeError as error:
             raise ValueError("Source walk-forward contains an invalid set identifier") from error
-        if not isinstance(symbols, list) or len(symbols) < 2:
+        if not isinstance(symbols, list) or len(symbols) < 1:
             raise ValueError("Source walk-forward contains an invalid qualified set")
         normalized = [str(symbol) for symbol in symbols]
         set_id = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
@@ -1322,6 +1325,7 @@ def _resumable_walk_forward(
                 spec.config.permutation_depth,
                 target_symbols=target_symbols,
                 max_sets=spec.config.max_generated_sets,
+                predictive_model_type=spec.config.predictive_model_type,
             )
             checkpoint.commit_artifact("generated_sets", generated)
             checkpoint.phase_completed("combination_generation")
@@ -1450,6 +1454,14 @@ def _xgboost_calibration(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
+    if spec.config.predictive_model_type == "constant_probability":
+        if not spec.source_end_to_end_run:
+            raise ValueError("XGBoost calibration is not applicable to a constant model")
+        provenance = {"status": "not_applicable", "reason": "constant_probability",
+                      "predictive_model_type": "constant_probability"}
+        for filename in ("selected_configurations.json", "sampling_manifest.json"):
+            (output / filename).write_text(json.dumps(provenance), encoding="utf-8")
+        return {"job_type": spec.job_type.value, **provenance}
     prepared, generated, qualified_source = _prepared_calibration_population(
         spec, progress_callback, cancellation_check
     )
@@ -1663,6 +1675,9 @@ def _holdout_evaluation(
         predictions.to_csv(output / "holdout_predictions.csv", index=False)
     configuration = {
         "protocol": "frozen_threshold_holdout_v1",
+        "predictive_model_type": spec.config.predictive_model_type,
+        "holdout_status": "executed" if spec.evaluate_final_holdout and eligible else "not_executed",
+        "data_status": "available",
         "holdout_requested": spec.evaluate_final_holdout,
         "holdout_evaluated": spec.evaluate_final_holdout and eligible,
         "holdout_skipped_reason": (
@@ -2442,9 +2457,11 @@ def _planned_effective_plan(
             raise ValueError("Derived Walk-forward expected a frozen combination plan")
         source_spec = repository.load_spec(source_id)
         source_checkpoint = _walk_forward_checkpoint(repository, source_id, source_spec)
-        raw_plan = CombinationPlan.from_dict(
+        raw_plan = (effective_plan if (source_spec.config.predictive_model_type != spec.config.predictive_model_type
+            and (source_spec.config.predictive_model_type in {"constant_probability", "target_only"}
+                 or spec.config.predictive_model_type in {"constant_probability", "target_only"})) else CombinationPlan.from_dict(
             source_checkpoint.load_artifact("raw_combination_plan")
-        )
+        ))
         for name, plan in (
             ("raw_combination_plan", raw_plan),
             ("effective_combination_plan", effective_plan),
@@ -2463,6 +2480,7 @@ def _planned_effective_plan(
         target_symbols=target_symbols,
         predictor_symbols=predictor_symbols,
         permutation_depth=spec.config.permutation_depth,
+        predictive_model_type=spec.config.predictive_model_type,
     )
     if checkpoint.artifact_exists("raw_combination_plan"):
         persisted_raw = CombinationPlan.from_dict(
@@ -2989,6 +3007,9 @@ def _resolve_threshold_xgboost_parameters(
 ) -> DirectionalXGBoostParameters:
     """Resolve threshold-model parameters from the immutable experiment spec."""
 
+    if spec.config.predictive_model_type == "constant_probability":
+        resolved = resolve_directional_xgboost_parameters(spec.config)
+        return DirectionalXGBoostParameters(resolved.up, resolved.down, "not_applicable")
     referenced: dict[str, Any] | None = None
     if (
         spec.frozen_xgboost_parameters is None

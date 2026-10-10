@@ -168,7 +168,7 @@ def round_selection_coverage(windows: pd.DataFrame) -> dict[str, object]:
     result = {}
     for direction in ("Up", "Down"):
         key = f"{direction}RoundSelectionUsed"
-        if key not in windows:
+        if key not in windows or windows.get(f"{direction}RoundSelectionMode", pd.Series(dtype=str)).eq("not_applicable").all():
             result[direction] = {"available": False}
             continue
         used = windows[key].fillna(False).astype(bool)
@@ -430,6 +430,10 @@ def write_probability_training_audit(predictions: pd.DataFrame, directory: Any,
     records = probability_training_records(predictions)
     if records.empty:
         return
+    if "PredictiveModelType" in records and records["PredictiveModelType"].eq("constant_probability").all():
+        records.to_csv(directory / "constant_probability_training.csv", index=False)
+        configuration["predictive_model_type"] = "constant_probability"
+        return
     records.to_csv(directory / "round_selection_training.csv", index=False)
     configuration["round_selection_coverage"] = training_records_coverage(records)
     configuration["round_selection_policy"] = records.iloc[0]["RoundSelectionPolicy"]
@@ -438,6 +442,8 @@ def write_probability_training_audit(predictions: pd.DataFrame, directory: Any,
 def production_training_config(config: RStockConfig, model: Any) -> RStockConfig:
     """A persisted model owns its future training policy, including the fallback."""
     from dataclasses import replace
+    if model.source_configuration.get("rstock_config", {}).get("predictive_model_type", "external_only") != "external_only":
+        raise ValueError("This predictive model type is not enabled for Production")
     policy = model.round_selection_policy
     if policy is None:
         source = model.source_configuration.get("rstock_config", {})
@@ -449,10 +455,12 @@ def production_training_config(config: RStockConfig, model: Any) -> RStockConfig
             raise ValueError("Incomplete frozen round selection policy")
         changes = {key: policy[key] for key in ROUND_SELECTION_FIELDS}
         changes["xgb_rounds"] = policy["fallback_rounds"]
-    return replace(config, **changes, xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads)
+    return replace(config, **changes, predictive_model_type="external_only", xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads)
 
 
 def validate_production_round_contract(model: Any, metadata: Mapping[str, Any]) -> None:
+    if model.source_configuration.get("rstock_config", {}).get("predictive_model_type", "external_only") != "external_only":
+        raise ValueError("This predictive model type is not enabled for Production")
     policy = model.round_selection_policy
     if policy is None:
         if model.source_configuration.get("rstock_config", {}).get("xgb_round_selection_mode") == "chronological":
@@ -469,12 +477,36 @@ def validate_production_round_contract(model: Any, metadata: Mapping[str, Any]) 
         raise ValueError("Incomplete or incompatible chronological production artifact")
 
 
+
+@dataclass(frozen=True, slots=True)
+class ConstantProbabilityModel:
+    probability: float
+    record: dict[str, object]
+
+    def attr(self, name: str) -> str | None:
+        return json.dumps(self.record, default=str, sort_keys=True) if name == "rstock_round_selection" else None
+
+
+def fit_constant_probability(train: pd.DataFrame, outcome: str) -> ConstantProbabilityModel:
+    known = train[outcome].dropna()
+    if known.empty or not known.isin([0, 1]).all():
+        raise ValueError("Constant model requires known binary training labels")
+    return ConstantProbabilityModel(float(known.mean()), {
+        "PredictiveModelType": "constant_probability", "ProtocolVersion": "empirical_prevalence_v1",
+        "TrainStart": known.index.min(), "TrainEnd": known.index.max(),
+        "TrainObservations": len(known), "PositiveOutcomes": int(known.sum()),
+        "Probability": float(known.mean()), "RoundSelectionMode": "not_applicable",
+        "RoundSelectionUsed": False, "RoundsRetained": None,
+    })
+
 def fit_booster(
     train: pd.DataFrame, predictor_names: Sequence[str], outcome_name: str,
     config: RStockConfig, *, parameters: XGBoostParameters | None = None,
     cancellation_check: Any = None,
 ) -> Any:
     """Apply the configured policy to every new training origin, then refit."""
+    if config.predictive_model_type == "constant_probability":
+        return fit_constant_probability(train, outcome_name)
     selected = parameters or historical_xgboost_parameters(config)
     if config.xgb_round_selection_mode == "chronological":
         booster, record = fit_chronological_booster(
@@ -537,6 +569,8 @@ def predict_probabilities(
     frame: pd.DataFrame,
     predictor_names: Sequence[str],
 ) -> np.ndarray:
+    if isinstance(booster, ConstantProbabilityModel):
+        return np.full(len(frame), booster.probability, dtype=float)
     xgb = xgboost_module()
     names = list(predictor_names)
     matrix = xgb.DMatrix(frame[names], feature_names=names)

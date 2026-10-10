@@ -1057,7 +1057,8 @@ def build_stage_spec(
             return replace(build_derived_prefilter_spec(repository, source_id, changes),
                            source_end_to_end_run=root_run_id)
         return child
-    if stage_key == "walk_forward" and manifest["schema_version"] in {5, 6}:
+    if (stage_key == "walk_forward" and manifest["schema_version"] in {5, 6}
+            and parent.config.predictive_model_type not in {"constant_probability", "target_only"}):
         existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
         if existing.is_file():
             return repository.load_spec(str(stage["child_run_id"]))
@@ -1211,7 +1212,8 @@ def build_stage_spec(
     selected = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
-    frozen_xgboost = selected_xgboost_parameters(selected, config=child.config)
+    frozen_xgboost = (None if child.config.predictive_model_type == "constant_probability"
+                      else selected_xgboost_parameters(selected, config=child.config))
     child = replace(
         child,
         source_xgboost_calibration_run=xgboost_id,
@@ -1991,7 +1993,13 @@ def run_end_to_end(
     ):
         check_cancellation(cancellation_check)
         current_stage = _stage(manifest, stage_key)
+        if stage_key == "prefilter" and spec.config.predictive_model_type in {"constant_probability", "target_only"}:
+            manifest = _persist_stage_values(repository, root_run_id, stage_key,
+                execution_status="not_applicable", not_executed_reason="predictive_model_type")
+            continue
         for dependency in dependencies:
+            if dependency == "prefilter" and spec.config.predictive_model_type in {"constant_probability", "target_only"}:
+                continue
             dependency_stage = _stage(manifest, dependency)
             dependency_id = effective_stage_run_id(manifest, dependency)
             if dependency_id is None:
@@ -2061,12 +2069,35 @@ def run_end_to_end(
             }
         )
         manifest = load_pipeline_manifest(repository, root_run_id) or manifest
+        if stage_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability":
+            manifest = _persist_stage_values(repository, root_run_id, stage_key,
+                execution_status="not_applicable", not_executed_reason="constant_probability")
+        if stage_key == "walk_forward":
+            qualification = pd.read_csv(repository.run_directory(child_run_id) / "results/qualification.csv")
+            eligible = qualification.get("Eligible", pd.Series(dtype=bool)).map(lambda value: str(value).lower() in {"true", "1"})
+            if "Eligible" in qualification and not eligible.any():
+                for skipped_key, _, _ in scientific_stages[stage_index + 1:]:
+                    manifest = _persist_stage_values(repository, root_run_id, skipped_key,
+                        execution_status="not_applicable" if skipped_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability" else "not_executed",
+                        not_executed_reason="constant_probability" if skipped_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability" else "no_qualified_candidates")
+                result = {
+                    "job_type": JobType.END_TO_END.value, "pipeline_version": spec.pipeline_version,
+                    "predictive_model_type": spec.config.predictive_model_type,
+                    "stages": completed, "stage_run_ids": {item["stage_key"]: item["child_run_id"] for item in completed},
+                    "candidate_status": "no_qualified_candidates", "qualified_candidates": 0,
+                    "holdout_status": "not_executed", "data_status": "available",
+                    "promotion": {"executed": False, "reason": "no_qualified_candidates"},
+                    "forward_simulation": {}, "temporal_validation": None,
+                    "result_files": ["pipeline_summary.json"],
+                }
+                (output / "pipeline_summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+                return result
 
     # A historical point-in-time run becomes reusable only after its candidates
     # have been frozen.  This belongs to the completed scientific parent, not
     # to any optional forward child.
     forward_snapshot = None
-    if spec.historical_data_cutoff is not None:
+    if spec.historical_data_cutoff is not None and spec.config.predictive_model_type == "external_only":
         forward_snapshot = build_forward_model_snapshot(
             repository, root_run_id, spec, result_directory=output,
             cancellation_check=cancellation_check,
@@ -2291,7 +2322,22 @@ def run_end_to_end(
     )
 
     output.mkdir(parents=True, exist_ok=True)
+    stage_keys = {item["stage_key"] for item in manifest["stages"]}
+    wf_id = effective_stage_run_id(manifest, "walk_forward") if "walk_forward" in stage_keys else None
+    wf_count = repository.summary(wf_id).get("eligible_combinations") if wf_id else None
+    qualification_id = effective_stage_run_id(manifest, "promotion_qualification") if "promotion_qualification" in stage_keys else None
+    candidate_count = repository.summary(qualification_id).get("candidate_count") if qualification_id else wf_count
+    holdout_key = next((key for key in ("holdout_evaluation", "fixed_candidate_evaluation", "threshold_calibration") if key in stage_keys), None)
+    holdout_id = effective_stage_run_id(manifest, holdout_key) if holdout_key else None
+    holdout_config = _read_result_json(repository, holdout_id, "run_configuration.json") if holdout_id else {}
+    result_states = {
+        "predictive_model_type": spec.config.predictive_model_type,
+        "candidate_status": ("unknown" if candidate_count is None else "qualified_candidates" if candidate_count else "no_qualified_candidates"),
+        "holdout_status": ("executed" if holdout_config.get("holdout_evaluated") else "not_executed" if holdout_config.get("holdout_evaluated") is False else "unknown"),
+        "data_status": "available",
+    }
     summary = {
+        **result_states,
         "schema_version": (
             manifest["schema_version"] if spec.derivation is not None
             else PIPELINE_SCHEMA_VERSION
@@ -2332,6 +2378,7 @@ def run_end_to_end(
         encoding="utf-8",
     )
     return {
+        **result_states,
         "job_type": JobType.END_TO_END.value,
         "pipeline_version": spec.pipeline_version,
         "stage_run_ids": {

@@ -82,6 +82,17 @@ class CombinationPlan:
         )
 
     @classmethod
+    def for_targets(cls, targets: Sequence[str]) -> "CombinationPlan":
+        targets = _unique_symbols(targets, "target_symbols")
+        if not targets:
+            raise ValueError("target_symbols must not be empty")
+        plan = object.__new__(cls)
+        plan._initialize(predictor_symbols=targets, target_symbols=targets,
+                         predictors_by_target=tuple((target, ()) for target in targets),
+                         permutation_depth=0, population_kind=RAW_POPULATION)
+        return plan
+
+    @classmethod
     def from_target_predictors(
         cls,
         predictors_by_target: Mapping[str, Sequence[str]],
@@ -133,7 +144,7 @@ class CombinationPlan:
         object.__setattr__(self, "_predictors_by_target", predictors_by_target)
         segments: list[_Segment] = []
         offset = 0
-        for feature_count in range(1, permutation_depth + 1):
+        for feature_count in range(0 if permutation_depth == 0 else 1, permutation_depth + 1):
             for target, predictors in predictors_by_target:
                 segment_count = (
                     comb(len(predictors), feature_count)
@@ -198,7 +209,9 @@ class CombinationPlan:
             raise ValueError("Unsupported combination plan version")
         kind = str(values.get("population_kind", ""))
         depth = int(values["permutation_depth"])
-        if kind == RAW_POPULATION:
+        if kind == RAW_POPULATION and depth == 0:
+            plan = cls.for_targets(tuple(str(value) for value in values["target_symbols"]))
+        elif kind == RAW_POPULATION:
             plan = cls(
                 tuple(str(value) for value in values["predictor_symbols"]),
                 depth,
@@ -367,9 +380,12 @@ def build_combination_plan(
     target_symbols: Sequence[str],
     predictor_symbols: Sequence[str],
     permutation_depth: int,
+    predictive_model_type: str = "external_only",
 ) -> CombinationPlan:
     """Shared raw-plan factory for execution and pre-submission preview."""
 
+    if predictive_model_type in {"constant_probability", "target_only"}:
+        return CombinationPlan.for_targets(target_symbols)
     return CombinationPlan(
         predictor_symbols,
         permutation_depth,
@@ -393,7 +409,7 @@ def build_combination_preview(
 
     if raw_plan.population_kind != RAW_POPULATION:
         raise ValueError("raw_plan must describe the raw population")
-    contexts = _unique_symbols(context_symbols, "context_symbols")
+    contexts = _unique_symbols(() if raw_plan.permutation_depth == 0 else context_symbols, "context_symbols")
     if not set(contexts) <= set(raw_plan.predictor_symbols):
         raise ValueError("context_symbols must be included in predictor_symbols")
     raw_count = raw_plan.count()

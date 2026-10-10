@@ -28,7 +28,7 @@ from .features import (
     intraday_target_column,
     mae_column,
     mfe_column,
-    predictor_columns,
+    model_predictor_columns,
 )
 from .modeling import (XGBoostParameters, fit_booster, predict_probabilities,
                       append_training_record, write_probability_training_audit)
@@ -146,9 +146,7 @@ def _threshold_development_combination(
     row = pd.Series(row_values)
     set_name = symbol_set_id(row)
     observation, feature_symbols = symbols_from_set(row)
-    names = predictor_columns(
-        development, feature_symbols, config.lag_depth, config.date_feature_regex
-    )
+    names = model_predictor_columns(development, observation, feature_symbols, config)
     outcomes = {
         "Up": intraday_target_column(observation),
         "Down": intraday_down_target_column(observation),
@@ -180,6 +178,8 @@ def _threshold_development_combination(
             records.extend(
                 {
                     "Set": set_name, "Observation": observation, "Direction": direction,
+                    "PredictiveModelType": config.predictive_model_type,
+                    "FeatureColumns": json.dumps(names),
                     "Window": window.number, "TrainEnd": train.index.max(), "Date": date,
                     "Probability": float(probability), "Target": int(test.at[date, outcome]),
                     "IntradayReturn": float(test.at[date, intraday_return_column(observation)]),
@@ -879,9 +879,7 @@ def generate_holdout_probabilities(
         check_cancellation(cancellation_check)
         set_name = symbol_set_id(row)
         observation, feature_symbols = symbols_from_set(row)
-        names = predictor_columns(
-            development, feature_symbols, config.lag_depth, config.date_feature_regex
-        )
+        names = model_predictor_columns(development, observation, feature_symbols, config)
         outcomes = {
             "Up": intraday_target_column(observation),
             "Down": intraday_down_target_column(observation),
@@ -908,6 +906,8 @@ def generate_holdout_probabilities(
                     "Set": set_name,
                     "Observation": observation,
                     "Direction": direction,
+                    "PredictiveModelType": config.predictive_model_type,
+                    "FeatureColumns": json.dumps(names),
                     "Window": 0,
                     "TrainEnd": train.index.max(),
                     "Date": date,

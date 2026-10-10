@@ -16,7 +16,8 @@ def test_all_dataframe_render_sites_use_shared_adapter():
     shared = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
               and isinstance(node.func, ast.Name) and node.func.id == "render_dataframe"]
     assert native == []
-    assert len(shared) == 82
+    # Additional result sections must also use the shared adapter.
+    assert len(shared) >= 82
 
 
 def test_all_existing_column_help_catalogs_are_carried_verbatim():

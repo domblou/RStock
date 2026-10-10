@@ -564,6 +564,7 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
                   if (name in _SCIENTIFIC_FIELDS or name.startswith(_SCIENTIFIC_PREFIXES))
                   and name not in _TECHNICAL_FIELDS}
     return {
+        "Type de modèle prédictif": settings.get("predictive_model_type", "external_only"),
         "Univers": {key: config.get(key) for key in ("primary_universe_id", "target_symbols", "predictor_symbols", "context_symbols", "combinations_per_target", "calendar")},
         "Profondeur": settings.get("permutation_depth"),
         "WF scientifique": {key: value for key, value in scientific.items()

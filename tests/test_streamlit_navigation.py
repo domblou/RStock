@@ -205,17 +205,9 @@ def test_settings_sections_follow_the_experiment_pipeline_order():
         "def _render_qualification", 1
     )[0]
     labels = (
-        "Préparation des données et génération",
-        "Pré-filtrage des prédicteurs",
-        "Walk-forward",
-        "Qualification",
-        "Classement des modèles",
-        "XGBoost",
-        "Calibration des seuils",
-        "Échantillonnage et reproductibilité",
-        "Validation temporelle",
-        "Promotion",
-        "Exécution",
+        '"Univers et données"', '"Modèles et combinaisons"', '"Préfiltre"',
+        '"Walk-forward"', '"Calibrations"', '"Holdout et promotion"',
+        '"Forward et production"', '"Avancé"',
     )
 
     positions = [settings.index(label) for label in labels]
@@ -226,9 +218,8 @@ def test_settings_sections_follow_the_experiment_pipeline_order():
 def test_settings_separate_scientific_qualification_sampling_and_execution():
     source = APP.read_text(encoding="utf-8")
     settings = source.split("def _settings", 1)[1].split("def _render_qualification", 1)[0]
-    qualification = settings.split('st.subheader("Qualification")', 1)[1].split(
-        'st.subheader("Classement des modèles")', 1
-    )[0]
+    qualification = settings.split("with tabs[3]:", 1)[1].split("with tabs[4]:", 1)[0]
+    holdout = settings.split("with tabs[5]:", 1)[1].split("with tabs[6]:", 1)[0]
     sampling = settings.split('st.subheader("Échantillonnage et reproductibilité")', 1)[1].split(
         'st.subheader("Validation temporelle")', 1
     )[0]
@@ -239,10 +230,12 @@ def test_settings_separate_scientific_qualification_sampling_and_execution():
     for label in (
         "Fenêtres minimales", "ROC-AUC médian minimal", "Part fenêtres > hasard",
         "Pire ROC-AUC minimal", "Observations positives minimales",
-        "Écart-type ROC-AUC maximal", "ROC-AUC confirmation finale",
-        "Seuil de décision standard", "Évaluer le holdout final",
+        "Écart-type ROC-AUC maximal", "Seuil de décision standard",
     ):
         assert label in qualification
+    for label in ("ROC-AUC confirmation finale", "Évaluer le holdout final"):
+        assert label in holdout
+        assert label not in qualification
     for label in ("Combinaisons par cible (calibrations)", "Seed"):
         assert label in sampling
         assert label not in execution

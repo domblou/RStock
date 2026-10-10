@@ -52,6 +52,7 @@ class RStockConfig:
 
     intraday_target_threshold: float = 0.01
     intraday_down_threshold: float = 0.01
+    predictive_model_type: str = "external_only"
     lag_depth: int = 3
     permutation_depth: int = 3
     date_feature_regex: str = ""
@@ -184,6 +185,10 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if self.predictive_model_type not in {"constant_probability", "target_only", "target_and_external", "external_only"}:
+            raise ValueError("Unsupported predictive_model_type")
+        if self.predictive_model_type in {"constant_probability", "target_only"}:
+            object.__setattr__(self, "predictor_prefilter_enabled", False)
         if self.prefilter_xgb_round_selection_mode not in {"fixed", "chronological"}:
             raise ValueError("Unsupported prefilter_xgb_round_selection_mode")
         if (self.prefilter_xgb_early_stopping_metric != "logloss"
@@ -405,6 +410,7 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    "predictive_model_type": "external_only",
     # Historical prefilters were fixed even when their downstream WF was chronological.
     "prefilter_xgb_round_selection_mode": "fixed",
     "prefilter_xgb_early_stopping_max_rounds": 500,

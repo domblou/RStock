@@ -559,7 +559,7 @@ def test_comparison_ui_keeps_mixed_wf_contract_separate_from_holdout_population(
     warnings = []
     fake_st = SimpleNamespace(
         session_state=SimpleNamespace(lab_config=SimpleNamespace(project_root=tmp_path)),
-        subheader=sections.append, warning=warnings.append, success=lambda _: None,
+        subheader=sections.append, warning=warnings.append, info=lambda _: None, success=lambda _: None,
         dataframe=lambda frame, **_: frames.append(frame),
         expander=lambda _: nullcontext(), caption=lambda _: None,
         selectbox=lambda _label, choices, **_: choices[0], button=lambda *_args, **_kwargs: False,
@@ -570,7 +570,7 @@ def test_comparison_ui_keeps_mixed_wf_contract_separate_from_holdout_population(
 
     streamlit_app._render_end_to_end_comparison(["pit-old", "pit-new"])
 
-    assert sections == ["Comparabilité", "Funnel scientifique", "Analyse des rejets de qualification",
+    assert sections == ["Métriques sur les observations communes", "Comparabilité", "Funnel scientifique", "Analyse des rejets de qualification",
                         "Holdout E2E — population évaluable", "Candidats finaux"]
     assert any("ne sont pas comparables" in warning for warning in warnings)
     wf_diagnostic = next(frame for frame in frames if "Confirmées holdout WF" in frame.columns)

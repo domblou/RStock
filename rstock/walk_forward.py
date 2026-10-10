@@ -12,7 +12,7 @@ from time import perf_counter
 import numpy as np
 import pandas as pd
 
-from .combinations import symbol_set_id, symbols_from_set
+from .combinations import predictive_model_identity, symbol_set_id, symbols_from_set
 from .config import RStockConfig
 from .evaluation import binary_predictions, classification_metrics
 from .features import (
@@ -23,7 +23,7 @@ from .features import (
     mae_column,
     mfe_column,
     overnight_return_column,
-    predictor_columns,
+    model_predictor_columns,
 )
 from .modeling import (
     XGBoostParameters,
@@ -177,18 +177,16 @@ def _walk_forward_combination(
     observation, feature_symbols = symbols_from_set(row)
     up_outcome_name = intraday_target_column(observation)
     down_outcome_name = intraday_down_target_column(observation)
-    names = predictor_columns(
-        ordered,
-        feature_symbols,
-        config.lag_depth,
-        config.date_feature_regex,
-    )
-    if up_outcome_name not in ordered or down_outcome_name not in ordered or not names:
+    names = model_predictor_columns(ordered, observation, feature_symbols, config)
+    if up_outcome_name not in ordered or down_outcome_name not in ordered or (not names and config.predictive_model_type != "constant_probability"):
         raise ValueError(f"Incomplete columns for set targeting {observation}")
     model_data = ordered[[*names, up_outcome_name, down_outcome_name]].dropna()
     rows_lost_to_lags = int(ordered[up_outcome_name].notna().sum() - len(model_data))
     set_name = symbol_set_id(row)
-    predictors_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
+    external_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
+    effective_symbols = ([observation] if config.predictive_model_type == "target_only" else
+                         [observation, *feature_symbols] if config.predictive_model_type == "target_and_external" else feature_symbols)
+    predictors_json = json.dumps(effective_symbols, ensure_ascii=False, separators=(",", ":"))
     development_data = model_data.loc[model_data.index < holdout_start]
     required_train = (
         config.walk_forward_train_size
@@ -236,13 +234,17 @@ def _walk_forward_combination(
         test = development_data.iloc[window.test_slice]
         if train.index.max() >= test.index.min():
             raise AssertionError("Walk-forward window leaked future test data")
-        xgb = xgboost_module()
+        constant = config.predictive_model_type == "constant_probability"
+        xgb = None if constant else xgboost_module()
         effective_parameters = parameters or historical_xgboost_parameters(config)
         train_features = train[names]
         test_features = test[names]
-        test_matrix = xgb.DMatrix(test_features, feature_names=names)
+        test_matrix = None if constant else xgb.DMatrix(test_features, feature_names=names)
         selection_diagnostics = {}
-        if round_selection_enabled and mode == "chronological":
+        if constant:
+            up_booster = fit_booster(train, names, up_outcome_name, config)
+            up_selection = dict(up_booster.record)
+        elif round_selection_enabled and mode == "chronological":
             up_booster, up_selection = fit_chronological_booster(
                 train, names, up_outcome_name, config, parameters=effective_parameters,
                 cancellation_check=cancellation_check,
@@ -255,13 +257,19 @@ def _walk_forward_combination(
                             "RoundsRetained": effective_parameters.num_boost_round,
                             "RoundSelectionFallbackReason": None}
         selection_diagnostics.update({f"Up{k}": v for k, v in up_selection.items()})
-        up_probabilities = predict_probabilities_matrix(up_booster, test_matrix)
+        up_probabilities = (predict_probabilities(up_booster, test, names) if constant
+                            else predict_probabilities_matrix(up_booster, test_matrix))
         up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
         up_actual = test[up_outcome_name].astype(int).to_numpy()
         window_record: dict[str, object] = {
             "Set": set_name,
             "Observation": observation,
             "Predictors": predictors_json,
+            "PredictiveModelType": config.predictive_model_type,
+            "FeatureColumns": json.dumps(names),
+            "ExternalPredictors": external_json,
+            "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up"),
+            "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down"),
             "MarketCalendar": market_calendars.get(observation),
             "Window": window.number,
             "TrainStart": train.index.min(),
@@ -277,7 +285,10 @@ def _walk_forward_combination(
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
         down_predicted = down_probabilities = None
         if include_down:
-            if round_selection_enabled and mode == "chronological":
+            if constant:
+                down_booster = fit_booster(train, names, down_outcome_name, config)
+                down_selection = dict(down_booster.record)
+            elif round_selection_enabled and mode == "chronological":
                 down_booster, down_selection = fit_chronological_booster(
                     train, names, down_outcome_name, config, parameters=effective_parameters,
                     cancellation_check=cancellation_check,
@@ -290,9 +301,8 @@ def _walk_forward_combination(
                                   "RoundsRetained": effective_parameters.num_boost_round,
                                   "RoundSelectionFallbackReason": None}
             selection_diagnostics.update({f"Down{k}": v for k, v in down_selection.items()})
-            down_probabilities = predict_probabilities_matrix(
-                down_booster, test_matrix
-            )
+            down_probabilities = (predict_probabilities(down_booster, test, names) if constant
+                                  else predict_probabilities_matrix(down_booster, test_matrix))
             down_predicted = binary_predictions(
                 down_probabilities, config.prediction_threshold
             )
@@ -310,6 +320,11 @@ def _walk_forward_combination(
                 "Set": set_name,
                 "Observation": observation,
                 "Predictors": predictors_json,
+                "PredictiveModelType": config.predictive_model_type,
+                "FeatureColumns": json.dumps(names),
+                "ExternalPredictors": external_json,
+                "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up"),
+                "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down"),
                 "MarketCalendar": market_calendars.get(observation),
                 "Window": window.number,
                 "Date": date,
@@ -358,7 +373,7 @@ def _prefilter_combination(
         # Keep the shared evaluator's geometry and qualification untouched. Only
         # this prefilter training context receives the independent seed.
         training_context = (
-            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed), *context[2:],
+            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed, predictive_model_type="external_only"), *context[2:],
         )
         result = _walk_forward_combination(
             row_values, training_context, cancellation_check, include_down=False,
@@ -895,12 +910,7 @@ def _evaluate_final_holdout(
         observation, feature_symbols = symbols_from_set(row)
         up_outcome_name = intraday_target_column(observation)
         down_outcome_name = intraday_down_target_column(observation)
-        names = predictor_columns(
-            ordered,
-            feature_symbols,
-            config.lag_depth,
-            config.date_feature_regex,
-        )
+        names = model_predictor_columns(ordered, observation, feature_symbols, config)
         model_data = ordered[[*names, up_outcome_name, down_outcome_name]].dropna()
         development = model_data.loc[model_data.index < holdout_start]
         holdout = model_data.loc[model_data.index >= holdout_start]
@@ -1286,7 +1296,7 @@ def evaluate_walk_forward(
 ) -> WalkForwardResult:
     """Qualify on development windows, then confirm on an untouched final holdout."""
 
-    if config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
         raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
 
     _validate_prepared_index(prepared)
@@ -1417,7 +1427,7 @@ def evaluate_walk_forward(
     )
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     run_configuration: dict[str, object] = {
-        "round_selection": {**round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__},
+        "round_selection": ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" else {**round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__}),
         "round_selection_coverage": round_selection_coverage(windows_frame),
         "target": "intraday_return >= intraday_target_threshold",
         "down_target": "intraday_return <= -intraday_down_threshold",
@@ -1448,6 +1458,10 @@ def evaluate_walk_forward(
             "PRAUCMedian desc",
         ],
     }
+    run_configuration["predictive_model_type"] = config.predictive_model_type
+    run_configuration["candidate_status"] = "qualified_candidates" if qualification["Eligible"].any() else "no_qualified_candidates"
+    run_configuration["holdout_status"] = "executed" if evaluate_holdout and len(final_holdout) else "not_executed"
+    run_configuration["data_status"] = "available"
     run_configuration["final_holdout_evaluated"] = evaluate_holdout
     return WalkForwardResult(
         windows=windows_frame,
