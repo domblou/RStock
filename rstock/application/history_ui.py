@@ -622,7 +622,11 @@ def history_row(
             if detail.get("storage", {}).get("state") == "purged"
             else "Complet"
         ),
-        duration=short_duration(status.get("duration_seconds")),
+        duration=(
+            short_duration(detail.get("timing", status).get("observed_duration_seconds")) + " observée"
+            if status.get("status") == "interrupted"
+            else short_duration(status.get("duration_seconds"))
+        ),
         summary=" · ".join((universe, summary_text)) if universe else summary_text,
     )
 

@@ -141,7 +141,8 @@ def _read_predictions(root: Path, phase: str = "development") -> pd.DataFrame:
     return pd.concat(records, ignore_index=True)
 
 
-def compare_common_predictions(project_root: Path, run_ids: Sequence[str], *, phase: str = "development") -> tuple[dict, pd.DataFrame]:
+def compare_common_predictions(project_root: Path, run_ids: Sequence[str], *, phase: str = "development",
+                               align_constant: bool = True) -> tuple[dict, pd.DataFrame]:
     """Intersect observations across every run and every candidate per target/direction.
 
     Scores are evaluated separately per candidate, never averaged into an ensemble.
@@ -166,6 +167,24 @@ def compare_common_predictions(project_root: Path, run_ids: Sequence[str], *, ph
              "population": "development_before_qualification" if phase == "development" else "holdout_evaluated_population", "unavailable_runs": unavailable}
     if unavailable:
         return {**audit, "status": "unavailable", "common_observations": 0}, pd.DataFrame()
+    roots = {r: _prediction_root(runs, r, phase) for r in run_ids}
+    kinds = {r: _json(root / "config.json").get("rstock_config", {}).get("predictive_model_type", "external_only")
+             for r, root in roots.items()}
+    volatility = {r: _json(root / "config.json").get("rstock_config", {}) for r, root in roots.items()}
+    alignment = "test_dates_only_training_unverified"
+    if "constant_probability" in kinds.values() and any(k != "constant_probability" for k in kinds.values()):
+        audit["training_alignment"] = {"status": "unverified", "reason": "Historical constant training is not aligned by intersecting test dates."}
+        if align_constant and phase == "development":
+            from .aligned_constant_comparison import reconstruct_aligned_constants
+            try:
+                aligned, diagnostics = reconstruct_aligned_constants(roots)
+                frames.update(aligned)
+                alignment = "common_training_and_test_verified"
+                audit["training_alignment"] = {"status": "verified", "constant": "recalculated_from_common_training_labels",
+                    "historical_constant_reused": False, "diagnostics": diagnostics.to_dict("records")}
+            except (OSError, ValueError, KeyError, TypeError, pd.errors.ParserError) as error:
+                audit["training_alignment"] = {"status": "unavailable", "reason": str(error),
+                    "warning": "Dates test communes uniquement ; la constante historique n'est pas une référence d'apprentissage alignée."}
     common_keys = set.intersection(*(set(zip(frame["Observation"], frame["Direction"])) for frame in frames.values()))
     rows = []
     common_count = 0
@@ -182,11 +201,13 @@ def compare_common_predictions(project_root: Path, run_ids: Sequence[str], *, ph
         if labels.groupby("Date")["Target"].nunique().gt(1).any():
             return {**audit, "status": "label_mismatch", "common_observations": 0}, pd.DataFrame()
         for run_id, frame in groups.items():
-            config = _json(runs / run_id / "config.json").get("rstock_config", {})
             for set_id, candidate in frame.groupby("Set", sort=False):
                 paired = candidate[candidate["Date"].isin(dates)].sort_values("Date")
                 metrics = classification_metrics(paired["Target"], paired["Prediction"], paired["Probability"])
-                rows.append({"Run": run_id, "PredictiveModelType": config.get("predictive_model_type", "external_only"),
+                rows.append({"Run": run_id, "PredictiveModelType": kinds[run_id], "TrainingAlignment": alignment,
+                    "TargetVolatilityEnabled": volatility[run_id].get("target_volatility_enabled", False) and kinds[run_id] != "constant_probability",
+                    "TargetVolatilitySessions": volatility[run_id].get("target_volatility_sessions", 21),
+                    "PredictiveModelDescription": ("external_only + volatilité cible" if kinds[run_id] == "external_only" and volatility[run_id].get("target_volatility_enabled", False) else kinds[run_id]),
                     "Observation": observation, "Direction": direction, "Set": set_id,
                     "CommonObservations": len(paired), "ExcludedObservations": len(candidate) - len(paired),
                     "FirstDate": paired["Date"].min(), "LastDate": paired["Date"].max(), **metrics.as_columns()})

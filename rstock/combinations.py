@@ -206,10 +206,12 @@ def symbols_from_set(row: pd.Series) -> tuple[str, list[str]]:
     return observation, features
 
 
-def predictive_model_identity(set_id: str, model_type: str, direction: str) -> str:
+def predictive_model_identity(set_id: str, model_type: str, direction: str, volatility: dict | None = None) -> str:
     symbols = json.loads(set_id)
     if not isinstance(symbols, list) or not symbols or direction not in {"Up", "Down"}:
         raise ValueError("Invalid predictive model identity")
-    return json.dumps({"version": 1, "type": model_type, "target": symbols[0],
-                       "externals": sorted(symbols[1:]), "direction": direction},
+    identity = {"version": 1, "type": model_type, "target": symbols[0], "externals": sorted(symbols[1:]), "direction": direction}
+    if volatility and volatility.get("enabled") and model_type != "constant_probability":
+        identity.update(version=2, target_volatility=volatility)
+    return json.dumps(identity,
                       ensure_ascii=False, sort_keys=True, separators=(",", ":"))

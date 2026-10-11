@@ -1236,6 +1236,8 @@ def analyze_run(
     if tested is None and not qualification.empty:
         tested = len(qualification)
     duration = status.get("duration_seconds")
+    if status.get("status") == "interrupted":
+        duration = detail.get("timing", status).get("observed_duration_seconds")
     return RunAnalytics(
         run_id=str(status["run_id"]),
         symbols=tuple(str(item) for item in configuration.get("symbols", ())),

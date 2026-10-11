@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 from pathlib import Path
+from time import perf_counter
 
 import pandas as pd
 import exchange_calendars as xcals
+from rstock.progress import report_progress, check_cancellation, CancellationRequested
 
 from .forward_diagnostic import _json, _key, _publish, _stage_ids, digest, REFERENCE, ANALYSIS
 from .market_context import (
@@ -80,7 +82,8 @@ def _acquisition_end(spec, owner, observed_end, wf):
     return max(observed_end, pd.Timestamp(cutoff).normalize()) if cutoff else observed_end
 
 
-def materialize_context_diagnostic(spec, output: Path, *, provider=None):
+def materialize_context_diagnostic(spec, output: Path, *, provider=None,
+                                   progress_callback=None, cancellation_check=None):
     if not spec.config.market_context_enabled or spec.job_type.value not in INPUTS:
         return None
     protocol = ContextProtocol.from_config(spec.config)
@@ -172,7 +175,10 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
             except (ValueError, OSError):
                 pass  # Interrupted publication: rebuild from verified evidence.
     metric_parts, summary_parts = [], []
+    aggregate_started = perf_counter()
+    processed = 0
     for raw in prediction_groups(source):
+        check_cancellation(cancellation_check)
         rows = normalize_predictions(raw, signal_rule=rule, thresholds=thresholds)
         if stage == "forward":
             rows["model_key"] = rows.source_model_id.map(identities)
@@ -192,6 +198,9 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
             for table in (metric, summary):
                 if not table.empty: table["period_kind"], table["horizon"] = kind, horizon
             metric_parts.append(metric); summary_parts.append(summary)
+        processed += 1
+        report_progress(progress_callback, "market_context_diagnostic", substage="aggregation",
+                        completed_units=processed, details={"models_processed": processed})
     metrics = pd.concat(metric_parts, ignore_index=True) if metric_parts else pd.DataFrame()
     robustness = pd.concat(summary_parts, ignore_index=True) if summary_parts else pd.DataFrame()
     if metrics.empty:
@@ -226,6 +235,8 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
             "stage_references": references, "source_e2e_run_id": owner.name,
             "t0_reference": t0_reference,
             "artifact_digests": {name: digest(output / name) for name in (METRICS_FILE, ROBUSTNESS_FILE)},
+            "performance": {"models_processed": processed,
+                            "aggregation_and_publication_seconds": perf_counter() - aggregate_started},
             "interpretation": "Descriptive terciles, not economic regimes. Calibration-selected thresholds are not independent WF evaluation."}
         if any(not (runs / name).is_file() or digest(runs / name) != sha for name,sha in inputs.items()):
             raise ValueError("context_inputs_changed_during_generation")
@@ -233,10 +244,13 @@ def materialize_context_diagnostic(spec, output: Path, *, provider=None):
     return manifest
 
 
-def optional_context_diagnostic(spec, output):
+def optional_context_diagnostic(spec, output, *, progress_callback=None, cancellation_check=None):
     """Every diagnostic failure is nonfatal, including failure to save its warning."""
     try:
-        result = materialize_context_diagnostic(spec, output)
+        result = (materialize_context_diagnostic(spec, output)
+                  if progress_callback is None and cancellation_check is None else
+                  materialize_context_diagnostic(spec, output, progress_callback=progress_callback,
+                                                 cancellation_check=cancellation_check))
         if result is not None:
             from .runner import _try_submission_mutex
             with _try_submission_mutex(Path(output) / ".context_diagnostic.lock") as acquired:
@@ -245,6 +259,8 @@ def optional_context_diagnostic(spec, output):
                 _publish(path, {**_json(path), "status": "available", "reason": None,
                     "protocol_id": result.get("protocol_id"), "acquisition": result.get("acquisition")})
         return result
+    except CancellationRequested:
+        raise
     except Exception as exc:
         reason = str(exc)
         LOGGER.warning("Diagnostic SPY incomplet; traitement scientifique conservé: %s", reason)

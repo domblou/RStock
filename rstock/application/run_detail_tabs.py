@@ -344,7 +344,11 @@ def pipeline_stage_rows(stages: object) -> list[dict[str, object]]:
                 "Durée (s)": item.get("duration_seconds"),
                 "Run ID enfant": item.get("child_run_id"),
                 "Début": item.get("started_at"),
-                "Fin": item.get("finished_at"),
+                "Fin": None if status == "interrupted" else item.get("finished_at"),
+                **({"Dernière observation": item.get("last_observed_at"),
+                    "Détection interruption": item.get("interruption_detected_at", item.get("finished_at")),
+                    "Délai détection (s)": item.get("detection_delay_seconds")}
+                   if status == "interrupted" else {}),
                 "Run source": item.get("source_run_id"),
                 "Erreur": item.get("error"),
             }

@@ -271,6 +271,7 @@ class ExperimentSpec:
     source_prepared_dataset_sha256: str | None = None
     prepared_dataset_digest_required: bool = False
     prepared_snapshot_required: bool = False
+    target_volatility_source: dict[str, Any] | None = None
     # Runtime-only worker context; deliberately excluded from persisted snapshots.
     execution_run_id: str | None = None
     forward_simulation_enabled: bool = False
@@ -687,6 +688,8 @@ class ExperimentSpec:
             values["stability_step_sessions"] = self.stability_step_sessions
         if self.prepared_snapshot_required:
             values["prepared_snapshot_required"] = True
+        if self.target_volatility_source is not None:
+            values["target_volatility_source"] = deepcopy(self.target_volatility_source)
         if self.experimental_overrides:
             values["experimental_overrides"] = list(self.experimental_overrides)
         return values
@@ -803,6 +806,8 @@ class ExperimentSpec:
             prepared_snapshot_required=bool(
                 values.get("prepared_snapshot_required", False)
             ),
+            target_volatility_source=(None if values.get("target_volatility_source") is None
+                                      else dict(values["target_volatility_source"])),
             forward_simulation_enabled=bool(
                 values.get("forward_simulation_enabled", False)
             ),

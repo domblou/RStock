@@ -45,7 +45,7 @@ WF_SELECTION_FIELDS = (
     "model_selection_sample_adequacy_weight",
 )
 WF_DERIVATION_CONFIG_FIELDS = frozenset(
-    ("predictive_model_type", *WF_GEOMETRY_FIELDS, *WF_XGBOOST_FIELDS,
+    ("predictive_model_type", "target_volatility_enabled", "target_volatility_sessions", *WF_GEOMETRY_FIELDS, *WF_XGBOOST_FIELDS,
      *WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS)
 )
 WF_DERIVATION_FIELDS = WF_DERIVATION_CONFIG_FIELDS | {"evaluate_final_holdout"}
@@ -252,7 +252,8 @@ def build_derived_walk_forward_spec(
     if "predictive_model_type" in effective:
         from rstock.features import require_predictive_model_inputs
         require_predictive_model_inputs(prepared, targets, predictors, replace(source.config, **{
-            field: value for field, value in effective.items() if field in WF_DERIVATION_CONFIG_FIELDS}))
+            field: value for field, value in effective.items() if field in WF_DERIVATION_CONFIG_FIELDS and field != "target_volatility_enabled"},
+            target_volatility_enabled=False))
     name, candidate_sha = _candidate_source(repository, source_run_id, source)
     provenance = {
         "schema_version": 1, "source_run_id": source_run_id,
@@ -273,8 +274,12 @@ def build_derived_walk_forward_spec(
     }
     config_changes = {field: value for field, value in effective.items()
                       if field in WF_DERIVATION_CONFIG_FIELDS}
+    next_config = replace(source.config, **config_changes)
+    volatility_source = source.target_volatility_source
+    from rstock.target_volatility import derivation_source
+    volatility_source = derivation_source(prepared, targets, next_config, source.calendar, anchor, volatility_source)
     return replace(
-        source, config=replace(source.config, **config_changes),
+        source, config=next_config, target_volatility_source=volatility_source,
         evaluate_final_holdout=effective.get("evaluate_final_holdout", source.evaluate_final_holdout),
         source_experiment_run=source_run_id, source_walk_forward_run=source_run_id,
         source_end_to_end_run=None, historical_data_cutoff=anchor,

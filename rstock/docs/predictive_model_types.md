@@ -17,6 +17,35 @@ Le `Set` reste une clé d'exécution locale au run ; les identités directionnel
 
 ## Labels et entraînement
 
+### Volatilité passée optionnelle du titre cible
+
+`target_volatility_enabled` (défaut `False`) ajoute une seule variable à chaque modèle
+XGBoost final, sans changer ses combinaisons. `target_volatility_sessions` (défaut `21`,
+minimum `2`) est le nombre de rendements logarithmiques clôture ajustée/clôture ajustée.
+L'écart-type `ddof=1` est annualisé par `sqrt(252)` et décalé d'une séance : pour J,
+les N rendements se terminent à J−1. N+1 clôtures valides et consécutives sur le calendrier
+du marché sont exigées ; aucune valeur manquante n'est remplie. La constante ignore
+cette option, et le préfiltre conserve exclusivement ses variables historiques.
+
+Le réglage se trouve dans Paramètres → Modèles et combinaisons, dans les lancements
+WF/E2E et leurs dérivations. `external_only` enrichi utilise aussi la volatilité cible,
+ce que la liste des colonnes et Comparer rendent explicite. Les snapshots historiques
+sans ces champs restent désactivés avec N=21 inactif.
+
+Le préfixe nécessaire au calcul est acquis séparément puis retiré de la période scientifique.
+Un dérivé fige les clôtures compatibles du cache dans un nouvel artefact référencé par SHA-256,
+en conservant les labels, retards et dates du parent. Il ne consulte plus le cache mutable lors
+de la reprise. Les colonnes, définition, couverture et provenance accompagnent les résultats.
+La liste ordonnée des variables et les réglages propres au modèle restent figés en Forward/
+Production pour les types actuellement autorisés ; les autres types restent bloqués.
+
+Les données Yahoo sont **rétrospectives, sans garantie point-in-time**. Le décalage J−1
+empêche l'usage de la clôture J mais ne recrée pas les millésimes historiques d'ajustement.
+Les sources sont marquées `retrospective_not_pit` : le test historique est exploratoire.
+Une conclusion prospective exige un protocole arrêté avant les nouveaux labels et des
+entrées/prédictions archivées à leur date d'utilisation. Aucun changement de N ne doit être
+choisi a posteriori selon les performances.
+
 Up et Down conservent leurs définitions binaires et leurs seuils actuels. Ils ne sont pas complémentaires.
 Les décisions conservent la convention strictement supérieure au seuil de probabilité.
 
@@ -43,6 +72,19 @@ d'apprentissage la plus récente, strictement antérieure à la prédiction. Des
 origine rendent la comparaison indisponible. Les dates et origines d'apprentissage peuvent différer entre modèles ;
 la comparaison décrit une population de test commune et ne démontre pas à elle seule une supériorité statistique.
 Les décisions holdout sont celles obtenues avec les seuils figés, jamais des décisions reconstruites avec le seuil global.
+
+Lorsqu’une constante est comparée à des variantes XGBoost en développement, Comparer reconstruit
+un calendrier et un masque de disponibilité communs à partir des snapshots locaux et des colonnes
+requises par chaque variante. Les fenêtres sont produites par le mécanisme WF existant. Leurs dates,
+effectifs et labels sont vérifiés contre les fenêtres et prédictions XGBoost enregistrées, sans entraînement.
+La constante est alors recalculée sur les seuls labels de cet apprentissage, strictement antérieur au test,
+et figée pendant chaque bloc test. Les diagnostics exposent les dates, effectifs et empreintes des
+observations/labels d’apprentissage et des dates test. Les runs historiques restent inchangés.
+
+Si les entraînements ou frontières diffèrent, ou si les snapshots nécessaires sont absents, cette
+reconstruction est refusée : les métriques historiques sur dates test communes restent disponibles,
+avec un avertissement explicite indiquant que l’apprentissage n’est pas aligné. Le fonctionnement
+autonome de la constante et la comparaison holdout conservent leurs probabilités enregistrées.
 
 Une intersection vide, des labels incohérents ou des prédictions absentes sont signalés explicitement.
 Aucune métrique agrégée n'est présentée comme une comparaison sur observations communes.

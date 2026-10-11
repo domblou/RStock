@@ -23,10 +23,12 @@ from rstock.features import (
     intraday_return_column,
     intraday_target_column,
     predictor_columns,
+    model_predictor_columns,
     prediction_source_observations,
     prepare_dataset,
     prepare_prediction_row,
 )
+from rstock.target_volatility import contract as volatility_contract, operational_features
 from rstock.modeling import (
     XGBoostParameters,
     fit_booster,
@@ -403,6 +405,7 @@ class PromotionService:
         walk_forward: ExperimentSpec, calibration: ExperimentSpec, label: str
     ) -> None:
         fields = (
+            "target_volatility_enabled", "target_volatility_sessions",
             "lag_depth",
             "intraday_target_threshold",
             "intraday_down_threshold",
@@ -441,7 +444,8 @@ class ProductionTrainingService:
             raise ValueError("A retired model cannot be trained")
         if model.status in {ProductionModelStatus.ACTIVE, ProductionModelStatus.WATCHING}:
             raise ValueError("Stop an active or watching model before retraining it")
-        names = predictor_columns(prepared, model.predictors, model.lag_depth, config.date_feature_regex)
+        prepared = operational_features(prepared, model)
+        names = model_predictor_columns(prepared, model.target, model.predictors, config)
         outcomes = {
             "up": intraday_target_column(model.target),
             "down": intraday_down_target_column(model.target),
@@ -478,6 +482,7 @@ class ProductionTrainingService:
                 "artifact_version": version,
                 "feature_version": model.feature_version,
                 "predictor_columns": names,
+                "target_volatility": volatility_contract(config),
                 "outcomes": outcomes,
                 "train_start": training.index.min().isoformat(),
                 "train_end": training.index.max().isoformat(),
@@ -531,6 +536,14 @@ class ProductionLifecycleService:
             for symbol in model.predictors
             for lag in range(1, model.lag_depth + 1)
         }
+        allowed_features = required_lags | {"wday", "yday", "mon"}
+        volatility = metadata.get("target_volatility", {})
+        if volatility.get("enabled"):
+            from rstock.target_volatility import column
+            name = column(model.target, volatility["sessions"])
+            if name not in predictor_names:
+                raise ValueError("Production target volatility feature missing")
+            allowed_features.add(name)
         if (
             metadata.get("model_id") != model.model_id
             or metadata.get("artifact_version") != model.artifact_version
@@ -538,7 +551,7 @@ class ProductionLifecycleService:
             or not predictor_names
             or not required_lags.issubset(set(predictor_names))
             or any(
-                name not in required_lags | {"wday", "yday", "mon"}
+                name not in allowed_features
                 for name in predictor_names
             )
         ):
@@ -817,6 +830,7 @@ class DailyPredictionService:
                     lag_depth=model.lag_depth,
                     intraday_down_threshold=model.down_target_threshold,
                 )
+                prepared = operational_features(prepared, model, market_data)
                 metadata = json.loads(
                     (self.repository.artifact_directory(model.model_id)
                      / "production.metadata.json").read_text(encoding="utf-8")
@@ -1001,6 +1015,7 @@ class DailyPredictionService:
         as_of = observations.index.max()
         calendar = str(model.training_metadata.get("calendar", "XNYS"))
         target_date = next_market_session(as_of, calendar)
+        prepared = operational_features(prepared, model, market_data)
         current = prepare_prediction_row(
             prepared, as_of_date=as_of, target_date=target_date, lag_depth=model.lag_depth
         )
@@ -1075,6 +1090,7 @@ class DailyPredictionService:
         if observations.empty:
             raise ValueError("no prior market observation")
         as_of = observations.index.max()
+        prepared = operational_features(prepared, model, market_data)
         current = prepare_prediction_row(
             prepared, as_of_date=as_of, target_date=target, lag_depth=model.lag_depth
         )

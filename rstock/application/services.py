@@ -71,13 +71,29 @@ class MarketDataService:
                 "Calendar": spec.calendar,
             }
         )
+        from rstock.target_volatility import enabled
+        requested_days = spec.config.model_history_days if history_days is None else history_days
+        acquisition_days = requested_days
+        if enabled(spec.config):
+            import exchange_calendars as xcals
+            anchor = pd.Timestamp(as_of or date.today())
+            first = anchor - pd.Timedelta(days=requested_days)
+            prior = pd.DatetimeIndex(xcals.get_calendar(spec.calendar).sessions_in_range(
+                first - pd.Timedelta(days=3 * spec.config.target_volatility_sessions + 100), first))
+            acquisition_days = int((anchor - prior[prior < first][-(spec.config.target_volatility_sessions + 1)]).days)
         result = market_data_service(spec.config).get_market_data(
             universe,
-            spec.config.model_history_days if history_days is None else history_days,
+            acquisition_days,
             as_of=as_of,
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
         )
+        if enabled(spec.config):
+            raw = result.prices.copy()
+            result.prices = raw.loc[raw.index >= pd.Timestamp(as_of or date.today()) - pd.Timedelta(days=requested_days)].copy()
+            result.prices.attrs["target_volatility_input"] = {
+                "prices": raw, "config": spec.config, "calendar": spec.calendar,
+                "targets": [s for s in spec.target_symbols if s in result.symbols]}
         calendars = {symbol: spec.calendar for symbol in result.symbols}
         return result, calendars
 

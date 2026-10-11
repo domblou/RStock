@@ -19,9 +19,11 @@ import numpy as np
 import pandas as pd
 
 from rstock.config import RStockConfig
+from rstock.target_volatility import realized_volatility
 from rstock.data import YahooFinanceProvider
+from rstock.evaluation import classification_metrics
 from .forward_diagnostic import (
-    _bool, _clean, _json, _key, _publish, _stage_ids, digest, probability_metrics,
+    _bool, _clean, _json, _key, _publish, _stage_ids, digest,
 )
 
 
@@ -105,7 +107,7 @@ def build_context(snapshot: pd.DataFrame, sessions: pd.DatetimeIndex, protocol: 
     historical = pd.DataFrame({
         "trend": values / values.shift(protocol.trend_sessions) - 1,
         "drawdown": 1 - values / values.rolling(protocol.drawdown_sessions, min_periods=protocol.drawdown_sessions).max(),
-        "volatility": log_returns.rolling(protocol.volatility_sessions, min_periods=protocol.volatility_sessions).std(ddof=1) * np.sqrt(252),
+        "volatility": realized_volatility(values, protocol.volatility_sessions),
     }, index=complete)
     # Do not bridge a missing session when calculating trend.
     historical.loc[values.rolling(protocol.trend_sessions + 1).count() != protocol.trend_sessions + 1, "trend"] = np.nan
@@ -331,15 +333,46 @@ def normalize_predictions(frame: pd.DataFrame, *, signal_rule: str,
     return rows
 
 
+def _context_probability_metrics(scores, actual, signal):
+    """Same diagnostic metrics, with conversions shared across context bands."""
+    if (not np.isfinite(scores).all() or not ((scores >= 0) & (scores <= 1)).all()
+            or not np.isin(actual, [0, 1]).all()):
+        return {"availability": "unavailable_invalid_probabilities"}
+    metrics = classification_metrics(actual, signal.astype(int), scores)
+    positives = int(actual.sum())
+    any_signal = signal.any()
+    return {"availability": "available", "observations": len(actual),
+        "positives": positives, "negatives": int((actual == 0).sum()),
+        "auc": metrics.roc_auc, "auc_status": "available" if metrics.roc_auc is not None else "unavailable_single_class",
+        "brier": float(((scores - actual) ** 2).mean()), "prevalence": metrics.prevalence,
+        "precision": metrics.precision if any_signal else None,
+        "recall": metrics.recall if positives else None,
+        "f1": metrics.f1 if positives or any_signal else None,
+        "signal_rate": float(signal.mean()), "signals": int(signal.sum()),
+        "mean_probability": float(scores.mean()),
+        "signal_mean_probability": float(scores[signal].mean()) if any_signal else None,
+        "probability_bias": float((scores - actual).mean())}
+
+
 def aggregate_context(rows: pd.DataFrame, context: pd.DataFrame, *, stage: str,
                       signal_rule: str, horizons: dict[int, tuple[str, str]] | None = None):
-    rows = rows.copy()
+    # Scientific prediction files carry many audit/feature columns. None is
+    # used here; retaining them copied every column for every context band.
+    columns = ["Date", "model_key", "Window", "signal", "prediction_probability",
+               "outcome", "directional_return"]
+    rows = rows.loc[:, [column for column in columns if column in rows]].copy()
     rows["session_date"] = pd.to_datetime(rows["Date"]).dt.strftime("%Y-%m-%d")
     if context.session_date.duplicated().any():
         raise ValueError("context_duplicate_session")
+    context_columns = ["session_date", *AXES, *(f"{axis}_band" for axis in AXES), "regime", "episode_id"]
+    context = context.loc[:, [column for column in context_columns if column in context]]
     joined = rows.merge(context, on="session_date", how="left", validate="many_to_one", suffixes=("", "_context"))
+    joined["_context_score"] = pd.to_numeric(joined.prediction_probability, errors="coerce")
+    joined["_context_actual"] = pd.to_numeric(joined.outcome, errors="coerce")
+    joined["_context_signal"] = _bool(joined.signal.fillna(False))
+    joined["_context_return"] = pd.to_numeric(joined.directional_return, errors="coerce")
+    ordered = context.sort_values("session_date")
     for axis in AXES:
-        ordered = context.sort_values("session_date")
         episodes = ordered[f"{axis}_band"].fillna("unavailable")
         episode_ids = episodes.ne(episodes.shift()).cumsum()
         joined[f"{axis}_episode"] = joined.session_date.map(dict(zip(ordered.session_date, episode_ids)))
@@ -359,37 +392,45 @@ def aggregate_context(rows: pd.DataFrame, context: pd.DataFrame, *, stage: str,
     records = []
     for kind, horizon, observations in periods:
         for (model, window), model_rows in observations.groupby(["model_key", "Window"], dropna=False):
+            calendar = context.loc[context.session_date.between(model_rows.session_date.min(), model_rows.session_date.max())]
+            model_signals = model_rows["_context_signal"].sum()
             for axis in axes:
+                calendar_bands = (calendar[f"{axis}_band"] if axis in AXES else calendar["regime"] if axis == "regime" else calendar.get("episode_id", pd.Series(index=calendar.index, dtype=object)).fillna("Hors épisode"))
+                calendar_counts = calendar_bands.value_counts()
+                coverage = float(model_rows[axis].notna().mean()) if axis in AXES else float(model_rows.regime.fillna("Indisponible").ne("Indisponible").mean())
                 bands = model_rows[f"{axis}_band"].fillna("unavailable")
                 for band, group in model_rows.groupby(bands, dropna=False):
-                    valid = group.loc[group.signal.notna()]
-                    probability = probability_metrics(group.assign(signal=group.signal.fillna(False)))
-                    if len(valid) != len(group):
+                    known_signal = group.signal.notna().to_numpy()
+                    signal = group["_context_signal"].to_numpy(dtype=bool)
+                    probability = _context_probability_metrics(
+                        group["_context_score"].to_numpy(dtype=float, na_value=np.nan),
+                        group["_context_actual"].to_numpy(dtype=float, na_value=np.nan), signal,
+                    )
+                    n = int(known_signal.sum())
+                    if n != len(group):
                         for name in ("precision", "recall", "f1", "signal_rate", "signals", "signal_mean_probability"):
                             probability[name] = None
-                    signals = valid.loc[_bool(valid.signal)]
-                    returns = pd.to_numeric(signals.directional_return, errors="coerce")
-                    n, positives, negatives = len(valid), probability.get("positives", 0), probability.get("negatives", 0)
-                    calendar = context.loc[context.session_date.between(model_rows.session_date.min(), model_rows.session_date.max())]
-                    calendar_bands = (calendar[f"{axis}_band"] if axis in AXES else calendar["regime"] if axis == "regime" else calendar.get("episode_id", pd.Series(index=calendar.index, dtype=object)).fillna("Hors épisode"))
-                    market_share = float(calendar_bands.eq(band).mean()) if len(calendar) else None
-                    model_signals = _bool(model_rows.signal.fillna(False)).sum()
-                    signal_share = len(signals) / model_signals if model_signals and len(valid) == len(group) else None
+                    signal_count = int((known_signal & signal).sum())
+                    returns = group["_context_return"].to_numpy(dtype=float, na_value=np.nan)[known_signal & signal]
+                    positives, negatives = probability.get("positives", 0), probability.get("negatives", 0)
+                    market_sessions = int(calendar_counts.get(band, 0))
+                    market_share = market_sessions / len(calendar) if len(calendar) else None
+                    signal_share = signal_count / model_signals if model_signals and n == len(group) else None
                     known_band = band not in {"unavailable", "Indisponible"}
                     records.append({"model_key": model, "stage": stage, "signal_rule": signal_rule,
                         "Window": window, "period_kind": kind, "horizon": horizon, "axis": axis, "band": band,
                         "observations": len(group), "evaluated_observations": n, "missing_signal_rule": len(group)-n,
                         "unique_dates": group.session_date.nunique(), "total_model_observations": len(model_rows),
                         "episodes": group[f"{axis}_episode"].nunique(),
-                        "market_sessions": int(calendar_bands.eq(band).sum()), "market_exposure_share": market_share,
+                        "market_sessions": market_sessions, "market_exposure_share": market_share,
                         "observation_share": len(group) / len(model_rows), "signal_share": signal_share,
                         "exposure_adjusted_signal_concentration": signal_share / market_share if signal_share is not None and market_share else None,
-                        "context_coverage": float(model_rows[axis].notna().mean()) if axis in AXES else float(model_rows.regime.fillna("Indisponible").ne("Indisponible").mean()),
+                        "context_coverage": coverage,
                         **{k:v for k,v in probability.items() if k != "observations"},
                         "mean_return": float(returns.mean()) if len(returns) and np.isfinite(returns).all() else None,
                         "auc_supported": known_band and probability.get("availability") == "available" and len(group) >= 30 and positives >= 10 and negatives >= 10,
-                        "signal_supported": known_band and n == len(group) and len(signals) >= 10,
-                        "signal_count": len(signals) if n == len(group) else None,
+                        "signal_supported": known_band and n == len(group) and signal_count >= 10,
+                        "signal_count": signal_count if n == len(group) else None,
                         "signal_return_sum": float(returns.sum()) if len(returns) and np.isfinite(returns).all() else None})
     metrics = pd.DataFrame(_clean(records))
     summaries = []

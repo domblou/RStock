@@ -53,6 +53,8 @@ class RStockConfig:
     intraday_target_threshold: float = 0.01
     intraday_down_threshold: float = 0.01
     predictive_model_type: str = "external_only"
+    target_volatility_enabled: bool = False
+    target_volatility_sessions: int = 21
     lag_depth: int = 3
     permutation_depth: int = 3
     date_feature_regex: str = ""
@@ -185,6 +187,12 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if not isinstance(self.target_volatility_enabled, bool):
+            raise ValueError("target_volatility_enabled must be boolean")
+        if (not isinstance(self.target_volatility_sessions, int)
+                or isinstance(self.target_volatility_sessions, bool)
+                or self.target_volatility_sessions < 2):
+            raise ValueError("target_volatility_sessions must be an integer >= 2")
         if self.predictive_model_type not in {"constant_probability", "target_only", "target_and_external", "external_only"}:
             raise ValueError("Unsupported predictive_model_type")
         if self.predictive_model_type in {"constant_probability", "target_only"}:
@@ -410,6 +418,8 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    "target_volatility_enabled": False,
+    "target_volatility_sessions": 21,
     "predictive_model_type": "external_only",
     # Historical prefilters were fixed even when their downstream WF was chronological.
     "prefilter_xgb_round_selection_mode": "fixed",

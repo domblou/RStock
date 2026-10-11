@@ -204,6 +204,39 @@ def test_parallel_threshold_parameter_resume_keeps_completed_checkpoints(
     assert len(resumed.development_by_window) > 0
 
 
+def test_probability_batch_resume_skips_committed_work_and_preserves_row_order(monkeypatch, tmp_path):
+    import rstock.threshold_calibration as module
+    from rstock.combinations import symbol_set_id
+    config = _config(tmp_path, combination_workers=1, walk_forward_batch_size=2)
+    sets = generate_symbol_sets(["AAA", "BBB", "CCC"], 1)
+    prepared = pd.DataFrame({"placeholder": [1]})
+    calls = []
+    def calculate(item, _context, _cancel):
+        calls.append(symbol_set_id(pd.Series(item)))
+        return [{"Set": calls[-1], "Probability": 0.2}]
+    monkeypatch.setattr(module, "_threshold_development_combination", calculate)
+    arguments = dict(min_train_size=2, test_size=2, step_size=2)
+    expected = module.generate_development_probabilities(prepared, sets, config, **arguments)
+    manager = CheckpointManager(tmp_path / "resume_probs", run_id="probabilities",
+        job_type="threshold_parameter_calibration", configuration_fingerprint="frozen", batch_sizes={})
+    commit = manager.commit_artifact
+    def interrupt(name, payload):
+        if name.endswith("_1"):
+            raise RuntimeError("interrupted probability publication")
+        return commit(name, payload)
+    monkeypatch.setattr(manager, "commit_artifact", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted probability"):
+        module.generate_development_probabilities(prepared, sets, config,
+            checkpoint_manager=manager, checkpoint_key="sample", **arguments)
+    resumed = CheckpointManager(tmp_path / "resume_probs", run_id="probabilities",
+        job_type="threshold_parameter_calibration", configuration_fingerprint="frozen", batch_sizes={})
+    calls.clear()
+    actual = module.generate_development_probabilities(prepared, sets, config,
+        checkpoint_manager=resumed, checkpoint_key="sample", **arguments)
+    assert calls == expected.Set.tolist()[2:]
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+
+
 def test_single_grid_splits_sets_across_two_workers(monkeypatch, tmp_path):
     import rstock.threshold_parameter_calibration as module
     from rstock.threshold_calibration import threshold_calibration_invariant

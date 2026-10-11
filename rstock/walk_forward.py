@@ -14,6 +14,7 @@ import pandas as pd
 
 from .combinations import predictive_model_identity, symbol_set_id, symbols_from_set
 from .config import RStockConfig
+from .target_volatility import contract as volatility_contract, enabled as volatility_enabled, column as volatility_column
 from .evaluation import binary_predictions, classification_metrics
 from .features import (
     close_to_close_return_column,
@@ -268,8 +269,8 @@ def _walk_forward_combination(
             "PredictiveModelType": config.predictive_model_type,
             "FeatureColumns": json.dumps(names),
             "ExternalPredictors": external_json,
-            "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up"),
-            "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down"),
+            "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config)),
+            "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config)),
             "MarketCalendar": market_calendars.get(observation),
             "Window": window.number,
             "TrainStart": train.index.min(),
@@ -283,6 +284,13 @@ def _walk_forward_combination(
             "RowsLostToLags": rows_lost_to_lags,
         }
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
+        if volatility_enabled(config):
+            base_names = [n for n in names if n != volatility_column(observation, config.target_volatility_sessions)]
+            base_count = len(ordered[[*base_names, up_outcome_name, down_outcome_name]].dropna())
+            window_record.update(TargetVolatilityEnabled=True, TargetVolatilitySessions=config.target_volatility_sessions,
+                TargetVolatilityDefinition=volatility_contract(config)["definition_version"],
+                RowsLostToVolatility=base_count - len(model_data), ModelObservations=len(model_data),
+                TargetVolatilitySourceQuality="retrospective_not_pit")
         down_predicted = down_probabilities = None
         if include_down:
             if constant:
@@ -323,8 +331,8 @@ def _walk_forward_combination(
                 "PredictiveModelType": config.predictive_model_type,
                 "FeatureColumns": json.dumps(names),
                 "ExternalPredictors": external_json,
-                "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up"),
-                "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down"),
+                "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config)),
+                "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config)),
                 "MarketCalendar": market_calendars.get(observation),
                 "Window": window.number,
                 "Date": date,
@@ -373,7 +381,7 @@ def _prefilter_combination(
         # Keep the shared evaluator's geometry and qualification untouched. Only
         # this prefilter training context receives the independent seed.
         training_context = (
-            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed, predictive_model_type="external_only"), *context[2:],
+            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed, predictive_model_type="external_only", target_volatility_enabled=False), *context[2:],
         )
         result = _walk_forward_combination(
             row_values, training_context, cancellation_check, include_down=False,
@@ -1459,6 +1467,9 @@ def evaluate_walk_forward(
         ],
     }
     run_configuration["predictive_model_type"] = config.predictive_model_type
+    if volatility_enabled(config):
+        run_configuration["target_volatility"] = {**volatility_contract(config),
+            "provenance": ordered.attrs.get("target_volatility", {}), "source_quality": "retrospective_not_pit"}
     run_configuration["candidate_status"] = "qualified_candidates" if qualification["Eligible"].any() else "no_qualified_candidates"
     run_configuration["holdout_status"] = "executed" if evaluate_holdout and len(final_holdout) else "not_executed"
     run_configuration["data_status"] = "available"

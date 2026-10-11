@@ -26,6 +26,7 @@ from .domain import (
 from .processes import process_alive, process_creation_time
 from .prefilter_experiments import prefilter_checkpoint_batch_sizes
 from .repository import RunRepository, utc_now
+from .run_timing import observed_run_timing
 from rstock.checkpoints import (
     CHECKPOINT_IMPLEMENTATION_VERSION,
     CHECKPOINT_SCHEMA_VERSION,
@@ -685,6 +686,9 @@ class RunService:
                     "Seuls les walk-forward avec checkpoint et les calibrations "
                     "de paramètres de seuils sont reprenables."
                 )
+            if spec.job_type is JobType.END_TO_END:
+                from .end_to_end import validate_pipeline_resume
+                validate_pipeline_resume(self.repository, run_id)
             if spec.job_type in {JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER} and not (
                 self.repository.run_directory(run_id) / "checkpoints" / "manifest.json"
             ).exists():
@@ -1014,6 +1018,7 @@ class RunService:
                             "started_at": child_status.get("started_at"),
                             "finished_at": child_status.get("finished_at"),
                             "error": child_status.get("error"),
+                            **observed_run_timing(child_directory, child_status, child_progress),
                         }
                     )
         except (FileNotFoundError, ValueError, OSError):
@@ -1023,6 +1028,7 @@ class RunService:
             "metadata": self.repository.run_metadata(run_id).to_dict(),
             "storage": self.repository.storage(run_id),
             "status": self.repository.status(run_id),
+            "timing": observed_run_timing(self.repository.run_directory(run_id), self.repository.status(run_id)),
             "progress": self.repository.progress(run_id),
             "summary": self.repository.summary(run_id),
             "files": self.repository.result_files(run_id),
@@ -1041,7 +1047,8 @@ class RunService:
 
         Deliberately excludes progress, logs, checkpoints, manifests, child
         state, and result-file inventories.  ``get`` remains the full-detail
-        API for run pages and explicit actions.
+        API for run pages and explicit actions. Interrupted runs additionally
+        read bounded lifetime evidence so delayed detection is not execution.
         """
 
         summaries: list[HistoryRunSummary] = []
@@ -1052,6 +1059,8 @@ class RunService:
             status = self._refresh_interrupted(run_id)
             if job_types is not None and str(status.get("job_type")) not in job_types:
                 continue
+            if status.get("status") == "interrupted":
+                status = {**status, **observed_run_timing(self.repository.run_directory(run_id), status)}
             summaries.append(
                 HistoryRunSummary(
                     status=status,
@@ -1064,11 +1073,15 @@ class RunService:
         return summaries
 
     def list(self) -> list[dict[str, object]]:
-        return [
-            self._refresh_interrupted(run_id)
-            for run_id in self.repository.list_run_ids()
-            if self.repository.run_metadata(run_id).visible_in_history
-        ]
+        runs = []
+        for run_id in self.repository.list_run_ids():
+            if not self.repository.run_metadata(run_id).visible_in_history:
+                continue
+            status = self._refresh_interrupted(run_id)
+            if status.get("status") == "interrupted":
+                status = {**status, **observed_run_timing(self.repository.run_directory(run_id), status)}
+            runs.append(status)
+        return runs
 
 
 class ProgressReporter:
@@ -1243,7 +1256,10 @@ class ProgressReporter:
             self._persist(stage=event.stage, substage=event.substage, completed=completed, total=total, stage_percent=percent, eta=eta, details=dict(event.details))
 
 
-def running_duration(status: dict[str, object]) -> float:
+def running_duration(status: dict[str, object]) -> float | None:
+    if status.get("status") == "interrupted":
+        observed = status.get("observed_duration_seconds")
+        return float(observed) if isinstance(observed, (float, int)) else None
     started = status.get("started_at") or status["created_at"]
     end = status.get("finished_at") or datetime.now(timezone.utc).isoformat()
     return max(

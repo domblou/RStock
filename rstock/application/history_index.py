@@ -154,6 +154,11 @@ def history_index(run_service, *, job_types=None):
             status = run_service._refresh_interrupted(run_id)
         else:
             run_service._forget_interruption_observation(run_id)
+        if status.get("status") == "interrupted":
+            from .run_timing import observed_run_timing
+            timing = _cached(repository.run_directory(run_id) / "status.json", "timing",
+                             lambda: observed_run_timing(repository.run_directory(run_id), status))
+            status = {**status, **timing}
         if job_types is None or status.get("job_type") in job_types:
             records.append(HistoryIndexRecord(status, detail))
     return records

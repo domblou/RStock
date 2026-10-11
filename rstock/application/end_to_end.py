@@ -991,7 +991,7 @@ def _base_child_spec(
         parent,
         job_type=job_type,
         evaluate_final_holdout=False if job_type is JobType.WALK_FORWARD else parent.evaluate_final_holdout,
-        config=replace(parent.config, walk_forward_end_offset_sessions=0) if job_type is JobType.PREDICTOR_PREFILTER else parent.config,
+        config=replace(parent.config, walk_forward_end_offset_sessions=0, target_volatility_enabled=False) if job_type is JobType.PREDICTOR_PREFILTER else parent.config,
         derivation=None,
         experimental_overrides=(),
         prepared_snapshot_required=False,
@@ -1075,6 +1075,8 @@ def build_stage_spec(
                        prefilter_execution_version=2, evaluate_final_holdout=False)
         from .prefilter_contract import plan
         plan(repository, child)  # Reject an empty selection before materializing a WF job.
+        from .prefilter_contract import inherit_reference
+        child = inherit_reference(repository, child)
         if parent.derivation is not None and parent.derivation.fork_stage == "walk_forward":
             from .walk_forward_experiments import freeze_walk_forward_input
             child = freeze_walk_forward_input(repository, child,
@@ -1142,8 +1144,11 @@ def build_stage_spec(
     existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
     if existing.is_file():
         persisted = repository.load_spec(str(stage["child_run_id"]))
-        if not persisted.prepared_snapshot_required:
-            return persisted
+        # Deserialization retains the original snapshot fingerprint, including
+        # fields absent in historical JSON. Rebuilding an equivalent dataclass
+        # would insert modern serialization fields and change that identity.
+        # Existing children always execute their persisted, frozen contract.
+        return persisted
 
     walk_forward_id = effective_stage_run_id(manifest, "walk_forward")
     if walk_forward_id is None:
@@ -1296,6 +1301,43 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def validate_pipeline_resume(repository: RunRepository, run_id: str) -> list[dict[str, Any]]:
+    """Read-only preflight of materialized children; never replace completed work."""
+    manifest = load_pipeline_manifest(repository, run_id)
+    if manifest is None:
+        return []  # An interruption before reservation has nothing to reuse.
+    parent = repository.load_spec(run_id)
+    if parent.fingerprint != repository.configuration_fingerprint(run_id):
+        raise ValueError("Frozen End-to-end parent snapshot changed")
+    manifest = persist_or_validate_pipeline_manifest(repository, run_id, parent)
+    verified = []
+    for stage in manifest["stages"]:
+        key = stage["stage_key"]
+        child_id = effective_stage_run_id(manifest, key)
+        if key not in REQUIRED_ARTIFACTS or child_id is None:
+            continue
+        if not repository.run_directory(child_id).exists():
+            if stage.get("artifact_digests"):
+                raise ValueError(f"Previously published child is missing: {key}/{child_id}")
+            continue
+        child = repository.load_spec(child_id)
+        expected = stage.get("expected_fingerprint")
+        if expected is not None and (
+            child.fingerprint != expected
+            or repository.configuration_fingerprint(child_id) != expected
+        ):
+            raise ValueError(f"Frozen child snapshot changed: {key}/{child_id}")
+        status = repository.status(child_id)["status"]
+        if status == "completed":
+            actual = artifact_digests(repository, child_id, key)
+            if stage.get("artifact_digests") and stage["artifact_digests"] != actual:
+                raise ValueError(f"Completed child artifacts changed: {key}/{child_id}")
+        elif stage.get("artifact_digests"):
+            raise ValueError(f"Previously published child is no longer completed: {key}/{child_id}")
+        verified.append({"stage_key": key, "child_run_id": child_id, "status": status})
+    return verified
 
 
 def artifact_digests(

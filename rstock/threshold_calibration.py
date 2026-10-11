@@ -32,7 +32,8 @@ from .features import (
 )
 from .modeling import (XGBoostParameters, fit_booster, predict_probabilities,
                       append_training_record, write_probability_training_audit)
-from .parallel import process_cancellation_requested, run_combination_tasks
+from .parallel import process_cancellation_requested, run_combination_tasks, iter_indexed_combination_batches
+from .checkpoints import CheckpointManager
 from .progress import (
     CancellationCheck,
     ProgressCallback,
@@ -837,14 +838,16 @@ def generate_development_probabilities(
     parameters_by_direction: Mapping[str, XGBoostParameters] | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
+    checkpoint_manager: CheckpointManager | None = None,
+    checkpoint_key: str | None = None,
 ) -> pd.DataFrame:
     """Generate out-of-sample development probabilities with expanding windows."""
 
     shared = parameters or EXPERIMENTAL_XGBOOST_PARAMETERS
     directional = parameters_by_direction or {"Up": shared, "Down": shared}
     context = (development, config, min_train_size, test_size, step_size, directional)
-    results = run_combination_tasks(
-        [row.to_dict() for _, row in sampled_sets.iterrows()],
+    items = [row.to_dict() for _, row in sampled_sets.iterrows()]
+    arguments = dict(
         combination_workers=config.combination_workers,
         worker_context=context,
         context_initializer=_set_threshold_development_context,
@@ -856,6 +859,34 @@ def generate_development_probabilities(
         cancellation_check=cancellation_check,
         details={"directions": 2, "combination_workers": config.combination_workers},
     )
+    if checkpoint_manager is None:
+        results = run_combination_tasks(items, **arguments)
+    else:
+        if not checkpoint_key:
+            raise ValueError("Development probability checkpoint identity is required")
+        batch_size = config.walk_forward_batch_size
+        count = (len(items) + batch_size - 1) // batch_size
+        resolved = {}
+        def artifact(batch_id):
+            return f"development_probability_batch_{checkpoint_key}_{batch_size}_{batch_id}"
+        for batch_id in range(count):
+            if checkpoint_manager.artifact_exists(artifact(batch_id)):
+                payload = checkpoint_manager.load_artifact(artifact(batch_id))
+                if payload["sample_key"] != checkpoint_key:
+                    raise ValueError("Development probability batch identity changed")
+                resolved[batch_id] = payload["results"]
+        batches = iter_indexed_combination_batches(
+            items, batch_size=batch_size, completed_batch_ids=tuple(resolved), **arguments,
+        )
+        try:
+            for batch in batches:
+                checkpoint_manager.commit_artifact(artifact(batch.batch_id), {
+                    "sample_key": checkpoint_key, "results": batch.results,
+                })
+                resolved[batch.batch_id] = batch.results
+        finally:
+            batches.close()
+        results = [result for batch_id in range(count) for result in resolved[batch_id]]
     return pd.DataFrame([record for result in results for record in result])
 
 

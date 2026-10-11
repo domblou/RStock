@@ -123,6 +123,15 @@ def inherit_reference(repository: RunRepository, spec: ExperimentSpec) -> Experi
         prepared_snapshot_required=True, prepared_dataset_digest_required=True,
     )
     load(repository, inherited)
+    from rstock.target_volatility import enabled, derivation_source
+    if enabled(inherited.config) and inherited.target_volatility_source is None:
+        from .derived_snapshot import load_source_prepared_snapshot
+        prepared, _, targets, _ = load_source_prepared_snapshot(repository,
+            replace(inherited, config=replace(inherited.config, target_volatility_enabled=False)),
+            source_run_id=inherited.source_prefilter_run, source_job_type=JobType.PREDICTOR_PREFILTER,
+            expected_snapshot_sha256=contract["prepared_snapshot_sha256"])
+        inherited = replace(inherited, target_volatility_source=derivation_source(
+            prepared, targets, inherited.config, inherited.calendar, contract["cutoff"]))
     return inherited
 
 

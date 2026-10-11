@@ -460,6 +460,19 @@ class RunRepository:
                 (datetime.fromisoformat(now) - datetime.fromisoformat(started)).total_seconds(),
             )
         status["status"] = target.value
+        if target is JobStatus.INTERRUPTED:
+            from .run_timing import observed_run_timing
+            timing = observed_run_timing(self.run_directory(run_id), status)
+            status.update(
+                worker_last_observed_at=timing["last_observed_at"],
+                observed_duration_seconds=timing["observed_duration_seconds"],
+                interruption_detected_at=now,
+                detection_delay_seconds=timing["detection_delay_seconds"],
+            )
+        elif target in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.COMPLETED}:
+            for key in ("worker_last_observed_at", "observed_duration_seconds",
+                        "interruption_detected_at", "detection_delay_seconds"):
+                status.pop(key, None)
         self.write_json(run_id, "status.json", status)
         return status
 

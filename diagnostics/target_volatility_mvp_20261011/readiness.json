@@ -1,0 +1,170 @@
+{
+  "source": "20261011T115541_2a0e278563",
+  "jobs_created": 0,
+  "jobs_launched": 0,
+  "source_quality": "retrospective_not_pit",
+  "historical_inputs_unchanged": true,
+  "coverage": {
+    "BNY": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "MRK": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "AAPL": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "CVX": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "REGN": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "MU": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "CSCO": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "COST": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "BMY": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "STX": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "AMZN": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "TSLA": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "VRTX": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "USB": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "ADBE": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "PM": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "TMO": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "MSFT": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "CEG": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    },
+    "TT": {
+      "control_observations": 748,
+      "enriched_observations": 748,
+      "same_training_calendar": true
+    }
+  },
+  "source_sha256": {
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\.worker.lock.guard": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\config.json": "68e431bd0a0c1f5a6f8446e06d6ff242af18d463c34149570316276f3f4662fc",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\metadata.json": "828b27eeec9d3c5eac16d400ef109c8bc511ce61d328b4276020227540546041",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\progress.json": "fdc4d2592d501aeb90a73b1858fba9c8382efe8ad4cc4ac438b250f0039f5a7a",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\run.log": "4428eadfb03c4f0c868af004be4d50b4e979d0b431ff1edef9d54f6b245c4ff5",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\status.json": "e9da4ca5d242501ffb48235b970483050fa2aa2a48837b7b2b7259a1d3d931b1",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\summary.json": "2cb36de00b4a269190af942132ac3d2aa9a755ec3451c842f65e93733ad43055",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\aggregation.sqlite": "2bb7e94f6afb28ae18d1acdb56254622891c1123757e6b5dffb6c86edc88e4d4",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\manifest.json": "bd465d4972785cf50c28b63219036cb49b68ec749bb02cefbcb4023809de8002",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\.context_diagnostic.lock": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\aggregate_by_set.csv": "99c4d05d32cea8c65aa570ada9afb8b6fb61d78d31ad62cf6480858606b00af6",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\aggregate_by_window.csv": "d18f20f67ec4a77699f1e5d960284ebc73df66454f00a710f5602bfcc892365e",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\aggregate_global.csv": "8de532d9a1c9156abb43b85253806a9ddf9386f3af0a62de75b0880ba79953ea",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\context_diagnostic_attempt.json": "05ca34a35a9e22c7203932eb6c0a0f9eecf7d17b9ba8b29e6a8443700954e203",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\context_diagnostic_manifest.json": "05ca34a35a9e22c7203932eb6c0a0f9eecf7d17b9ba8b29e6a8443700954e203",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\final_holdout.csv": "fa81d6249e76775fcc47c1f71999c7565981251951c3162635a40605c0ed1d38",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\final_holdout_predictions.csv": "8a3e1d9272cee731d999554512002bdd85dff2dd394b71d25223e8f131f9363e",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\final_holdout_risk.csv": "2744cd65b947a9f8365ed127cb3f1a87da48780c86220a1e42267197c4455619",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\predictions.csv": "c58dd5e2fd449809def1485f00ffd9abbbe5366d6755589f0e5285408c575440",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\qualification.csv": "6004120a721bb479763f202ce9211ad0ad37a40fa4cd96296a12b95147d762d4",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\risk_by_set.csv": "67cf599908daeae07cd8e73322764290fb957bad41cf332619def68907472eec",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\risk_by_window.csv": "98f08bdc14286e8f506ba36d6cc7fb7e5aef26f619e69dca07d9e33a6e48cec2",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\risk_global.csv": "fd14a1755015b933a3aa4ea28e54f44e143096287d613a2df7407acbdcc7380f",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\run_configuration.json": "d9ba065e6f337c89fefb0948cee6db49a3399b7e33b50cd3130757ce1928ba01",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\selection_results.csv": "e998461182fa383b9728087b825bb2e9eae4a718e5d9abf148636e6b0eb7ce35",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\results\\windows.csv": "e0434d01b460b974f9c9bc52bc4c8d6e4c31967f3ba0706f62e44a82cce7284c",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\telemetry\\batches.jsonl": "c7800413c10e16c3ba8dd43056325853a4ad06ef0d05e56ee442f11bc3a82230",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\telemetry\\resource_summary.json": "b3d6509069ddffd316ad6ea8c8b751ea74a5d62f9a6adf9b4898d9556ec71a8a",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\telemetry\\samples.jsonl": "46b0ae141bf91d6cf5b7478a1854f900e488df1c3778b0e27300d9d86963fa5b",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\aggregation.json": "3d4a918a146a3f987300a3c8d70f3203282f4a4e60fa2cc10c717b4546282b7b",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\aggregation.pkl": "38af9cd08754123ffff8b4d7b54702674b5f973ff8af3ac0119830734fdff5ee",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\effective_combination_plan.json": "621ad5a1fb66452fc9b2a63afecf906c7a34cf16585d4a2a8818fb56ebdd58da",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\effective_combination_plan.pkl": "75db810a3edd357020ba6bd4162cd159559e7c1d122b060df14413dfca19aa86",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\final_holdout_aggregate.json": "3e334c68a3c3776d7e94da772fed7839db0ed6e511e20dd455d02c0dfa7be311",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\final_holdout_aggregate.pkl": "c291911e999a6a76ee37068f9dcd25e34d49892b7fdd605851e06a66af7c1064",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\metrics.json": "d86be4b9823a8b5f7d9a34cbecf48ba730a6ab456e1fb8237b1feede5764fda5",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\metrics.pkl": "053e3eaff47fac8c97c9bab73ca46c9837c533af8d08ff8d40e20a6c336143e2",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\prepared_snapshot.json": "659d80b89bf524d6833507c1faba76fa55159986ffc80d0643462ef350f5d488",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\prepared_snapshot.pkl": "bcce9917e3c6c48f2500b093e3fe97b0ec040f8430a24ea732c1411c946f229d",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\qualification.json": "962081363edbe76c4e0f1056cbb3c2b4c857d94489a5d1ffb6f84699aaf29b6e",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\qualification.pkl": "12f646fa37860100d5d837d3df55c98cd71b6faf115088dc25bef92b3bed9b59",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\raw_combination_plan.json": "4757f15db543a8d69ebc2fb7f510e42e39e21f19db220d05482c49d8c0d3dfab",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\raw_combination_plan.pkl": "75db810a3edd357020ba6bd4162cd159559e7c1d122b060df14413dfca19aa86",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\result_summary.json": "50428c3db1fac450a4e261806e9fb11f5b989864751094befb5b808d005662ff",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\artifacts\\result_summary.pkl": "b9855e7dfcec3b6f65235618b41537e23c4eb35201e223866a5f78c514e95416",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\batches\\final_holdout\\batch-000000\\complete.json": "0544a02c1aed49953c6c6892d4847f974e657274ffe5e6b1da5237eee9fa49d3",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\batches\\final_holdout\\batch-000000\\metadata.json": "0544a02c1aed49953c6c6892d4847f974e657274ffe5e6b1da5237eee9fa49d3",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\batches\\final_holdout\\batch-000000\\payload.pkl": "6f0588be7bc7391fa11a66b67967d6ad2c67935a7d19ec7dfe7db04503d898ed",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\batches\\walk_forward\\batch-000000\\complete.json": "a97303ab8105bf7b43ca1e7d26d20c2046c5a94cb8620d61fbd05ee37feecc64",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\batches\\walk_forward\\batch-000000\\metadata.json": "a97303ab8105bf7b43ca1e7d26d20c2046c5a94cb8620d61fbd05ee37feecc64",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\checkpoints\\batches\\walk_forward\\batch-000000\\payload.pkl": "5e9aaea158e3de2ed0ffa766d563686542bda8a33bed6f3b2d5b45b00bd1ae22",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\.context.lock": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\d97ccd85e095ea200b9c\\acquisitions\\d855648df95f453f8464b0c0f2e9c67c\\acquisition_manifest.json": "0eb7f58a1ccec5dd938d3d0378c575cc5efedce0b110ba6eddc9b40a6a59c20b",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\d97ccd85e095ea200b9c\\acquisitions\\d855648df95f453f8464b0c0f2e9c67c\\response.csv": "eae63bd38a2faee82d4ad60502aefea71f1519a3b628de816852f40cd10de6c2",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\d97ccd85e095ea200b9c\\revisions\\3cd9d59aaf33f8d70381d7ad\\market_context.csv": "fc425a23c0c0b9a6d069d1db02bbc2231c11280fa42d84503338d5a0ed20e788",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\d97ccd85e095ea200b9c\\revisions\\3cd9d59aaf33f8d70381d7ad\\market_context_manifest.json": "c93ebc07c1f1a9c053c974587165f9a6e8632496c11dd90fae46be04e570208d",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\d97ccd85e095ea200b9c\\revisions\\3cd9d59aaf33f8d70381d7ad\\market_episodes.csv": "56e28021656e883e3c5827f3964353d1b2bfbeacf4d4bb13fce3eaf8157f3077",
+    "C:\\Dev\\RStock\\runs\\20261011T115541_2a0e278563\\diagnostics\\market_context\\d97ccd85e095ea200b9c\\revisions\\3cd9d59aaf33f8d70381d7ad\\spy_adjusted_snapshot.csv": "ba081856f45eeb577a5c2984a27ade7f92502795bb0f971c001c3b03e4394e26"
+  },
+  "protocol": "Aligned constant on common WF training; no volatility definition search; independent holdout kept."
+}

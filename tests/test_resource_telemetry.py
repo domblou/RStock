@@ -81,6 +81,32 @@ def test_resource_resume_reconciles_an_unfinished_attempt(tmp_path, monkeypatch)
     assert attempts[0]["phase_rows"][0]["finished_at"] is None
 
 
+def test_background_summary_refresh_reconciles_persisted_attempts(tmp_path, monkeypatch):
+    class Thread:
+        def __init__(self, **kwargs):
+            pass
+        def start(self):
+            pass
+        def join(self, **kwargs):
+            pass
+    monkeypatch.setattr(resource_telemetry.threading, "Thread", Thread)
+    recorder = resource_telemetry.ResourceRecorder(tmp_path / "run", "run", {})
+    path = tmp_path / "run/telemetry/resource_summary.json"
+    persisted = json.loads(path.read_text())
+    before_samples = persisted["attempts"][0]["sample_count"]
+    external = {"attempt_id": "external", "status": "completed", "marker": "must survive"}
+    persisted["attempts"].append(external)
+    path.write_text(json.dumps(persisted))
+    waits = iter([False, True])
+    monkeypatch.setattr(recorder.stop_event, "wait", lambda seconds: next(waits))
+    recorder._sampling_loop()
+    updated = json.loads(path.read_text())
+    assert updated["attempts"][0]["sample_count"] > before_samples
+    assert updated["attempts"][1] == external
+    recorder.close("completed")
+    assert json.loads(path.read_text())["attempts"][1] == external
+
+
 def test_aggregation_subphases_persist_in_resource_summary(tmp_path):
     run = tmp_path / "run"
     recorder = resource_telemetry.ResourceRecorder(run, "run", {})

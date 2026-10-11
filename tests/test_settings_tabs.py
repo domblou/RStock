@@ -62,7 +62,8 @@ def test_tabs_preserve_all_existing_controls_and_defaults(tmp_path):
                      ("number_input", "text_input", "selectbox", "checkbox", "button")
                      for item in getattr(app, kind))
     # Frozen inventory from the settings page before its reorganisation.
-    assert actual == Counter([*EXPECTED_CONTROLS, ("selectbox", "Type de modèle prédictif")])
+    assert actual == Counter([*EXPECTED_CONTROLS, ("selectbox", "Type de modèle prédictif"),
+                              ("checkbox", "Ajouter la volatilité du titre cible"), ("number_input", "Nombre de séances")])
     before = replace(DEFAULT_CONFIG, project_root=tmp_path)
     assert app.session_state["lab_config"] == before
     assert not user_settings_path(tmp_path).exists()

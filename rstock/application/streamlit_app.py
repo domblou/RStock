@@ -1100,12 +1100,17 @@ def _experiments(service: ExperimentService) -> None:
     if selected_job_type in {JobType.WALK_FORWARD, JobType.END_TO_END}:
         model_type = _predictive_model_input(run_config.predictive_model_type, "launch-predictive-model-type")
         run_config = replace(run_config, predictive_model_type=model_type)
+        volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=run_config.target_volatility_enabled,
+            disabled=model_type == "constant_probability", key="launch-target-volatility",
+            help="Clôtures ajustées connues avant la séance prédite. Historique Yahoo rétrospectif, sans garantie point-in-time.")
+        volatility_sessions = st.number_input("Nombre de séances", min_value=2, value=run_config.target_volatility_sessions, key="launch-target-volatility-sessions")
+        run_config = replace(run_config, target_volatility_enabled=volatility_enabled, target_volatility_sessions=int(volatility_sessions))
         uses_externals = model_type in {"external_only", "target_and_external"}
         enabled = st.checkbox("Activer le pré-filtrage", value=run_config.predictor_prefilter_enabled,
                               disabled=not uses_externals, key="launch-predictive-prefilter")
         run_config = replace(run_config, predictor_prefilter_enabled=enabled and uses_externals)
     elif selected_job_type is JobType.PREDICTOR_PREFILTER:
-        run_config = replace(run_config, predictive_model_type="external_only")
+        run_config = replace(run_config, predictive_model_type="external_only", target_volatility_enabled=False)
     prefilter_method = run_config.prefilter_selection_mode if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} else "single_origin"
     stability_origin_count = 5
     stability_step_sessions = 1
@@ -1527,6 +1532,12 @@ def _render_common_prediction_comparison(run_ids: list[str]) -> None:
     render_dataframe(metrics.rename(columns={"PredictiveModelType": "Type de modèle",
         "CommonObservations": "Observations communes", "ExcludedObservations": "Observations exclues"}),
         hide_index=True, width="stretch")
+    alignment = audit.get("training_alignment", {})
+    if alignment.get("status") == "verified":
+        st.caption("Constante recalculée sur les mêmes labels d’apprentissage, le même masque de disponibilité et les mêmes blocs test que les variantes comparées. Les runs historiques restent inchangés.")
+        render_dataframe(pd.DataFrame(alignment["diagnostics"]), hide_index=True, width="stretch")
+    elif alignment:
+        st.warning("Dates test communes uniquement : les entraînements ne sont pas vérifiés comme identiques. La constante historique n’est pas une référence parfaitement alignée. " + alignment.get("reason", ""))
     holdout_audit, holdout_metrics = compare_common_predictions(st.session_state.lab_config.project_root, run_ids, phase="holdout")
     if holdout_audit["status"] == "available":
         st.subheader("Holdout sur les observations communes")
@@ -1567,6 +1578,13 @@ def _settings() -> None:
         max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
         st.subheader('Types de modèles')
         predictive_model_type = _predictive_model_input(current.predictive_model_type, "settings-predictive-model-type", widget=st)
+        st.subheader("Volatilité passée du titre cible")
+        target_volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=current.target_volatility_enabled,
+            disabled=predictive_model_type == "constant_probability", key="settings-target-volatility",
+            help="Une seule variable par cible : volatilité annualisée des rendements logarithmiques ajustés, arrêtée à J−1. Les données Yahoo sont rétrospectives, sans garantie point-in-time.")
+        target_volatility_sessions = st.number_input("Nombre de séances", min_value=2, value=current.target_volatility_sessions, key="settings-target-volatility-sessions")
+        if predictive_model_type != "external_only":
+            st.caption("Type expérimental : disponible uniquement en Walk-forward (WF) et, pour « Titre cible + externes », avec préfiltre des externes. Non disponible pour les calibrations, les seuils, la promotion ou le Forward/Production.")
         st.caption("Un seul type par job. Les résultats se comparent dans Comparer.")
     with tabs[2]:
         st.subheader("Pré-filtrage des prédicteurs")
@@ -2042,6 +2060,8 @@ def _settings() -> None:
             permutation_depth=int(permutation),
             max_generated_sets=int(max_sets),
             predictive_model_type=predictive_model_type,
+            target_volatility_enabled=target_volatility_enabled,
+            target_volatility_sessions=int(target_volatility_sessions),
             lag_depth=int(lag),
             intraday_target_threshold=float(up_threshold),
             intraday_down_threshold=float(down_threshold),
@@ -3028,6 +3048,17 @@ def _render_run_resources(run_id: str) -> None:
         st.info("Télémétrie indisponible pour ce run")
         return
 
+    displayed_seconds = attempt.get("elapsed_seconds")
+    run_status = _read_light_json(root.parent / "status.json") or {}
+    interrupted_attempt = run_status.get("status") == "interrupted" and attempt_number == len(attempts)
+    if interrupted_attempt:
+        from rstock.application.run_timing import observed_run_timing
+        timing = observed_run_timing(root.parent, run_status)
+        displayed_seconds = timing["observed_duration_seconds"]
+        if attempt.get("status") == "running":
+            st.caption("Résumé de ressources non finalisé. La durée observée provient des dernières traces du worker ; "
+                       "les moyennes CPU du résumé historique peuvent être incomplètes.")
+
     def cpu_text(cores: object) -> str:
         logical = attempt.get("logical_processors")
         if not isinstance(cores, (int, float)) or not isinstance(logical, int) or logical < 1:
@@ -3046,7 +3077,7 @@ def _render_run_resources(run_id: str) -> None:
         "Le RSS additionné peut inclure des pages partagées."
     )
     summary = st.columns(7)
-    summary[0].metric("Durée", _duration(attempt.get("elapsed_seconds")))
+    summary[0].metric("Durée observée" if interrupted_attempt else "Durée", _duration(displayed_seconds))
     summary[1].metric("CPU moyen", cpu_text(attempt.get("cpu_mean_cores")))
     summary[2].metric("CPU max échantillonné", cpu_text(attempt.get("cpu_max_sampled_cores")))
     summary[3].metric("Pic RSS simultané", memory_text(attempt.get("rss_peak_sampled_bytes")))
@@ -3078,7 +3109,7 @@ def _render_run_resources(run_id: str) -> None:
     if attempt.get("error"):
         st.caption(f"Erreur : {attempt['error']}")
 
-    execution_seconds = max(0.0, float(attempt.get("elapsed_seconds") or 0) - wait_total)
+    execution_seconds = max(0.0, float(displayed_seconds or 0) - wait_total)
     phase_rows = []
     for phase in attempt.get("phase_rows", []):
         if not isinstance(phase, dict):
@@ -4320,9 +4351,12 @@ def _render_derived_creation(
                 value = st.selectbox("Mode de sélection", modes, index=modes.index(original),
                                      key=f"derive-value-{run_id}-{fork}-{field}")
             elif isinstance(original, bool):
-                value = st.checkbox(field, value=original, key=f"derive-value-{run_id}-{fork}-{field}")
+                value = st.checkbox("Ajouter la volatilité du titre cible" if field == "target_volatility_enabled" else field,
+                                    value=original, key=f"derive-value-{run_id}-{fork}-{field}")
             elif isinstance(original, int):
-                value = st.number_input(field, value=original, step=1, key=f"derive-value-{run_id}-{fork}-{field}")
+                value = st.number_input("Nombre de séances" if field == "target_volatility_sessions" else field,
+                    value=original, step=1, key=f"derive-value-{run_id}-{fork}-{field}",
+                    **({"min_value": 2} if field == "target_volatility_sessions" else {}))
             elif isinstance(original, float):
                 value = st.number_input(field, value=original, format="%.6f", key=f"derive-value-{run_id}-{fork}-{field}")
             else:
@@ -4554,6 +4588,10 @@ def _render_walk_forward_derived_creation(
         widget_key = f"wf-derive-{run_id}-{field}"
         if field == "predictive_model_type":
             value = _predictive_model_input(original, widget_key, widget)
+        elif field == "target_volatility_enabled":
+            value = widget.checkbox("Ajouter la volatilité du titre cible", value=original, key=widget_key)
+        elif field == "target_volatility_sessions":
+            value = int(widget.number_input("Nombre de séances", min_value=2, value=original, key=widget_key))
         elif field == "walk_forward_window_mode":
             modes = ("expanding", "rolling")
             value = widget.selectbox(label, modes, index=modes.index(original), key=widget_key)
@@ -4599,6 +4637,8 @@ def _render_walk_forward_derived_creation(
 
     with st.container(border=True):
         field_input("predictive_model_type", st)
+        field_input("target_volatility_enabled", st)
+        field_input("target_volatility_sessions", st)
         st.subheader("Géométrie Walk-forward")
         for field in WF_GEOMETRY_FIELDS:
             field_input(field, st)
@@ -4706,6 +4746,9 @@ def _render_pipeline_summary(
     if not rows:
         st.info("Le manifest du pipeline n'est pas encore disponible.")
         return
+    if any(row["Statut"] == "interrupted" for row in rows):
+        st.caption("Pour les étapes interrompues, la durée va jusqu’à la dernière observation du worker. "
+                   "Le délai de détection est affiché séparément ; le temps observé inclut les attentes.")
     failed = [row for row in rows if row["Statut"] == "failed"]
     running = [row for row in rows if row["Statut"] == "running"]
     if failed:
@@ -5516,6 +5559,14 @@ def _render_run_detail_view(
         if status["job_type"] == JobType.FORWARD_SIMULATION.value:
             policy = detail.get("configuration", {}).get("forward_policy") or "FROZEN"
             st.caption("Mode : Figé" if policy == "FROZEN" else f"Mode : {policy}")
+    if status.get("status") == "interrupted":
+        timing = detail.get("timing", {})
+        st.caption(
+            f"Dernière observation : {timing.get('last_observed_at') or 'inconnue'} · "
+            f"Interruption détectée : {timing.get('interruption_detected_at') or status.get('finished_at')} · "
+            f"Délai de détection : {_duration(timing.get('detection_delay_seconds'))}. "
+            "La durée observée inclut les attentes ; l’heure exacte d’arrêt est inconnue."
+        )
     if status.get("job_type") in {"walk_forward", "end_to_end"}:
         from rstock.application.common_prediction_comparison import result_availability, STATE_LABELS
         availability = result_availability(st.session_state.lab_config.project_root / "runs" / run_id)

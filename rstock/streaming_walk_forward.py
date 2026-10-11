@@ -1127,6 +1127,10 @@ def run_streamed_walk_forward(
             evaluate_holdout=evaluate_holdout,
         )
         run_configuration.update(dict(run_configuration_extras or {}))
+        from .target_volatility import enabled, contract
+        if enabled(config):
+            run_configuration["target_volatility"] = {**contract(config),
+                "provenance": ordered.attrs.get("target_volatility", {}), "source_quality": "retrospective_not_pit"}
         run_configuration["candidate_status"] = "qualified_candidates" if qualification["Eligible"].any() else "no_qualified_candidates"
         run_configuration["holdout_status"] = "executed" if evaluate_holdout and len(final_holdout) else "not_executed"
         run_configuration["data_status"] = "available"

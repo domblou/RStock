@@ -455,10 +455,22 @@ def production_training_config(config: RStockConfig, model: Any) -> RStockConfig
             raise ValueError("Incomplete frozen round selection policy")
         changes = {key: policy[key] for key in ROUND_SELECTION_FIELDS}
         changes["xgb_rounds"] = policy["fallback_rounds"]
-    return replace(config, **changes, predictive_model_type="external_only", xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads)
+    source = model.source_configuration.get("rstock_config", {})
+    return replace(config, **changes, predictive_model_type="external_only", xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads,
+                   target_volatility_enabled=source.get("target_volatility_enabled", False),
+                   target_volatility_sessions=source.get("target_volatility_sessions", 21))
 
 
 def validate_production_round_contract(model: Any, metadata: Mapping[str, Any]) -> None:
+    from rstock.config import DEFAULT_CONFIG
+    from dataclasses import replace
+    from rstock.target_volatility import contract
+    source = model.source_configuration.get("rstock_config", {})
+    expected = contract(replace(DEFAULT_CONFIG, target_volatility_enabled=source.get("target_volatility_enabled", False),
+        target_volatility_sessions=source.get("target_volatility_sessions", 21)))
+    actual = metadata.get("target_volatility", {"enabled": False})
+    if actual.get("enabled") != expected["enabled"] or (expected["enabled"] and actual != expected):
+        raise ValueError("Production target volatility contract mismatch")
     if model.source_configuration.get("rstock_config", {}).get("predictive_model_type", "external_only") != "external_only":
         raise ValueError("This predictive model type is not enabled for Production")
     policy = model.round_selection_policy

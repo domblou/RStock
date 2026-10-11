@@ -18,11 +18,13 @@ from rstock.combinations import canonical_combination_id
 from rstock.features import (
     intraday_down_target_column, intraday_return_column, intraday_target_column, mae_column, mfe_column,
     predictor_columns,
+    model_predictor_columns,
     prepare_dataset, prepare_prediction_row,
 )
 from rstock.modeling import (fit_booster, predict_probabilities, selected_xgboost_parameters,
                             booster_training_record, round_selection_snapshot)
 from rstock.persistence import load_booster
+from rstock.target_volatility import contract as volatility_contract
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from rstock.traceability import prepared_dataset_hash
 
@@ -412,7 +414,7 @@ def build_forward_model_snapshot(
             continue
         symbols = json.loads(set_name)
         target, predictors = str(symbols[0]), tuple(str(item) for item in symbols[1:])
-        names = predictor_columns(prepared, predictors, spec.config.lag_depth, spec.config.date_feature_regex)
+        names = model_predictor_columns(prepared, target, predictors, spec.config)
         up_name, down_name = intraday_target_column(target), intraday_down_target_column(target)
         training = prepared.loc[prepared.index <= cutoff, [*names, up_name, down_name]].dropna()
         if training.empty:
@@ -441,6 +443,7 @@ def build_forward_model_snapshot(
             "predictors": list(predictors), "direction": direction,
             "canonical_combination_id": canonical_combination_id(target, direction, predictors),
             "feature_names": list(names), "lag_depth": spec.config.lag_depth,
+            "target_volatility": volatility_contract(spec.config),
             "xgboost_parameters": selected_xgb,
             "round_selection_policy": round_selection_snapshot(spec.config),
             "round_selection_records": training_records,
@@ -494,6 +497,10 @@ def run_forward_simulation(
     # executable with their frozen spec; manual recovery requires the stronger
     # hash check above.
     snapshot = validate_forward_snapshot(runs, spec, require_expected_hash=False)
+    source_config = runs.load_spec(spec.source_end_to_end_run).config
+    spec = replace(spec, config=replace(spec.config,
+        target_volatility_enabled=source_config.target_volatility_enabled,
+        target_volatility_sessions=source_config.target_volatility_sessions))
     root = runs.run_directory(spec.source_end_to_end_run)
     if not snapshot.get("models"):
         summary = {
@@ -524,6 +531,11 @@ def run_forward_simulation(
         raise ValueError("Forward period must be strictly after the source cutoff")
     downloaded, _ = MarketDataService().load(spec, as_of=end.date(), cancellation_check=cancellation_check)
     prepared = prepare_dataset(downloaded.prices, downloaded.symbols, spec.config.intraday_target_threshold, spec.config.lag_depth, spec.config.intraday_down_threshold)
+    from rstock.target_volatility import contract
+    for model in snapshot["models"]:
+        expected = model.get("target_volatility", {"enabled": False})
+        if expected.get("enabled") != contract(spec.config)["enabled"] or (expected.get("enabled") and expected != contract(spec.config)):
+            raise ValueError("Forward target volatility contract differs from frozen model")
     if prepared.empty or prepared.index.max() < end:
         raise ValueError("insufficient_forward_market_data")
     calendar = xcals.get_calendar(spec.calendar)

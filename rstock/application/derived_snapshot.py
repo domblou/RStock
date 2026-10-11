@@ -100,4 +100,13 @@ def load_source_prepared_snapshot(
     )
     prepared = prepared.copy()
     prepared.attrs["prepared_dataset_digest_verification"] = verification
+    from rstock.target_volatility import enabled, attach, load_prices, column, VERSION
+    if enabled(spec.config):
+        if spec.target_volatility_source is not None:
+            prepared = attach(prepared, load_prices(spec.config.project_root, spec.target_volatility_source),
+                              targets, spec.config, spec.calendar, spec.target_volatility_source)
+        elif (prepared.attrs.get("target_volatility", {}).get("definition_version") != VERSION
+              or prepared.attrs.get("target_volatility", {}).get("sessions") != spec.config.target_volatility_sessions
+              or any(column(t, spec.config.target_volatility_sessions) not in prepared for t in targets)):
+            raise ValueError("Frozen target volatility source required; no acquisition is allowed during resume")
     return prepared, list(predictors), list(targets), dict(calendars)

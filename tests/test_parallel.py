@@ -12,6 +12,7 @@ from rstock.progress import CancellationRequested
 
 
 _TEST_CONTEXT: dict[int, float] | None = None
+_STALL_MARKER = None
 
 
 def _set_test_context(context: dict[int, float]) -> None:
@@ -31,6 +32,66 @@ def _serial_task(item: int, context: dict[int, float], cancellation_check) -> in
     if cancellation_check is not None and cancellation_check():
         raise CancellationRequested("cancelled serially")
     return item * 10
+
+
+def _stalled_initializer(context) -> None:
+    time.sleep(30)
+
+
+def _set_stall_context(path):
+    global _STALL_MARKER
+    _STALL_MARKER = path
+
+
+def _uncooperative_task(item):
+    _STALL_MARKER.write_text("started")
+    time.sleep(30)
+    return item
+
+
+def test_cancellation_terminates_a_task_that_does_not_poll_the_event(monkeypatch, tmp_path):
+    import multiprocessing as mp
+    import rstock.parallel as parallel
+    before = {process.pid for process in mp.active_children()}
+    marker = tmp_path / "task_started"
+    monkeypatch.setattr(parallel, "POOL_STOP_SECONDS", .2)
+    started = time.monotonic()
+    with pytest.raises(CancellationRequested):
+        run_combination_tasks(
+            [0, 1], combination_workers=2, worker_context=marker,
+            context_initializer=_set_stall_context, process_task=_uncooperative_task,
+            serial_task=_serial_task, item_label=str, stage="test",
+            cancellation_check=marker.exists,
+        )
+    assert marker.exists()
+    assert time.monotonic() - started < 10
+    assert {process.pid for process in mp.active_children()} <= before
+
+
+def test_stalled_initializer_times_out_and_reaps_owned_workers(monkeypatch):
+    import multiprocessing as mp
+    import rstock.parallel as parallel
+    before = {process.pid for process in mp.active_children()}
+    monkeypatch.setattr(parallel, "POOL_STARTUP_SECONDS", 0.5)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="workers initialized"):
+        list(iter_ordered_process_results(
+            [0], workers=1, initializer=_stalled_initializer,
+            context=None, task=_process_task,
+        ))
+    assert time.monotonic() - started < 10
+    assert {process.pid for process in mp.active_children()} <= before
+
+
+def test_consecutive_spawn_pools_do_not_use_manager_rpc(monkeypatch):
+    import rstock.parallel as parallel
+    monkeypatch.setattr(parallel.mp, "Manager", lambda: pytest.fail("Manager RPC must not be used"))
+    for _ in range(3):
+        assert run_combination_tasks(
+            [0, 1, 2, 3], combination_workers=4, worker_context={item: .01 for item in range(4)},
+            context_initializer=_set_test_context, process_task=_process_task,
+            serial_task=_serial_task, item_label=str, stage="test",
+        ) == [0, 10, 20, 30]
 
 
 def test_parallel_combination_results_are_input_ordered_and_progress_is_completion_based():

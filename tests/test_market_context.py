@@ -132,6 +132,27 @@ def test_compact_metrics_use_all_probabilities_and_frozen_combined_rule():
     assert unavailable.auc.dropna().eq(1).all()
 
 
+@pytest.mark.parametrize("scores,actual,signals", [
+    ([.2, .2, .8, .8], [0, 1, 0, 1], [False, True, False, True]),
+    ([0., 1.], [0, 0], [False, False]),
+    ([0., 1.], [1, 1], [True, True]),
+    ([np.nan, .5], [0, 1], [False, True]),
+    ([.1, .9], [0, np.nan], [True, False]),
+    ([-.1, 1.1], [0, 1], [False, True]),
+])
+def test_optimized_probability_metrics_preserve_reference(scores, actual, signals):
+    from rstock.application.forward_diagnostic import probability_metrics
+    reference = probability_metrics(pd.DataFrame({"prediction_probability": scores,
+                                                   "outcome": actual, "signal": signals}))
+    optimized = mc._context_probability_metrics(np.asarray(scores), np.asarray(actual), np.asarray(signals))
+    assert optimized.keys() == reference.keys()
+    for key, value in reference.items():
+        if isinstance(value, (int, float)):
+            assert optimized[key] == pytest.approx(value, rel=1e-12, abs=1e-12)
+        else:
+            assert optimized[key] == value
+
+
 def setup_run(tmp_path):
     raw = prices()
     output = tmp_path / "runs/wf/results"

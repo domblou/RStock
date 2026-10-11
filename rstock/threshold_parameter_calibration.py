@@ -424,7 +424,7 @@ def run_threshold_parameter_calibration(
     )
     sample_ids = [str(value) for value in sample.manifest["selected_set_ids"]]
     prediction_key = hashlib.sha256("|".join(sample_ids).encode("utf-8")).hexdigest()
-    if config.xgb_round_selection_mode == "chronological":
+    if config.xgb_round_selection_mode == "chronological" or (config.target_volatility_enabled and config.predictive_model_type != "constant_probability"):
         identity = {"sample": sample_ids, "policy": round_selection_snapshot(config),
             "parameters": {direction: params.as_dict() for direction, params in (xgboost_parameters_by_direction or {}).items()},
             "seed": config.xgb_seed, "features": list(development.columns),
@@ -448,6 +448,8 @@ def run_threshold_parameter_calibration(
             parameters_by_direction=xgboost_parameters_by_direction,
             progress_callback=progress_callback,
             cancellation_check=cancellation_check,
+            checkpoint_manager=checkpoint_manager,
+            checkpoint_key=prediction_key,
         )
         if checkpoint_manager is not None:
             checkpoint_manager.commit_artifact(

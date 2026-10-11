@@ -3053,6 +3053,13 @@ def _operational_prepared(
     effective_spec = (
         spec if preparation_config is None else replace(spec, config=preparation_config)
     )
+    if spec.job_type is not JobType.PRODUCTION_TRAINING:
+        tracked = ProductionRepository(spec.config.project_root).tracked_models()
+        windows = [int(m.source_configuration.get("rstock_config", {}).get("target_volatility_sessions", 21))
+                   for m in tracked if m.source_configuration.get("rstock_config", {}).get("target_volatility_enabled", False)]
+        # Acquire the largest required prefix once; each model resolves its own N.
+        effective_spec = replace(effective_spec, config=replace(effective_spec.config,
+            target_volatility_enabled=bool(windows), target_volatility_sessions=max(windows, default=21)))
     _phase(progress_callback, phase_name, "started", symbols=len(spec.symbols))
     downloaded, _ = MarketDataService().load(
         effective_spec,
@@ -3081,6 +3088,8 @@ def _production_training(
     effective_config = replace(
         spec.config,
         lag_depth=candidate.lag_depth,
+        target_volatility_enabled=source_rstock.get("target_volatility_enabled", False),
+        target_volatility_sessions=source_rstock.get("target_volatility_sessions", 21),
         intraday_target_threshold=candidate.up_target_threshold,
         intraday_down_threshold=candidate.down_target_threshold,
         xgb_seed=candidate.xgboost_seed,
@@ -3506,10 +3515,31 @@ class WorkflowRegistry:
         if handler is None:
             raise ValueError(f"No workflow is registered for {spec.job_type.value}")
         result = handler(spec, output, progress_callback, cancellation_check)
+        from rstock.target_volatility import enabled, contract
+        if enabled(spec.config) and spec.job_type is not JobType.PREDICTOR_PREFILTER:
+            result["target_volatility"] = {**contract(spec.config), "source_quality": "retrospective_not_pit",
+                                         "source": spec.target_volatility_source}
+            path = output / "run_configuration.json"
+            if path.is_file():
+                recorded = json.loads(path.read_text(encoding="utf-8"))
+                prior = recorded.get("target_volatility", {})
+                result["target_volatility"] = {**prior, **result["target_volatility"],
+                    "source": spec.target_volatility_source or prior.get("provenance", {}).get("source")}
+                recorded["target_volatility"] = result["target_volatility"]
+                path.write_text(json.dumps(recorded, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if spec.config.market_context_enabled:
-            from .market_context_runtime import optional_context_diagnostic
+            from .market_context_runtime import optional_context_diagnostic, INPUTS
 
-            diagnostic = optional_context_diagnostic(spec, output)
+            measured = spec.job_type.value in INPUTS
+            if measured:
+                _phase(progress_callback, "market_context_diagnostic", "started")
+            diagnostic = (optional_context_diagnostic(spec, output)
+                          if progress_callback is None and cancellation_check is None else
+                          optional_context_diagnostic(spec, output, progress_callback=progress_callback,
+                                                      cancellation_check=cancellation_check))
+            if measured:
+                _phase(progress_callback, "market_context_diagnostic", "completed",
+                       status=(diagnostic or {}).get("status"))
             if diagnostic is not None:
                 result["market_context_diagnostic"] = {
                     "status": diagnostic["status"],

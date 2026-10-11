@@ -697,6 +697,12 @@ def execute_run(
         run_lock_started_at = datetime.now(timezone.utc).isoformat()
         run_lease.acquire()
         spec = replace(repository.load_spec(run_id), execution_run_id=run_id)
+        # execution_run_id is runtime metadata. dataclasses.replace drops the
+        # init=False historical fingerprint; keep the persisted run identity
+        # shared by the worker and workflow checkpoint managers.
+        object.__setattr__(
+            spec, "_snapshot_fingerprint", repository.configuration_fingerprint(run_id)
+        )
         try:
             resources = ResourceRecorder(
                 repository.run_directory(run_id), run_id,
@@ -808,6 +814,12 @@ def execute_run(
             spec.pipeline_version >= 4 and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None
         ):
             phases = [item for item in phases if item[0] != "prefilter"]
+        if spec.config.market_context_enabled:
+            from .market_context_runtime import INPUTS
+            if spec.job_type.value in INPUTS:
+                phases = [*[(name, weight) for name, weight in phases if name != "publishing"],
+                          ("market_context_diagnostic", 2),
+                          *[(name, weight) for name, weight in phases if name == "publishing"]]
         reporter.configure_phases(phases)
         working = repository.run_directory(run_id) / "_working"
         results = repository.run_directory(run_id) / "results"
