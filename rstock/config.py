@@ -41,8 +41,20 @@ class RStockConfig:
     model_history_days: int = 730
     prediction_history_days: int = 10
 
+    # Optional descriptive context; never affects training or qualification.
+    market_context_enabled: bool = False
+    market_context_trend_sessions: int = 63
+    market_context_drawdown_sessions: int = 252
+    market_context_volatility_sessions: int = 21
+    market_context_terciles: bool = True
+    market_context_protocol_version: str = "spy_adjusted_context_v1"
+    market_context_regime_version: str | None = "rstock_spy_regimes_v1"
+
     intraday_target_threshold: float = 0.01
     intraday_down_threshold: float = 0.01
+    predictive_model_type: str = "external_only"
+    target_volatility_enabled: bool = False
+    target_volatility_sessions: int = 21
     lag_depth: int = 3
     permutation_depth: int = 3
     date_feature_regex: str = ""
@@ -51,6 +63,13 @@ class RStockConfig:
     xgb_eta: float = 1.0
     xgb_nthread: int = 2
     xgb_rounds: int = 4
+    xgb_round_selection_mode: str = "fixed"
+    xgb_early_stopping_max_rounds: int = 500
+    xgb_early_stopping_validation_sessions: int = 63
+    xgb_early_stopping_patience: int = 30
+    xgb_early_stopping_min_train_observations: int = 252
+    xgb_early_stopping_metric: str = "logloss"
+    xgb_round_selection_protocol_version: str = "chronological_v1"
     xgb_min_child_weight: float = 1.0
     xgb_subsample: float = 1.0
     xgb_colsample_bytree: float = 1.0
@@ -126,6 +145,13 @@ class RStockConfig:
     prefilter_xgb_reg_alpha: float = 0.0
     prefilter_xgb_reg_lambda: float = 5.0
     prefilter_xgb_seed: int = 1234
+    prefilter_xgb_round_selection_mode: str = "fixed"
+    prefilter_xgb_early_stopping_max_rounds: int = 500
+    prefilter_xgb_early_stopping_validation_sessions: int = 63
+    prefilter_xgb_early_stopping_patience: int = 30
+    prefilter_xgb_early_stopping_min_train_observations: int = 252
+    prefilter_xgb_early_stopping_metric: str = "logloss"
+    prefilter_xgb_round_selection_protocol_version: str = "chronological_v1"
 
     # Decision-threshold calibration is performed only on development predictions.
     threshold_calibration_min_signals_per_window: int = 20
@@ -161,6 +187,42 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        if not isinstance(self.target_volatility_enabled, bool):
+            raise ValueError("target_volatility_enabled must be boolean")
+        if (not isinstance(self.target_volatility_sessions, int)
+                or isinstance(self.target_volatility_sessions, bool)
+                or self.target_volatility_sessions < 2):
+            raise ValueError("target_volatility_sessions must be an integer >= 2")
+        if self.predictive_model_type not in {"constant_probability", "target_only", "target_and_external", "external_only"}:
+            raise ValueError("Unsupported predictive_model_type")
+        if self.predictive_model_type in {"constant_probability", "target_only"}:
+            object.__setattr__(self, "predictor_prefilter_enabled", False)
+        if self.prefilter_xgb_round_selection_mode not in {"fixed", "chronological"}:
+            raise ValueError("Unsupported prefilter_xgb_round_selection_mode")
+        if (self.prefilter_xgb_early_stopping_metric != "logloss"
+                or self.prefilter_xgb_round_selection_protocol_version != "chronological_v1"):
+            raise ValueError("Unsupported prefilter_xgb round selection protocol")
+        for name in ("prefilter_xgb_early_stopping_max_rounds", "prefilter_xgb_early_stopping_validation_sessions",
+                     "prefilter_xgb_early_stopping_patience", "prefilter_xgb_early_stopping_min_train_observations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.xgb_round_selection_mode not in {"fixed", "chronological"}:
+            raise ValueError("Unsupported XGBoost round selection mode")
+        if self.xgb_early_stopping_metric != "logloss" or self.xgb_round_selection_protocol_version != "chronological_v1":
+            raise ValueError("Unsupported XGBoost round selection protocol")
+        for name in ("xgb_early_stopping_max_rounds", "xgb_early_stopping_validation_sessions", "xgb_early_stopping_patience", "xgb_early_stopping_min_train_observations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.market_context_regime_version not in {None, "rstock_spy_regimes_v1"}:
+            raise ValueError("Unsupported market regime protocol version")
+        if self.market_context_protocol_version != "spy_adjusted_context_v1":
+            raise ValueError("Unsupported market context protocol version")
+        for name in ("market_context_trend_sessions", "market_context_drawdown_sessions", "market_context_volatility_sessions"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+                raise ValueError(f"{name} must be an integer >= 2")
         if self.prefilter_selection_mode not in {"single_origin", "temporal_stability", "temporal_consensus"}:
             raise ValueError("Unsupported prefilter selection mode")
         for name in ("temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"):
@@ -356,6 +418,34 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    "target_volatility_enabled": False,
+    "target_volatility_sessions": 21,
+    "predictive_model_type": "external_only",
+    # Historical prefilters were fixed even when their downstream WF was chronological.
+    "prefilter_xgb_round_selection_mode": "fixed",
+    "prefilter_xgb_early_stopping_max_rounds": 500,
+    "prefilter_xgb_early_stopping_validation_sessions": 63,
+    "prefilter_xgb_early_stopping_patience": 30,
+    "prefilter_xgb_early_stopping_min_train_observations": 252,
+    "prefilter_xgb_early_stopping_metric": "logloss",
+    "prefilter_xgb_round_selection_protocol_version": "chronological_v1",
+    # Old snapshots always trained with their recorded xgb_rounds. The other
+    # fields are inert until chronological selection is explicitly requested.
+    "xgb_round_selection_mode": "fixed",
+    "xgb_early_stopping_max_rounds": 500,
+    "xgb_early_stopping_validation_sessions": 63,
+    "xgb_early_stopping_patience": 30,
+    "xgb_early_stopping_min_train_observations": 252,
+    "xgb_early_stopping_metric": "logloss",
+    "xgb_round_selection_protocol_version": "chronological_v1",
+    # Historical runs had no context protocol. Windows are inert until explicit activation.
+    "market_context_regime_version": None,
+    "market_context_enabled": False,
+    "market_context_trend_sessions": 63,
+    "market_context_drawdown_sessions": 252,
+    "market_context_volatility_sessions": 21,
+    "market_context_terciles": True,
+    "market_context_protocol_version": "spy_adjusted_context_v1",
     # Absent mode never activates a new scientific policy on an old snapshot.
     "prefilter_selection_mode": "single_origin",
     "temporal_consensus_origins": 4,
@@ -627,4 +717,3 @@ def save_user_settings(
             temporary_path.unlink(missing_ok=True)
         raise
     return path
-

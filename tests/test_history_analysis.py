@@ -239,13 +239,14 @@ def test_comparison_includes_cutoffs_raw_plan_and_population_settings():
     assert {"requested_historical_cutoff", "predictor_prefilter_enabled"} <= set(differences["Paramètre"])
 
 
-def test_selection_routes_one_run_to_detail_and_two_to_five_to_comparison():
+def test_selection_routes_one_run_to_detail_and_two_to_six_to_comparison():
     assert selected_run_action(["run-1"]) == "detail"
     assert selected_run_action(["run-1", "run-2"]) == "comparison"
     assert selected_run_action(["a", "b", "c", "d"]) == "comparison"
     assert selected_run_action([]) is None
     assert selected_run_action(["a", "b", "c", "d", "e"]) == "comparison"
-    assert selected_run_action(["a", "b", "c", "d", "e", "f"]) is None
+    assert selected_run_action(["a", "b", "c", "d", "e", "f"]) == "comparison"
+    assert selected_run_action(["a", "b", "c", "d", "e", "f", "g"]) is None
 
 
 def test_comparison_charts_keep_quality_and_duration_on_separate_human_axes():

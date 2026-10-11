@@ -237,6 +237,7 @@ def walk_forward_duplication_draft(
         "stability_origin_count": configuration.get("stability_origin_count", 5),
         "stability_step_sessions": configuration.get("stability_step_sessions", 1),
         "pipeline_version": int(configuration.get("pipeline_version", 0)),
+        "e2e_xgboost_protocol_version": int(configuration.get("e2e_xgboost_protocol_version", 1)),
         "calibration_sampling_policy_version": int(
             configuration.get("calibration_sampling_policy_version", 1)
         ),
@@ -276,6 +277,8 @@ def duplication_combination_count(
     predictor_count = len(tuple(draft.get("predictor_symbols", ())))
     target_count = len(tuple(draft.get("target_symbols", ())))
     depth = config.permutation_depth
+    if config.predictive_model_type in {"constant_probability", "target_only"}:
+        return target_count
     if predictor_count < 2 or depth < 1 or depth >= predictor_count:
         raise ValueError("Invalid frozen population or permutation depth")
     return target_count * sum(
@@ -559,6 +562,8 @@ def experiment_spec_from_duplication(
         stability_origin_count=int(values.get("stability_origin_count", 5)),
         stability_step_sessions=int(values.get("stability_step_sessions", 1)),
         pipeline_version=int(values.get("pipeline_version", 0)),
+        e2e_xgboost_protocol_version=(int(values.get("e2e_xgboost_protocol_version", 1))
+                                     if use_run_config and source_job_type is selected_job_type else 2),
         calibration_sampling_policy_version=int(
             values.get("calibration_sampling_policy_version", 1)
         ),

@@ -9,6 +9,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+PROBABILITY_LOSS_EPSILON = 1e-15
+
+
+def probability_losses(outcome: Sequence[int], probabilities: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+    actual = np.asarray(outcome, dtype=float)
+    scores = np.asarray(probabilities, dtype=float)
+    if actual.shape != scores.shape or not np.isfinite(scores).all() or not np.isin(actual, [0, 1]).all() or ((scores < 0) | (scores > 1)).any():
+        raise ValueError("Probability losses require aligned binary outcomes and finite probabilities in [0, 1]")
+    clipped = np.clip(scores, PROBABILITY_LOSS_EPSILON, 1 - PROBABILITY_LOSS_EPSILON)
+    return -(actual * np.log(clipped) + (1 - actual) * np.log1p(-clipped)), (scores - actual) ** 2
+
 
 @dataclass(frozen=True, slots=True)
 class BinaryClassificationMetrics:
@@ -25,6 +36,8 @@ class BinaryClassificationMetrics:
     roc_auc: float | None
     pr_auc: float | None
     prevalence: float
+    log_loss: float | None = None
+    brier: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -42,6 +55,8 @@ class BinaryClassificationMetrics:
             "ROCAUC": self.roc_auc,
             "PRAUC": self.pr_auc,
             "Prevalence": self.prevalence,
+            "LogLoss": self.log_loss,
+            "Brier": self.brier,
         }
 
 
@@ -115,6 +130,7 @@ def classification_metrics(
         raise ValueError("outcome, predictions and probabilities must have the same shape")
     if not np.isin(actual, [0, 1]).all() or not np.isin(predicted, [0, 1]).all():
         raise ValueError("outcome and predictions must contain only binary values")
+    log_losses, brier_losses = probability_losses(actual, scores)
 
     true_negative = int(((actual == 0) & (predicted == 0)).sum())
     false_positive = int(((actual == 0) & (predicted == 1)).sum())
@@ -139,4 +155,6 @@ def classification_metrics(
         roc_auc=_roc_auc(actual, scores),
         pr_auc=_pr_auc(actual, scores),
         prevalence=float(actual.mean()) if len(actual) else 0.0,
+        log_loss=float(log_losses.mean()) if len(actual) else None,
+        brier=float(brier_losses.mean()) if len(actual) else None,
     )

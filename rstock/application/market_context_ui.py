@@ -1,0 +1,90 @@
+"""Read-only views of persisted market context diagnostics."""
+from pathlib import Path
+import pandas as pd
+
+from .market_context import AXES, DIAGNOSTIC_MANIFEST
+from .market_context_runtime import load_context_diagnostic
+
+
+def render_context_diagnostic(st, output: Path, runs: Path):
+    from .forward_diagnostic import _json
+    attempt = _json(output / "context_diagnostic_attempt.json")
+    if not (output / DIAGNOSTIC_MANIFEST).exists() and not attempt:
+        return
+    with st.expander("Contexte de marché SPY — diagnostic descriptif", expanded=False):
+        if attempt.get("status") == "unavailable":
+            st.warning(_incomplete_message(attempt.get("reason")))
+        if not (output / DIAGNOSTIC_MANIFEST).exists(): return
+        try:
+            manifest, context, metrics, robustness = load_context_diagnostic(output, runs)
+        except (ValueError, OSError, KeyError) as exc:
+            st.warning(f"Diagnostic de contexte indisponible : {exc}")
+            return
+        if manifest.get("status") != "available":
+            if attempt.get("status") != "unavailable":
+                st.warning(_incomplete_message(manifest.get("reason", "données absentes")))
+            return
+        st.caption(f"Protocole {'standard' if manifest['standard_protocol'] else 'personnalisé'} : {manifest['protocol_id']} · SPY ajusté · contexte à J−1")
+        st.caption("Les terciles sont descriptifs et ne définissent pas des régimes économiques. Ces mesures ne modifient pas la qualification.")
+        protocol = manifest["protocol"]
+        st.caption(f"Tendance {protocol['trend_sessions']} séances · drawdown {protocol['drawdown_sessions']} · volatilité {protocol['volatility_sessions']}")
+        axes = [*AXES, "regime", "episode"] if "regime" in context else list(AXES)
+        axis = st.selectbox("Variable de contexte", axes, key=f"context-axis-{output.parent.name}")
+        timeline = context.copy()
+        timeline["session_date"] = pd.to_datetime(timeline.session_date)
+        if axis in AXES:
+            st.line_chart(timeline.set_index("session_date")[[axis]])
+        else:
+            st.dataframe(timeline[[c for c in ("session_date","regime","episode_id","episode_drawdown","episode_max_severity","episode_duration_sessions","recovery") if c in timeline]],hide_index=True)
+            st.caption("Régimes RStock V1 déterministes, connus à J−1. Gravité et durée d’épisode conservées pendant la reprise; aucun seuil optimisé selon les modèles.")
+        tables = [(manifest["stage"], metrics, robustness)]
+        from .forward_diagnostic import _json, digest
+        origins = {}
+        reference = manifest.get("t0_reference")
+        if reference:
+            path = (runs / reference["path"]).resolve()
+            if path.is_relative_to(runs.resolve()) and path.exists() and digest(path) == reference["sha256"]:
+                origins = {model["canonical_combination_id"]: model.get("origin", "unavailable")
+                           for model in _json(path).get("models", [])}
+        # Reuse compact upstream aggregates, never read/recompute predictions in UI.
+        for stage, reference in manifest.get("stage_references", {}).items():
+            path = (runs / reference["path"]).resolve()
+            if not path.is_relative_to(runs.resolve()) or not path.exists() or digest(path) != reference["sha256"]:
+                st.caption(f"{stage} : agrégats T0 indisponibles ou modifiés.")
+                continue
+            try:
+                other, _, table, summary = load_context_diagnostic(path.parent, runs)
+                if contexts_comparable(other, manifest):
+                    tables.append((stage, table, summary))
+                else:
+                    st.caption(f"{stage} : protocole différent, comparaison indisponible.")
+            except (ValueError, OSError, KeyError):
+                st.caption(f"{stage} : agrégats indisponibles.")
+        for stage, table, summary in tables:
+            st.write(stage)
+            if origins:
+                table = table.assign(qualification_origin=table.model_key.map(origins).fillna("unavailable"))
+                summary = summary.assign(qualification_origin=summary.model_key.map(origins).fillna("unavailable"))
+            st.dataframe(table.loc[table.axis.eq(axis)], hide_index=True)
+            if not summary.empty:
+                st.dataframe(summary.loc[summary.axis.eq(axis)], hide_index=True)
+        st.caption("AUC étayée : ≥30 observations et ≥10 dans chaque classe ; signaux étayés : ≥10. Robustesse : trois bandes étayées et au moins deux fenêtres en WF. Les fenêtres et épisodes ne sont pas indépendants.")
+
+
+
+def contexts_comparable(left, right):
+    """Protocol equality alone does not imply equal learned boundaries/reference."""
+    if left.get("protocol_id") != right.get("protocol_id"): return False
+    a,b=left.get("comparability"),right.get("comparability")
+    if a is not None or b is not None: return a is not None and a==b
+    # Legacy manifests cannot establish shared boundaries across unrelated stores.
+    return left.get("context_manifest")==right.get("context_manifest") and left.get("context_manifest_sha256")==right.get("context_manifest_sha256")
+
+
+def _incomplete_message(reason):
+    if reason == "context_extension_historical_returns_changed":
+        explanation = "Les rendements ou facteurs d’ajustement SPY diffèrent matériellement de la référence figée. L’extension a été refusée."
+    else:
+        explanation = str(reason or "données absentes")
+    return ("Diagnostic SPY incomplet : " + explanation +
+            " La dernière révision valide est conservée. Le traitement et les résultats scientifiques ne sont pas remis en cause.")

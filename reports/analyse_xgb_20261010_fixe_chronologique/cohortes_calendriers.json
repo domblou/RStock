@@ -1,0 +1,91 @@
+[
+  {
+    "cohorte": "C01",
+    "calendrier": [
+      {
+        "TestEnd": "2024-10-09",
+        "TestStart": "2024-07-12",
+        "TrainEnd": "2024-07-11",
+        "TrainStart": "2023-07-12",
+        "Window": 1
+      },
+      {
+        "TestEnd": "2025-01-10",
+        "TestStart": "2024-10-10",
+        "TrainEnd": "2024-10-09",
+        "TrainStart": "2023-07-12",
+        "Window": 2
+      },
+      {
+        "TestEnd": "2025-04-11",
+        "TestStart": "2025-01-13",
+        "TrainEnd": "2025-01-10",
+        "TrainStart": "2023-07-12",
+        "Window": 3
+      },
+      {
+        "TestEnd": "2025-07-15",
+        "TestStart": "2025-04-14",
+        "TrainEnd": "2025-04-11",
+        "TrainStart": "2023-07-12",
+        "Window": 4
+      },
+      {
+        "TestEnd": "2025-10-13",
+        "TestStart": "2025-07-16",
+        "TrainEnd": "2025-07-15",
+        "TrainStart": "2023-07-12",
+        "Window": 5
+      },
+      {
+        "TestEnd": "2026-01-13",
+        "TestStart": "2025-10-14",
+        "TrainEnd": "2025-10-13",
+        "TrainStart": "2023-07-12",
+        "Window": 6
+      },
+      {
+        "TestEnd": "2026-04-02",
+        "TestStart": "2026-01-14",
+        "TrainEnd": "2026-01-13",
+        "TrainStart": "2023-07-12",
+        "Window": 7
+      }
+    ],
+    "candidats": 1702
+  },
+  {
+    "cohorte": "C02",
+    "calendrier": [
+      {
+        "TestEnd": "2025-07-03",
+        "TestStart": "2025-04-03",
+        "TrainEnd": "2025-04-02",
+        "TrainStart": "2024-04-02",
+        "Window": 1
+      },
+      {
+        "TestEnd": "2025-10-02",
+        "TestStart": "2025-07-07",
+        "TrainEnd": "2025-07-03",
+        "TrainStart": "2024-04-02",
+        "Window": 2
+      },
+      {
+        "TestEnd": "2026-01-02",
+        "TestStart": "2025-10-03",
+        "TrainEnd": "2025-10-02",
+        "TrainStart": "2024-04-02",
+        "Window": 3
+      },
+      {
+        "TestEnd": "2026-04-02",
+        "TestStart": "2026-01-05",
+        "TrainEnd": "2026-01-02",
+        "TrainStart": "2024-04-02",
+        "Window": 4
+      }
+    ],
+    "candidats": 112
+  }
+]

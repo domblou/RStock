@@ -629,6 +629,58 @@ def test_end_to_end_resume_reuses_completed_stages_and_failed_child_id(
     )
 
 
+@pytest.mark.parametrize("tampered", [False, True])
+def test_historical_snapshot_resume_preserves_completed_wf_and_xgb(tmp_path, tampered):
+    import hashlib
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _create_parent(repository, _spec(tmp_path))
+    calls = Counter()
+    registry = _fake_registry(repository, calls, fail_once=JobType.THRESHOLD_PARAMETER_CALIBRATION)
+    execute_run(repository, run_id, 1, registry=registry)
+    manifest = load_pipeline_manifest(repository, run_id)
+    # Simulate original snapshots predating model-type serialization. Loading
+    # defaults is semantically equivalent, but reserializing changes the hash.
+    for stage in manifest["stages"][1:3]:
+        child_id = stage["child_run_id"]
+        snapshot = repository.read_json(child_id, "config.json")
+        snapshot["rstock_config"].pop("predictive_model_type", None)
+        fingerprint = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        repository.write_json(child_id, "config.json", snapshot)
+        status = repository.status(child_id)
+        status["configuration_fingerprint"] = fingerprint
+        repository.write_json(child_id, "status.json", status)
+        checkpoint_path = repository.run_directory(child_id) / "checkpoints/manifest.json"
+        if checkpoint_path.exists():
+            checkpoint = json.loads(checkpoint_path.read_text())
+            checkpoint["configuration_fingerprint"] = fingerprint
+            repository.write_json(child_id, "checkpoints/manifest.json", checkpoint)
+        stage["expected_fingerprint"] = fingerprint
+        spec = end_to_end.build_stage_spec(repository, run_id, repository.load_spec(run_id), stage["stage_key"], manifest)
+        assert spec.fingerprint == fingerprint
+    repository.write_json(run_id, PIPELINE_MANIFEST, manifest)
+    original = {stage["stage_key"]: stage["artifact_digests"] for stage in manifest["stages"][:2]}
+    before_status = repository.status(run_id)
+    if tampered:
+        child_id = manifest["stages"][0]["child_run_id"]
+        (repository.run_directory(child_id) / "results/qualification.csv").write_text("changed")
+        with pytest.raises(ValueError, match="artifacts changed"):
+            end_to_end.validate_pipeline_resume(repository, run_id)
+        class Backend:
+            def launch(self, *args):
+                pytest.fail("An invalid historical pipeline must not launch a worker")
+        with pytest.raises(ValueError, match="artifacts changed"):
+            RunService(repository, backend=Backend()).resume(run_id)
+        assert repository.status(run_id) == before_status
+        return
+    verified = end_to_end.validate_pipeline_resume(repository, run_id)
+    assert [stage["status"] for stage in verified[:3]] == ["completed", "completed", "failed"]
+    _resume(repository, run_id, registry)
+    assert repository.status(run_id)["status"] == "completed"
+    assert calls[JobType.WALK_FORWARD] == calls[JobType.XGBOOST_CALIBRATION] == 1
+    after = load_pipeline_manifest(repository, run_id)
+    assert {stage["stage_key"]: stage["artifact_digests"] for stage in after["stages"][:2]} == original
+
+
 def test_end_to_end_reserves_every_child_before_materializing_the_first(tmp_path):
     repository = RunRepository(tmp_path / "runs")
     run_id = _create_parent(repository, _spec(tmp_path))

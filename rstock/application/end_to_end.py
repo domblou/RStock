@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from rstock.modeling import selected_xgboost_parameters
+from rstock.modeling import selected_xgboost_parameters, round_selection_snapshot, ROUND_SELECTION_FIELDS
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation
 
 from .auto_promotion import PromotionCoordinator
@@ -87,8 +87,21 @@ def _stage_parameter_contract(spec: ExperimentSpec, stage_key: str) -> dict[str,
         field: getattr(spec.config, field)
         for field in SPLIT_STAGE_PARAMETER_FIELDS.get(stage_key, ())
     }
+    if stage_key == "walk_forward" and spec.e2e_xgboost_protocol_version == 1:
+        # Schema predating complete round selection owned only the prefilter
+        # controls here. Keep its persisted parameter contract byte-compatible.
+        from .derivation import STAGE_PARAMETER_FIELDS
+        values = {field: getattr(spec.config, field) for field in STAGE_PARAMETER_FIELDS[stage_key]}
     if stage_key == "holdout_evaluation":
         values["evaluate_final_holdout"] = spec.evaluate_final_holdout
+    if spec.e2e_xgboost_protocol_version >= 2:
+        if stage_key == "walk_forward":
+            values.update({field: getattr(spec.config, field) for field in ROUND_SELECTION_FIELDS})
+        if stage_key in {"walk_forward", "xgboost_calibration", "threshold_parameter_calibration",
+                         "threshold_calibration", "holdout_evaluation"}:
+            values["round_selection_policy"] = round_selection_snapshot(spec.config)
+        if stage_key == "xgboost_calibration":
+            values["intermediate_holdout_evaluation"] = False
     return {
         key: list(value) if isinstance(value, tuple) else value
         for key, value in values.items()
@@ -188,6 +201,125 @@ def effective_stage_run_id(
     return None if child_id is None else str(child_id)
 
 
+def derivation_schema_for_manifest(manifest: dict[str, Any]) -> int:
+    """Resolve the scientific graph independently of initial/derived ownership."""
+    versions = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3}
+    if manifest.get("workflow_type") == JobType.FORCED_CANDIDATE_VALIDATION.value:
+        raise ValueError("Forced End-to-End derivation is deferred")
+    try:
+        return versions[manifest["schema_version"]]
+    except KeyError as error:
+        raise ValueError("Source End-to-End manifest is unavailable") from error
+
+
+def effective_threshold_calibration_parameters(repository: RunRepository, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Selected policy, including explicit overrides consumed by the threshold job."""
+    parameter_id = effective_stage_run_id(manifest, "threshold_parameter_calibration")
+    selection = _read_result_json(repository, str(parameter_id),
+                                  "selected_threshold_calibration_configuration.json")
+    parameters = selection.get("parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError("Selected threshold parameters are unavailable")
+    threshold_id = effective_stage_run_id(manifest, "threshold_calibration")
+    if threshold_id is not None:
+        threshold = repository.load_spec(threshold_id)
+        if threshold.frozen_threshold_calibration_parameters is not None:
+            if threshold.source_threshold_parameter_calibration_run != parameter_id:
+                raise ValueError("Threshold policy source differs from selected parameter stage")
+            return dict(threshold.frozen_threshold_calibration_parameters)
+    return dict(parameters)  # Historical jobs predate the frozen policy field.
+
+
+def validate_source_lineage(repository: RunRepository, lineage: dict[str, Any] | None) -> None:
+    """Verify recorded physical sources; never resolve replacements on resume."""
+    if lineage is None:
+        return  # Historical contracts did not freeze the ancestor chain.
+    verified_stages: dict[tuple[str, str], dict[str, str]] = {}
+    for run_id, lock in lineage.items():
+        if repository.storage(run_id)["state"] != "full":
+            raise ValueError(f"Frozen ancestor has been purged: {run_id}")
+        if repository.status(run_id).get("status") != "completed":
+            raise ValueError(f"Frozen ancestor is not completed: {run_id}")
+        path = repository.run_directory(run_id) / PIPELINE_MANIFEST
+        if not path.is_file() or _sha256(path) != lock["manifest_sha256"]:
+            raise ValueError(f"Frozen ancestor manifest is missing or changed: {run_id}")
+        if repository.configuration_fingerprint(run_id) != lock["configuration_fingerprint"]:
+            raise ValueError(f"Frozen ancestor configuration changed: {run_id}")
+        if _sha256(repository.run_directory(run_id) / "config.json") != lock["configuration_sha256"]:
+            raise ValueError(f"Frozen ancestor configuration file changed: {run_id}")
+        for key, reference in lock["stages"].items():
+            source_id = reference["source_run_id"]
+            if repository.storage(source_id)["state"] != "full":
+                raise ValueError(f"Frozen source has been purged: {key}")
+            if repository.status(source_id).get("status") != "completed":
+                raise ValueError(f"Frozen source is not completed: {key}")
+            if repository.configuration_fingerprint(source_id) != reference["configuration_fingerprint"]:
+                raise ValueError(f"Frozen source fingerprint differs: {key}")
+            if _sha256(repository.run_directory(source_id) / "config.json") != reference["configuration_sha256"]:
+                raise ValueError(f"Frozen source configuration file changed: {key}")
+            expected_job_type = JobType.PREDICTOR_PREFILTER if key == "prefilter" else JobType(key)
+            if repository.load_spec(source_id).job_type is not expected_job_type:
+                raise ValueError(f"Frozen source job type differs: {key}")
+            identity = (source_id, key)
+            if identity not in verified_stages:
+                verified_stages[identity] = artifact_digests(repository, source_id, key)
+            if verified_stages[identity] != reference["required_artifact_digests"]:
+                raise ValueError(f"Frozen source artifacts changed: {key}")
+        snapshot = lock.get("prepared_snapshot")
+        if snapshot is not None:
+            path = repository.run_directory(snapshot["source_run_id"]) / "checkpoints/artifacts/prepared_snapshot.pkl"
+            if not path.is_file() or _sha256(path) != snapshot["sha256"]:
+                raise ValueError(f"Frozen ancestor prepared snapshot has changed: {run_id}")
+
+
+def freeze_source_lineage(repository: RunRepository, parent_id: str) -> dict[str, Any]:
+    """Capture parents and their effective scientific sources at creation."""
+    lineage: dict[str, Any] = {}
+    current: str | None = parent_id
+    while current is not None:
+        if current in lineage:
+            raise ValueError("Cycle in End-to-End source lineage")
+        spec = repository.load_spec(current)
+        if spec.job_type is not JobType.END_TO_END:
+            raise ValueError("Lineage source is not an End-to-End")
+        manifest = load_pipeline_manifest(repository, current)
+        if manifest is None:
+            raise ValueError("Source End-to-End manifest is unavailable")
+        derivation_schema_for_manifest(manifest)
+        references = {}
+        for key, _, _ in _scientific_stages_for_manifest(manifest):
+            source_id = effective_stage_run_id(manifest, key)
+            if source_id is None:
+                continue
+            stage = _stage(manifest, key)
+            references[key] = {
+                "source_run_id": source_id,
+                "configuration_fingerprint": stage["expected_fingerprint"],
+                "configuration_sha256": _sha256(repository.run_directory(source_id) / "config.json"),
+                "required_artifact_digests": dict(stage["artifact_digests"]),
+            }
+        wf_id = effective_stage_run_id(manifest, "walk_forward")
+        snapshot_path = repository.run_directory(str(wf_id)) / "checkpoints/artifacts/prepared_snapshot.pkl"
+        lineage[current] = {
+            "manifest_sha256": _sha256(repository.run_directory(current) / PIPELINE_MANIFEST),
+            "configuration_fingerprint": repository.configuration_fingerprint(current),
+            "configuration_sha256": _sha256(repository.run_directory(current) / "config.json"),
+            "stages": references,
+            "prepared_snapshot": {"source_run_id": wf_id, "sha256": _sha256(snapshot_path)},
+        }
+        if spec.derivation is not None:
+            validate_source_lineage(repository, spec.derivation.source_lineage)
+            ancestor = spec.derivation.source_end_to_end_run_id
+            ancestor_path = repository.run_directory(ancestor) / PIPELINE_MANIFEST
+            if not ancestor_path.is_file() or _sha256(ancestor_path) != spec.derivation.source_manifest_sha256:
+                raise ValueError("Source ancestor manifest is missing or changed")
+            current = ancestor
+        else:
+            current = None
+    validate_source_lineage(repository, lineage)
+    return lineage
+
+
 def _build_derived_pipeline_manifest(
     repository: RunRepository,
     root_run_id: str,
@@ -198,6 +330,9 @@ def _build_derived_pipeline_manifest(
     derivation = spec.derivation
     if derivation is None:
         raise ValueError("Missing derivation plan")
+    validate_source_lineage(repository, derivation.source_lineage)
+    if derivation.source_lineage and root_run_id in derivation.source_lineage:
+        raise ValueError("An End-to-End cannot derive from its descendant")
     if derivation.source_end_to_end_run_id == root_run_id:
         raise ValueError("An End-to-End cannot derive from itself")
     if repository.status(derivation.source_end_to_end_run_id).get("status") != "completed":
@@ -211,9 +346,7 @@ def _build_derived_pipeline_manifest(
     source_manifest = load_pipeline_manifest(
         repository, derivation.source_end_to_end_run_id
     )
-    source_schema = (5 if derivation.schema_version == 3 else SPLIT_PIPELINE_SCHEMA_VERSION if derivation.schema_version == 2
-                     else PIPELINE_SCHEMA_VERSION)
-    if source_manifest is None or source_manifest["schema_version"] != source_schema:
+    if source_manifest is None or derivation_schema_for_manifest(source_manifest) != derivation.schema_version:
         raise ValueError("Derived sources are not supported in this pipeline version")
     if (
         derivation.source_temporal_validation_enabled is not None
@@ -227,7 +360,7 @@ def _build_derived_pipeline_manifest(
     )
     for stage_key, reference in derivation.inherited_stages.items():
         source_stage = _stage(source_manifest, stage_key)
-        if source_stage["child_run_id"] != reference.source_run_id:
+        if effective_stage_run_id(source_manifest, stage_key) != reference.source_run_id:
             raise ValueError(f"Inherited source run mismatch: {stage_key}")
         if repository.status(reference.source_run_id).get("status") != "completed":
             raise ValueError(f"Inherited source run is not completed: {stage_key}")
@@ -244,7 +377,7 @@ def _build_derived_pipeline_manifest(
             derivation.prepared_snapshot_source_run_id
             or derivation.inherited_stages["walk_forward"].source_run_id
         )
-        if walk_forward_id != str(_stage(source_manifest, "walk_forward")["child_run_id"]):
+        if walk_forward_id != effective_stage_run_id(source_manifest, "walk_forward"):
             raise ValueError("Derived prepared snapshot source differs from parent")
         snapshot_path = (
             repository.run_directory(walk_forward_id)
@@ -857,7 +990,8 @@ def _base_child_spec(
     return replace(
         parent,
         job_type=job_type,
-        config=replace(parent.config, walk_forward_end_offset_sessions=0) if job_type is JobType.PREDICTOR_PREFILTER else parent.config,
+        evaluate_final_holdout=False if job_type is JobType.WALK_FORWARD else parent.evaluate_final_holdout,
+        config=replace(parent.config, walk_forward_end_offset_sessions=0, target_volatility_enabled=False) if job_type is JobType.PREDICTOR_PREFILTER else parent.config,
         derivation=None,
         experimental_overrides=(),
         prepared_snapshot_required=False,
@@ -923,7 +1057,8 @@ def build_stage_spec(
             return replace(build_derived_prefilter_spec(repository, source_id, changes),
                            source_end_to_end_run=root_run_id)
         return child
-    if stage_key == "walk_forward" and manifest["schema_version"] in {5, 6}:
+    if (stage_key == "walk_forward" and manifest["schema_version"] in {5, 6}
+            and parent.config.predictive_model_type not in {"constant_probability", "target_only"}):
         existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
         if existing.is_file():
             return repository.load_spec(str(stage["child_run_id"]))
@@ -940,6 +1075,13 @@ def build_stage_spec(
                        prefilter_execution_version=2, evaluate_final_holdout=False)
         from .prefilter_contract import plan
         plan(repository, child)  # Reject an empty selection before materializing a WF job.
+        from .prefilter_contract import inherit_reference
+        child = inherit_reference(repository, child)
+        if parent.derivation is not None and parent.derivation.fork_stage == "walk_forward":
+            from .walk_forward_experiments import freeze_walk_forward_input
+            child = freeze_walk_forward_input(repository, child,
+                str(parent.derivation.prepared_snapshot_source_run_id),
+                str(parent.derivation.prepared_snapshot_sha256))
         return child
     if stage_key == "walk_forward":
         child = replace(child, prefilter_execution_version=1)
@@ -959,6 +1101,10 @@ def build_stage_spec(
             cutoff, dataset_digest = _walk_forward_traceability(repository, str(source_id))
             if dataset_digest != parent.source_prepared_dataset_sha256:
                 raise ValueError("Source Walk-forward dataset digest has changed")
+            if child.config.xgb_round_selection_mode == "chronological":
+                from .walk_forward_experiments import freeze_walk_forward_input
+                return freeze_walk_forward_input(repository, replace(child, evaluate_final_holdout=False),
+                    str(source_id), str(parent.derivation.prepared_snapshot_sha256))
             return replace(
                 child,
                 evaluate_final_holdout=False,
@@ -998,8 +1144,11 @@ def build_stage_spec(
     existing = repository.run_directory(str(stage["child_run_id"])) / "config.json"
     if existing.is_file():
         persisted = repository.load_spec(str(stage["child_run_id"]))
-        if not persisted.prepared_snapshot_required:
-            return persisted
+        # Deserialization retains the original snapshot fingerprint, including
+        # fields absent in historical JSON. Rebuilding an equivalent dataclass
+        # would insert modern serialization fields and change that identity.
+        # Existing children always execute their persisted, frozen contract.
+        return persisted
 
     walk_forward_id = effective_stage_run_id(manifest, "walk_forward")
     if walk_forward_id is None:
@@ -1068,7 +1217,8 @@ def build_stage_spec(
     selected = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
-    frozen_xgboost = selected_xgboost_parameters(selected)
+    frozen_xgboost = (None if child.config.predictive_model_type == "constant_probability"
+                      else selected_xgboost_parameters(selected, config=child.config))
     child = replace(
         child,
         source_xgboost_calibration_run=xgboost_id,
@@ -1106,6 +1256,9 @@ def build_stage_spec(
     if not isinstance(parameters, dict):
         raise ValueError("Paramètres de calibration des seuils absents")
     effective_parameters = dict(parameters)
+    if parent.derivation is not None and parent.derivation.fork_stage == "threshold_calibration":
+        source_manifest = load_pipeline_manifest(repository, parent.derivation.source_end_to_end_run_id)
+        effective_parameters = effective_threshold_calibration_parameters(repository, source_manifest)
     experimental_overrides = ()
     if parent.derivation is not None:
         from rstock.threshold_parameter_calibration import THRESHOLD_PARAMETER_FIELDS
@@ -1150,12 +1303,53 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_pipeline_resume(repository: RunRepository, run_id: str) -> list[dict[str, Any]]:
+    """Read-only preflight of materialized children; never replace completed work."""
+    manifest = load_pipeline_manifest(repository, run_id)
+    if manifest is None:
+        return []  # An interruption before reservation has nothing to reuse.
+    parent = repository.load_spec(run_id)
+    if parent.fingerprint != repository.configuration_fingerprint(run_id):
+        raise ValueError("Frozen End-to-end parent snapshot changed")
+    manifest = persist_or_validate_pipeline_manifest(repository, run_id, parent)
+    verified = []
+    for stage in manifest["stages"]:
+        key = stage["stage_key"]
+        child_id = effective_stage_run_id(manifest, key)
+        if key not in REQUIRED_ARTIFACTS or child_id is None:
+            continue
+        if not repository.run_directory(child_id).exists():
+            if stage.get("artifact_digests"):
+                raise ValueError(f"Previously published child is missing: {key}/{child_id}")
+            continue
+        child = repository.load_spec(child_id)
+        expected = stage.get("expected_fingerprint")
+        if expected is not None and (
+            child.fingerprint != expected
+            or repository.configuration_fingerprint(child_id) != expected
+        ):
+            raise ValueError(f"Frozen child snapshot changed: {key}/{child_id}")
+        status = repository.status(child_id)["status"]
+        if status == "completed":
+            actual = artifact_digests(repository, child_id, key)
+            if stage.get("artifact_digests") and stage["artifact_digests"] != actual:
+                raise ValueError(f"Completed child artifacts changed: {key}/{child_id}")
+        elif stage.get("artifact_digests"):
+            raise ValueError(f"Previously published child is no longer completed: {key}/{child_id}")
+        verified.append({"stage_key": key, "child_run_id": child_id, "status": status})
+    return verified
+
+
 def artifact_digests(
     repository: RunRepository, run_id: str, stage_key: str
 ) -> dict[str, str]:
     run_directory = repository.run_directory(run_id)
     values: dict[str, str] = {}
     required = REQUIRED_ARTIFACTS[stage_key]
+    if (stage_key == "prefilter"
+            and repository.load_spec(run_id).config.prefilter_xgb_round_selection_mode == "chronological"):
+        required = (*required, "results/prefilter_round_selection_training.csv",
+                    "results/prefilter_round_selection.json")
     if (
         stage_key == "threshold_calibration"
         and repository.load_spec(run_id).pipeline_version >= 3
@@ -1430,7 +1624,7 @@ def _forced_candidate_spec(
     reference_xgboost = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
-    frozen_xgboost = selected_xgboost_parameters(reference_xgboost)
+    frozen_xgboost = selected_xgboost_parameters(reference_xgboost, config=parent.config)
     threshold_parameter_selection = _read_result_json(
         repository,
         threshold_parameter_id,
@@ -1841,7 +2035,13 @@ def run_end_to_end(
     ):
         check_cancellation(cancellation_check)
         current_stage = _stage(manifest, stage_key)
+        if stage_key == "prefilter" and spec.config.predictive_model_type in {"constant_probability", "target_only"}:
+            manifest = _persist_stage_values(repository, root_run_id, stage_key,
+                execution_status="not_applicable", not_executed_reason="predictive_model_type")
+            continue
         for dependency in dependencies:
+            if dependency == "prefilter" and spec.config.predictive_model_type in {"constant_probability", "target_only"}:
+                continue
             dependency_stage = _stage(manifest, dependency)
             dependency_id = effective_stage_run_id(manifest, dependency)
             if dependency_id is None:
@@ -1911,12 +2111,35 @@ def run_end_to_end(
             }
         )
         manifest = load_pipeline_manifest(repository, root_run_id) or manifest
+        if stage_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability":
+            manifest = _persist_stage_values(repository, root_run_id, stage_key,
+                execution_status="not_applicable", not_executed_reason="constant_probability")
+        if stage_key == "walk_forward":
+            qualification = pd.read_csv(repository.run_directory(child_run_id) / "results/qualification.csv")
+            eligible = qualification.get("Eligible", pd.Series(dtype=bool)).map(lambda value: str(value).lower() in {"true", "1"})
+            if "Eligible" in qualification and not eligible.any():
+                for skipped_key, _, _ in scientific_stages[stage_index + 1:]:
+                    manifest = _persist_stage_values(repository, root_run_id, skipped_key,
+                        execution_status="not_applicable" if skipped_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability" else "not_executed",
+                        not_executed_reason="constant_probability" if skipped_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability" else "no_qualified_candidates")
+                result = {
+                    "job_type": JobType.END_TO_END.value, "pipeline_version": spec.pipeline_version,
+                    "predictive_model_type": spec.config.predictive_model_type,
+                    "stages": completed, "stage_run_ids": {item["stage_key"]: item["child_run_id"] for item in completed},
+                    "candidate_status": "no_qualified_candidates", "qualified_candidates": 0,
+                    "holdout_status": "not_executed", "data_status": "available",
+                    "promotion": {"executed": False, "reason": "no_qualified_candidates"},
+                    "forward_simulation": {}, "temporal_validation": None,
+                    "result_files": ["pipeline_summary.json"],
+                }
+                (output / "pipeline_summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+                return result
 
     # A historical point-in-time run becomes reusable only after its candidates
     # have been frozen.  This belongs to the completed scientific parent, not
     # to any optional forward child.
     forward_snapshot = None
-    if spec.historical_data_cutoff is not None:
+    if spec.historical_data_cutoff is not None and spec.config.predictive_model_type == "external_only":
         forward_snapshot = build_forward_model_snapshot(
             repository, root_run_id, spec, result_directory=output,
             cancellation_check=cancellation_check,
@@ -2141,7 +2364,22 @@ def run_end_to_end(
     )
 
     output.mkdir(parents=True, exist_ok=True)
+    stage_keys = {item["stage_key"] for item in manifest["stages"]}
+    wf_id = effective_stage_run_id(manifest, "walk_forward") if "walk_forward" in stage_keys else None
+    wf_count = repository.summary(wf_id).get("eligible_combinations") if wf_id else None
+    qualification_id = effective_stage_run_id(manifest, "promotion_qualification") if "promotion_qualification" in stage_keys else None
+    candidate_count = repository.summary(qualification_id).get("candidate_count") if qualification_id else wf_count
+    holdout_key = next((key for key in ("holdout_evaluation", "fixed_candidate_evaluation", "threshold_calibration") if key in stage_keys), None)
+    holdout_id = effective_stage_run_id(manifest, holdout_key) if holdout_key else None
+    holdout_config = _read_result_json(repository, holdout_id, "run_configuration.json") if holdout_id else {}
+    result_states = {
+        "predictive_model_type": spec.config.predictive_model_type,
+        "candidate_status": ("unknown" if candidate_count is None else "qualified_candidates" if candidate_count else "no_qualified_candidates"),
+        "holdout_status": ("executed" if holdout_config.get("holdout_evaluated") else "not_executed" if holdout_config.get("holdout_evaluated") is False else "unknown"),
+        "data_status": "available",
+    }
     summary = {
+        **result_states,
         "schema_version": (
             manifest["schema_version"] if spec.derivation is not None
             else PIPELINE_SCHEMA_VERSION
@@ -2182,6 +2420,7 @@ def run_end_to_end(
         encoding="utf-8",
     )
     return {
+        **result_states,
         "job_type": JobType.END_TO_END.value,
         "pipeline_version": spec.pipeline_version,
         "stage_run_ids": {

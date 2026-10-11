@@ -205,17 +205,9 @@ def test_settings_sections_follow_the_experiment_pipeline_order():
         "def _render_qualification", 1
     )[0]
     labels = (
-        "Préparation des données et génération",
-        "Pré-filtrage des prédicteurs",
-        "Walk-forward",
-        "Qualification",
-        "Classement des modèles",
-        "XGBoost",
-        "Calibration des seuils",
-        "Échantillonnage et reproductibilité",
-        "Validation temporelle",
-        "Promotion",
-        "Exécution",
+        '"Univers et données"', '"Modèles et combinaisons"', '"Préfiltre"',
+        '"Walk-forward"', '"Calibrations"', '"Holdout et promotion"',
+        '"Forward et production"', '"Avancé"',
     )
 
     positions = [settings.index(label) for label in labels]
@@ -226,9 +218,8 @@ def test_settings_sections_follow_the_experiment_pipeline_order():
 def test_settings_separate_scientific_qualification_sampling_and_execution():
     source = APP.read_text(encoding="utf-8")
     settings = source.split("def _settings", 1)[1].split("def _render_qualification", 1)[0]
-    qualification = settings.split('st.subheader("Qualification")', 1)[1].split(
-        'st.subheader("Classement des modèles")', 1
-    )[0]
+    qualification = settings.split("with tabs[3]:", 1)[1].split("with tabs[4]:", 1)[0]
+    holdout = settings.split("with tabs[5]:", 1)[1].split("with tabs[6]:", 1)[0]
     sampling = settings.split('st.subheader("Échantillonnage et reproductibilité")', 1)[1].split(
         'st.subheader("Validation temporelle")', 1
     )[0]
@@ -239,10 +230,12 @@ def test_settings_separate_scientific_qualification_sampling_and_execution():
     for label in (
         "Fenêtres minimales", "ROC-AUC médian minimal", "Part fenêtres > hasard",
         "Pire ROC-AUC minimal", "Observations positives minimales",
-        "Écart-type ROC-AUC maximal", "ROC-AUC confirmation finale",
-        "Seuil de décision standard", "Évaluer le holdout final",
+        "Écart-type ROC-AUC maximal", "Seuil de décision standard",
     ):
         assert label in qualification
+    for label in ("ROC-AUC confirmation finale", "Évaluer le holdout final"):
+        assert label in holdout
+        assert label not in qualification
     for label in ("Combinaisons par cible (calibrations)", "Seed"):
         assert label in sampling
         assert label not in execution
@@ -1367,14 +1360,12 @@ def test_history_can_duplicate_one_walk_forward_run_into_experiments():
     assert "st.switch_page(target_page)" in source
 
 
-def test_history_grid_clears_persisted_selection_and_uses_compact_actions():
+def test_history_uses_compact_actions():
     source = APP.read_text(encoding="utf-8")
     history = source.split("def _history_runs_panel", 1)[1].split(
         "def _experiments_page", 1
     )[0]
 
-    assert 'st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]' in history
-    assert 'if selected_rows:' not in history
     assert 'actions = st.columns([1.2, 2.4, 2.6, 4])' in history
     assert '"Purger les données lourdes"' in history
     assert "_history_purge_preview(service, selected_run_id)" in history
@@ -1407,9 +1398,9 @@ def test_history_grid_uses_lightweight_records_and_defers_purge_eligibility():
     history = source.split("def _history_runs_panel", 1)[1].split(
         "def _experiments_page", 1
     )[0]
-    grid_setup = history.split("selection = render_history_grid", 1)[0]
+    grid_setup = history.split("render_history_grid(", 1)[0]
 
-    assert "service.history_runs(job_types=allowed_types)" in history
+    assert "service.history_index(job_types=allowed_types)" in history
     assert "details_by_run_id" in history
     assert "service.run(" not in grid_setup
     assert "service.purge_eligibility" not in history

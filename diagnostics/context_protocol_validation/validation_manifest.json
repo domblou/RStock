@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "protocol": "spy_adjusted_context_v1",
+  "standard_protocol_id": "194d4a6b786a86c1e2d0",
+  "purpose": "Descriptive benchmark-only sensitivity check; no optimization and no model outcomes",
+  "source": "data\\market\\SPY.parquet",
+  "source_sha256": "f75f95f2b6aae0882941c3e9373c432eef0705a201aa7c17317530dd71c15a6a",
+  "snapshot_start": "2023-01-03T00:00:00",
+  "snapshot_end": "2026-10-07T00:00:00",
+  "episodes": {
+    "2018_Q4": [
+      "2018-10-01",
+      "2018-12-31"
+    ],
+    "2020_Feb_Mar": [
+      "2020-02-19",
+      "2020-03-31"
+    ],
+    "2020_Apr_Jun": [
+      "2020-04-01",
+      "2020-06-30"
+    ],
+    "2022_first_half": [
+      "2022-01-03",
+      "2022-06-30"
+    ],
+    "2023_Aug_Oct": [
+      "2023-08-01",
+      "2023-10-31"
+    ],
+    "2023_Nov_2024_Mar": [
+      "2023-11-01",
+      "2024-03-28"
+    ],
+    "2024_Jul_Aug": [
+      "2024-07-15",
+      "2024-08-16"
+    ],
+    "2025_Feb_Apr": [
+      "2025-02-19",
+      "2025-04-30"
+    ],
+    "2025_May_Jun": [
+      "2025-05-01",
+      "2025-06-30"
+    ]
+  },
+  "missing_or_partial_episodes": [
+    "2018_Q4",
+    "2020_Feb_Mar",
+    "2020_Apr_Jun",
+    "2022_first_half"
+  ],
+  "insufficient_warmup_episodes": [
+    "2023_Aug_Oct",
+    "2023_Nov_2024_Mar"
+  ],
+  "status": "partial_historical_coverage",
+  "defaults": {
+    "trend": 63,
+    "drawdown": 252,
+    "volatility": 21
+  },
+  "selection": "Defaults fixed by protocol decision, not selected from model results or variant scores",
+  "artifact_digests": {
+    "spy_adjusted_validation.csv": "29f2869da112628480b2947e323f831be6f45e9823544c62e08bec107614db2c",
+    "window_variants.csv": "ad45ecd148bccb4560e9d0f20a9a1ffbb08bf9ede12ffd3997889bcdbe91792f"
+  }
+}

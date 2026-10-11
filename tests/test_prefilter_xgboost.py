@@ -219,6 +219,12 @@ def test_settings_ui_renders_edits_and_saves_prefilter_fields_in_prefilter_secti
     headings = []
 
     class FakeStreamlit:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
         def container(self, **kwargs):
             borders.append(kwargs)
             return nullcontext()
@@ -232,11 +238,20 @@ def test_settings_ui_renders_edits_and_saves_prefilter_fields_in_prefilter_secti
         def number_input(self, label, *, key, value, **kwargs):
             field = key.removeprefix("settings-")
             shown[field] = (label, value)
-            return CUSTOM[field]
+            return CUSTOM.get(field, value)
+
+        def selectbox(self, label, choices, **kwargs):
+            return choices[kwargs["index"]]
+
+        def caption(self, *args):
+            pass
 
     monkeypatch.setattr(streamlit_app, "st", FakeStreamlit())
-    assert streamlit_app._prefilter_xgboost_settings(DEFAULT_CONFIG) == CUSTOM
-    assert set(shown) == set(PREFILTER_XGBOOST_FIELDS)
+    values = streamlit_app._prefilter_xgboost_settings(DEFAULT_CONFIG)
+    assert {field: values[field] for field in CUSTOM} == CUSTOM
+    assert values["prefilter_xgb_round_selection_mode"] == "fixed"
+    assert values["prefilter_xgb_early_stopping_max_rounds"] == 500
+    assert set(PREFILTER_XGBOOST_FIELDS) <= set(shown)
     assert all(shown[field] == (field.removeprefix("prefilter_xgb_"), value)
                for field, value in DEFAULTS.items())
     assert borders == [{"border": True}]
@@ -245,6 +260,6 @@ def test_settings_ui_renders_edits_and_saves_prefilter_fields_in_prefilter_secti
     settings = source.split("def _settings()", 1)[1].split("def _history_model_contexts", 1)[0]
     prefilter = settings.split('st.subheader("Pré-filtrage des prédicteurs")', 1)[1].split(
         'st.subheader("Walk-forward")', 1)[0]
-    assert "prefilter_xgboost_values = _prefilter_xgboost_settings(current)" in prefilter
+    assert "prefilter_xgboost_values = _prefilter_xgboost_settings(current, disabled=prefilter_disabled)" in prefilter
     assert "**prefilter_xgboost_values" in settings
     assert "save_user_settings(" in settings

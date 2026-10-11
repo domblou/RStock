@@ -43,6 +43,10 @@ def publish(repository: RunRepository, run_id: str, spec: ExperimentSpec, output
         stability_origin_count=spec.stability_origin_count,
         stability_step_sessions=spec.stability_step_sessions,
     )
+    if spec.config.prefilter_xgb_round_selection_mode == "chronological":
+        contract.update(schema_version=2, round_selection_policy=report["round_selection_policy"],
+            round_selection_artifacts={name: hashlib.sha256((output / name).read_bytes()).hexdigest()
+                for name in ("prefilter_round_selection_training.csv", "prefilter_round_selection.json")})
     contract["contract_sha256"] = digest(contract)
     (output / "prefilter_contract.json").write_text(
         json.dumps(contract, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -73,7 +77,7 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
             and spec.resolved_market_session_cutoff != value["cutoff"]):
         raise ValueError("Resolved Walk-forward cutoff must match the frozen Prefilter cutoff")
     scientific = {key: item for key, item in value.items() if key != "contract_sha256"}
-    if (value.get("schema_version") != 1 or value.get("contract_sha256") != digest(scientific)
+    if (value.get("schema_version") not in {1, 2} or value.get("contract_sha256") != digest(scientific)
             or value.get("source_run_id") != source
             or value.get("configuration_fingerprint") != repository.configuration_fingerprint(source)
             or value.get("selection_sha256") != digest(value["ordered_predictors_by_target"])
@@ -89,6 +93,19 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
             or source_spec.calendar != spec.calendar):
         raise ValueError("Prefilter universe or calendar differs from Walk-forward")
     source_config = source_spec.config
+    if value.get("schema_version") == 2:
+        from rstock.modeling import RoundSelectionPolicy
+        if value.get("round_selection_policy") != RoundSelectionPolicy.from_config(source_config, scope="prefilter").snapshot():
+            raise ValueError("Prefilter round selection policy changed")
+        artifacts = value.get("round_selection_artifacts", {})
+        expected = {"prefilter_round_selection_training.csv", "prefilter_round_selection.json"}
+        if set(artifacts) != expected:
+            raise ValueError("Prefilter training audit contract is incomplete")
+        for name, expected_digest in artifacts.items():
+            if hashlib.sha256((path.parent / name).read_bytes()).hexdigest() != expected_digest:
+                raise ValueError("Frozen Prefilter training audit changed")
+    elif source_config.prefilter_xgb_round_selection_mode != "fixed":
+        raise ValueError("Chronological Prefilter requires its versioned training contract")
     if spec.config.final_holdout_size > source_config.final_holdout_size:
         raise ValueError("Inherited Prefilter selection overlaps the new holdout; recompute Prefilter")
     return value
@@ -106,6 +123,15 @@ def inherit_reference(repository: RunRepository, spec: ExperimentSpec) -> Experi
         prepared_snapshot_required=True, prepared_dataset_digest_required=True,
     )
     load(repository, inherited)
+    from rstock.target_volatility import enabled, derivation_source
+    if enabled(inherited.config) and inherited.target_volatility_source is None:
+        from .derived_snapshot import load_source_prepared_snapshot
+        prepared, _, targets, _ = load_source_prepared_snapshot(repository,
+            replace(inherited, config=replace(inherited.config, target_volatility_enabled=False)),
+            source_run_id=inherited.source_prefilter_run, source_job_type=JobType.PREDICTOR_PREFILTER,
+            expected_snapshot_sha256=contract["prepared_snapshot_sha256"])
+        inherited = replace(inherited, target_volatility_source=derivation_source(
+            prepared, targets, inherited.config, inherited.calendar, contract["cutoff"]))
     return inherited
 
 

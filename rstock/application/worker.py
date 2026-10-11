@@ -21,7 +21,7 @@ from rstock.checkpoints import CheckpointManager
 
 from .domain import JobStatus, JobType
 from .orchestration_runtime import child_executor_context
-from .processes import process_alive
+from .processes import process_alive, process_creation_time, process_identity_matches
 from .prefilter_experiments import prefilter_checkpoint_batch_sizes
 from .repository import RunRepository
 from .runner import LocalProcessBackend, ProgressReporter, RunService
@@ -551,7 +551,10 @@ class RunLease:
                     owner, state = _read_owner(owner_path)
                     if state == "valid":
                         try:
-                            if _process_alive(int(owner["pid"])):
+                            if (_process_alive(int(owner["pid"])) and process_identity_matches(
+                                owner["pid"], expected_created_at=owner.get("pid_created_at"),
+                                existed_by=owner.get("acquired_at"),
+                            )):
                                 continue
                         except (TypeError, ValueError, KeyError):
                             pass
@@ -566,6 +569,7 @@ class RunLease:
                 claim_token = uuid.uuid4().hex
                 _atomic_owner_write(owner_path, {
                     "pid": os.getpid(), "run_id": self.run_id,
+                    "pid_created_at": process_creation_time(os.getpid()),
                     "token": claim_token,
                     "acquired_at": datetime.now(timezone.utc).isoformat(),
                 })
@@ -608,6 +612,21 @@ class RunLease:
             )
         except (FileNotFoundError, OSError, ValueError, KeyError, json.JSONDecodeError):
             return False
+
+
+def _validate_publication_recovery(run: Path, summary: dict) -> None:
+    """A diagnostic directory alone cannot prove successful publication."""
+    working, results = run / "_working", run / "results"
+    if working.is_dir() and any(working.iterdir()):
+        raise ValueError("publication_incomplete_working_not_reconciled")
+    if not results.is_dir():
+        raise ValueError("publication_results_missing")
+    for name in summary.get("result_files", []):
+        path = (results / name).resolve()
+        if not path.is_relative_to(results.resolve()) or not path.is_file():
+            raise ValueError(f"publication_result_missing:{name}")
+    if summary.get("forward_simulation") and not (results / "forward_model_snapshot.json").is_file():
+        raise ValueError("publication_forward_snapshot_missing")
 
 
 def _publishing_completed(repository: RunRepository, run_id: str) -> bool:
@@ -678,6 +697,12 @@ def execute_run(
         run_lock_started_at = datetime.now(timezone.utc).isoformat()
         run_lease.acquire()
         spec = replace(repository.load_spec(run_id), execution_run_id=run_id)
+        # execution_run_id is runtime metadata. dataclasses.replace drops the
+        # init=False historical fingerprint; keep the persisted run identity
+        # shared by the worker and workflow checkpoint managers.
+        object.__setattr__(
+            spec, "_snapshot_fingerprint", repository.configuration_fingerprint(run_id)
+        )
         try:
             resources = ResourceRecorder(
                 repository.run_directory(run_id), run_id,
@@ -789,10 +814,17 @@ def execute_run(
             spec.pipeline_version >= 4 and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None
         ):
             phases = [item for item in phases if item[0] != "prefilter"]
+        if spec.config.market_context_enabled:
+            from .market_context_runtime import INPUTS
+            if spec.job_type.value in INPUTS:
+                phases = [*[(name, weight) for name, weight in phases if name != "publishing"],
+                          ("market_context_diagnostic", 2),
+                          *[(name, weight) for name, weight in phases if name == "publishing"]]
         reporter.configure_phases(phases)
         working = repository.run_directory(run_id) / "_working"
         results = repository.run_directory(run_id) / "results"
         if results.exists() and repository.summary(run_id):
+            _validate_publication_recovery(repository.run_directory(run_id), repository.summary(run_id))
             reporter.phase_started("publishing")
             reporter.phase_completed("publishing")
             reporter.complete_workflow()

@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 
 import numpy as np
 import pandas as pd
 
-from .combinations import symbol_set_id, symbols_from_set
+from .combinations import predictive_model_identity, symbol_set_id, symbols_from_set
 from .config import RStockConfig
+from .target_volatility import contract as volatility_contract, enabled as volatility_enabled, column as volatility_column
 from .evaluation import binary_predictions, classification_metrics
 from .features import (
     close_to_close_return_column,
@@ -23,14 +24,19 @@ from .features import (
     mae_column,
     mfe_column,
     overnight_return_column,
-    predictor_columns,
+    model_predictor_columns,
 )
 from .modeling import (
     XGBoostParameters,
+    RoundSelectionPolicy,
     fit_booster,
     fit_booster_matrix,
+    fit_chronological_booster,
+    round_selection_snapshot,
+    round_selection_coverage,
     historical_xgboost_parameters,
     prefilter_xgboost_parameters,
+    prefilter_xgboost_snapshot,
     predict_probabilities,
     predict_probabilities_matrix,
     xgboost_module,
@@ -99,6 +105,7 @@ class PrefilterWalkForwardResult:
     telemetry: dict[str, object]
     exploitable_targets: tuple[str, ...]
     excluded_targets: dict[str, str]
+    round_selection_training: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 class InsufficientWalkForwardObservations(ValueError):
@@ -159,26 +166,28 @@ def _walk_forward_combination(
     *,
     include_down: bool = True,
     parameters: XGBoostParameters | None = None,
+    round_selection_enabled: bool = True,
+    round_selection_policy: RoundSelectionPolicy | None = None,
 ) -> _WalkForwardCombinationResult:
     """Evaluate one combination; its chronological windows remain sequential."""
 
     ordered, config, holdout_start, market_calendars, min_train, test_window, step = context
+    mode = (round_selection_policy.values["xgb_round_selection_mode"]
+            if round_selection_policy else config.xgb_round_selection_mode)
     row = pd.Series(row_values)
     observation, feature_symbols = symbols_from_set(row)
     up_outcome_name = intraday_target_column(observation)
     down_outcome_name = intraday_down_target_column(observation)
-    names = predictor_columns(
-        ordered,
-        feature_symbols,
-        config.lag_depth,
-        config.date_feature_regex,
-    )
-    if up_outcome_name not in ordered or down_outcome_name not in ordered or not names:
+    names = model_predictor_columns(ordered, observation, feature_symbols, config)
+    if up_outcome_name not in ordered or down_outcome_name not in ordered or (not names and config.predictive_model_type != "constant_probability"):
         raise ValueError(f"Incomplete columns for set targeting {observation}")
     model_data = ordered[[*names, up_outcome_name, down_outcome_name]].dropna()
     rows_lost_to_lags = int(ordered[up_outcome_name].notna().sum() - len(model_data))
     set_name = symbol_set_id(row)
-    predictors_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
+    external_json = json.dumps(feature_symbols, ensure_ascii=False, separators=(",", ":"))
+    effective_symbols = ([observation] if config.predictive_model_type == "target_only" else
+                         [observation, *feature_symbols] if config.predictive_model_type == "target_and_external" else feature_symbols)
+    predictors_json = json.dumps(effective_symbols, ensure_ascii=False, separators=(",", ":"))
     development_data = model_data.loc[model_data.index < holdout_start]
     required_train = (
         config.walk_forward_train_size
@@ -226,24 +235,42 @@ def _walk_forward_combination(
         test = development_data.iloc[window.test_slice]
         if train.index.max() >= test.index.min():
             raise AssertionError("Walk-forward window leaked future test data")
-        xgb = xgboost_module()
+        constant = config.predictive_model_type == "constant_probability"
+        xgb = None if constant else xgboost_module()
         effective_parameters = parameters or historical_xgboost_parameters(config)
         train_features = train[names]
         test_features = test[names]
-        test_matrix = xgb.DMatrix(test_features, feature_names=names)
-        up_train_matrix = xgb.DMatrix(
-            train_features, label=train[up_outcome_name], feature_names=names
-        )
-        up_booster = fit_booster_matrix(
-            up_train_matrix, config, parameters=effective_parameters
-        )
-        up_probabilities = predict_probabilities_matrix(up_booster, test_matrix)
+        test_matrix = None if constant else xgb.DMatrix(test_features, feature_names=names)
+        selection_diagnostics = {}
+        if constant:
+            up_booster = fit_booster(train, names, up_outcome_name, config)
+            up_selection = dict(up_booster.record)
+        elif round_selection_enabled and mode == "chronological":
+            up_booster, up_selection = fit_chronological_booster(
+                train, names, up_outcome_name, config, parameters=effective_parameters,
+                cancellation_check=cancellation_check,
+                policy=round_selection_policy,
+            )
+        else:
+            up_train_matrix = xgb.DMatrix(train_features, label=train[up_outcome_name], feature_names=names)
+            up_booster = fit_booster_matrix(up_train_matrix, config, parameters=effective_parameters)
+            up_selection = {"RoundSelectionMode": "fixed", "RoundSelectionUsed": False,
+                            "RoundsRetained": effective_parameters.num_boost_round,
+                            "RoundSelectionFallbackReason": None}
+        selection_diagnostics.update({f"Up{k}": v for k, v in up_selection.items()})
+        up_probabilities = (predict_probabilities(up_booster, test, names) if constant
+                            else predict_probabilities_matrix(up_booster, test_matrix))
         up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
         up_actual = test[up_outcome_name].astype(int).to_numpy()
         window_record: dict[str, object] = {
             "Set": set_name,
             "Observation": observation,
             "Predictors": predictors_json,
+            "PredictiveModelType": config.predictive_model_type,
+            "FeatureColumns": json.dumps(names),
+            "ExternalPredictors": external_json,
+            "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config)),
+            "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config)),
             "MarketCalendar": market_calendars.get(observation),
             "Window": window.number,
             "TrainStart": train.index.min(),
@@ -257,17 +284,33 @@ def _walk_forward_combination(
             "RowsLostToLags": rows_lost_to_lags,
         }
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
+        if volatility_enabled(config):
+            base_names = [n for n in names if n != volatility_column(observation, config.target_volatility_sessions)]
+            base_count = len(ordered[[*base_names, up_outcome_name, down_outcome_name]].dropna())
+            window_record.update(TargetVolatilityEnabled=True, TargetVolatilitySessions=config.target_volatility_sessions,
+                TargetVolatilityDefinition=volatility_contract(config)["definition_version"],
+                RowsLostToVolatility=base_count - len(model_data), ModelObservations=len(model_data),
+                TargetVolatilitySourceQuality="retrospective_not_pit")
         down_predicted = down_probabilities = None
         if include_down:
-            down_train_matrix = xgb.DMatrix(
-                train_features, label=train[down_outcome_name], feature_names=names
-            )
-            down_booster = fit_booster_matrix(
-                down_train_matrix, config, parameters=effective_parameters
-            )
-            down_probabilities = predict_probabilities_matrix(
-                down_booster, test_matrix
-            )
+            if constant:
+                down_booster = fit_booster(train, names, down_outcome_name, config)
+                down_selection = dict(down_booster.record)
+            elif round_selection_enabled and mode == "chronological":
+                down_booster, down_selection = fit_chronological_booster(
+                    train, names, down_outcome_name, config, parameters=effective_parameters,
+                    cancellation_check=cancellation_check,
+                    policy=round_selection_policy,
+                )
+            else:
+                down_train_matrix = xgb.DMatrix(train_features, label=train[down_outcome_name], feature_names=names)
+                down_booster = fit_booster_matrix(down_train_matrix, config, parameters=effective_parameters)
+                down_selection = {"RoundSelectionMode": "fixed", "RoundSelectionUsed": False,
+                                  "RoundsRetained": effective_parameters.num_boost_round,
+                                  "RoundSelectionFallbackReason": None}
+            selection_diagnostics.update({f"Down{k}": v for k, v in down_selection.items()})
+            down_probabilities = (predict_probabilities(down_booster, test, names) if constant
+                                  else predict_probabilities_matrix(down_booster, test_matrix))
             down_predicted = binary_predictions(
                 down_probabilities, config.prediction_threshold
             )
@@ -278,12 +321,18 @@ def _walk_forward_combination(
                     "Down", down_actual, down_predicted, down_probabilities
                 )
             )
+        window_record.update(selection_diagnostics)
         window_records.append(window_record)
         for position, date in enumerate(test.index):
             prediction = {
                 "Set": set_name,
                 "Observation": observation,
                 "Predictors": predictors_json,
+                "PredictiveModelType": config.predictive_model_type,
+                "FeatureColumns": json.dumps(names),
+                "ExternalPredictors": external_json,
+                "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config)),
+                "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config)),
                 "MarketCalendar": market_calendars.get(observation),
                 "Window": window.number,
                 "Date": date,
@@ -332,11 +381,13 @@ def _prefilter_combination(
         # Keep the shared evaluator's geometry and qualification untouched. Only
         # this prefilter training context receives the independent seed.
         training_context = (
-            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed), *context[2:],
+            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed, predictive_model_type="external_only", target_volatility_enabled=False), *context[2:],
         )
         result = _walk_forward_combination(
             row_values, training_context, cancellation_check, include_down=False,
             parameters=prefilter_xgboost_parameters(config),
+            round_selection_enabled=config.prefilter_xgb_round_selection_mode == "chronological",
+            round_selection_policy=RoundSelectionPolicy.from_config(config, scope="prefilter"),
         )
     except InsufficientWalkForwardObservations as error:
         _, _, _, market_calendars, _, _, _ = context
@@ -394,7 +445,21 @@ def _prefilter_combination(
         pd.DataFrame(result.prediction_records),
         context[1],
     )
-    return qualification.drop(columns="EligibleRank").iloc[0].to_dict()
+    record = qualification.drop(columns="EligibleRank").iloc[0].to_dict()
+    if config.prefilter_xgb_round_selection_mode == "chronological":
+        # Compact per-fit audit travels with the qualification in the same atomic
+        # checkpoint batch; prediction-level detail is still released by workers.
+        record["_round_selection_training"] = [
+            {key: value for key, value in window.items()
+             if key.startswith("UpRound") or key.startswith("UpInternal")
+             or key.startswith("UpValidation") or key.startswith("UpSelection")
+             or key in {"Set", "Observation", "Predictors", "Window", "TrainStart", "TrainEnd",
+                        "TrainObservations", "TestStart", "TestEnd", "TestObservations",
+                        "UpTrainingIdentity", "UpBestIteration", "UpBestValidationLogLoss",
+                        "UpEarlyStoppingTriggered", "UpRefitSeconds", "UpLogLoss", "UpBrier", "UpROCAUC", "UpPRAUC"}}
+            for window in result.window_records
+        ]
+    return record
 
 
 def _prefilter_population_diagnostics(
@@ -853,12 +918,7 @@ def _evaluate_final_holdout(
         observation, feature_symbols = symbols_from_set(row)
         up_outcome_name = intraday_target_column(observation)
         down_outcome_name = intraday_down_target_column(observation)
-        names = predictor_columns(
-            ordered,
-            feature_symbols,
-            config.lag_depth,
-            config.date_feature_regex,
-        )
+        names = model_predictor_columns(ordered, observation, feature_symbols, config)
         model_data = ordered[[*names, up_outcome_name, down_outcome_name]].dropna()
         development = model_data.loc[model_data.index < holdout_start]
         holdout = model_data.loc[model_data.index >= holdout_start]
@@ -989,6 +1049,23 @@ def _combine_selection_results(
     return combined
 
 
+def ensure_prefilter_training_policy(manager, config: RStockConfig) -> None:
+    """Fixed legacy checkpoints remain readable; chronological work is explicit."""
+    from .checkpoints import CheckpointIncompatibleError
+
+    name = "prefilter_round_selection_contract"
+    policy = {"schema_version": 1, "training": prefilter_xgboost_snapshot(config),
+              "policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot()}
+    if manager.artifact_exists(name):
+        if manager.load_artifact(name) != policy:
+            raise CheckpointIncompatibleError("Prefilter training policy differs from its checkpoint")
+    elif config.prefilter_xgb_round_selection_mode == "chronological":
+        if manager.completed_batch_ids("predictor_prefilter_walk_forward") or any(
+                manager.artifact_exists(key) for key in ("prefilter_qualification", "prefilter_selection")):
+            raise CheckpointIncompatibleError("Historical fixed Prefilter work cannot resume as chronological")
+        manager.commit_artifact(name, policy)
+
+
 def evaluate_prefilter_walk_forward(
     prepared: pd.DataFrame,
     generated_sets: pd.DataFrame,
@@ -1056,6 +1133,19 @@ def evaluate_prefilter_walk_forward(
     )
     batch_size = config.predictor_prefilter_batch_size
     total_batches = (len(task_rows) + batch_size - 1) // batch_size
+    training_records: list[dict[str, object]] = []
+
+    def unpack(records):
+        rows = []
+        for record in records:
+            row = dict(record)
+            for training in row.pop("_round_selection_training", []):
+                training_records.append({**training, "OriginCutoff": ordered.index.max()})
+            rows.append(row)
+        return rows
+
+    if checkpoint_manager is not None:
+        ensure_prefilter_training_policy(checkpoint_manager, config)
     if checkpoint_manager is None:
         batches = iter_combination_batches(
             task_rows,
@@ -1071,7 +1161,7 @@ def evaluate_prefilter_walk_forward(
             cancellation_check=cancellation_check,
             details={"combination_workers": config.combination_workers},
         )
-        records = [record for batch in batches for record in batch]
+        records = unpack(record for batch in batches for record in batch)
     else:
         manager = checkpoint_manager
         manager.set_total_batches("predictor_prefilter_walk_forward", total_batches)
@@ -1092,7 +1182,16 @@ def evaluate_prefilter_walk_forward(
             completed_batch_ids=completed_ids,
         ):
             checkpoint_started_at = perf_counter()
-            payload = {"qualification": pd.DataFrame(batch.results)}
+            first_training = len(training_records)
+            payload = {"qualification": pd.DataFrame(unpack(batch.results))}
+            if config.prefilter_xgb_round_selection_mode == "chronological":
+                payload["round_selection_training"] = pd.DataFrame(training_records[first_training:])
+            batch_costs = {
+                "selection_worker_seconds": sum(float(row.get("UpSelectionSeconds", 0)) for row in training_records[first_training:]),
+                "refit_worker_seconds": sum(float(row.get("UpRefitSeconds", 0)) for row in training_records[first_training:]),
+                "selection_rounds_run": sum(int(row.get("UpSelectionRoundsRun", 0)) for row in training_records[first_training:]),
+                "refit_rounds": sum(int(row.get("UpRoundsRetained", 0)) for row in training_records[first_training:]),
+            } if config.prefilter_xgb_round_selection_mode == "chronological" else {}
             manager.commit_batch(
                 "predictor_prefilter_walk_forward",
                 batch.batch_id,
@@ -1100,7 +1199,7 @@ def evaluate_prefilter_walk_forward(
                 first_index=batch.first_index,
                 last_index=batch.last_index,
                 combination_count=len(batch.results),
-                row_counts={"qualification": len(payload["qualification"])},
+                row_counts={name: len(frame) for name, frame in payload.items()},
             )
             report_progress(
                 progress_callback,
@@ -1120,17 +1219,26 @@ def evaluate_prefilter_walk_forward(
                     "calculation_seconds": batch.elapsed_seconds,
                     "parent_rss_bytes": process_rss_bytes(),
                     "checkpoint_written": True,
+                    **batch_costs,
                 },
             )
         records = []
+        training_records = []
         for batch_id in range(total_batches):
             payload = manager.load_batch("predictor_prefilter_walk_forward", batch_id)
             records.extend(payload["qualification"].to_dict("records"))
+            audit = payload.get("round_selection_training")
+            if config.prefilter_xgb_round_selection_mode == "chronological" and audit is None:
+                from .checkpoints import CheckpointIncompatibleError
+                raise CheckpointIncompatibleError("Chronological Prefilter batch has no training audit")
+            if audit is not None:
+                training_records.extend(audit.to_dict("records"))
     population_diagnostics, exploitable_targets, excluded_targets = (
         _prefilter_population_diagnostics(records, task_rows)
     )
     qualification = rank_qualified_combinations(pd.DataFrame(records))
     elapsed = perf_counter() - started_at
+    training = pd.DataFrame(training_records)
     telemetry = {
         "elapsed_seconds": elapsed,
         "combinations": len(task_rows),
@@ -1141,7 +1249,30 @@ def evaluate_prefilter_walk_forward(
         "combination_workers": config.combination_workers,
         "xgb_threads_per_worker": config.xgb_nthread,
         **population_diagnostics,
+        "round_selection_policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot(),
+        "round_selection_coverage": {**round_selection_coverage(training), "Down": {"available": False, "status": "not_applicable"}},
+        "selection_rounds_run": sum(int(row.get("UpSelectionRoundsRun", 0)) for row in training_records),
+        "refit_rounds": sum(int(row.get("UpRoundsRetained", 0)) for row in training_records),
+        "selection_worker_seconds": sum(float(row.get("UpSelectionSeconds", 0)) for row in training_records),
+        "refit_worker_seconds": sum(float(row.get("UpRefitSeconds", 0)) for row in training_records),
     }
+    if config.prefilter_xgb_round_selection_mode == "fixed":
+        # The historical fixed primitive does not measure individual fit costs.
+        # Keep its batch timings; absence must not imply zero training work.
+        for key in ("selection_rounds_run", "refit_rounds", "selection_worker_seconds", "refit_worker_seconds"):
+            telemetry.pop(key)
+    if checkpoint_manager is not None and config.prefilter_xgb_round_selection_mode == "chronological":
+        checkpoint_manager.commit_artifact("prefilter_round_selection_training", training)
+        # Scientific costs belong to the durable fits, not the current resume's
+        # wall time/RSS. Exporting volatile attempt telemetry would change the
+        # immutable Prefilter contract even when no model was retrained.
+        checkpoint_manager.commit_artifact("prefilter_round_selection_telemetry", {
+            "origin_cutoff": ordered.index.max().date().isoformat(),
+            **{key: value for key, value in telemetry.items() if key in {
+                "round_selection_policy", "round_selection_coverage", "selection_rounds_run",
+                "refit_rounds", "selection_worker_seconds", "refit_worker_seconds",
+                *population_diagnostics.keys()}},
+        })
     report_progress(
         progress_callback,
         "predictor_prefilter_walk_forward",
@@ -1153,6 +1284,7 @@ def evaluate_prefilter_walk_forward(
         telemetry,
         exploitable_targets,
         excluded_targets,
+        training,
     )
 
 
@@ -1171,6 +1303,9 @@ def evaluate_walk_forward(
     cancellation_check: CancellationCheck | None = None,
 ) -> WalkForwardResult:
     """Qualify on development windows, then confirm on an untouched final holdout."""
+
+    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+        raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
 
     _validate_prepared_index(prepared)
     ordered = prepared.sort_index()
@@ -1300,6 +1435,8 @@ def evaluate_walk_forward(
     )
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     run_configuration: dict[str, object] = {
+        "round_selection": ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" else {**round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__}),
+        "round_selection_coverage": round_selection_coverage(windows_frame),
         "target": "intraday_return >= intraday_target_threshold",
         "down_target": "intraday_return <= -intraday_down_threshold",
         "intraday_target_threshold": config.intraday_target_threshold,
@@ -1329,6 +1466,13 @@ def evaluate_walk_forward(
             "PRAUCMedian desc",
         ],
     }
+    run_configuration["predictive_model_type"] = config.predictive_model_type
+    if volatility_enabled(config):
+        run_configuration["target_volatility"] = {**volatility_contract(config),
+            "provenance": ordered.attrs.get("target_volatility", {}), "source_quality": "retrospective_not_pit"}
+    run_configuration["candidate_status"] = "qualified_candidates" if qualification["Eligible"].any() else "no_qualified_candidates"
+    run_configuration["holdout_status"] = "executed" if evaluate_holdout and len(final_holdout) else "not_executed"
+    run_configuration["data_status"] = "available"
     run_configuration["final_holdout_evaluated"] = evaluate_holdout
     return WalkForwardResult(
         windows=windows_frame,

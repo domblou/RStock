@@ -71,7 +71,9 @@ def prepare_dataset(
         raise ValueError("lag_depth must be positive")
     if intraday_target_threshold < 0 or intraday_down_threshold < 0:
         raise ValueError("Intraday target thresholds cannot be negative")
+    volatility_input = stock.attrs.get("target_volatility_input")
     stock = _normalise_datetime_index(stock)
+    stock.attrs.pop("target_volatility_input", None)
     columns: dict[str, pd.Series] = {}
 
     for symbol in stock_symbols:
@@ -133,6 +135,12 @@ def prepare_dataset(
     prepared["yday"] = prepared.index.dayofyear - 1
     prepared["mon"] = prepared.index.month - 1
 
+    if volatility_input:
+        from .target_volatility import attach, freeze_prices
+        source = freeze_prices(volatility_input["config"].project_root,
+            volatility_input["prices"][[f"{s}.Adjusted" for s in volatility_input["targets"]]], volatility_input["calendar"])
+        prepared = attach(prepared, volatility_input["prices"], volatility_input["targets"],
+                          volatility_input["config"], volatility_input["calendar"], source)
     return prepared
 
 
@@ -194,6 +202,8 @@ def prepare_prediction_row(
                 float(known.iloc[-lag]) if len(known) >= lag else np.nan
             )
     values["wday"] = (target.dayofweek + 1) % 7
+    from .target_volatility import future_values
+    values.update(future_values(prepared, as_of, target))
     values["yday"] = target.dayofyear - 1
     values["mon"] = target.month - 1
     return pd.DataFrame([values], index=pd.DatetimeIndex([target], name="Date"))
@@ -214,6 +224,19 @@ def prediction_source_observations(
     observations: dict[str, dict[pd.Timestamp, dict[str, object]]] = {}
     pattern = re.compile(r"^(?P<symbol>.+)_intraday_J-(?P<lag>\d+)$")
     for feature_name in feature_names:
+        volatility = re.fullmatch(r"(?P<symbol>.+)_target_volatility_(?P<sessions>\d+)", feature_name)
+        if volatility:
+            prices = prepared.attrs.get("target_volatility_prices")
+            if prices is not None:
+                from .target_volatility import prices_frame
+                prices = prices_frame(prices)
+            symbol, sessions = volatility.group("symbol"), int(volatility.group("sessions"))
+            name = f"{symbol}.Adjusted"
+            if isinstance(prices, pd.DataFrame) and name in prices:
+                prior = prices.loc[prices.index <= pd.Timestamp(as_of_date).normalize(), name].tail(sessions + 1)
+                for source_date, value in prior.items():
+                    observations.setdefault(symbol, {}).setdefault(pd.Timestamp(source_date), {"date": pd.Timestamp(source_date).date().isoformat()})["adjusted_close"] = float(value)
+            continue
         match = pattern.fullmatch(feature_name)
         if match is None:
             continue
@@ -269,3 +292,39 @@ def predictor_columns(
             and date_pattern.search(name)
         )
     ]
+
+
+def model_predictor_columns(dataset: pd.DataFrame, target: str, external_symbols: Sequence[str],
+                            config: object) -> list[str]:
+    """Resolve the information set without altering historical external features."""
+    kind = config.predictive_model_type
+    if kind == "constant_probability":
+        return []
+    symbols = ([target] if kind == "target_only" else
+               [target, *external_symbols] if kind == "target_and_external" else list(external_symbols))
+    if kind in {"external_only", "target_and_external"} and not external_symbols:
+        raise ValueError("External predictive models require external predictors")
+    names = predictor_columns(dataset, symbols, config.lag_depth,
+                              config.date_feature_regex if kind == "external_only" else "")
+    if kind != "external_only":
+        expected = {intraday_lag_column(symbol, lag) for symbol in symbols for lag in range(1, config.lag_depth + 1)}
+        missing = expected - set(names)
+        if missing:
+            raise ValueError(f"Predictive model input columns unavailable: {sorted(missing)}")
+    from .target_volatility import enabled, column
+    if enabled(config):
+        name = column(target, config.target_volatility_sessions)
+        if name not in dataset:
+            raise ValueError(f"Target volatility feature unavailable: {name}")
+        names.append(name)
+    return names
+
+
+def require_predictive_model_inputs(dataset: pd.DataFrame, targets: Sequence[str],
+                                   external_symbols: Sequence[str], config: object) -> None:
+    """Reject a type change when the frozen scientific snapshot lacks its inputs."""
+    for target in targets:
+        outcomes = {intraday_target_column(target), intraday_down_target_column(target)}
+        if not outcomes <= set(dataset.columns):
+            raise ValueError(f"Predictive model labels unavailable for {target}")
+        model_predictor_columns(dataset, target, [symbol for symbol in external_symbols if symbol != target], config)

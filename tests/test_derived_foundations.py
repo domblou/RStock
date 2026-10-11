@@ -179,6 +179,8 @@ def test_derivation_round_trip_and_override_ownership(tmp_path):
     restored = ExperimentSpec.from_dict(spec.to_dict())
     assert restored.derivation == spec.derivation
     assert restored.fingerprint == spec.fingerprint
+    assert restored.derivation.source_lineage is None
+    assert "source_lineage" not in restored.derivation.to_dict()
     assert stage_modes("threshold_calibration", forward_enabled=True)[
         "forward_simulation"
     ] == "recomputed"

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
+import logging
+from contextlib import contextmanager
+from queue import Empty
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
@@ -23,6 +27,75 @@ Result = TypeVar("Result")
 Context = TypeVar("Context")
 
 _CANCELLATION_EVENT: Any = None
+POOL_STARTUP_SECONDS = 60.0
+POOL_STOP_SECONDS = 5.0
+LOGGER = logging.getLogger(__name__)
+
+
+def _pool_probe() -> None:
+    """Trigger spawn; readiness is acknowledged by every initializer."""
+
+
+@contextmanager
+def _process_pool(workers: int, initializer: Callable[[Any], None], context: Any,
+                  cancellation_check: CancellationCheck | None = None):
+    # Synchronization primitives can be inherited through spawn's initargs.
+    # They must not be sent through the executor's *task* queue. A Manager
+    # adds a server and synchronous RPC to initialization and cancellation.
+    spawn = mp.get_context("spawn")
+    cancellation = spawn.Event()
+    ready = spawn.Queue()
+    start_gate = spawn.Event()
+    executor = ProcessPoolExecutor(
+        max_workers=workers, mp_context=spawn,
+        initializer=_initialize_process_worker,
+        initargs=(cancellation, initializer, context, ready, start_gate),
+    )
+    failed = True
+    try:
+        check_cancellation(cancellation_check)
+        started = perf_counter()
+        LOGGER.info("Process pool startup requested workers=%s", workers)
+        deadline = perf_counter() + POOL_STARTUP_SECONDS
+        probes = [executor.submit(_pool_probe) for _ in range(workers)]
+        acknowledged: set[int] = set()
+        while len(acknowledged) < workers:
+            check_cancellation(cancellation_check)
+            for probe in probes:
+                if probe.done():
+                    probe.result()  # Surface an initializer/process failure.
+            remaining = deadline - perf_counter()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Process pool startup timed out: {len(acknowledged)}/{workers} "
+                    f"workers initialized after {POOL_STARTUP_SECONDS:g}s"
+                )
+            try:
+                acknowledged.add(ready.get(timeout=min(0.1, remaining)))
+            except Empty:
+                pass
+        start_gate.set()
+        LOGGER.info("Process pool ready workers=%s startup_seconds=%.3f pids=%s",
+                    workers, perf_counter() - started, sorted(acknowledged))
+        yield executor, cancellation
+        failed = False
+    finally:
+        if failed:
+            cancellation.set()
+            # shutdown(wait=True) alone can wait forever for a stalled native
+            # initializer/task. Terminate only this executor's owned processes.
+            processes = list((executor._processes or {}).values())
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+            deadline = perf_counter() + POOL_STOP_SECONDS
+            for process in processes:
+                process.join(timeout=max(0.0, deadline - perf_counter()))
+            executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            executor.shutdown(wait=True)
+        ready.close()
+        ready.join_thread()
 
 
 @dataclass(slots=True)
@@ -58,17 +131,11 @@ def iter_ordered_process_results(
         raise ValueError("workers must be positive")
     if not items:
         return
-    executor = ProcessPoolExecutor(
-        max_workers=min(workers, len(items)),
-        mp_context=mp.get_context("spawn"),
-        initializer=initializer,
-        initargs=(context,),
-    )
     futures: dict[Any, int] = {}
     ready: dict[int, Result] = {}
     next_submit = 0
     next_yield = 0
-    try:
+    with _process_pool(min(workers, len(items)), initializer, context, cancellation_check) as (executor, _):
         while next_yield < len(items):
             check_cancellation(cancellation_check)
             while (
@@ -86,18 +153,26 @@ def iter_ordered_process_results(
             done, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
             for future in done:
                 ready[futures.pop(future)] = future.result()
-    finally:
-        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _initialize_process_worker(
     cancellation_event: Any,
     context_initializer: Callable[[Any], None],
     context: Any,
+    ready: Any = None,
+    start_gate: Any = None,
 ) -> None:
     global _CANCELLATION_EVENT
     _CANCELLATION_EVENT = cancellation_event
     context_initializer(context)
+    if ready is not None:
+        ready.put(os.getpid())
+    if start_gate is not None:
+        # Keep startup probes busy until all initializers acknowledge. Without
+        # this barrier the executor may reuse an idle worker for later probes
+        # instead of spawning the full requested pool.
+        if not start_gate.wait(timeout=POOL_STARTUP_SECONDS + POOL_STOP_SECONDS):
+            raise TimeoutError("Process pool startup barrier was not released")
 
 
 def run_combination_tasks(
@@ -244,18 +319,8 @@ def iter_indexed_combination_batches(
             )
         return
 
-    # A Manager Event is picklable under the Windows spawn start method, unlike a
-    # bare synchronization Event passed through an executor task queue.
-    manager = mp.Manager()
-    cancellation_event = manager.Event()
     cancelled = False
-    executor = ProcessPoolExecutor(
-        max_workers=min(combination_workers, total),
-        mp_context=mp.get_context("spawn"),
-        initializer=_initialize_process_worker,
-        initargs=(cancellation_event, context_initializer, worker_context),
-    )
-    try:
+    with _process_pool(min(combination_workers, total), context_initializer, worker_context, cancellation_check) as (executor, cancellation_event):
         completed = completed_initial
         for batch_start in range(0, total, batch_size):
             batch_end = min(batch_start + batch_size, total)
@@ -279,12 +344,17 @@ def iter_indexed_combination_batches(
                     next_index += 1
 
             submit_available()
+            cancellation_deadline = None
             while futures:
                 if cancellation_check is not None and cancellation_check():
                     cancelled = True
                     cancellation_event.set()
+                    if cancellation_deadline is None:
+                        cancellation_deadline = perf_counter() + POOL_STOP_SECONDS
                     for future in futures:
                         future.cancel()
+                if cancellation_deadline is not None and perf_counter() >= cancellation_deadline:
+                    raise CancellationRequested("Process pool cancellation timed out; stopping owned workers")
                 done, _ = wait(futures, timeout=0.05, return_when=FIRST_COMPLETED)
                 for future in done:
                     index = futures.pop(future)
@@ -316,10 +386,3 @@ def iter_indexed_combination_batches(
                 [results_by_index[index] for index in range(batch_start, batch_end)],
                 perf_counter() - batch_started_at,
             )
-    finally:
-        if cancelled:
-            cancellation_event.set()
-            executor.shutdown(wait=True, cancel_futures=True)
-        else:
-            executor.shutdown(wait=True)
-        manager.shutdown()

@@ -14,6 +14,21 @@ from typing import Any, Iterator, Mapping
 _held = threading.local()
 
 
+def reference_free_run_document(relative: Path) -> bool:
+    """Known numerical/hash-only exports; unknown files are never excluded.
+
+    Producers: threshold_calibration.export_threshold_calibration and
+    CheckpointStore.commit_batch. Keep publication and deletion in agreement.
+    """
+    return (
+        relative.parent == Path("results") and relative.name in {
+            "threshold_diagnostics.json", "threshold_diagnostics_by_set.json",
+        }
+        or len(relative.parts) == 5 and relative.parts[:2] == ("checkpoints", "batches")
+        and relative.name in {"metadata.json", "complete.json"}
+    )
+
+
 def text_references(name: str, content: str) -> Iterator[tuple[str, str]]:
     if name.endswith(".json"):
         yield from references(json.loads(content))

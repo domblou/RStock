@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
+from rstock.modeling import ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS
 
 
 DERIVATION_SCHEMA_VERSION = 1
@@ -56,7 +57,7 @@ STAGE_MODES = frozenset({"inherited", "recomputed", "not_executed"})
 # Other fields are added here only after their effective consumer is verified.
 STAGE_PARAMETER_FIELDS: dict[str, frozenset[str]] = {
     "walk_forward": frozenset({
-        "predictor_prefilter_enabled", "predictor_prefilter_top_n",
+        "predictive_model_type", "target_volatility_enabled", "target_volatility_sessions", "predictor_prefilter_enabled", "predictor_prefilter_top_n",
     }),
     "xgboost_calibration": frozenset({
         "xgboost_global_max_qualified_combinations",
@@ -90,9 +91,13 @@ PARAMETER_OWNER = {
     for stage, fields in STAGE_PARAMETER_FIELDS.items()
     for field in fields
 }
+WALK_FORWARD_XGBOOST_FIELDS = frozenset({"xgb_max_depth", "xgb_eta", "xgb_rounds",
+    "xgb_min_child_weight", "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma",
+    "xgb_reg_alpha", "xgb_reg_lambda", "xgb_seed", *ROUND_SELECTION_FIELDS})
 SPLIT_STAGE_PARAMETER_FIELDS = {
     **{key: value for key, value in STAGE_PARAMETER_FIELDS.items()
        if key not in {"promotion", "forward_simulation"}},
+    "walk_forward": STAGE_PARAMETER_FIELDS["walk_forward"] | WALK_FORWARD_XGBOOST_FIELDS,
     "threshold_calibration": STAGE_PARAMETER_FIELDS["threshold_calibration"]
         | frozenset({"final_holdout_size"}),
     "holdout_evaluation": frozenset({"evaluate_final_holdout"}),
@@ -102,7 +107,7 @@ SPLIT_STAGE_PARAMETER_FIELDS = {
 
 PREFILTER_STAGE_PARAMETER_FIELDS = {
     **SPLIT_STAGE_PARAMETER_FIELDS,
-    "prefilter": STAGE_PARAMETER_FIELDS["walk_forward"] | frozenset({
+    "prefilter": (STAGE_PARAMETER_FIELDS["walk_forward"] - {"predictive_model_type", "target_volatility_enabled", "target_volatility_sessions"}) | frozenset({
         "predictor_prefilter_min_median_auc", "predictor_prefilter_min_pct_above_random",
         "predictor_prefilter_min_worst_auc", "predictor_prefilter_max_auc_std",
         "predictor_prefilter_correlation_threshold",
@@ -110,12 +115,11 @@ PREFILTER_STAGE_PARAMETER_FIELDS = {
         "prefilter_xgb_min_child_weight", "prefilter_xgb_subsample",
         "prefilter_xgb_colsample_bytree", "prefilter_xgb_gamma", "prefilter_xgb_reg_alpha",
         "prefilter_xgb_reg_lambda", "prefilter_xgb_seed",
+        *PREFILTER_ROUND_SELECTION_FIELDS,
         "prefilter_method", "stability_origin_count", "stability_step_sessions",
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }),
-    "walk_forward": frozenset({"xgb_max_depth", "xgb_eta", "xgb_rounds",
-        "xgb_min_child_weight", "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma",
-        "xgb_reg_alpha", "xgb_reg_lambda", "xgb_seed"}),
+    "walk_forward": WALK_FORWARD_XGBOOST_FIELDS | {"predictive_model_type", "target_volatility_enabled", "target_volatility_sessions"},
 }
 
 
@@ -276,10 +280,37 @@ class Derivation:
     prepared_snapshot_sha256: str | None = None
     prepared_snapshot_source_run_id: str | None = None
     source_temporal_validation_enabled: bool | None = None
+    # Absent in historical specs: retain their original serialized contract.
+    source_lineage: dict[str, dict[str, Any]] | None = None
     schema_version: int = DERIVATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         derivation_graph(self.schema_version)
+        if self.source_lineage is not None:
+            if not isinstance(self.source_lineage, dict) or not self.source_lineage:
+                raise ValueError("Invalid frozen source lineage")
+            if self.source_end_to_end_run_id not in self.source_lineage:
+                raise ValueError("Frozen source lineage has no immediate parent")
+            for run_id, lock in self.source_lineage.items():
+                _nonempty(run_id, "lineage run ID")
+                if not isinstance(lock, dict):
+                    raise ValueError("Invalid frozen source lock")
+                _digest(lock.get("manifest_sha256"), "lineage manifest digest")
+                _digest(lock.get("configuration_fingerprint"), "lineage configuration fingerprint")
+                _digest(lock.get("configuration_sha256"), "lineage configuration digest")
+                if not isinstance(lock.get("stages"), dict):
+                    raise ValueError("Invalid frozen lineage stages")
+                for reference in lock["stages"].values():
+                    InheritedStage.from_dict(reference)
+                    _digest(reference.get("configuration_sha256"), "lineage stage configuration digest")
+                snapshot = lock.get("prepared_snapshot")
+                if not isinstance(snapshot, dict):
+                    raise ValueError("Frozen lineage prepared snapshot is missing")
+                _nonempty(snapshot.get("source_run_id"), "lineage snapshot source")
+                _digest(snapshot.get("sha256"), "lineage snapshot digest")
+            if self.source_lineage[self.source_end_to_end_run_id]["manifest_sha256"] != self.source_manifest_sha256:
+                raise ValueError("Frozen parent manifest digest differs from derivation")
+            object.__setattr__(self, "source_lineage", deepcopy(self.source_lineage))
         _nonempty(self.source_end_to_end_run_id, "source_end_to_end_run_id")
         _digest(self.source_manifest_sha256, "source_manifest_sha256")
         if self.prepared_snapshot_sha256 is not None:
@@ -350,6 +381,8 @@ class Derivation:
             values["prepared_snapshot_source_run_id"] = self.prepared_snapshot_source_run_id
         if self.source_temporal_validation_enabled is not None:
             values["source_temporal_validation_enabled"] = self.source_temporal_validation_enabled
+        if self.source_lineage is not None:
+            values["source_lineage"] = deepcopy(self.source_lineage)
         return values
 
     @classmethod
@@ -387,4 +420,5 @@ class Derivation:
                                "prepared_snapshot_source_run_id")
             ),
             source_temporal_validation_enabled=values.get("source_temporal_validation_enabled"),
+            source_lineage=values.get("source_lineage"),
         )

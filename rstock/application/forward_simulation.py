@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -17,10 +18,13 @@ from rstock.combinations import canonical_combination_id
 from rstock.features import (
     intraday_down_target_column, intraday_return_column, intraday_target_column, mae_column, mfe_column,
     predictor_columns,
+    model_predictor_columns,
     prepare_dataset, prepare_prediction_row,
 )
-from rstock.modeling import fit_booster, predict_probabilities, selected_xgboost_parameters
+from rstock.modeling import (fit_booster, predict_probabilities, selected_xgboost_parameters,
+                            booster_training_record, round_selection_snapshot)
 from rstock.persistence import load_booster
+from rstock.target_volatility import contract as volatility_contract
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from rstock.traceability import prepared_dataset_hash
 
@@ -91,6 +95,9 @@ def validate_forward_snapshot(
     if snapshot.get("source_end_to_end_run_id") != spec.source_end_to_end_run:
         raise ValueError("forward_snapshot_source_mismatch")
     source_spec = repository.load_spec(spec.source_end_to_end_run)
+    if source_spec.config.predictive_model_type != "external_only":
+        raise ValueError("This predictive model type is not enabled for Forward")
+    _validate_round_selection_contract(snapshot, source_spec)
     if source_spec.derivation is not None:
         if not expected:
             raise ValueError("forward_snapshot_sha256_missing")
@@ -112,6 +119,21 @@ def validate_forward_snapshot(
         if not all((directory / name).is_file() for name in ("up.ubj", "down.ubj", "metadata.json")):
             raise ValueError("forward_snapshot_model_artifact_missing")
     return snapshot
+
+
+def _validate_round_selection_contract(snapshot: dict[str, Any], spec: ExperimentSpec) -> None:
+    if spec.config.xgb_round_selection_mode != "chronological":
+        return
+    expected = round_selection_snapshot(spec.config)
+    if snapshot.get("round_selection_contract_version") != 2 or snapshot.get("round_selection_policy") != expected:
+        raise ValueError("forward_snapshot_round_selection_policy_missing_or_mismatched")
+    for model in snapshot.get("models", []):
+        records = model.get("round_selection_records", {})
+        if model.get("round_selection_policy") != expected or any(
+            not records.get(direction, {}).get("TrainingIdentity") or records[direction].get("RoundSelectionPolicy") != expected
+            for direction in ("up", "down")
+        ):
+            raise ValueError("forward_snapshot_round_selection_record_missing_or_mismatched")
 
 
 def validate_forward_checkpoint(
@@ -330,6 +352,7 @@ def build_forward_model_snapshot(
     manifest_path = result_dir / SNAPSHOT_FILENAME
     if manifest_path.is_file():
         snapshot = _read_json(manifest_path)
+        _validate_round_selection_contract(snapshot, spec)
         if derived_prepared is not None:
             if (
                 snapshot.get("prepared_dataset_sha256") != prepared_dataset_hash(derived_prepared)
@@ -364,7 +387,8 @@ def build_forward_model_snapshot(
         guidance = _promotion_guidance(threshold_results, selected_thresholds, source_config)
     candidates = guidance[guidance.get("Statut promotion", pd.Series(dtype=str)).eq("Candidat")]
     selected_xgb = selected_xgboost_parameters(
-        _read_json(repository.run_directory(xgb_id) / "results" / "selected_configurations.json")
+        _read_json(repository.run_directory(xgb_id) / "results" / "selected_configurations.json"),
+        config=spec.config,
     )
     if derived_prepared is not None:
         prepared = derived_prepared
@@ -390,7 +414,7 @@ def build_forward_model_snapshot(
             continue
         symbols = json.loads(set_name)
         target, predictors = str(symbols[0]), tuple(str(item) for item in symbols[1:])
-        names = predictor_columns(prepared, predictors, spec.config.lag_depth, spec.config.date_feature_regex)
+        names = model_predictor_columns(prepared, target, predictors, spec.config)
         up_name, down_name = intraday_target_column(target), intraday_down_target_column(target)
         training = prepared.loc[prepared.index <= cutoff, [*names, up_name, down_name]].dropna()
         if training.empty:
@@ -401,11 +425,13 @@ def build_forward_model_snapshot(
         model_id = hashlib.sha256(identity.encode()).hexdigest()[:20]
         directory = model_root / model_id
         directory.mkdir(exist_ok=True)
+        training_records = {}
         for label, outcome, parameters in (
             ("up", up_name, selected_xgb["Up"]), ("down", down_name, selected_xgb["Down"]),
         ):
             from rstock.modeling import XGBoostParameters
             booster = fit_booster(training, names, outcome, spec.config, parameters=XGBoostParameters(**parameters))
+            training_records[label] = booster_training_record(booster)
             booster.save_model(directory / f"{label}.ubj")
         thresholds = selected_thresholds.get(set_name, {})
         up_threshold = thresholds.get("Up", {}).get("threshold")
@@ -417,12 +443,16 @@ def build_forward_model_snapshot(
             "predictors": list(predictors), "direction": direction,
             "canonical_combination_id": canonical_combination_id(target, direction, predictors),
             "feature_names": list(names), "lag_depth": spec.config.lag_depth,
+            "target_volatility": volatility_contract(spec.config),
             "xgboost_parameters": selected_xgb,
+            "round_selection_policy": round_selection_snapshot(spec.config),
+            "round_selection_records": training_records,
             "up_threshold": up_threshold,
             "down_threshold": down_threshold,
             "train_start": training.index.min().date().isoformat(),
             "train_end": training.index.max().date().isoformat(),
             "training_observations": len(training),
+            "training_cutoff": cutoff.date().isoformat(),
             "up_booster_sha256": _sha256(directory / "up.ubj"),
             "down_booster_sha256": _sha256(directory / "down.ubj"),
         }
@@ -430,6 +460,8 @@ def build_forward_model_snapshot(
         models.append(entry)
     snapshot = {
         "schema_version": 1, "source_end_to_end_run_id": root_run_id,
+        "round_selection_contract_version": 2,
+        "round_selection_policy": round_selection_snapshot(spec.config),
         "pipeline_version": spec.pipeline_version,
         "requested_historical_cutoff": spec.requested_historical_cutoff,
         "resolved_market_session_cutoff": cutoff.date().isoformat(),
@@ -442,6 +474,7 @@ def build_forward_model_snapshot(
         "prepared_dataset_sha256": prepared_dataset_hash(prepared),
         "candidate_count": len(models), "models": models,
     }
+    _validate_round_selection_contract(snapshot, spec)
     if result_dir == root / "results":
         repository.write_json(root_run_id, f"results/{SNAPSHOT_FILENAME}", snapshot)
     else:
@@ -464,6 +497,10 @@ def run_forward_simulation(
     # executable with their frozen spec; manual recovery requires the stronger
     # hash check above.
     snapshot = validate_forward_snapshot(runs, spec, require_expected_hash=False)
+    source_config = runs.load_spec(spec.source_end_to_end_run).config
+    spec = replace(spec, config=replace(spec.config,
+        target_volatility_enabled=source_config.target_volatility_enabled,
+        target_volatility_sessions=source_config.target_volatility_sessions))
     root = runs.run_directory(spec.source_end_to_end_run)
     if not snapshot.get("models"):
         summary = {
@@ -494,6 +531,11 @@ def run_forward_simulation(
         raise ValueError("Forward period must be strictly after the source cutoff")
     downloaded, _ = MarketDataService().load(spec, as_of=end.date(), cancellation_check=cancellation_check)
     prepared = prepare_dataset(downloaded.prices, downloaded.symbols, spec.config.intraday_target_threshold, spec.config.lag_depth, spec.config.intraday_down_threshold)
+    from rstock.target_volatility import contract
+    for model in snapshot["models"]:
+        expected = model.get("target_volatility", {"enabled": False})
+        if expected.get("enabled") != contract(spec.config)["enabled"] or (expected.get("enabled") and expected != contract(spec.config)):
+            raise ValueError("Forward target volatility contract differs from frozen model")
     if prepared.empty or prepared.index.max() < end:
         raise ValueError("insufficient_forward_market_data")
     calendar = xcals.get_calendar(spec.calendar)
@@ -619,7 +661,9 @@ def run_forward_simulation(
     }
     for filename, values in analysis_files.items():
         _write_csv_atomic(values, output / filename)
-    _write_json_atomic({
+    analysis_manifest_path = output / "forward_analysis_manifest.json"
+    analysis_manifest = _read_json(analysis_manifest_path) if analysis_manifest_path.is_file() else {}
+    analysis_manifest.update({
         "schema_version": 1,
         "forward_run_id": output.parent.name,
         "source_e2e_run_id": spec.source_end_to_end_run,
@@ -638,7 +682,8 @@ def run_forward_simulation(
                 "forward_observations.csv", EXCLUSIONS_FILENAME, *analysis_files
             )
         },
-    }, output / "forward_analysis_manifest.json")
+    })
+    _write_json_atomic(analysis_manifest, analysis_manifest_path)
     signals = frame[frame.get("signal", pd.Series(dtype=bool)).astype(bool)] if not frame.empty else frame
     notional_per_signal = 10_000.0
     unique_issues = exclusion_frame.drop_duplicates(
@@ -647,7 +692,14 @@ def run_forward_simulation(
     population = len(frame) + len(exclusion_frame)
     summary = {"job_type": "forward_simulation", "source_end_to_end_run_id": spec.source_end_to_end_run, "source_model_count": len(snapshot["models"]), "models_with_signals": int(signals["source_model_id"].nunique()) if not signals.empty else 0, "total_signals": len(signals), "evaluated_observations": len(frame), "skipped_observations": len(exclusion_frame), "evaluability_rate": None if population == 0 else len(frame) / population, "unique_data_quality_issues": len(unique_issues), "skipped_missing_target_ohlc": int(exclusion_frame["exclusion_reason"].eq("missing_target_ohlc").sum()), "precision": float(signals["correct_direction"].mean()) if not signals.empty else None, "directional_return_mean": float(signals["directional_return"].mean()) if not signals.empty else None, "opposite_movement_frequency": float(signals["opposite_movement"].mean()) if not signals.empty else None, "notional_per_signal": notional_per_signal, "cumulative_profit_loss": float((signals["directional_return"] * notional_per_signal).sum()) if not signals.empty else 0.0, "first_session": None if frame.empty else str(frame["session_date"].min()), "last_session": None if frame.empty else str(frame["session_date"].max()), "sessions": int(frame["session_date"].nunique()) if not frame.empty else 0}
     summary["forward_policy"] = spec.forward_policy
+    summary["round_selection_policy"] = snapshot.get("round_selection_policy", {"xgb_round_selection_mode": "fixed"})
     summary["horizon_max"] = len(sessions)
     summary["model_count_t0"] = len(snapshot["models"])
     (output / "forward_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    # Derived analysis is independent of scientific evaluation and its checkpoints.
+    from .forward_diagnostic import materialize_forward_diagnostic
+    try:
+        materialize_forward_diagnostic(output)
+    except (OSError, ValueError, KeyError) as error:
+        logging.getLogger(__name__).warning("Forward diagnostic unavailable: %s", error)
     return summary

@@ -421,12 +421,20 @@ def load_model_quality_detail(
             return ModelQualityDetail(
                 None, None, None, pd.DataFrame(), pd.DataFrame(), "version_mismatch"
             )
+    observations = repository.load_observations(model_id)
+    baseline = repository.load_baseline(model_id)
+    lineage = repository.load_lineage(model_id)
+    if model_version is not _UNSPECIFIED_VERSION and model_version is not None:
+        observations = observations.reindex(columns=observations.columns.union(["model_version"]))
+        observations = observations[
+            observations["model_version"].eq(model_version).fillna(False)
+        ].copy()
+        lineage = (snapshot or {}).get("identity") or lineage
+        if baseline and baseline.get("model_version") != model_version:
+            baseline = {**baseline, "availability_status": "unavailable_version_mismatch"}
     return ModelQualityDetail(
-        snapshot=snapshot,
-        lineage=repository.load_lineage(model_id),
-        baseline=repository.load_baseline(model_id),
-        series=repository.load_model_series(model_id),
-        observations=repository.load_observations(model_id),
+        snapshot=snapshot, lineage=lineage, baseline=baseline,
+        series=repository.load_model_series(model_id), observations=observations,
     )
 
 

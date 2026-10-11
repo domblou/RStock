@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
@@ -259,6 +259,8 @@ class ExperimentSpec:
     frozen_xgboost_parameters: dict[str, dict[str, int | float]] | None = None
     frozen_xgboost_parameters_sha256: str | None = None
     xgboost_resolution_version: int = 1
+    # v1 evaluated an intermediate holdout; v2 reserves it for the E2E stage.
+    e2e_xgboost_protocol_version: int = 2
     source_threshold_parameter_calibration_run: str | None = None
     frozen_threshold_calibration_parameters: dict[str, object] | None = None
     frozen_threshold_calibration_parameters_sha256: str | None = None
@@ -269,6 +271,7 @@ class ExperimentSpec:
     source_prepared_dataset_sha256: str | None = None
     prepared_dataset_digest_required: bool = False
     prepared_snapshot_required: bool = False
+    target_volatility_source: dict[str, Any] | None = None
     # Runtime-only worker context; deliberately excluded from persisted snapshots.
     execution_run_id: str | None = None
     forward_simulation_enabled: bool = False
@@ -324,6 +327,27 @@ class ExperimentSpec:
             object.__setattr__(self, "prefilter_method", self.config.prefilter_selection_mode
                                if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}
                                else "single_origin")
+        if self.config.predictive_model_type != "external_only":
+            if self.job_type is JobType.PREDICTOR_PREFILTER:
+                object.__setattr__(self, "config", replace(self.config, predictive_model_type="external_only"))
+            elif self.forward_simulation_enabled or self.auto_promote_candidates or self.job_type in {
+                JobType.FORWARD_SIMULATION, JobType.PRODUCTION_TRAINING, JobType.FULL_TRAINING,
+                JobType.DAILY_PREDICTION,
+            }:
+                raise ValueError("New predictive model types are limited to research WF/E2E jobs")
+            if self.source_prefilter_run and self.config.predictive_model_type in {"constant_probability", "target_only"}:
+                raise ValueError("This predictive model type cannot consume a Prefilter reference")
+        if self.config.predictive_model_type != "constant_probability" and self.config.xgb_round_selection_mode == "chronological":
+            if self.e2e_xgboost_protocol_version != 2 and self.job_type not in {
+                JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH, JobType.PREDICTOR_PREFILTER,
+            }:
+                raise ValueError("Chronological XGBoost requires the complete v2 training contract")
+            if self.job_type is JobType.END_TO_END and self.pipeline_version < 3:
+                raise ValueError("Chronological E2E requires a dedicated holdout stage")
+            if self.job_type is JobType.WALK_FORWARD and self.evaluate_final_holdout:
+                raise ValueError("Chronological XGBoost WF requires evaluate_final_holdout=False")
+        if self.e2e_xgboost_protocol_version not in {1, 2}:
+            raise ValueError("Unsupported E2E XGBoost protocol version")
         if self.forward_policy != "FROZEN":
             raise ValueError("Unsupported forward policy")
         if self.forced_period_lock is not None and (
@@ -505,8 +529,9 @@ class ExperimentSpec:
             object.__setattr__(
                 self, "frozen_threshold_calibration_parameters_sha256", None
             )
-        if len(self.symbols) < 2:
-            raise ValueError("At least two symbols are required")
+        minimum_symbols = 1 if self.config.predictive_model_type in {"constant_probability", "target_only"} else 2
+        if len(self.symbols) < minimum_symbols:
+            raise ValueError("At least two symbols are required" if minimum_symbols == 2 else "At least one symbol is required")
         if self.combinations_per_target < 1:
             raise ValueError("combinations_per_target must be positive")
         if self.pipeline_version < 0:
@@ -569,6 +594,7 @@ class ExperimentSpec:
             "frozen_xgboost_parameters": self.frozen_xgboost_parameters,
             "frozen_xgboost_parameters_sha256": self.frozen_xgboost_parameters_sha256,
             "xgboost_resolution_version": self.xgboost_resolution_version,
+            "e2e_xgboost_protocol_version": self.e2e_xgboost_protocol_version,
             "source_threshold_parameter_calibration_run": (
                 self.source_threshold_parameter_calibration_run
             ),
@@ -662,6 +688,8 @@ class ExperimentSpec:
             values["stability_step_sessions"] = self.stability_step_sessions
         if self.prepared_snapshot_required:
             values["prepared_snapshot_required"] = True
+        if self.target_volatility_source is not None:
+            values["target_volatility_source"] = deepcopy(self.target_volatility_source)
         if self.experimental_overrides:
             values["experimental_overrides"] = list(self.experimental_overrides)
         return values
@@ -734,6 +762,7 @@ class ExperimentSpec:
                 else str(values["frozen_xgboost_parameters_sha256"])
             ),
             xgboost_resolution_version=int(values.get("xgboost_resolution_version", 0)),
+            e2e_xgboost_protocol_version=int(values.get("e2e_xgboost_protocol_version", 1)),
             source_threshold_parameter_calibration_run=(
                 None
                 if values.get("source_threshold_parameter_calibration_run") is None
@@ -777,6 +806,8 @@ class ExperimentSpec:
             prepared_snapshot_required=bool(
                 values.get("prepared_snapshot_required", False)
             ),
+            target_volatility_source=(None if values.get("target_volatility_source") is None
+                                      else dict(values["target_volatility_source"])),
             forward_simulation_enabled=bool(
                 values.get("forward_simulation_enabled", False)
             ),

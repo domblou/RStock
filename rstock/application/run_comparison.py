@@ -564,6 +564,7 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
                   if (name in _SCIENTIFIC_FIELDS or name.startswith(_SCIENTIFIC_PREFIXES))
                   and name not in _TECHNICAL_FIELDS}
     return {
+        "Type de modèle prédictif": settings.get("predictive_model_type", "external_only"),
         "Univers": {key: config.get(key) for key in ("primary_universe_id", "target_symbols", "predictor_symbols", "context_symbols", "combinations_per_target", "calendar")},
         "Profondeur": settings.get("permutation_depth"),
         "WF scientifique": {key: value for key, value in scientific.items()
@@ -578,7 +579,8 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
         "Calibration et seuils": {key: value for key, value in scientific.items()
                                   if key.startswith(("threshold_calibration_", "xgb_"))
                                   or key in {"threshold_parameter_calibration_max_models", "xgboost_global_max_qualified_combinations"}},
-        "Version scientifique": {key: config.get(key) for key in ("pipeline_version", "calibration_sampling_policy_version")},
+        "Version scientifique": {**{key: config.get(key) for key in ("pipeline_version", "calibration_sampling_policy_version")},
+                                 "e2e_xgboost_protocol_version": config.get("e2e_xgboost_protocol_version", 1)},
     }
 def comparison_types(types: Sequence[str]) -> str | None:
     """Return the homogeneous comparison mode for two to six runs."""
@@ -586,5 +588,5 @@ def comparison_types(types: Sequence[str]) -> str | None:
         return None
     kind = set(types)
     return next(iter(kind)) if len(kind) == 1 and kind <= {
-        "walk_forward", "end_to_end", "predictor_prefilter",
+        "walk_forward", "end_to_end", "predictor_prefilter", "forward_simulation",
     } else None

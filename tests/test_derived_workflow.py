@@ -35,8 +35,176 @@ def _completed(repository, run_id):
     repository.transition(run_id, JobStatus.COMPLETED)
 
 
+def _completed_derivative(repository, parent_id, fork, changes):
+    """Materialize synthetic stage artifacts, without executing any trainer."""
+    import shutil
+    from rstock.application import end_to_end as pipeline
+    spec = build_derived_spec(repository, parent_id, fork, changes)
+    run_id = repository.create(spec)
+    manifest = pipeline.build_pipeline_manifest(repository, run_id, spec)
+    parent = pipeline.load_pipeline_manifest(repository, parent_id)
+    for stage in manifest["stages"]:
+        if stage["mode"] != "recomputed" or not stage["child_run_id"]:
+            continue
+        key, child_id = stage["stage_key"], stage["child_run_id"]
+        child = pipeline.build_stage_spec(repository, run_id, spec, key, manifest)
+        repository.create(child, run_id=child_id)
+        source_id = pipeline.effective_stage_run_id(parent, key)
+        source_dir = repository.run_directory(source_id)
+        child_dir = repository.run_directory(child_id)
+        shutil.copytree(source_dir / "results", child_dir / "results")
+        if key == "walk_forward":
+            payload = pickle.loads((source_dir / "checkpoints/artifacts/prepared_snapshot.pkl").read_bytes())
+            repository.write_json(child_id, "summary.json", repository.summary(source_id))
+            checkpoint = CheckpointManager(child_dir, run_id=child_id,
+                job_type=child.job_type.value, configuration_fingerprint=child.fingerprint,
+                batch_sizes={"walk_forward": child.config.walk_forward_batch_size})
+            checkpoint.commit_snapshot(payload["prepared"], payload["metadata"])
+        if key == "threshold_parameter_calibration":
+            repository.write_json(child_id, "results/selected_threshold_calibration_configuration.json",
+                {"parameters": ThresholdCalibrationParameters.from_config(spec.config).as_dict()})
+        stage["expected_fingerprint"] = child.fingerprint
+        stage["artifact_digests"] = artifact_digests(repository, child_id, key)
+        _completed(repository, child_id)
+    repository.run_directory(run_id).joinpath("orchestration").mkdir()
+    repository.write_json(run_id, PIPELINE_MANIFEST, manifest)
+    _completed(repository, run_id)
+    return run_id, spec, manifest
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_nested_derivation_freezes_effective_stages_and_preserves_parent_changes(tmp_path, split):
+    from rstock.application import end_to_end as pipeline
+    repository, a, original, _ = _source(tmp_path, split=split)
+    changes = {"xgb_eta": 0.17} if split else {"xgboost_global_max_qualified_combinations": 17}
+    b, b_spec, b_manifest = _completed_derivative(repository, a, "walk_forward", changes)
+    c, c_spec, c_manifest = _completed_derivative(repository, b, "threshold_calibration",
+        {"threshold_calibration_min_robust_signals": 15})
+    d_spec = build_derived_spec(repository, c, "threshold_calibration",
+        {"threshold_calibration_min_robust_signals": 12})
+    for field, value in changes.items():
+        assert getattr(d_spec.config, field) == getattr(b_spec.config, field) == value
+    assert d_spec.derivation.overrides[0].old_value == 15
+    assert set(d_spec.derivation.source_lineage) == {a, b, c}
+    assert d_spec.derivation.source_end_to_end_run_id == c
+    assert d_spec.derivation.inherited_stages["walk_forward"].source_run_id == pipeline.effective_stage_run_id(b_manifest, "walk_forward")
+    assert d_spec.derivation.prepared_snapshot_source_run_id != original["stages"][0]["child_run_id"]
+    assert d_spec.derivation.prepared_snapshot_source_run_id == c_spec.derivation.prepared_snapshot_source_run_id
+    assert ExperimentSpec.from_dict(d_spec.to_dict()).derivation == d_spec.derivation
+    d = repository.create(d_spec)
+    first = persist_or_validate_pipeline_manifest(repository, d, d_spec)
+    assert persist_or_validate_pipeline_manifest(repository, d, d_spec) == first
+    # Materialized downstream jobs consume the selected winner, not xgb_eta=0.17.
+    child = pipeline.build_stage_spec(repository, d, d_spec, "threshold_calibration", first)
+    assert child.frozen_xgboost_parameters["Up"]["eta"] == 0.05
+    assert child.frozen_xgboost_parameters["Down"]["eta"] == 0.05
+    assert child.frozen_threshold_calibration_parameters["threshold_calibration_min_robust_signals"] == 12
+
+
+@pytest.mark.parametrize("mutation", ["manifest", "purge", "artifact", "snapshot", "configuration", "missing"])
+def test_nested_derivation_rejects_changed_ancestor_at_start_and_resume(tmp_path, mutation):
+    repository, a, original, _ = _source(tmp_path, split=True)
+    b, _, _ = _completed_derivative(repository, a, "promotion_qualification",
+        {"promotion_min_holdout_signals": 21})
+    spec = build_derived_spec(repository, b, "promotion_qualification",
+        {"promotion_min_holdout_signals": 22})
+    c = repository.create(spec)
+    persist_or_validate_pipeline_manifest(repository, c, spec)
+    if mutation == "manifest":
+        path = repository.run_directory(a) / PIPELINE_MANIFEST
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif mutation == "purge":
+        repository.write_json(a, "storage.json", {"schema_version": 1, "state": "purged"})
+    elif mutation == "snapshot":
+        wf_id = original["stages"][0]["child_run_id"]
+        path = repository.run_directory(wf_id) / "checkpoints/artifacts/prepared_snapshot.pkl"
+        path.write_bytes(path.read_bytes() + b"changed")
+    elif mutation == "configuration":
+        config = repository.read_json(a, "config.json")
+        config["symbols"] = ["CCC", "DDD"]
+        repository.write_json(a, "config.json", config)
+    elif mutation == "missing":
+        (repository.run_directory(a) / PIPELINE_MANIFEST).unlink()
+    else:
+        xgb_id = original["stages"][1]["child_run_id"]
+        repository.write_json(xgb_id, "results/selected_configurations.json", {})
+    with pytest.raises(ValueError, match="Frozen|purged"):
+        persist_or_validate_pipeline_manifest(repository, c, spec)
+    with pytest.raises(ValueError, match="Frozen|purged"):
+        build_pipeline_manifest(repository, c, spec)
+
+
+def test_nested_holdout_inherits_selected_directional_thresholds(tmp_path):
+    from rstock.application import end_to_end as pipeline
+    repository, a, manifest, _ = _source(tmp_path, split=True)
+    selected = _threshold_selection(json.dumps(["AAA", "BBB"]))
+    threshold_stage = next(item for item in manifest["stages"] if item["stage_key"] == "threshold_calibration")
+    threshold_id = threshold_stage["child_run_id"]
+    repository.write_json(threshold_id, "results/selected_thresholds_by_set.json", selected)
+    threshold_stage["artifact_digests"] = artifact_digests(repository, threshold_id, "threshold_calibration")
+    repository.write_json(a, PIPELINE_MANIFEST, manifest)
+    b, _, _ = _completed_derivative(repository, a, "promotion_qualification",
+        {"promotion_min_holdout_signals": 21})
+    spec = build_derived_spec(repository, b, "holdout_evaluation", {"evaluate_final_holdout": False})
+    c = repository.create(spec)
+    child = pipeline.build_stage_spec(repository, c, spec, "holdout_evaluation",
+        persist_or_validate_pipeline_manifest(repository, c, spec))
+    assert child.frozen_selected_thresholds_by_set == selected
+    assert child.source_threshold_calibration_run == threshold_id
+    assert child.frozen_xgboost_parameters["Up"]["eta"] == 0.05
+
+
+def test_nested_resume_preserves_reserved_jobs_and_frozen_sources(tmp_path, monkeypatch):
+    from rstock.application import end_to_end as pipeline
+    repository, a, _, _ = _source(tmp_path, split=True)
+    b, _, _ = _completed_derivative(repository, a, "promotion_qualification",
+        {"promotion_min_holdout_signals": 21})
+    spec = build_derived_spec(repository, b, "promotion_qualification",
+        {"promotion_min_holdout_signals": 22})
+    c = repository.create(spec)
+    output = repository.run_directory(c) / "results"
+    reserved = []
+    monkeypatch.setattr(pipeline, "build_forward_model_snapshot", lambda *a, **k: None)
+    def interrupt(repo, child_id):
+        reserved.append(child_id)
+        raise RuntimeError("simulated interruption")
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run_end_to_end(spec, output, None, None, execute_reserved_child=interrupt,
+                      phase_callback=lambda *a, **k: None)
+    frozen = repository.load_spec(c).derivation.to_dict()
+    completed = []
+    def finish(repo, child_id):
+        completed.append(child_id)
+        (repo.run_directory(child_id) / "results").mkdir(exist_ok=True)
+        repo.write_json(child_id, "results/qualification.json", {"candidate_sets": [], "decisions": []})
+        _completed(repo, child_id)
+    run_end_to_end(spec, output, None, None, execute_reserved_child=finish,
+                  phase_callback=lambda *a, **k: None)
+    assert completed == reserved
+    assert repository.load_spec(c).derivation.to_dict() == frozen
+    run_end_to_end(spec, output, None, None,
+        execute_reserved_child=lambda repo, child_id: (
+            None if child_id in reserved and repo.status(child_id)["status"] == "completed"
+            else pytest.fail("new or unfinished job on resume")),
+        phase_callback=lambda *a, **k: None)
+
+
+def test_source_lineage_rejects_a_cycle(tmp_path, monkeypatch):
+    from rstock.application import end_to_end as pipeline
+    repository, a, _, _ = _source(tmp_path, split=True)
+    b, spec, _ = _completed_derivative(repository, a, "promotion_qualification",
+        {"promotion_min_holdout_signals": 21})
+    cyclic = replace(spec, derivation=replace(spec.derivation,
+        source_end_to_end_run_id=b, source_lineage=None,
+        source_manifest_sha256=hashlib.sha256((repository.run_directory(b) / PIPELINE_MANIFEST).read_bytes()).hexdigest()))
+    original = repository.load_spec
+    monkeypatch.setattr(repository, "load_spec", lambda run_id: cyclic if run_id == b else original(run_id))
+    with pytest.raises(ValueError, match="Cycle"):
+        pipeline.freeze_source_lineage(repository, b)
+
+
 def _source(tmp_path, *, temporal=False, legacy_manifest=False, split=False,
-            prefilter_top_n=None, end_offset=0):
+            prefilter_top_n=None, end_offset=0, prefilter_settings=None):
     repository = RunRepository(tmp_path / "runs")
     config = replace(
         DEFAULT_CONFIG, project_root=tmp_path,
@@ -49,6 +217,7 @@ def _source(tmp_path, *, temporal=False, legacy_manifest=False, split=False,
         historical_data_cutoff=None if temporal else "2026-09-26",
         temporal_validation_enabled=temporal,
         pipeline_version=3 if split else 2,
+        **(prefilter_settings or {}),
     )
     root_id = repository.create(source)
     manifest = build_pipeline_manifest(repository, root_id, source)
@@ -63,7 +232,11 @@ def _source(tmp_path, *, temporal=False, legacy_manifest=False, split=False,
         SPLIT_SCIENTIFIC_STAGES if split else SCIENTIFIC_STAGES
     ):
         child_id = manifest["stages"][index]["child_run_id"]
-        child_spec = replace(source, job_type=job_type, temporal_validation_enabled=False)
+        child_spec = replace(
+            source, job_type=job_type, temporal_validation_enabled=False,
+            prefilter_method="single_origin", stability_origin_count=5,
+            stability_step_sessions=1,
+        )
         repository.create(
             child_spec, run_id=child_id,
             metadata=RunMetadata(
@@ -297,10 +470,19 @@ def _threshold_selection(set_name):
     }}
 
 
+@pytest.mark.parametrize("prefilter_settings", [
+    {},
+    {"prefilter_method": "temporal_consensus", "stability_origin_count": 5,
+     "stability_step_sessions": 1},
+    {"prefilter_method": "temporal_stability", "stability_origin_count": 7,
+     "stability_step_sessions": 3},
+])
 def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, prefilter_settings,
 ):
-    repository, source_id, source_manifest, digest = _source(tmp_path)
+    repository, source_id, source_manifest, digest = _source(
+        tmp_path, prefilter_settings=prefilter_settings,
+    )
     source_threshold = source_manifest["stages"][3]["child_run_id"]
     source_set = json.dumps(["AAA", "BBB"])
     derived_set = json.dumps(["BBB", "AAA"])
@@ -308,6 +490,11 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
         source_threshold, "results/selected_thresholds_by_set.json",
         _threshold_selection(source_set),
     )
+    # Complete fixture setup before freezing this source in a new derivative.
+    source_manifest["stages"][3]["artifact_digests"] = artifact_digests(
+        repository, source_threshold, "threshold_calibration",
+    )
+    repository.write_json(source_id, PIPELINE_MANIFEST, source_manifest)
 
     class FrozenMarket:
         def load(self, *_args, **_kwargs):
@@ -341,8 +528,11 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
     assert source_snapshot["models"][0]["canonical_combination_id"] == (
         '["AAA","Up","BBB"]'
     )
+    launches = []
+
     class RecordingBackend:
-        def launch(self, _runs_root, _run_id, _limit):
+        def launch(self, runs_root, run_id, limit):
+            launches.append((runs_root, run_id, limit))
             return 7654
 
     parent_forward = RunService(
@@ -378,9 +568,11 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
     def execute(repo, child_id):
         calls.append(child_id)
         repo.run_directory(child_id).joinpath("results").mkdir(exist_ok=True)
+        selected = _threshold_selection(derived_set)
+        selected[derived_set]["Up"]["threshold"] = 0.7
+        selected[derived_set]["Down"]["threshold"] = 0.3
         repo.write_json(
-            child_id, "results/selected_thresholds_by_set.json",
-            _threshold_selection(derived_set),
+            child_id, "results/selected_thresholds_by_set.json", selected,
         )
         repo.write_json(child_id, "results/run_configuration.json", {})
         _completed(repo, child_id)
@@ -428,11 +620,31 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
     manual = RunService(
         repository, backend=RecordingBackend()
     ).start_forward_simulation(
-        derived_id, start_date="2026-09-28", end_date="2026-10-02"
+        derived_id, start_date="2026-09-28", end_date="2026-09-28"
     )
     assert manual.run_id != forward_id
-    assert repository.load_spec(manual.run_id).source_end_to_end_run == derived_id
-    assert repository.load_spec(manual.run_id).derivation is None
+    manual_spec = repository.load_spec(manual.run_id)
+    assert manual.created
+    assert launches[-1][1] == manual.run_id
+    assert manual_spec.source_end_to_end_run == derived_id
+    assert manual_spec.derivation is None
+    assert manual_spec.config == repository.load_spec(derived_id).config
+    assert manual_spec.prefilter_method == "single_origin"
+    assert manual_spec.stability_origin_count == 5
+    assert manual_spec.stability_step_sessions == 1
+    assert forward_module.validate_forward_snapshot(repository, manual_spec) == derived_snapshot
+    assert manual_spec.source_forward_model_snapshot_sha256 == hashlib.sha256(
+        (output / forward_module.SNAPSHOT_FILENAME).read_bytes()
+    ).hexdigest()
+    for field, invalid in (
+        ("prefilter_method", "temporal_consensus"),
+        ("stability_origin_count", 7),
+        ("stability_step_sessions", 3),
+    ):
+        with pytest.raises(ValueError, match="Prefilter method settings belong only"):
+            replace(manual_spec, **{field: invalid})
+    for field, expected in prefilter_settings.items():
+        assert getattr(repository.load_spec(derived_id), field) == expected
     source_wf = source_manifest["stages"][0]["child_run_id"]
     historical = pickle.loads((
         repository.run_directory(source_wf)
@@ -455,7 +667,21 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
         forward_module, "prepare_prediction_row",
         lambda *_args, **_kwargs: pd.DataFrame({"AAA_Close": [4.0]}),
     )
-    monkeypatch.setattr(forward_module, "load_booster", lambda path: path.name)
+    loaded_models = []
+
+    def load_frozen_booster(path):
+        assert path.parent == (
+            output / forward_module.SNAPSHOT_DIRECTORY
+            / derived_snapshot["models"][0]["source_model_id"]
+        )
+        loaded_models.append(path)
+        return path.name
+
+    monkeypatch.setattr(forward_module, "load_booster", load_frozen_booster)
+    monkeypatch.setattr(
+        forward_module, "fit_booster",
+        lambda *_args, **_kwargs: pytest.fail("Forward retrained a frozen model"),
+    )
     monkeypatch.setattr(
         forward_module, "predict_probabilities",
         lambda booster, *_args: [0.8 if booster == "up.ubj" else 0.2],
@@ -464,14 +690,19 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
     monkeypatch.setattr(forward_module, "intraday_return_column", lambda *_: "BBB_Close")
     monkeypatch.setattr(forward_module, "mfe_column", lambda *_: "BBB_Close")
     monkeypatch.setattr(forward_module, "mae_column", lambda *_: "BBB_Close")
-    forward_output = repository.run_directory(forward_id) / "results"
+    forward_output = repository.run_directory(manual.run_id) / "results"
     forward_output.mkdir(exist_ok=True)
     forward_summary = forward_module.run_forward_simulation(
-        repository.load_spec(forward_id), forward_output
+        manual_spec, forward_output
     )
     assert forward_summary["total_signals"] == 1
+    assert {path.name for path in loaded_models} == {"up.ubj", "down.ubj"}
     observations = pd.read_csv(forward_output / "forward_observations.csv")
+    assert observations["forward_simulation_run_id"].tolist() == [manual.run_id]
     assert observations["source_end_to_end_run_id"].tolist() == [derived_id]
+    assert observations["decision_threshold"].tolist() == [
+        derived_snapshot["models"][0]["up_threshold"]
+    ]
     assert observations["source_model_id"].tolist() == [
         derived_snapshot["models"][0]["source_model_id"]
     ]
@@ -480,7 +711,7 @@ def test_derived_forward_has_own_frozen_models_candidates_and_reserved_child(
         lambda *_args: pytest.fail("completed Forward model was evaluated again"),
     )
     assert forward_module.run_forward_simulation(
-        repository.load_spec(forward_id), forward_output
+        manual_spec, forward_output
     )["total_signals"] == 1
     model = derived_snapshot["models"][0]
     booster = (
@@ -1049,7 +1280,7 @@ def test_prefilter_fork_rejects_missing_changed_snapshot_and_digest(tmp_path):
     summary = repository.summary(source_wf)
     summary["traceability"]["prepared_dataset_sha256"] = "0" * 64
     repository.write_json(source_wf, "summary.json", summary)
-    with pytest.raises(ValueError, match="dataset digest has changed"):
+    with pytest.raises(ValueError, match="dataset digest has changed|Frozen source artifacts changed"):
         pipeline.build_pipeline_manifest(repository, derived_id, spec)
     with pytest.raises(ValueError, match="dataset digest has changed"):
         pipeline.build_stage_spec(repository, derived_id, spec,

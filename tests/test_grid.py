@@ -104,7 +104,7 @@ window.addEventListener('message', event => {
     check(JSON.stringify(event.data.value) === '["a"]', 'single replacement'); stage++;
     args.selection_mode='none'; render();
     later(doc => {
-     check(!doc.querySelector('input'), 'read only');
+     check(!doc.querySelector('table input'), 'read only');
      doc.querySelector('th').click();
      check(doc.querySelector('tbody tr').textContent === '2 %', 'numeric sort');
      args.rows=[]; args.empty_message='Aucun résultat'; render();

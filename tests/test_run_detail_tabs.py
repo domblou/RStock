@@ -55,6 +55,7 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
         "thresholds",
         "holdout_evaluation",
         "promotion_qualification",
+        "selection_diagnostic",
         "temporal_validation",
         "promotion",
         "technical",
@@ -308,5 +309,5 @@ def test_temporal_and_split_result_technical_blocks_follow_scientific_content():
     qualification = standard.split("elif job_type is JobType.PROMOTION_QUALIFICATION", 1)[1].split(
         "elif (", 1
     )[0]
-    assert holdout.index("st.dataframe(") < holdout.index("st.json(configuration)")
+    assert holdout.index("render_dataframe(") < holdout.index("st.json(configuration)")
     assert qualification.index("_render_qualification_decision_grid(") < qualification.index("st.json(")

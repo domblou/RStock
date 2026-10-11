@@ -101,6 +101,20 @@ class ResourceRecorder:
         self.attempt["cpu_mean_cores"] = (
             None if cpu is None or covered <= 0 else cpu / covered
         )
+        if self.summary_path.exists():
+            persisted = json.loads(self.summary_path.read_text(encoding="utf-8"))
+            attempts = persisted.get("attempts", [])
+            local = {row["attempt_id"]: row for row in self.document["attempts"]}
+            attempts = [local[row["attempt_id"]]
+                        if row.get("status") == "running" and row.get("finished_at") is None
+                        and local.get(row["attempt_id"], {}).get("status") == "interrupted"
+                        else row for row in attempts]
+            own_id = self.attempt["attempt_id"]
+            if not any(row.get("attempt_id") == own_id for row in attempts):
+                attempts.append(self.attempt)
+            else:
+                attempts = [self.attempt if row.get("attempt_id") == own_id else row for row in attempts]
+            self.document = {**persisted, "attempts": attempts}
         _atomic_json(self.summary_path, self.document)
 
     def _sample_locked(self) -> None:
@@ -215,6 +229,7 @@ class ResourceRecorder:
             with self.lock:
                 try:
                     self._sample_locked()
+                    self._persist_locked()
                 except (OSError, ValueError):
                     pass  # A failed reading remains absent; it must not fail ML.
 
@@ -319,6 +334,9 @@ class ResourceRecorder:
                 "duration_seconds": elapsed if isinstance(elapsed, (int, float)) else None,
                 "calculation_seconds": details.get("calculation_seconds"),
                 "rows": details.get("rows"), "checkpoint_written": True,
+                **{key: details[key] for key in (
+                    "selection_worker_seconds", "refit_worker_seconds",
+                    "selection_rounds_run", "refit_rounds") if key in details},
             })
 
     def wait_completed(self, name: str, seconds: float) -> None:

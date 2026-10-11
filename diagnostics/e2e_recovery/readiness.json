@@ -1,0 +1,36 @@
+{
+  "run_id": "20261010T120328_c809cd1e25",
+  "stages_verified": [
+    {
+      "stage_key": "walk_forward",
+      "child_run_id": "20261010T120330_7853894bf7",
+      "status": "completed"
+    },
+    {
+      "stage_key": "xgboost_calibration",
+      "child_run_id": "20261010T120330_4067d6e0dc",
+      "status": "completed"
+    },
+    {
+      "stage_key": "threshold_parameter_calibration",
+      "child_run_id": "20261010T120330_f014bd3b5f",
+      "status": "interrupted"
+    }
+  ],
+  "snapshot_fingerprint_verified": true,
+  "prepared_dataset_digest_verified": true,
+  "sampled_sets": 4,
+  "probability_rows": 3464,
+  "exact_probability_parity": true,
+  "serial_seconds": 2.273828500183299,
+  "parallel_seconds": 2.9169188998639584,
+  "threshold_parameter_timing": {
+    "duration_seconds": 22802.380708,
+    "wall_duration_seconds": 46963.191915,
+    "last_observed_at": "2026-10-10T19:46:35.018121+00:00",
+    "observed_duration_seconds": 22802.380708,
+    "interruption_detected_at": "2026-10-11T02:29:15.829328+00:00",
+    "detection_delay_seconds": 24160.811207,
+    "observation_source": "telemetry"
+  }
+}

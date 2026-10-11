@@ -28,10 +28,12 @@ from .features import (
     intraday_target_column,
     mae_column,
     mfe_column,
-    predictor_columns,
+    model_predictor_columns,
 )
-from .modeling import XGBoostParameters, fit_booster, predict_probabilities
-from .parallel import process_cancellation_requested, run_combination_tasks
+from .modeling import (XGBoostParameters, fit_booster, predict_probabilities,
+                      append_training_record, write_probability_training_audit)
+from .parallel import process_cancellation_requested, run_combination_tasks, iter_indexed_combination_batches
+from .checkpoints import CheckpointManager
 from .progress import (
     CancellationCheck,
     ProgressCallback,
@@ -145,9 +147,7 @@ def _threshold_development_combination(
     row = pd.Series(row_values)
     set_name = symbol_set_id(row)
     observation, feature_symbols = symbols_from_set(row)
-    names = predictor_columns(
-        development, feature_symbols, config.lag_depth, config.date_feature_regex
-    )
+    names = model_predictor_columns(development, observation, feature_symbols, config)
     outcomes = {
         "Up": intraday_target_column(observation),
         "Down": intraday_down_target_column(observation),
@@ -171,12 +171,16 @@ def _threshold_development_combination(
             raise AssertionError("Threshold calibration leaked future test data")
         for direction, outcome in outcomes.items():
             booster = fit_booster(
-                train, names, outcome, config, parameters=parameters[direction]
+                train, names, outcome, config, parameters=parameters[direction],
+                **({"cancellation_check": cancellation_check} if cancellation_check is not None else {}),
             )
             probabilities = predict_probabilities(booster, test, names)
+            record_start = len(records)
             records.extend(
                 {
                     "Set": set_name, "Observation": observation, "Direction": direction,
+                    "PredictiveModelType": config.predictive_model_type,
+                    "FeatureColumns": json.dumps(names),
                     "Window": window.number, "TrainEnd": train.index.max(), "Date": date,
                     "Probability": float(probability), "Target": int(test.at[date, outcome]),
                     "IntradayReturn": float(test.at[date, intraday_return_column(observation)]),
@@ -185,6 +189,7 @@ def _threshold_development_combination(
                 }
                 for date, probability in zip(test.index, probabilities, strict=True)
             )
+            append_training_record(records, record_start, booster)
     return records
 
 
@@ -833,14 +838,16 @@ def generate_development_probabilities(
     parameters_by_direction: Mapping[str, XGBoostParameters] | None = None,
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
+    checkpoint_manager: CheckpointManager | None = None,
+    checkpoint_key: str | None = None,
 ) -> pd.DataFrame:
     """Generate out-of-sample development probabilities with expanding windows."""
 
     shared = parameters or EXPERIMENTAL_XGBOOST_PARAMETERS
     directional = parameters_by_direction or {"Up": shared, "Down": shared}
     context = (development, config, min_train_size, test_size, step_size, directional)
-    results = run_combination_tasks(
-        [row.to_dict() for _, row in sampled_sets.iterrows()],
+    items = [row.to_dict() for _, row in sampled_sets.iterrows()]
+    arguments = dict(
         combination_workers=config.combination_workers,
         worker_context=context,
         context_initializer=_set_threshold_development_context,
@@ -852,6 +859,34 @@ def generate_development_probabilities(
         cancellation_check=cancellation_check,
         details={"directions": 2, "combination_workers": config.combination_workers},
     )
+    if checkpoint_manager is None:
+        results = run_combination_tasks(items, **arguments)
+    else:
+        if not checkpoint_key:
+            raise ValueError("Development probability checkpoint identity is required")
+        batch_size = config.walk_forward_batch_size
+        count = (len(items) + batch_size - 1) // batch_size
+        resolved = {}
+        def artifact(batch_id):
+            return f"development_probability_batch_{checkpoint_key}_{batch_size}_{batch_id}"
+        for batch_id in range(count):
+            if checkpoint_manager.artifact_exists(artifact(batch_id)):
+                payload = checkpoint_manager.load_artifact(artifact(batch_id))
+                if payload["sample_key"] != checkpoint_key:
+                    raise ValueError("Development probability batch identity changed")
+                resolved[batch_id] = payload["results"]
+        batches = iter_indexed_combination_batches(
+            items, batch_size=batch_size, completed_batch_ids=tuple(resolved), **arguments,
+        )
+        try:
+            for batch in batches:
+                checkpoint_manager.commit_artifact(artifact(batch.batch_id), {
+                    "sample_key": checkpoint_key, "results": batch.results,
+                })
+                resolved[batch.batch_id] = batch.results
+        finally:
+            batches.close()
+        results = [result for batch_id in range(count) for result in resolved[batch_id]]
     return pd.DataFrame([record for result in results for record in result])
 
 
@@ -875,9 +910,7 @@ def generate_holdout_probabilities(
         check_cancellation(cancellation_check)
         set_name = symbol_set_id(row)
         observation, feature_symbols = symbols_from_set(row)
-        names = predictor_columns(
-            development, feature_symbols, config.lag_depth, config.date_feature_regex
-        )
+        names = model_predictor_columns(development, observation, feature_symbols, config)
         outcomes = {
             "Up": intraday_target_column(observation),
             "Down": intraday_down_target_column(observation),
@@ -894,14 +927,18 @@ def generate_holdout_probabilities(
             raise AssertionError("Final holdout leaked into threshold training data")
         for direction, outcome in outcomes.items():
             booster = fit_booster(
-                train, names, outcome, config, parameters=directional[direction]
+                train, names, outcome, config, parameters=directional[direction],
+                **({"cancellation_check": cancellation_check} if cancellation_check is not None else {}),
             )
             probabilities = predict_probabilities(booster, test, names)
+            record_start = len(records)
             records.extend(
                 {
                     "Set": set_name,
                     "Observation": observation,
                     "Direction": direction,
+                    "PredictiveModelType": config.predictive_model_type,
+                    "FeatureColumns": json.dumps(names),
                     "Window": 0,
                     "TrainEnd": train.index.max(),
                     "Date": date,
@@ -915,6 +952,7 @@ def generate_holdout_probabilities(
                 }
                 for date, probability in zip(test.index, probabilities, strict=True)
             )
+            append_training_record(records, record_start, booster)
         report_progress(
             progress_callback,
             "final_holdout",
@@ -1266,6 +1304,7 @@ def write_threshold_calibration_results(
     result: ControlledThresholdCalibrationResult, directory: Path
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    write_probability_training_audit(result.development_predictions, directory, result.run_configuration)
     result.development_predictions.to_csv(
         directory / "development_probabilities.csv", index=False
     )

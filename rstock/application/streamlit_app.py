@@ -17,6 +17,8 @@ from typing import Any, Mapping, Sequence
 import altair as alt
 import pandas as pd
 import streamlit as st
+from rstock.application.grid_dataframe import dataframe as render_dataframe
+from rstock.modeling import ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -468,7 +470,7 @@ def _render_locked_duplication_mode(service: ExperimentService) -> bool:
         )
         selected_job_type = JOB_TYPE_BY_LABEL[selected_label]
         summary["Valeur"] = summary["Valeur"].astype(str)
-        st.dataframe(summary, hide_index=True, width="stretch")
+        render_dataframe(summary, hide_index=True, width="stretch")
         if job_type_fallback_message:
             st.warning(job_type_fallback_message)
         if duplication_error:
@@ -718,6 +720,7 @@ def _combination_plan_preview(job_type: JobType, *, config=None, selection_mode=
             target_symbols=targets,
             predictor_symbols=predictors,
             permutation_depth=config.permutation_depth,
+            predictive_model_type=config.predictive_model_type,
         )
         preview = build_combination_preview(
             plan,
@@ -1094,11 +1097,25 @@ def _experiments(service: ExperimentService) -> None:
     choice = st.selectbox("Type de job", list(labels))
     selected_job_type = labels[choice]
     run_config = st.session_state.lab_config
+    if selected_job_type in {JobType.WALK_FORWARD, JobType.END_TO_END}:
+        model_type = _predictive_model_input(run_config.predictive_model_type, "launch-predictive-model-type")
+        run_config = replace(run_config, predictive_model_type=model_type)
+        volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=run_config.target_volatility_enabled,
+            disabled=model_type == "constant_probability", key="launch-target-volatility",
+            help="Clôtures ajustées connues avant la séance prédite. Historique Yahoo rétrospectif, sans garantie point-in-time.")
+        volatility_sessions = st.number_input("Nombre de séances", min_value=2, value=run_config.target_volatility_sessions, key="launch-target-volatility-sessions")
+        run_config = replace(run_config, target_volatility_enabled=volatility_enabled, target_volatility_sessions=int(volatility_sessions))
+        uses_externals = model_type in {"external_only", "target_and_external"}
+        enabled = st.checkbox("Activer le pré-filtrage", value=run_config.predictor_prefilter_enabled,
+                              disabled=not uses_externals, key="launch-predictive-prefilter")
+        run_config = replace(run_config, predictor_prefilter_enabled=enabled and uses_externals)
+    elif selected_job_type is JobType.PREDICTOR_PREFILTER:
+        run_config = replace(run_config, predictive_model_type="external_only", target_volatility_enabled=False)
     prefilter_method = run_config.prefilter_selection_mode if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} else "single_origin"
     stability_origin_count = 5
     stability_step_sessions = 1
     valid_consensus = True
-    if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}:
+    if selected_job_type is JobType.PREDICTOR_PREFILTER or (selected_job_type is JobType.END_TO_END and run_config.predictor_prefilter_enabled):
         st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet."
                    if selected_job_type is JobType.PREDICTOR_PREFILTER else
                    "Le Préfiltre, lorsqu'il est activé, est une étape autonome avant le Walk-forward.")
@@ -1206,10 +1223,17 @@ def _experiments(service: ExperimentService) -> None:
             else:
                 st.caption("Les cutoffs seront résolus à partir de la dernière séance disponible au lancement.")
     if selected_job_type is JobType.END_TO_END:
+        capture_context = st.checkbox(
+            "Capturer le diagnostic SPY et les régimes de marché", value=True,
+            help="Calcul descriptif après les étapes scientifiques, sans modifier les décisions. Les snapshots historiques restent inchangés.",
+            key="e2e-capture-market-context",
+        )
+        run_config = replace(run_config, market_context_enabled=capture_context,
+                             market_context_regime_version="rstock_spy_regimes_v1")
         if requested_historical_cutoff is not None:
             forward_simulation_enabled = st.checkbox(
                 "Lancer une Forward Simulation après succès", value=False
-            )
+            , disabled=run_config.predictive_model_type != "external_only")
             if forward_simulation_enabled:
                 forward_simulation_mode = st.radio(
                     "Durée Forward", ["63_sessions", "126_sessions", "custom_end_date"],
@@ -1227,7 +1251,7 @@ def _experiments(service: ExperimentService) -> None:
                 "La promotion est une etape interne persistee du pipeline; "
                 "elle n'entraine et n'active aucun modele."
             ),
-        )
+         disabled=run_config.predictive_model_type != "external_only")
         if auto_promote_candidates and not st.session_state.lab_evaluate_holdout:
             st.error("La promotion automatique exige le holdout final.")
         temporal_validation_enabled = st.checkbox(
@@ -1376,13 +1400,13 @@ def _experiments(service: ExperimentService) -> None:
     _live_job_panel(service, domain="experiment")
 
 
-def _prefilter_temporal_settings(current):
+def _prefilter_temporal_settings(current, *, disabled: bool = False):
     with st.container(border=True):
         st.subheader("Sélection temporelle")
         modes = ("single_origin", "temporal_stability", "temporal_consensus")
         mode = st.selectbox("Mode de sélection", modes,
                             index=modes.index(current.prefilter_selection_mode),
-                            key="settings-prefilter-selection-mode")
+                            key="settings-prefilter-selection-mode", disabled=disabled)
         columns = st.columns(3)
         origins = int(columns[0].number_input("Nombre d'origines", min_value=1,
             value=current.temporal_consensus_origins, disabled=mode != "temporal_consensus",
@@ -1400,9 +1424,56 @@ def _prefilter_temporal_settings(current):
                 temporal_consensus_step_sessions=step, temporal_consensus_min_occurrences=minimum)
 
 
-def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, int | float]:
+def _round_selection_input(field: str, original: object, key: str, *, disabled: bool = False) -> object:
+    """One set of controls for settings and both existing derivation forms."""
+    suffix = field.removeprefix("prefilter_").removeprefix("xgb_")
+    if suffix == "round_selection_mode":
+        return st.selectbox("Sélection des tours XGBoost du préfiltre", ("fixed", "chronological"),
+            index=0 if original == "fixed" else 1, key=key,
+            format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique", disabled=disabled)
+    labels = {
+        "early_stopping_max_rounds": "Tours maximum (préfiltre)",
+        "early_stopping_validation_sessions": "Validation interne — séances utilisables distinctes",
+        "early_stopping_patience": "Patience — log loss (préfiltre)",
+        "early_stopping_min_train_observations": "Apprentissage interne minimum — séances utilisables distinctes",
+    }
+    if suffix in labels:
+        return int(st.number_input(labels[suffix], min_value=1, value=int(original), step=1, key=key, disabled=disabled))
+    st.caption(f"{suffix} : {original}")
+    return original
+
+
+def _prefilter_round_selection_inputs(
+    config: RStockConfig, key_prefix: str, *, horizontal: bool = False, disabled: bool = False,
+) -> dict[str, object]:
+    if horizontal:
+        values = {}
+        for index, field in enumerate(PREFILTER_ROUND_SELECTION_FIELDS):
+            if index == 1:
+                columns = st.columns(4)
+            if 1 <= index <= 4:
+                with columns[index - 1]:
+                    values[field] = _round_selection_input(
+                        field, getattr(config, field), f"{key_prefix}{field}",
+                     disabled=disabled)
+            else:
+                values[field] = _round_selection_input(
+                    field, getattr(config, field), f"{key_prefix}{field}",
+                 disabled=disabled)
+    else:
+        values = {field: _round_selection_input(field, getattr(config, field), f"{key_prefix}{field}", disabled=disabled)
+                  for field in PREFILTER_ROUND_SELECTION_FIELDS}
+    total = values["prefilter_xgb_early_stopping_validation_sessions"] + values["prefilter_xgb_early_stopping_min_train_observations"]
+    st.caption(f"Minimum : {total} séances utilisables distinctes, après retards et exclusions. "
+               "Validation strictement antérieure au test, sans holdout. "
+               "num_boost_round configure les tours fixes et le repli. "
+               "Le mode du préfiltre est indépendant du WF et peut changer les candidats retenus.")
+    return values
+
+
+def _prefilter_xgboost_settings(config: RStockConfig, *, disabled: bool = False) -> dict[str, object]:
     """Edit dedicated training values within the predictor-prefilter section."""
-    values: dict[str, int | float] = {}
+    values: dict[str, object] = {}
     with st.container(border=True):
         st.subheader("XGBoost du préfiltre")
         columns = st.columns(3)
@@ -1417,7 +1488,7 @@ def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, int | float]:
                 bounds["step"] = 1
                 value = int(columns[index % 3].number_input(
                     label, value=int(original), key=f"settings-{field}", **bounds,
-                ))
+                 disabled=disabled))
             else:
                 bounds["min_value"] = (
                     0.0001 if field == "prefilter_xgb_eta" else
@@ -1429,81 +1500,145 @@ def _prefilter_xgboost_settings(config: RStockConfig) -> dict[str, int | float]:
                 value = float(columns[index % 3].number_input(
                     label, value=float(original), format="%.4f",
                     key=f"settings-{field}", **bounds,
-                ))
+                 disabled=disabled))
             values[field] = value
+        values.update(_prefilter_round_selection_inputs(config, "settings-", horizontal=True, disabled=disabled))
     return values
 
 
+
+def _predictive_model_input(current: str, key: str, widget=None) -> str:
+    from rstock.application.predictive_model_ui import predictive_model_input
+    return predictive_model_input(current, key, widget=st if widget is None else widget)
+
+
+def _render_common_prediction_comparison(run_ids: list[str]) -> None:
+    from rstock.application.common_prediction_comparison import compare_common_predictions, STATE_LABELS
+    st.subheader("Métriques sur les observations communes")
+    audit, metrics = compare_common_predictions(st.session_state.lab_config.project_root, run_ids)
+    states = [{"Run": run_id, **{key: STATE_LABELS.get(value, value) for key, value in values.items()}}
+              for run_id, values in audit["availability"].items()]
+    render_dataframe(pd.DataFrame(states).rename(columns={"candidate_status": "Qualification",
+        "holdout_status": "Holdout", "data_status": "Prédictions individuelles"}), hide_index=True, width="stretch")
+    if audit["status"] != "available":
+        messages = {"unavailable": "Données individuelles indisponibles : aucune métrique commune calculée.",
+                    "no_common_observations": "Aucune observation réellement commune aux runs sélectionnés.",
+                    "label_mismatch": "Les labels des observations communes diffèrent entre les runs."}
+        st.info(messages[audit["status"]])
+        return
+    st.caption("Développement avant qualification. Même population de dates par cible et direction pour chaque combinaison. "
+               "Fenêtres chevauchantes : origine d’apprentissage la plus récente antérieure à la prédiction. "
+               "Aucune moyenne de probabilités entre modèles.")
+    render_dataframe(metrics.rename(columns={"PredictiveModelType": "Type de modèle",
+        "CommonObservations": "Observations communes", "ExcludedObservations": "Observations exclues"}),
+        hide_index=True, width="stretch")
+    alignment = audit.get("training_alignment", {})
+    if alignment.get("status") == "verified":
+        st.caption("Constante recalculée sur les mêmes labels d’apprentissage, le même masque de disponibilité et les mêmes blocs test que les variantes comparées. Les runs historiques restent inchangés.")
+        render_dataframe(pd.DataFrame(alignment["diagnostics"]), hide_index=True, width="stretch")
+    elif alignment:
+        st.warning("Dates test communes uniquement : les entraînements ne sont pas vérifiés comme identiques. La constante historique n’est pas une référence parfaitement alignée. " + alignment.get("reason", ""))
+    holdout_audit, holdout_metrics = compare_common_predictions(st.session_state.lab_config.project_root, run_ids, phase="holdout")
+    if holdout_audit["status"] == "available":
+        st.subheader("Holdout sur les observations communes")
+        render_dataframe(holdout_metrics, hide_index=True, width="stretch")
+    else:
+        st.caption("Holdout commun indisponible : seules les prédictions individuelles effectivement exécutées sont comparables.")
+
 def _settings() -> None:
+    from rstock.application.predictive_model_ui import predictive_model_input as _predictive_model_input
     _page_header("Paramètres")
     load_warning = st.session_state.pop("_settings_load_warning", None)
     if load_warning:
         st.warning(load_warning)
     current = st.session_state.lab_config
-    with st.expander("Valeurs RStock par défaut"):
-        defaults = asdict(DEFAULT_CONFIG)
-        defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
-        st.json(defaults)
-    with st.container():
-        st.subheader("Préparation des données et génération")
+    # Use native Streamlit tabs as in the E2E details. Render all settings
+    # tabs eagerly so hidden widgets remain alive and feed the common save.
+    tabs = st.tabs([
+        "Univers et données", "Modèles et combinaisons", "Préfiltre",
+        "Walk-forward", "Calibrations", "Holdout et promotion",
+        "Forward et production", "Avancé",
+    ])
+    with tabs[0]:
+        st.subheader('Univers de titres')
+        st.caption('Les listes de titres se gèrent dans Univers ; les cibles et prédicteurs sont sélectionnés au lancement dans Expériences.')
+        st.subheader("Historique, calendrier et retards")
         calendar = st.text_input("Calendrier", value=st.session_state.lab_calendar)
-        c1, c2, c3 = st.columns(3)
+        c1, = st.columns(1)
         history = c1.number_input("Historique (jours)", min_value=1, value=current.model_history_days)
-        permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
-        max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
         lag = c1.number_input("Lag depth", min_value=1, value=current.lag_depth)
+    with tabs[1]:
+        st.subheader('Définition des cibles Up/Down')
+        c2, c3 = st.columns(2)
         up_threshold = c2.number_input("Seuil intraday hausse", min_value=0.0, value=current.intraday_target_threshold, format="%.4f")
         down_threshold = c3.number_input("Seuil intraday baisse", min_value=0.0, value=current.intraday_down_threshold, format="%.4f")
-
+        st.subheader('Génération des combinaisons')
+        c2, c3 = st.columns(2)
+        permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
+        max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
+        st.subheader('Types de modèles')
+        predictive_model_type = _predictive_model_input(current.predictive_model_type, "settings-predictive-model-type", widget=st)
+        if predictive_model_type != "external_only":
+            st.caption("Type expérimental : disponible uniquement en Walk-forward (WF) et, pour « Titre cible + externes », avec préfiltre des externes. Non disponible pour les calibrations, les seuils, la promotion ou le Forward/Production.")
+        st.subheader("Volatilité passée du titre cible")
+        target_volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=current.target_volatility_enabled,
+            disabled=predictive_model_type == "constant_probability", key="settings-target-volatility",
+            help="Une seule variable par cible : volatilité annualisée des rendements logarithmiques ajustés, arrêtée à J−1. Les données Yahoo sont rétrospectives, sans garantie point-in-time.")
+        target_volatility_sessions = st.number_input("Nombre de séances", min_value=2, value=current.target_volatility_sessions, key="settings-target-volatility-sessions")
+        st.caption("Un seul type par job. Les résultats se comparent dans Comparer.")
+    with tabs[2]:
         st.subheader("Pré-filtrage des prédicteurs")
         prefilter_enabled = st.checkbox(
             "Activer le pré-filtrage",
-            value=current.predictor_prefilter_enabled,
+            value=current.predictor_prefilter_enabled and predictive_model_type in {"external_only", "target_and_external"},
             help="Évalue les prédicteurs seuls avant de générer les combinaisons.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         p1, p2, p3 = st.columns(3)
         prefilter_top_n = p1.number_input(
             "Top N prédicteurs", min_value=1,
             value=current.predictor_prefilter_top_n,
             help="Nombre maximal de prédicteurs admissibles conservés par cible.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_median_auc = p2.number_input(
             "AUC médiane minimale", min_value=0.0, max_value=1.0,
             value=current.predictor_prefilter_min_median_auc,
             help="Performance médiane minimale sur les fenêtres de développement.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_pct_random = p3.number_input(
             "Part minimale de fenêtres > 0,50", min_value=0.0, max_value=1.0,
             value=current.predictor_prefilter_min_pct_above_random,
             help="Proportion minimale de fenêtres meilleures que le hasard.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_worst_auc = p1.number_input(
             "Worst AUC minimal", min_value=0.0, max_value=1.0,
             value=current.predictor_prefilter_min_worst_auc,
             help="AUC minimale tolérée parmi les fenêtres valides.",
-        )
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
         prefilter_auc_std = p2.number_input(
             "Dispersion AUC maximale", min_value=0.0,
             value=current.predictor_prefilter_max_auc_std,
             help="Écart-type maximal des AUC entre fenêtres.",
-        )
-        prefilter_correlation = p3.number_input(
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
+        st.subheader('Corrélation et déredondance')
+        p1, p2, p3 = st.columns(3)
+        prefilter_correlation = p1.number_input(
             "Seuil de corrélation", min_value=0.0,
             value=current.predictor_prefilter_correlation_threshold,
             help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
-        )
-
-        prefilter_temporal_values = _prefilter_temporal_settings(current)
-        prefilter_xgboost_values = _prefilter_xgboost_settings(current)
-
-        st.subheader("Walk-forward")
+         disabled=predictive_model_type in {"constant_probability", "target_only"})
+        st.subheader('Stabilité et consensus')
+        prefilter_disabled = predictive_model_type in {"constant_probability", "target_only"}
+        prefilter_temporal_values = _prefilter_temporal_settings(current, disabled=prefilter_disabled)
+        prefilter_xgboost_values = _prefilter_xgboost_settings(current, disabled=prefilter_disabled)
+    with tabs[3]:
+        st.subheader('Fenêtres et calendrier')
         window_mode_label = st.selectbox(
             "Mode de fenêtre",
             ["Expansive", "Glissante"],
             index=0 if current.walk_forward_window_mode == "expanding" else 1,
         )
         window_mode = "expanding" if window_mode_label == "Expansive" else "rolling"
-        w1, w2, w3, w4, w5, w6 = st.columns(6)
+        w1, w2, w3, w4, w6 = st.columns(5)
         min_train = w1.number_input(
             "Train minimal",
             min_value=1,
@@ -1520,7 +1655,6 @@ def _settings() -> None:
         )
         test_size = w3.number_input("Taille test", min_value=1, value=current.walk_forward_test_size)
         step = w4.number_input("Step", min_value=1, value=current.walk_forward_step_size)
-        holdout = w5.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
         end_offset = w6.number_input(
             "Décalage de fin (jours de marché)",
             min_value=0,
@@ -1532,85 +1666,28 @@ def _settings() -> None:
                 "0 = données les plus récentes."
             ),
         )
-        b1, b2, b3, b4 = st.columns(4)
-        prefilter_batch_size = b1.number_input(
-            "Batch préfiltre",
-            min_value=1,
-            value=current.predictor_prefilter_batch_size,
-            help="Nombre de combinaisons univariées calculées avant chaque checkpoint.",
-        )
-        walk_forward_batch_size = b2.number_input(
-            "Batch walk-forward",
-            min_value=1,
-            value=current.walk_forward_batch_size,
-            help="Nombre de combinaisons détaillées conservées simultanément en mémoire.",
-        )
-        final_holdout_batch_size = b3.number_input(
-            "Batch holdout final",
-            min_value=1,
-            value=current.final_holdout_batch_size,
-            help="Nombre de modèles admissibles évalués entre deux checkpoints holdout.",
-        )
-        max_combinations_per_batch = b4.number_input(
-            "Taille maximale d’un batch de combinaisons",
-            min_value=1,
-            value=(
-                current.walk_forward_max_combinations_per_batch
-                if current.walk_forward_max_combinations_per_batch is not None
-                else DEFAULT_CONFIG.walk_forward_max_combinations_per_batch
-            ),
-            help=(
-                "Contrôle uniquement le découpage des combinaisons en batches; "
-                "ne change ni les combinaisons générées ni les critères du modèle."
-            ),
-        )
-
-        if False: """
-        st.subheader("Pré-filtrage des prédicteurs")
-        prefilter_enabled = st.checkbox(
-            "Activer le pré-filtrage",
-            value=current.predictor_prefilter_enabled,
-            help="Évalue les prédicteurs seuls avant de générer les combinaisons.",
-        )
-        p1, p2, p3 = st.columns(3)
-        prefilter_top_n = p1.number_input(
-            "Top N prédicteurs",
-            min_value=1,
-            value=current.predictor_prefilter_top_n,
-            help="Nombre maximal de prédicteurs admissibles conservés par cible.",
-        )
-        prefilter_median_auc = p2.number_input(
-            "AUC médiane minimale",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_min_median_auc,
-            help="Performance médiane minimale sur les fenêtres de développement.",
-        )
-        prefilter_pct_random = p3.number_input(
-            "Part minimale de fenêtres > 0,50",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_min_pct_above_random,
-            help="Proportion minimale de fenêtres meilleures que le hasard.",
-        )
-        prefilter_worst_auc = p1.number_input(
-            "Worst AUC minimal",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_min_worst_auc,
-            help="AUC minimale tolérée parmi les fenêtres valides.",
-        )
-        prefilter_auc_std = p2.number_input(
-            "Dispersion AUC maximale",
-            min_value=0.0,
-            value=current.predictor_prefilter_max_auc_std,
-            help="Écart-type maximal des AUC entre fenêtres.",
-        )
-        prefilter_correlation = p3.number_input(
-            "Seuil de corrélation",
-            min_value=0.0, max_value=1.0,
-            value=current.predictor_prefilter_correlation_threshold,
-            help="Au-delà de ce seuil absolu, seul le prédicteur le mieux classé est gardé.",
-        )
-
-        """
+        st.subheader("XGBoost")
+        x1, x2, x3 = st.columns(3)
+        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth, disabled=predictive_model_type == "constant_probability")
+        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f", disabled=predictive_model_type == "constant_probability")
+        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds, disabled=predictive_model_type == "constant_probability")
+        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight, disabled=predictive_model_type == "constant_probability")
+        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample, disabled=predictive_model_type == "constant_probability")
+        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree, disabled=predictive_model_type == "constant_probability")
+        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma, disabled=predictive_model_type == "constant_probability")
+        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha, disabled=predictive_model_type == "constant_probability")
+        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda, disabled=predictive_model_type == "constant_probability")
+        st.subheader('Sélection fixe ou chronologique des tours')
+        round_modes = ("fixed", "chronological")
+        round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
+            index=round_modes.index(current.xgb_round_selection_mode),
+            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique", disabled=predictive_model_type == "constant_probability")
+        st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
+        round_controls = st.columns(4)
+        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds, disabled=predictive_model_type == "constant_probability")
+        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions, disabled=predictive_model_type == "constant_probability")
+        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience, disabled=predictive_model_type == "constant_probability")
+        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations, disabled=predictive_model_type == "constant_probability")
         st.subheader("Qualification")
         q1, q2, q3 = st.columns(3)
         min_windows = q1.number_input(
@@ -1657,14 +1734,6 @@ def _settings() -> None:
                 "Une valeur plus faible exige une performance plus stable dans le temps."
             ),
         )
-        final_auc = q1.number_input(
-            "ROC-AUC confirmation finale", min_value=0.0, max_value=1.0,
-            value=current.final_confirmation_min_auc,
-            help=(
-                "ROC-AUC minimal requis lors de la confirmation finale du modèle. "
-                "Ce contrôle sert de barrière supplémentaire avant de poursuivre le pipeline."
-            ),
-        )
         prediction_threshold = q2.number_input(
             "Seuil de décision standard", min_value=0.0, max_value=1.0,
             value=current.prediction_threshold,
@@ -1673,84 +1742,12 @@ def _settings() -> None:
                 "décision binaire lorsqu’aucun seuil calibré spécifique n’est appliqué."
             ),
         )
-        evaluate_holdout = q3.checkbox(
-            "Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout,
-            help=(
-                "Active l’évaluation finale sur le jeu holdout, conservé hors des étapes de sélection "
-                "précédentes afin de mesurer la performance hors échantillon."
-            ),
-        )
-
-        st.subheader("Classement des modèles")
-        st.caption("Pondérations du score final; les composantes absentes sont exclues puis les poids disponibles sont renormalisés.")
-        s1, s2, s3 = st.columns(3)
-        selection_predictive_weight = s1.number_input(
-            "Poids qualité prédictive", min_value=0.0,
-            value=current.model_selection_predictive_quality_weight,
-            help="Poids de l’AUC médiane walk-forward.",
-        )
-        selection_stability_weight = s2.number_input(
-            "Poids stabilité", min_value=0.0,
-            value=current.model_selection_stability_weight,
-            help="Poids du Worst AUC, de la dispersion et de la constance entre fenêtres.",
-        )
-        selection_holdout_weight = s3.number_input(
-            "Poids holdout", min_value=0.0,
-            value=current.model_selection_holdout_weight,
-            help="Poids de l’AUC holdout et de l’écart développement-holdout.",
-        )
-        selection_signal_weight = s1.number_input(
-            "Poids qualité signal", min_value=0.0,
-            value=current.model_selection_signal_quality_weight,
-            help="Poids de la qualité, de la stabilité et du volume des signaux calibrés.",
-        )
-        selection_sample_weight = s2.number_input(
-            "Poids adéquation échantillon", min_value=0.0,
-            value=current.model_selection_sample_adequacy_weight,
-            help="Poids du nombre et de la validité des fenêtres et observations.",
-        )
-        st.subheader("XGBoost")
-        x1, x2, x3 = st.columns(3)
-        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth)
-        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f")
-        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds)
-        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight)
-        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample)
-        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree)
-        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma)
-        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha)
-        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda)
-
-        st.subheader("Calibration des seuils")
-        t1, t2, t3 = st.columns(3)
-        min_signals = t1.number_input(
-            "Signaux minimaux par fenêtre",
-            min_value=1,
-            value=current.threshold_calibration_min_signals_per_window,
-        )
-        min_window_fraction = t2.number_input(
-            "Fraction minimale de fenêtres",
-            min_value=0.01,
-            max_value=1.0,
-            value=current.threshold_calibration_min_window_fraction,
-        )
-        min_robust_signals = t3.number_input(
-            "Signaux totaux minimum pour un seuil robuste",
-            min_value=1,
-            value=current.threshold_calibration_min_robust_signals,
-            help=(
-                "Nombre minimal de signaux générés au total, toutes fenêtres de calibration "
-                "confondues, pour qu’un seuil admissible soit considéré comme suffisamment robuste. "
-                "Ce critère ne remplace pas la règle « Signaux minimaux par fenêtre × Fraction "
-                "minimale de fenêtres » : un seuil doit d’abord respecter la couverture temporelle "
-                "requise. `RobustSample` sert ensuite à privilégier les seuils disposant d’un "
-                "échantillon global suffisant parmi ceux déjà admissibles. "
-                "Exemple : avec 7 fenêtres, 5 signaux minimum par fenêtre et 60 % de fenêtres "
-                "requises, il faut au moins 5 fenêtres conformes, donc au moins 25 signaux "
-                "répartis dans le temps. Un seuil avec 25+ signaux au total mais mal répartis "
-                "peut quand même être rejeté."
-            ),
-        )
+    with tabs[4]:
+        st.subheader('Recherche des hyperparamètres XGBoost')
+        st.caption('Les grilles de recherche se configurent au lancement de la calibration XGBoost et dans les formulaires de dérivation existants.')
+        st.subheader('Calibration des probabilités')
+        st.caption("La calibration sigmoïde chronologique est prévue ; aucun réglage actif n'est disponible sur cette page.")
+        st.subheader('Calibration des paramètres de seuils')
         unlimited_threshold_parameter_models = st.checkbox(
             "Sans plafond de modèles directionnels",
             value=current.threshold_parameter_calibration_max_models is None,
@@ -1795,6 +1792,92 @@ def _settings() -> None:
                 "avant le départage économique. 0,01 = 1 point de pourcentage."
             ),
         )
+        st.subheader("Calibration des seuils")
+        t1, t2, t3 = st.columns(3)
+        min_signals = t1.number_input(
+            "Signaux minimaux par fenêtre",
+            min_value=1,
+            value=current.threshold_calibration_min_signals_per_window,
+        )
+        min_window_fraction = t2.number_input(
+            "Fraction minimale de fenêtres",
+            min_value=0.01,
+            max_value=1.0,
+            value=current.threshold_calibration_min_window_fraction,
+        )
+        min_robust_signals = t3.number_input(
+            "Signaux totaux minimum pour un seuil robuste",
+            min_value=1,
+            value=current.threshold_calibration_min_robust_signals,
+            help=(
+                "Nombre minimal de signaux générés au total, toutes fenêtres de calibration "
+                "confondues, pour qu’un seuil admissible soit considéré comme suffisamment robuste. "
+                "Ce critère ne remplace pas la règle « Signaux minimaux par fenêtre × Fraction "
+                "minimale de fenêtres » : un seuil doit d’abord respecter la couverture temporelle "
+                "requise. `RobustSample` sert ensuite à privilégier les seuils disposant d’un "
+                "échantillon global suffisant parmi ceux déjà admissibles. "
+                "Exemple : avec 7 fenêtres, 5 signaux minimum par fenêtre et 60 % de fenêtres "
+                "requises, il faut au moins 5 fenêtres conformes, donc au moins 25 signaux "
+                "répartis dans le temps. Un seuil avec 25+ signaux au total mais mal répartis "
+                "peut quand même être rejeté."
+            ),
+        )
+        st.subheader("Échantillonnage et reproductibilité")
+        sampling_1, sampling_2 = st.columns(2)
+        combinations = sampling_1.number_input(
+            "Combinaisons par cible (calibrations)", min_value=1,
+            value=st.session_state.lab_combinations_per_target,
+        )
+        seed = sampling_2.number_input("Seed", min_value=0, value=current.xgb_seed)
+    with tabs[5]:
+        st.subheader('Réserve Holdout et confirmation finale')
+        w5 = st.columns(1)[0]
+        holdout = w5.number_input("Holdout final", min_value=1, value=current.final_holdout_size)
+        q1, q2, q3 = st.columns(3)
+        final_auc = q1.number_input(
+            "ROC-AUC confirmation finale", min_value=0.0, max_value=1.0,
+            value=current.final_confirmation_min_auc,
+            help=(
+                "ROC-AUC minimal requis lors de la confirmation finale du modèle. "
+                "Ce contrôle sert de barrière supplémentaire avant de poursuivre le pipeline."
+            ),
+        )
+        evaluate_holdout = q2.checkbox(
+            "Évaluer le holdout final", value=st.session_state.lab_evaluate_holdout,
+            help=(
+                "Active l’évaluation finale sur le jeu holdout, conservé hors des étapes de sélection "
+                "précédentes afin de mesurer la performance hors échantillon."
+            ),
+        )
+        st.subheader("Classement des modèles")
+        st.caption("Pondérations du score final; les composantes absentes sont exclues puis les poids disponibles sont renormalisés.")
+        s1, s2, s3 = st.columns(3)
+        selection_predictive_weight = s1.number_input(
+            "Poids qualité prédictive", min_value=0.0,
+            value=current.model_selection_predictive_quality_weight,
+            help="Poids de l’AUC médiane walk-forward.",
+        )
+        selection_stability_weight = s2.number_input(
+            "Poids stabilité", min_value=0.0,
+            value=current.model_selection_stability_weight,
+            help="Poids du Worst AUC, de la dispersion et de la constance entre fenêtres.",
+        )
+        selection_holdout_weight = s3.number_input(
+            "Poids holdout", min_value=0.0,
+            value=current.model_selection_holdout_weight,
+            help="Poids de l’AUC holdout et de l’écart développement-holdout.",
+        )
+        selection_signal_weight = s1.number_input(
+            "Poids qualité signal", min_value=0.0,
+            value=current.model_selection_signal_quality_weight,
+            help="Poids de la qualité, de la stabilité et du volume des signaux calibrés.",
+        )
+        selection_sample_weight = s2.number_input(
+            "Poids adéquation échantillon", min_value=0.0,
+            value=current.model_selection_sample_adequacy_weight,
+            help="Poids du nombre et de la validité des fenêtres et observations.",
+        )
+        st.subheader('Analyse de sensibilité des seuils')
         sensitivity_1, sensitivity_2, sensitivity_3 = st.columns(3)
         sensitivity_threshold_min = sensitivity_1.number_input(
             "Seuil min — analyse de sensibilité",
@@ -1821,15 +1904,6 @@ def _settings() -> None:
             step=0.005,
             format="%.4f",
         )
-
-        st.subheader("Échantillonnage et reproductibilité")
-        sampling_1, sampling_2 = st.columns(2)
-        combinations = sampling_1.number_input(
-            "Combinaisons par cible (calibrations)", min_value=1,
-            value=st.session_state.lab_combinations_per_target,
-        )
-        seed = sampling_2.number_input("Seed", min_value=0, value=current.xgb_seed)
-
         st.subheader("Validation temporelle")
         st.caption(
             "Ces valeurs sont figées dans le snapshot End-to-end de référence. "
@@ -1867,7 +1941,6 @@ def _settings() -> None:
             value=current.temporal_max_ci_width,
             help="Ce paramètre ne s’applique pas au rendement directionnel.",
         )
-
         st.subheader("Promotion")
         st.caption(
             "La promotion automatique se choisit au lancement d’un run End-to-end. "
@@ -1901,8 +1974,14 @@ def _settings() -> None:
             value=current.promotion_max_opposite_movement_frequency,
             help="Fréquence maximale autorisée des mouvements opposés sur le holdout.",
         )
-
+    with tabs[6]:
+        st.subheader('Simulation Forward')
+        st.caption("L'horizon et les options de simulation se règlent dans les lancements Forward et End-to-End existants.")
+        st.subheader('Modèles et production')
+        st.caption('Le mode de réentraînement, les modèles figés et leur surveillance se gèrent dans les parcours de simulation, de promotion et de production existants.')
+    with tabs[7]:
         st.subheader("Exécution")
+        st.subheader('Parallélisme et threads')
         execution_1, execution_2, execution_3 = st.columns(3)
         workers = execution_1.number_input(
             "Workers marché", min_value=1, value=current.market_cache_workers
@@ -1917,119 +1996,179 @@ def _settings() -> None:
             "Jobs lourds concurrents", min_value=1,
             value=st.session_state.max_concurrent_heavy_jobs,
         )
-        if st.button("Enregistrer les paramètres", type="primary"):
-            parsed_quantiles = tuple(
-                float(item.strip()) for item in quantiles.split(",") if item.strip()
-            )
-            new_config = replace(
-                current,
-                **prefilter_xgboost_values,
-                **prefilter_temporal_values,
-                model_history_days=int(history),
-                permutation_depth=int(permutation),
-                max_generated_sets=int(max_sets),
-                lag_depth=int(lag),
-                intraday_target_threshold=float(up_threshold),
-                intraday_down_threshold=float(down_threshold),
-                walk_forward_window_mode=window_mode,
-                walk_forward_min_train_size=int(min_train),
-                walk_forward_train_size=int(rolling_train),
-                walk_forward_test_size=int(test_size),
-                walk_forward_step_size=int(step),
-                final_holdout_size=int(holdout),
-                walk_forward_end_offset_sessions=int(end_offset),
-                predictor_prefilter_batch_size=int(prefilter_batch_size),
-                walk_forward_batch_size=int(walk_forward_batch_size),
-                final_holdout_batch_size=int(final_holdout_batch_size),
-                walk_forward_max_combinations_per_batch=int(
-                    max_combinations_per_batch
-                ),
-                temporal_min_candidate_yield_ratio=float(temporal_candidate_yield),
-                temporal_max_auc_degradation=float(temporal_auc_degradation),
-                temporal_min_precision_edge=float(temporal_precision_edge),
-                temporal_min_mean_directional_return=float(temporal_directional_return),
-                temporal_confidence_level=float(temporal_confidence),
-                temporal_max_ci_width=float(temporal_ci_width),
-                promotion_min_holdout_signals=int(promotion_min_signals),
-                promotion_min_holdout_auc=float(promotion_min_auc),
-                promotion_min_holdout_precision=float(promotion_min_precision),
-                promotion_min_mean_directional_return=float(promotion_min_return),
-                promotion_max_opposite_movement_frequency=float(promotion_max_opposite),
-                predictor_prefilter_enabled=bool(prefilter_enabled),
-                predictor_prefilter_top_n=int(prefilter_top_n),
-                predictor_prefilter_min_median_auc=float(prefilter_median_auc),
-                predictor_prefilter_min_pct_above_random=float(prefilter_pct_random),
-                predictor_prefilter_min_worst_auc=float(prefilter_worst_auc),
-                predictor_prefilter_max_auc_std=float(prefilter_auc_std),
-                predictor_prefilter_correlation_threshold=float(
-                    prefilter_correlation
-                ),
-                xgb_max_depth=int(max_depth),
-                xgb_eta=float(eta),
-                xgb_rounds=int(rounds),
-                xgb_min_child_weight=float(child),
-                xgb_subsample=float(subsample),
-                xgb_colsample_bytree=float(colsample),
-                xgb_gamma=float(gamma),
-                xgb_reg_alpha=float(alpha),
-                xgb_reg_lambda=float(reg_lambda),
-                qualification_min_windows=int(min_windows),
-                qualification_min_median_auc=float(median_auc),
-                qualification_min_pct_windows_above_random=float(pct_random),
-                qualification_min_worst_window_auc=float(worst_auc),
-                qualification_min_positive_observations=int(min_positive),
-                qualification_max_auc_std=float(max_auc_std),
-                final_confirmation_min_auc=float(final_auc),
-                prediction_threshold=float(prediction_threshold),
-                model_selection_predictive_quality_weight=float(selection_predictive_weight),
-                model_selection_stability_weight=float(selection_stability_weight),
-                model_selection_holdout_weight=float(selection_holdout_weight),
-                model_selection_signal_quality_weight=float(selection_signal_weight),
-                model_selection_sample_adequacy_weight=float(selection_sample_weight),
-                market_cache_workers=int(workers),
-                combination_workers=int(combination_workers),
-                xgb_nthread=int(nthread),
-                xgb_seed=int(seed),
-                threshold_calibration_min_signals_per_window=int(min_signals),
-                threshold_calibration_min_robust_signals=int(min_robust_signals),
-                threshold_calibration_min_window_fraction=float(min_window_fraction),
-                threshold_calibration_precision_tolerance=float(precision_tolerance),
-                threshold_calibration_quantiles=parsed_quantiles,
-                threshold_parameter_calibration_max_models=(
-                    None
-                    if unlimited_threshold_parameter_models
-                    else int(threshold_parameter_calibration_max_models)
-                ),
-            )
-            st.session_state.lab_config = new_config
-            st.session_state.lab_calendar = calendar
-            st.session_state.lab_combinations_per_target = int(combinations)
-            st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
-            st.session_state.lab_evaluate_holdout = evaluate_holdout
-            st.session_state.sensitivity_threshold_min = float(sensitivity_threshold_min)
-            st.session_state.sensitivity_threshold_max = float(sensitivity_threshold_max)
-            st.session_state.sensitivity_threshold_step = float(sensitivity_threshold_step)
+        st.subheader('Gestion des lots et checkpoints')
+        b1, b2, b3, b4 = st.columns(4)
+        prefilter_batch_size = b1.number_input(
+            "Batch préfiltre",
+            min_value=1,
+            value=current.predictor_prefilter_batch_size,
+            help="Nombre de combinaisons univariées calculées avant chaque checkpoint.",
+        )
+        walk_forward_batch_size = b2.number_input(
+            "Batch walk-forward",
+            min_value=1,
+            value=current.walk_forward_batch_size,
+            help="Nombre de combinaisons détaillées conservées simultanément en mémoire.",
+        )
+        final_holdout_batch_size = b3.number_input(
+            "Batch holdout final",
+            min_value=1,
+            value=current.final_holdout_batch_size,
+            help="Nombre de modèles admissibles évalués entre deux checkpoints holdout.",
+        )
+        max_combinations_per_batch = b4.number_input(
+            "Taille maximale d’un batch de combinaisons",
+            min_value=1,
+            value=(
+                current.walk_forward_max_combinations_per_batch
+                if current.walk_forward_max_combinations_per_batch is not None
+                else DEFAULT_CONFIG.walk_forward_max_combinations_per_batch
+            ),
+            help=(
+                "Contrôle uniquement le découpage des combinaisons en batches; "
+                "ne change ni les combinaisons générées ni les critères du modèle."
+            ),
+        )
+        st.subheader('Cache, persistance et télémétrie')
+        st.caption('Les mécanismes de cache, de reprise et les diagnostics de ressources conservent leurs réglages existants dans les jobs et leurs résultats.')
+        st.subheader('Diagnostics techniques')
+        context_enabled = st.checkbox("Activer le diagnostic descriptif SPY", value=current.market_context_enabled)
+        st.caption("Protocole standard : 63 / 252 / 21 séances. Les variantes sont persistées et identifiées ; ces paramètres ne doivent pas être choisis selon les résultats des modèles.")
+        diagnostic_columns = st.columns(3)
+        context_trend = diagnostic_columns[0].number_input("Tendance SPY (séances)", min_value=2, value=current.market_context_trend_sessions)
+        context_drawdown = diagnostic_columns[1].number_input("Drawdown SPY (séances)", min_value=2, value=current.market_context_drawdown_sessions)
+        context_volatility = diagnostic_columns[2].number_input("Volatilité SPY (séances)", min_value=2, value=current.market_context_volatility_sessions)
+        context_terciles = st.checkbox("Terciles descriptifs figés sur le développement initial", value=current.market_context_terciles)
+        with st.expander("Valeurs RStock par défaut"):
+            defaults = asdict(DEFAULT_CONFIG)
+            defaults["project_root"] = str(DEFAULT_CONFIG.project_root)
+            st.json(defaults)
+    if st.button("Enregistrer les paramètres", type="primary"):
+        parsed_quantiles = tuple(
+            float(item.strip()) for item in quantiles.split(",") if item.strip()
+        )
+        new_config = replace(
+            current,
+            **prefilter_xgboost_values,
+            **prefilter_temporal_values,
+            market_context_enabled=context_enabled,
+            market_context_trend_sessions=int(context_trend),
+            market_context_drawdown_sessions=int(context_drawdown),
+            market_context_volatility_sessions=int(context_volatility),
+            market_context_terciles=context_terciles,
+            model_history_days=int(history),
+            permutation_depth=int(permutation),
+            max_generated_sets=int(max_sets),
+            predictive_model_type=predictive_model_type,
+            target_volatility_enabled=target_volatility_enabled,
+            target_volatility_sessions=int(target_volatility_sessions),
+            lag_depth=int(lag),
+            intraday_target_threshold=float(up_threshold),
+            intraday_down_threshold=float(down_threshold),
+            walk_forward_window_mode=window_mode,
+            walk_forward_min_train_size=int(min_train),
+            walk_forward_train_size=int(rolling_train),
+            walk_forward_test_size=int(test_size),
+            walk_forward_step_size=int(step),
+            final_holdout_size=int(holdout),
+            walk_forward_end_offset_sessions=int(end_offset),
+            predictor_prefilter_batch_size=int(prefilter_batch_size),
+            walk_forward_batch_size=int(walk_forward_batch_size),
+            final_holdout_batch_size=int(final_holdout_batch_size),
+            walk_forward_max_combinations_per_batch=int(
+                max_combinations_per_batch
+            ),
+            temporal_min_candidate_yield_ratio=float(temporal_candidate_yield),
+            temporal_max_auc_degradation=float(temporal_auc_degradation),
+            temporal_min_precision_edge=float(temporal_precision_edge),
+            temporal_min_mean_directional_return=float(temporal_directional_return),
+            temporal_confidence_level=float(temporal_confidence),
+            temporal_max_ci_width=float(temporal_ci_width),
+            promotion_min_holdout_signals=int(promotion_min_signals),
+            promotion_min_holdout_auc=float(promotion_min_auc),
+            promotion_min_holdout_precision=float(promotion_min_precision),
+            promotion_min_mean_directional_return=float(promotion_min_return),
+            promotion_max_opposite_movement_frequency=float(promotion_max_opposite),
+            predictor_prefilter_enabled=bool(prefilter_enabled),
+            predictor_prefilter_top_n=int(prefilter_top_n),
+            predictor_prefilter_min_median_auc=float(prefilter_median_auc),
+            predictor_prefilter_min_pct_above_random=float(prefilter_pct_random),
+            predictor_prefilter_min_worst_auc=float(prefilter_worst_auc),
+            predictor_prefilter_max_auc_std=float(prefilter_auc_std),
+            predictor_prefilter_correlation_threshold=float(
+                prefilter_correlation
+            ),
+            xgb_max_depth=int(max_depth),
+            xgb_eta=float(eta),
+            xgb_rounds=int(rounds),
+            xgb_round_selection_mode=round_mode,
+            xgb_early_stopping_max_rounds=int(round_max),
+            xgb_early_stopping_validation_sessions=int(round_validation),
+            xgb_early_stopping_patience=int(round_patience),
+            xgb_early_stopping_min_train_observations=int(round_min_train),
+            xgb_min_child_weight=float(child),
+            xgb_subsample=float(subsample),
+            xgb_colsample_bytree=float(colsample),
+            xgb_gamma=float(gamma),
+            xgb_reg_alpha=float(alpha),
+            xgb_reg_lambda=float(reg_lambda),
+            qualification_min_windows=int(min_windows),
+            qualification_min_median_auc=float(median_auc),
+            qualification_min_pct_windows_above_random=float(pct_random),
+            qualification_min_worst_window_auc=float(worst_auc),
+            qualification_min_positive_observations=int(min_positive),
+            qualification_max_auc_std=float(max_auc_std),
+            final_confirmation_min_auc=float(final_auc),
+            prediction_threshold=float(prediction_threshold),
+            model_selection_predictive_quality_weight=float(selection_predictive_weight),
+            model_selection_stability_weight=float(selection_stability_weight),
+            model_selection_holdout_weight=float(selection_holdout_weight),
+            model_selection_signal_quality_weight=float(selection_signal_weight),
+            model_selection_sample_adequacy_weight=float(selection_sample_weight),
+            market_cache_workers=int(workers),
+            combination_workers=int(combination_workers),
+            xgb_nthread=int(nthread),
+            xgb_seed=int(seed),
+            threshold_calibration_min_signals_per_window=int(min_signals),
+            threshold_calibration_min_robust_signals=int(min_robust_signals),
+            threshold_calibration_min_window_fraction=float(min_window_fraction),
+            threshold_calibration_precision_tolerance=float(precision_tolerance),
+            threshold_calibration_quantiles=parsed_quantiles,
+            threshold_parameter_calibration_max_models=(
+                None
+                if unlimited_threshold_parameter_models
+                else int(threshold_parameter_calibration_max_models)
+            ),
+        )
+        st.session_state.lab_config = new_config
+        st.session_state.lab_calendar = calendar
+        st.session_state.lab_combinations_per_target = int(combinations)
+        st.session_state.max_concurrent_heavy_jobs = int(max_jobs)
+        st.session_state.lab_evaluate_holdout = evaluate_holdout
+        st.session_state.sensitivity_threshold_min = float(sensitivity_threshold_min)
+        st.session_state.sensitivity_threshold_max = float(sensitivity_threshold_max)
+        st.session_state.sensitivity_threshold_step = float(sensitivity_threshold_step)
 
-            ui_settings = {
-                "lab_calendar": st.session_state.lab_calendar,
-                "lab_combinations_per_target": st.session_state.lab_combinations_per_target,
-                "lab_evaluate_holdout": st.session_state.lab_evaluate_holdout,
-                "max_concurrent_heavy_jobs": st.session_state.max_concurrent_heavy_jobs,
-                "sensitivity_threshold_min": st.session_state.sensitivity_threshold_min,
-                "sensitivity_threshold_max": st.session_state.sensitivity_threshold_max,
-                "sensitivity_threshold_step": st.session_state.sensitivity_threshold_step,
-            }
-            try:
-                save_user_settings(
-                    new_config, ui_settings, default_config=DEFAULT_CONFIG
-                )
-            except (OSError, TypeError, ValueError) as error:
-                st.error(
-                    "Paramètres appliqués à la session, mais la persistance a échoué : "
-                    f"{error}"
-                )
-            else:
-                st.success("Paramètres enregistrés.")
+        ui_settings = {
+            "lab_calendar": st.session_state.lab_calendar,
+            "lab_combinations_per_target": st.session_state.lab_combinations_per_target,
+            "lab_evaluate_holdout": st.session_state.lab_evaluate_holdout,
+            "max_concurrent_heavy_jobs": st.session_state.max_concurrent_heavy_jobs,
+            "sensitivity_threshold_min": st.session_state.sensitivity_threshold_min,
+            "sensitivity_threshold_max": st.session_state.sensitivity_threshold_max,
+            "sensitivity_threshold_step": st.session_state.sensitivity_threshold_step,
+        }
+        try:
+            save_user_settings(
+                new_config, ui_settings, default_config=DEFAULT_CONFIG
+            )
+        except (OSError, TypeError, ValueError) as error:
+            st.error(
+                "Paramètres appliqués à la session, mais la persistance a échoué : "
+                f"{error}"
+            )
+        else:
+            st.success("Paramètres enregistrés.")
 
 
 def _history_model_contexts(project_root) -> dict[str, str]:
@@ -2112,7 +2251,7 @@ def _render_walk_forward_promotion(
     if combinations.empty:
         st.info("Aucune combinaison ne satisfait les critères de qualification.")
         return
-    selection = st.dataframe(
+    selection = render_dataframe(
         combinations,
         hide_index=True,
         width="stretch",
@@ -2292,7 +2431,7 @@ def _render_threshold_calibration_promotion(
     if sensitivity_summary.empty:
         st.caption("Aucune sensibilité holdout disponible pour les combinaisons visibles.")
     else:
-        st.dataframe(
+        render_dataframe(
             sensitivity_summary,
             hide_index=True,
             width="stretch",
@@ -2334,7 +2473,7 @@ def _render_threshold_calibration_promotion(
     if choice_diagnostics.empty:
         st.caption("Diagnostics de calibration indisponibles pour cette combinaison.")
     else:
-        st.dataframe(
+        render_dataframe(
             choice_diagnostics,
             hide_index=True,
             width="stretch",
@@ -2470,7 +2609,7 @@ def _render_threshold_sensitivity_analysis(
         "✓ identifie le seuil calibré actuel et le meilleur seuil par précision "
         f"avec au moins {minimum_robust_signals} signaux. Cette analyse ne modifie pas le run."
     )
-    st.dataframe(
+    render_dataframe(
         sensitivity,
         hide_index=True,
         width="stretch",
@@ -2588,6 +2727,10 @@ def _render_history_detail(
     st.divider()
     st.subheader(summary_text if summary_text != "—" else "Détail du run")
     st.caption(f"ID technique : {run_id}")
+    if status.get("job_type") in {"walk_forward", "end_to_end"}:
+        from rstock.application.common_prediction_comparison import result_availability, STATE_LABELS
+        availability = result_availability(st.session_state.lab_config.project_root / "runs" / run_id)
+        st.caption(" · ".join(STATE_LABELS[value] for value in availability.values()))
     _render_resume_controls(run_id, status, detail)
     _render_job_detail_tabs(_service(), run_id, status=status, detail=detail)
     return
@@ -2663,7 +2806,7 @@ def _render_qualification_decision_grid(
     """Shared decision grid for standalone, pipeline and legacy promotion views."""
 
     table = rows if pre_sorted else sort_promotion_decisions(rows)
-    selection = st.dataframe(
+    selection = render_dataframe(
         table, hide_index=True, width="stretch", on_select="rerun",
         selection_mode="single-row", key=key, column_config=column_config,
     )
@@ -2689,8 +2832,13 @@ def _render_xgboost_calibration_selection(run_id: str) -> None:
         st.caption("Les artefacts de sélection XGBoost ne sont pas disponibles pour ce run historique.")
         return
     st.subheader("Sélection et validation XGBoost")
+    if any(payload.get("round_selection_policy", {}).get("xgb_round_selection_mode") == "chronological"
+           for payload in selected.values() if isinstance(payload, dict)):
+        st.caption("Mode chronologique : num_boost_round est nominal dans les paramètres de calibration. "
+                   "Les tours effectifs sont sélectionnés par direction et origine ; consulter l’audit des entraînements. "
+                   "Dans le nouveau protocole E2E, le holdout est évalué à son étape dédiée.")
     st.caption("Stabilité développement = écart-type ROC-AUC entre les fenêtres.")
-    st.dataframe(
+    render_dataframe(
         xgboost_calibration_selection_display_table(table),
         hide_index=True,
         width="stretch",
@@ -2734,7 +2882,7 @@ def _render_threshold_parameter_calibration_selection(run_id: str) -> None:
         f"{selected.get('source_xgboost_calibration_run') or selected.get('xgboost_parameter_source') or '—'} · "
         f"Digest : {selected.get('configuration_sha256', '—')}"
     )
-    st.dataframe(
+    render_dataframe(
         table,
         hide_index=True,
         width="stretch",
@@ -2792,7 +2940,7 @@ def _selected_combination(
         "Score qualité prédictive", "Score stabilité", "Score holdout",
         "Score qualité signal", "Score adéquation échantillon",
     ]
-    event = st.dataframe(
+    event = render_dataframe(
         table.drop(columns=["Eligible", "Holdout confirmé", *detail_only], errors="ignore"),
         hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key=f"analysis-combinations-{run_id}",
@@ -2900,6 +3048,17 @@ def _render_run_resources(run_id: str) -> None:
         st.info("Télémétrie indisponible pour ce run")
         return
 
+    displayed_seconds = attempt.get("elapsed_seconds")
+    run_status = _read_light_json(root.parent / "status.json") or {}
+    interrupted_attempt = run_status.get("status") == "interrupted" and attempt_number == len(attempts)
+    if interrupted_attempt:
+        from rstock.application.run_timing import observed_run_timing
+        timing = observed_run_timing(root.parent, run_status)
+        displayed_seconds = timing["observed_duration_seconds"]
+        if attempt.get("status") == "running":
+            st.caption("Résumé de ressources non finalisé. La durée observée provient des dernières traces du worker ; "
+                       "les moyennes CPU du résumé historique peuvent être incomplètes.")
+
     def cpu_text(cores: object) -> str:
         logical = attempt.get("logical_processors")
         if not isinstance(cores, (int, float)) or not isinstance(logical, int) or logical < 1:
@@ -2918,7 +3077,7 @@ def _render_run_resources(run_id: str) -> None:
         "Le RSS additionné peut inclure des pages partagées."
     )
     summary = st.columns(7)
-    summary[0].metric("Durée", _duration(attempt.get("elapsed_seconds")))
+    summary[0].metric("Durée observée" if interrupted_attempt else "Durée", _duration(displayed_seconds))
     summary[1].metric("CPU moyen", cpu_text(attempt.get("cpu_mean_cores")))
     summary[2].metric("CPU max échantillonné", cpu_text(attempt.get("cpu_max_sampled_cores")))
     summary[3].metric("Pic RSS simultané", memory_text(attempt.get("rss_peak_sampled_bytes")))
@@ -2950,7 +3109,7 @@ def _render_run_resources(run_id: str) -> None:
     if attempt.get("error"):
         st.caption(f"Erreur : {attempt['error']}")
 
-    execution_seconds = max(0.0, float(attempt.get("elapsed_seconds") or 0) - wait_total)
+    execution_seconds = max(0.0, float(displayed_seconds or 0) - wait_total)
     phase_rows = []
     for phase in attempt.get("phase_rows", []):
         if not isinstance(phase, dict):
@@ -2976,7 +3135,7 @@ def _render_run_resources(run_id: str) -> None:
         })
     selected_phase = None
     if phase_rows:
-        phase_table = st.dataframe(
+        phase_table = render_dataframe(
             pd.DataFrame(phase_rows), hide_index=True, width="stretch",
             key=f"resources-phases-{run_id}", on_select="rerun",
             selection_mode="single-row",
@@ -3088,7 +3247,7 @@ def _render_run_resources(run_id: str) -> None:
                 "La taille des fichiers ne mesure pas les octets physiques écrits sur disque. "
                 "L'assemblage inclut l'écriture du checkpoint, exclue du compteur historique aggregation_seconds."
             )
-            st.dataframe(pd.DataFrame(subphase_rows), hide_index=True, width="stretch")
+            render_dataframe(pd.DataFrame(subphase_rows), hide_index=True, width="stretch")
 
     samples = []
     path = root / "samples.jsonl"
@@ -3134,7 +3293,7 @@ def _render_run_resources(run_id: str) -> None:
                         f"Durée par batch : médiane {durations.median():.2f} s · "
                         f"P95 {durations.quantile(0.95):.2f} s"
                     )
-                st.dataframe(batch_frame[[
+                render_dataframe(batch_frame[[
                     "phase", "batch_id", "completed_items", "duration_seconds",
                     "calculation_seconds", "rows",
                 ]], hide_index=True, width="stretch")
@@ -3158,7 +3317,7 @@ def _render_standard_results(
                 )
                 if selected_target != "Toutes":
                     ranking = ranking.loc[ranking["Observation"] == selected_target]
-            st.dataframe(ranking, hide_index=True, width="stretch")
+            render_dataframe(ranking, hide_index=True, width="stretch")
             origins_path = result_dir / "predictor_prefilter_origins.csv"
             if origins_path.is_file():
                 with st.expander("Métriques par origine"):
@@ -3167,7 +3326,7 @@ def _render_standard_results(
                         origin_rows = origin_rows.loc[
                             origin_rows["Observation"] == selected_target
                         ]
-                    st.dataframe(origin_rows, hide_index=True, width="stretch")
+                    render_dataframe(origin_rows, hide_index=True, width="stretch")
                     st.download_button(
                         "Exporter les métriques par origine (CSV)",
                         data=origins_path.read_bytes(),
@@ -3178,10 +3337,30 @@ def _render_standard_results(
             st.info("Classement indisponible tant que le préfiltre n'est pas terminé.")
         manifest = _read_light_json(result_dir / "predictor_prefilter.json")
         if manifest is not None:
+            coverage = manifest.get("round_selection_coverage", {}).get("Up", {})
+            policy = manifest.get("round_selection_policy", {})
+            st.caption("Tours XGBoost du préfiltre : " + str(policy.get("prefilter_xgb_round_selection_mode", "fixed"))
+                       + " · Up uniquement ; Down non applicable.")
+            if coverage.get("available"):
+                st.metric("Fenêtres Up optimisées", f"{coverage['optimized_windows']} / {coverage['windows']} ({coverage['optimized_percent']:.1f} %)")
+                st.caption(f"Repli : {coverage['fallback_windows']} fenêtres ({coverage['fallback_percent']:.1f} %). "
+                           f"Minimum : {policy.get('minimum_usable_observations', 315)} séances distinctes utilisables.")
+                st.caption("Les métriques de qualification portent sur toutes les fenêtres ; "
+                           "la couverture identifie celles effectivement optimisées. Résultat exploratoire : "
+                           "aucune supériorité statistique n'est déduite de cette couverture.")
+                render_dataframe(pd.DataFrame([
+                    {"Périmètre": "Toutes les fenêtres évaluées", **manifest.get("all_evaluated_windows", {})},
+                    {"Périmètre": "Fenêtres effectivement optimisées", **manifest.get("optimized_windows_only", {})},
+                ]), hide_index=True, width="stretch")
+                with st.expander("Tours, validation interne et motifs de repli"):
+                    audit_path = result_dir / "prefilter_round_selection_training.csv"
+                    if audit_path.is_file():
+                        render_dataframe(pd.read_csv(audit_path), hide_index=True, width="stretch")
+                    st.json(coverage)
             if manifest.get("prefilter_method") == "temporal_consensus":
                 st.metric("Candidats consensus retenus", manifest["retained_predictors"])
                 st.caption(f"Origines : {', '.join(manifest['origin_cutoffs'])} · minimum {manifest['min_occurrences']} occurrences")
-                st.dataframe(pd.DataFrame([{"Occurrences": key, "Candidats": count}
+                render_dataframe(pd.DataFrame([{"Occurrences": key, "Candidats": count}
                                           for key, count in manifest["occurrence_distribution"].items()]),
                              hide_index=True, width="stretch")
                 consensus_path = result_dir / "temporal_consensus_candidates.csv"
@@ -3241,7 +3420,7 @@ def _render_standard_results(
                     "Observations exclues — affichage limité aux 500 premières lignes."
                     if len(exclusions) > 500 else "Observations exclues"
                 )
-                st.dataframe(exclusions.loc[:, columns].head(500), hide_index=True, width="stretch")
+                render_dataframe(exclusions.loc[:, columns].head(500), hide_index=True, width="stretch")
         _render_forward_temporal_results(run_id, summary)
         return
     if job_type is JobType.XGBOOST_CALIBRATION:
@@ -3256,7 +3435,7 @@ def _render_standard_results(
             path = result_dir / filename
             if path.is_file():
                 st.subheader(label)
-                st.dataframe(pd.read_csv(path), hide_index=True, width="stretch")
+                render_dataframe(pd.read_csv(path), hide_index=True, width="stretch")
         if configuration is not None:
             with st.expander("Protocole et provenance holdout"):
                 st.json(configuration)
@@ -3292,7 +3471,7 @@ def _render_standard_results(
             metrics = pd.read_csv(metrics_path)
             if "Set" in metrics:
                 metrics = metrics[["Set", *[column for column in metrics if column != "Set"]]]
-            st.dataframe(metrics, hide_index=True, width="stretch")
+            render_dataframe(metrics, hide_index=True, width="stretch")
             selected = _read_light_json(result_dir / "selected_thresholds_by_set.json")
             if selected is not None:
                 st.json(selected)
@@ -3330,6 +3509,9 @@ _FORWARD_COLUMN_HELP = {
     "Rendement Q25": "Premier quartile des rendements moyens par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
     "Rendement Q75": "Troisième quartile des rendements moyens par modèle contributeur dans cet intervalle, en %. Chaque modèle compte une fois.",
     "P&L cumulatif modèle": "P&L théorique de ce modèle depuis T0 : somme des rendements de ses signaux × 10 000 $, en dollars.",
+    "Origine qualification": "E2E normal, candidat commun au parent ou supplémentaire admis par le dérivé. Les candidats retirés ne sont pas simulés dans ce dérivé.",
+    "AUC Holdout T0 comparable": "AUC de qualification sur les probabilités Holdout persistées. Le booster Forward final a ensuite été réentraîné jusqu'à T0.",
+    "Δ Brier +21": "Brier Forward cumulatif à +21 moins Brier Holdout T0 : une hausse est défavorable. Indisponible si la référence ou l'horizon manque.",
 }
 
 
@@ -3405,6 +3587,8 @@ def _forward_precision_chart(rows: pd.DataFrame, checkpoints: Sequence[int]) -> 
 
 def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object]) -> None:
     root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    from rstock.application.forward_export import render_forward_export
+    render_forward_export(st, root)
     manifest = _read_light_json(root / "forward_analysis_manifest.json")
     if manifest is None:
         st.info("Analyse temporelle détaillée indisponible pour ce run.")
@@ -3424,12 +3608,15 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
     periods = pd.read_csv(root / required[0]).fillna({"source_model_id": ""})
     population = pd.read_csv(root / required[1])
     daily = pd.read_csv(root / required[2]).fillna({"source_model_id": ""})
+    from rstock.application.forward_diagnostic_ui import load_view, render_summary, render_model, render_population
+    t0_reference, diagnostic_metrics, probability_bins = load_view(st, root)
     view = st.radio(
         "Analyse Forward", ("Synthèse", "Modèles", "Évolution population"),
         horizontal=True, key=f"forward-view-{run_id}",
     )
     checkpoints = tuple(manifest.get("checkpoints", ()))
     if view == "Synthèse":
+        render_summary(st, render_dataframe, t0_reference, diagnostic_metrics)
         st.metric("Modèles à T0", int(manifest.get("model_count_t0", 0)),
                   help=_FORWARD_COLUMN_HELP["Modèles à T0"])
         st.metric("Signaux évaluables", int(summary.get("total_signals", 0) or 0),
@@ -3438,7 +3625,7 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
                                (periods["period_kind"] == "full_run")]
         if not full_run.empty:
             final_table = _forward_metric_table(full_run, label="Résultat à la date réelle de fin")
-            st.dataframe(final_table, hide_index=True, width="stretch",
+            render_dataframe(final_table, hide_index=True, width="stretch",
                          column_config=_forward_column_config(final_table.columns))
         run_daily = daily.loc[daily["scope"] == "run"]
         if not run_daily.empty:
@@ -3458,7 +3645,7 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
             st.info("Aucun checkpoint standard entièrement atteint ; le résultat global reste disponible dans le résumé du run.")
         else:
             table = _forward_metric_table(selected, label="Métriques aux checkpoints")
-            st.dataframe(table, hide_index=True, width="stretch",
+            render_dataframe(table, hide_index=True, width="stretch",
                          column_config=_forward_column_config(table.columns))
     elif view == "Modèles":
         latest = periods.loc[(periods["scope"] == "model") &
@@ -3484,7 +3671,14 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
             "Rendement moyen intervalle": full_run["source_model_id"].map(last_return),
             "P&L cumulatif modèle": full_run["source_model_id"].map(pnl),
         }).reset_index(drop=True)
-        event = st.dataframe(
+        if t0_reference:
+            from rstock.application.forward_diagnostic import ORIGINS
+            model_references = {m["source_model_id"]: m for m in t0_reference["models"] if m.get("source_model_id")}
+            grid["Origine qualification"] = grid["Modèle"].map(lambda key: ORIGINS[model_references[key]["origin"]])
+            grid["AUC Holdout T0 comparable"] = grid["Modèle"].map(lambda key: model_references[key]["holdout_comparable"].get("auc"))
+            at_21 = diagnostic_metrics.loc[diagnostic_metrics["period_kind"].eq("cumulative") & diagnostic_metrics["horizon"].eq(21)]
+            grid["Δ Brier +21"] = grid["Modèle"].map(dict(zip(at_21["source_model_id"], at_21["delta_brier"])))
+        event = render_dataframe(
             grid, hide_index=True, width="stretch", on_select="rerun",
             selection_mode="single-row", key=f"forward-model-select-{run_id}",
             column_config=_forward_column_config(grid.columns),
@@ -3525,8 +3719,9 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
             st.info("Aucun checkpoint standard entièrement atteint ; le résultat global du modèle reste disponible dans la grille.")
         else:
             table = _forward_metric_table(chosen, label="Métriques par horizon")
-            st.dataframe(table, hide_index=True, width="stretch",
+            render_dataframe(table, hide_index=True, width="stretch",
                          column_config=_forward_column_config(table.columns))
+        render_model(st, render_dataframe, t0_reference, diagnostic_metrics, probability_bins, model_id, run_id)
     else:
         if population.empty:
             st.info("Aucun intervalle standard entièrement atteint.")
@@ -3548,7 +3743,7 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
                    "Précision Q25", "Précision Q75", "Rendement médian",
                    "Rendement Q25", "Rendement Q75",
                    "Précision pondérée", "Rendement pondéré"]
-        st.dataframe(table[columns], hide_index=True, width="stretch",
+        render_dataframe(table[columns], hide_index=True, width="stretch",
                      column_config=_forward_column_config(pd.Index(columns)))
         _forward_line_chart(population.dropna(subset=["median_model_precision"]),
                             x="horizon", y="median_model_precision",
@@ -3559,6 +3754,7 @@ def _render_forward_temporal_results(run_id: str, summary: Mapping[str, object])
                             title="Rendement médian des modèles par intervalle",
                             percent=True, checkpoints=checkpoints)
         st.caption("Les médianes comptent chaque modèle contributeur une fois ; les valeurs pondérées comptent chaque signal. Les modèles sans signal restent dans la population T0.")
+        render_population(st, render_dataframe, t0_reference, diagnostic_metrics, run_id)
 
 
 def _render_standard_job_tabs(
@@ -3610,6 +3806,102 @@ def _render_walk_forward_metrics(analytics: RunAnalytics) -> None:
     metrics[5].metric("Fenetres (mediane)", _format_metric(windows))
 
 
+def _render_round_selection_summary(run_id: str, detail: dict[str, object]) -> None:
+    configuration = detail.get("configuration", {}).get("rstock_config", {})
+    if configuration.get("predictive_model_type", "external_only") == "constant_probability":
+        st.caption("Tours XGBoost : non applicables. Probabilités issues des labels connus de l’apprentissage.")
+        return
+    mode = configuration.get("xgb_round_selection_mode", "fixed")
+    st.caption(f"Tours XGBoost : {'chronologique' if mode == 'chronological' else 'fixe'} · repli / tours fixes : {configuration.get('xgb_rounds', '—')}")
+    if mode != "chronological":
+        return
+    minimum = configuration.get("xgb_early_stopping_validation_sessions", 63) + configuration.get("xgb_early_stopping_min_train_observations", 252)
+    st.caption(f"Minimum : {minimum} observations utilisables (315 avec les paramètres par défaut). Les fenêtres sont comptées par candidat, séparément pour Up et Down. Les résultats globaux incluent les replis ; le sous-ensemble optimisé dispose de davantage d'historique.")
+    root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
+    effective = _read_light_json(root / "run_configuration.json") or {}
+    coverage = effective.get("round_selection_coverage", {})
+    rows = []
+    for direction in ("Up", "Down"):
+        values = coverage.get(direction, {})
+        if not values.get("available"):
+            st.caption(f"{direction} : couverture indisponible")
+            continue
+        distribution = values.get("rounds_distribution", {})
+        rows.append({"Direction": direction, "Fenêtres": values["windows"],
+            "Optimisées": values["optimized_windows"], "% optimisées": values["optimized_percent"],
+            "Replis": values["fallback_windows"], "% replis": values["fallback_percent"],
+            "Tours médians": distribution.get("50%"), "Tours Q1": distribution.get("25%"),
+            "Tours Q3": distribution.get("75%"), "Tours minimum": distribution.get("min"),
+            "Tours maximum": distribution.get("max")})
+        histogram = values.get("rounds_histogram", {})
+        if histogram:
+            st.caption(f"{direction} — distribution des tours retenus, replis inclus")
+            optimized_histogram = values.get("optimized_rounds_histogram", {})
+            st.bar_chart(pd.DataFrame({"Toutes les fenêtres": {int(k): v for k, v in histogram.items()},
+                "Fenêtres optimisées": {int(k): v for k, v in optimized_histogram.items()}}).fillna(0).sort_index())
+        reasons = values.get("fallback_reasons", {})
+        if reasons:
+            reason_labels = {"insufficient_history": "Historique utilisable insuffisant",
+                "validation_single_class": "Une seule classe en validation interne",
+                "internal_train_single_class": "Une seule classe en apprentissage interne",
+                "invalid_selection_result": "Résultat de sélection inexploitable",
+                "selection_result_unavailable": "Résultat de sélection indisponible"}
+            render_dataframe(pd.DataFrame({"Raison du repli": [reason_labels.get(reason, reason) for reason in reasons], "Fenêtres": list(reasons.values())}), hide_index=True, width="stretch")
+    if rows:
+        render_dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    audit = root / "round_selection_training.csv"
+    if audit.is_file():
+        with st.expander("Tours retenus et validations internes par entraînement"):
+            render_dataframe(pd.read_csv(audit), hide_index=True, width="stretch")
+
+
+def _render_paired_round_comparison(details: list[dict[str, object]], run_ids: list[str]) -> None:
+    if len(details) != 2:
+        return
+    modes = [d.get("configuration", {}).get("rstock_config", {}).get("xgb_round_selection_mode", "fixed") for d in details]
+    if set(modes) != {"fixed", "chronological"}:
+        return
+    from rstock.application.round_selection_comparison import compare_round_selection
+    st.subheader("Comparaison appariée des tours XGBoost")
+    try:
+        summary, pairs = compare_round_selection(st.session_state.lab_config.project_root,
+            run_ids[modes.index("fixed")], run_ids[modes.index("chronological")])
+    except (OSError, ValueError, KeyError) as error:
+        st.warning(f"Comparaison appariée indisponible : {error}")
+        return
+    st.caption(summary["scope"])
+    rows = []
+    for key, label in (("all_windows", "Toutes les fenêtres comparables"), ("optimized_windows", "Fenêtres réellement optimisées")):
+        values = summary[key]
+        inference = values["inference"]
+        interval = inference["interval"]
+        rows.append({"Population": label, "Fenêtres candidat-direction": values["candidate_direction_windows"],
+            "Δ log loss": values.get("delta_LogLoss"), "Δ Brier": values.get("delta_Brier"),
+            "Δ AUC": values.get("delta_ROCAUC"), "Gain relatif log loss": values.get("relative_log_loss_improvement"),
+            "IC 95 % log loss": "indisponible" if interval is None else f"[{interval[0]:.5f}, {interval[1]:.5f}]",
+            "Validité": inference["status"]})
+    render_dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("Δ = chronologique − fixe. Log loss et Brier : plus faible est meilleur. L'IC utilise des blocs temporels communs à tous les candidats, avec contrôle du chevauchement et sensibilité à la taille des blocs.")
+    st.caption(summary["optimized_subset_caveat"])
+    inference = summary["all_windows"]["inference"]
+    if inference["interval"] is None:
+        st.info("Résultat exploratoire : les données ne permettent pas une estimation fiable de l'IC 95 %. Aucune supériorité démontrée.")
+    elif summary["all_windows"].get("additional_validation_warranted"):
+        st.info("Les critères proposés sont satisfaits sur cette population sélectionnée : une validation indépendante supplémentaire est justifiée.")
+    else:
+        st.info("Les critères proposés pour une validation supplémentaire ne sont pas tous satisfaits. Aucune supériorité démontrée.")
+    st.caption("Critères : gain de log loss ≥ 1 %, borne supérieure IC < 0, dégradation AUC ≤ 0,01 et Brier ≤ 0,005 ; gain dans deux tiers temporels et après retrait du tiers le plus favorable.")
+    with st.expander("Détails par direction et stabilité temporelle"):
+        for key in ("all_windows", "optimized_windows"):
+            values = summary[key]
+            st.caption("Toutes les fenêtres comparables" if key == "all_windows" else "Fenêtres réellement optimisées")
+            render_dataframe(pd.DataFrame(values.get("directions", {})).T, width="stretch")
+            render_dataframe(pd.DataFrame(values.get("performance_dispersion", {})), width="stretch")
+        st.line_chart(pairs.groupby("TestStart")[["DeltaLogLoss", "DeltaBrier", "DeltaROCAUC"]].mean())
+    st.download_button("Exporter les différences appariées (CSV)", pairs.to_csv(index=False).encode("utf8"),
+        file_name="comparaison_tours_xgboost.csv", mime="text/csv", key="round-selection-paired-export")
+
+
 def _render_walk_forward_summary(
     run_id: str, status: dict[str, object], detail: dict[str, object]
 ) -> None:
@@ -3620,6 +3912,7 @@ def _render_walk_forward_summary(
         else {}
     )
     config = raw_config if isinstance(raw_config, Mapping) else {}
+    _render_round_selection_summary(run_id, detail)
     mode = str(config.get("walk_forward_window_mode", "expanding"))
     train = (
         f"train fixe {int(config.get('walk_forward_train_size', 252))}"
@@ -3638,7 +3931,7 @@ def _render_walk_forward_summary(
     prefilter_table = predictor_prefilter_summary(detail.get("summary", {}))
     if not prefilter_table.empty:
         st.subheader("Pré-filtrage des prédicteurs")
-        st.dataframe(
+        render_dataframe(
             prefilter_table, hide_index=True, width="stretch",
             column_config=_grid_column_help_config(prefilter_table.columns, _PREFILTER_COLUMN_HELP),
         )
@@ -3713,7 +4006,7 @@ def _render_walk_forward_combinations(
                 {"Indicateur": "Rang", "Valeur": selected.get("Rang", "-")},
             ]
         )
-        st.dataframe(diagnostic, hide_index=True, width="stretch")
+        render_dataframe(diagnostic, hide_index=True, width="stretch")
         subscores = [
             ("Qualité prédictive", "Score qualité prédictive"),
             ("Stabilité", "Score stabilité"),
@@ -3723,7 +4016,7 @@ def _render_walk_forward_combinations(
         ]
         if any(name in selected.index for _, name in subscores):
             st.markdown("**Sous-scores**")
-            st.dataframe(
+            render_dataframe(
                 pd.DataFrame(
                     [
                         {"Composante": label, "Score / 100": selected.get(name, "-")}
@@ -3768,7 +4061,7 @@ def _render_walk_forward_validation(
             },
         ]
     )
-    st.dataframe(
+    render_dataframe(
         validation, hide_index=True, width="stretch",
         column_config=_grid_column_help_config(validation.columns, _WF_VALIDATION_COLUMN_HELP),
     )
@@ -3823,7 +4116,7 @@ def _render_walk_forward_batches(
         "ne seront pas recalculés."
     )
     table = pd.DataFrame(rows)
-    event = st.dataframe(
+    event = render_dataframe(
         table,
         hide_index=True,
         width="stretch",
@@ -3883,6 +4176,18 @@ def _render_walk_forward_tabs(
     )
 
 
+def _ordered_derivation_fields(fields: Sequence[str]) -> list[str]:
+    """Keep each mode followed by its controls, preserving other field ordering."""
+    ordered = sorted(fields, key=lambda field: (field != "predictive_model_type", field))
+    for policy in (ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS):
+        if policy[0] in ordered:
+            controls = [field for field in policy[1:] if field in ordered]
+            ordered = [field for field in ordered if field not in controls]
+            position = ordered.index(policy[0]) + 1
+            ordered[position:position] = controls
+    return ordered
+
+
 def _render_derived_creation(
     run_id: str, detail: dict[str, object], service: ExperimentService,
 ) -> None:
@@ -3897,7 +4202,6 @@ def _render_derived_creation(
                 "La validation temporelle du run source n’a été ni héritée ni "
                 "rejouée : ce dérivé n’est pas temporellement revalidé."
             )
-        return
     status = detail.get("status", {})
     if not isinstance(status, Mapping) or status.get("status") != "completed":
         return
@@ -3916,8 +4220,14 @@ def _render_derived_creation(
     repository = service.run_service.repository
     source_spec = repository.load_spec(run_id)
     source_manifest = load_pipeline_manifest(repository, run_id)
-    if source_manifest is None or source_manifest.get("schema_version") not in {1, 3, 5}:
+    if source_manifest is None:
         st.error("Le manifest source ne permet pas cette dérivation.")
+        return
+    from rstock.application.end_to_end import derivation_schema_for_manifest
+    try:
+        source_schema = derivation_schema_for_manifest(source_manifest)
+    except ValueError as error:
+        st.error(str(error))
         return
     labels = {
         "walk_forward": "Walk-forward / préfiltre",
@@ -3927,8 +4237,8 @@ def _render_derived_creation(
     }
     labels.update({"holdout_evaluation": "Évaluation holdout",
                    "promotion_qualification": "Qualification promotion"})
-    split = source_manifest["schema_version"] in {3, 5}
-    separated = source_manifest["schema_version"] == 5
+    split = source_schema >= 2
+    separated = source_schema == 3
     labels["prefilter"] = "Préfiltre"
     if separated:
         labels["walk_forward"] = "Walk-forward"
@@ -3967,8 +4277,12 @@ def _render_derived_creation(
     fields = [
         field for stage in fork_keys
         if modes[stage] == "recomputed"
-        for field in sorted(parameter_fields.get(stage, ()))
+        for field in _ordered_derivation_fields(parameter_fields.get(stage, ()))
     ]
+    if modes.get("xgboost_calibration") == "recomputed":
+        st.info("Protocole E2E : la calibration XGBoost utilise le développement uniquement. "
+                "Le holdout reste réservé à l’étape Évaluation holdout, en mode fixe comme chronologique. "
+                "Les reprises des anciens runs conservent leur protocole enregistré.")
     changes: dict[str, object] = {}
     with st.container(border=True):
         if forward_enabled:
@@ -4000,7 +4314,12 @@ def _render_derived_creation(
                 ).isoformat()
                 if selected_end != original_end:
                     changes["forward_simulation_end_date"] = selected_end
+        last_stage = None
         for field in fields:
+            owner = next(stage for stage in fork_keys if field in parameter_fields.get(stage, ()))
+            if owner != last_stage:
+                st.subheader(labels[owner])
+                last_stage = owner
             try:
                 original = source_parameter_value(
                     repository, source_spec, source_manifest, field
@@ -4008,14 +4327,36 @@ def _render_derived_creation(
             except (OSError, ValueError, KeyError) as error:
                 st.error(f"Valeur source indisponible pour {field} : {error}")
                 return
-            if field == "prefilter_method":
+            effective_type = changes.get("predictive_model_type", st.session_state.get(f"derive-value-{run_id}-{fork}-predictive_model_type", source_spec.config.predictive_model_type))
+            if (field.startswith("xgb_") and effective_type == "constant_probability") or (field.startswith(("prefilter_", "predictor_prefilter_", "temporal_consensus_", "stability_")) and effective_type in {"constant_probability", "target_only"}):
+                st.caption(f"{field} : non applicable")
+                continue
+            if field.startswith("prefilter_xgb_") and field in PREFILTER_ROUND_SELECTION_FIELDS:
+                value = _round_selection_input(field, original, f"derive-value-{run_id}-{fork}-{field}")
+            elif field == "predictive_model_type":
+                value = _predictive_model_input(original, f"derive-value-{run_id}-{fork}-{field}")
+            elif field == "xgb_round_selection_mode":
+                value = st.selectbox("Sélection des tours XGBoost (Walk-forward et aval)",
+                    ("fixed", "chronological"), index=(0 if original == "fixed" else 1),
+                    format_func=lambda mode: "Fixe" if mode == "fixed" else "Early stopping chronologique",
+                    key=f"derive-value-{run_id}-{fork}-{field}")
+                st.caption("Politique du préfiltre indépendante. Sélection interne dans chaque entraînement aval, "
+                           "sans accès au holdout. Minimum par défaut : 315 observations utilisables (252 + 63). "
+                           "Forward conserve ses modèles figés.")
+            elif field in {"xgb_early_stopping_metric", "xgb_round_selection_protocol_version"}:
+                st.caption(f"{field} : {original}")
+                value = original
+            elif field == "prefilter_method":
                 modes = ("single_origin", "temporal_stability", "temporal_consensus")
                 value = st.selectbox("Mode de sélection", modes, index=modes.index(original),
                                      key=f"derive-value-{run_id}-{fork}-{field}")
             elif isinstance(original, bool):
-                value = st.checkbox(field, value=original, key=f"derive-value-{run_id}-{fork}-{field}")
+                value = st.checkbox("Ajouter la volatilité du titre cible" if field == "target_volatility_enabled" else field,
+                                    value=original, key=f"derive-value-{run_id}-{fork}-{field}")
             elif isinstance(original, int):
-                value = st.number_input(field, value=original, step=1, key=f"derive-value-{run_id}-{fork}-{field}")
+                value = st.number_input("Nombre de séances" if field == "target_volatility_sessions" else field,
+                    value=original, step=1, key=f"derive-value-{run_id}-{fork}-{field}",
+                    **({"min_value": 2} if field == "target_volatility_sessions" else {}))
             elif isinstance(original, float):
                 value = st.number_input(field, value=original, format="%.6f", key=f"derive-value-{run_id}-{fork}-{field}")
             else:
@@ -4135,7 +4476,7 @@ def _render_prefilter_derived_creation(
                                             key=f"prefilter-derive-{run_id}-{field}"))
                 if value != original:
                     changes[field] = value
-        for field in sorted(PREFILTER_DERIVATION_FIELDS - set(PREFILTER_XGBOOST_FIELDS) - {"temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"}):
+        for field in sorted(PREFILTER_DERIVATION_FIELDS - set(PREFILTER_XGBOOST_FIELDS) - set(PREFILTER_ROUND_SELECTION_FIELDS) - {"temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"}):
             original = getattr(source.config, field)
             if field == "predictor_prefilter_top_n":
                 value = int(st.number_input(
@@ -4169,6 +4510,9 @@ def _render_prefilter_derived_creation(
                     key=f"prefilter-derive-{run_id}-{field}", **bounds,
                 ))
             if value != original:
+                changes[field] = value
+        for field, value in _prefilter_round_selection_inputs(source.config, f"prefilter-derive-{run_id}-").items():
+            if value != getattr(source.config, field):
                 changes[field] = value
         submitted = st.button(
             "Lancer le préfiltre dérivé", disabled=not changes,
@@ -4204,13 +4548,20 @@ def _render_walk_forward_derived_creation(
     st.caption(
         f"Hérité et figé : snapshot préparé, cutoff demandé "
         f"{source.requested_historical_cutoff or 'N/D'}, séance {as_of}, "
-        "candidats/combinaisons d'entrée, préfiltre et offset "
+        "univers d'entrée et offset "
         f"{source.config.walk_forward_end_offset_sessions}. "
-        "Recalculé : Walk-forward, qualification, holdout interne s'il est activé, "
+        "Candidats reconstruits en cas de changement de type. Recalculé : Walk-forward, qualification, holdout interne s'il est activé, "
         "et classement. Aucune promotion ni Forward Simulation automatique."
     )
     labels = {
         "walk_forward_window_mode": "Mode de fenêtre",
+        "xgb_round_selection_mode": "Sélection des tours (WF)",
+        "xgb_early_stopping_max_rounds": "Tours internes maximum",
+        "xgb_early_stopping_validation_sessions": "Séances utilisables de validation interne",
+        "xgb_early_stopping_patience": "Patience (tours)",
+        "xgb_early_stopping_min_train_observations": "Observations minimales d'apprentissage interne",
+        "xgb_early_stopping_metric": "Métrique de sélection",
+        "xgb_round_selection_protocol_version": "Version du protocole de sélection",
         "walk_forward_min_train_size": "Train minimal (expansive)",
         "walk_forward_train_size": "Train fixe (glissante)",
         "walk_forward_test_size": "Taille du test",
@@ -4230,17 +4581,35 @@ def _render_walk_forward_derived_creation(
 
     def field_input(field: str, widget: object) -> None:
         original = getattr(source.config, field)
+        if field.startswith("xgb_") and changes.get("predictive_model_type", source.config.predictive_model_type) == "constant_probability":
+            widget.caption(f"{field} : non applicable")
+            return
         label = labels.get(field, field.removeprefix("xgb_").removeprefix("model_selection_"))
         widget_key = f"wf-derive-{run_id}-{field}"
-        if field == "walk_forward_window_mode":
+        if field == "predictive_model_type":
+            value = _predictive_model_input(original, widget_key, widget)
+        elif field == "target_volatility_enabled":
+            value = widget.checkbox("Ajouter la volatilité du titre cible", value=original, key=widget_key)
+        elif field == "target_volatility_sessions":
+            value = int(widget.number_input("Nombre de séances", min_value=2, value=original, key=widget_key))
+        elif field == "walk_forward_window_mode":
             modes = ("expanding", "rolling")
             value = widget.selectbox(label, modes, index=modes.index(original), key=widget_key)
+        elif field == "xgb_round_selection_mode":
+            modes = ("fixed", "chronological")
+            value = widget.selectbox("Sélection des tours (WF)", modes, index=modes.index(original), key=widget_key,
+                format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique")
+        elif field in {"xgb_early_stopping_metric", "xgb_round_selection_protocol_version"}:
+            widget.caption(f"{label} : {original}")
+            return
         elif field in {
             "walk_forward_min_train_size", "walk_forward_train_size",
             "walk_forward_test_size", "walk_forward_step_size",
             "final_holdout_size", "xgb_max_depth", "xgb_rounds",
             "qualification_min_windows", "qualification_min_positive_observations",
             "xgb_seed",
+            "xgb_early_stopping_max_rounds", "xgb_early_stopping_validation_sessions",
+            "xgb_early_stopping_patience", "xgb_early_stopping_min_train_observations",
         }:
             minimum = 0 if field in {
                 "qualification_min_positive_observations", "xgb_seed",
@@ -4267,13 +4636,20 @@ def _render_walk_forward_derived_creation(
             changes[field] = value
 
     with st.container(border=True):
+        field_input("predictive_model_type", st)
+        field_input("target_volatility_enabled", st)
+        field_input("target_volatility_sessions", st)
         st.subheader("Géométrie Walk-forward")
         for field in WF_GEOMETRY_FIELDS:
             field_input(field, st)
         st.subheader("XGBoost")
+        for field in ROUND_SELECTION_FIELDS:
+            field_input(field, st)
         columns = st.columns(3)
         for index, field in enumerate(WF_XGBOOST_FIELDS):
-            field_input(field, columns[index % 3])
+            if field not in ROUND_SELECTION_FIELDS:
+                field_input(field, columns[index % 3])
+        st.caption("Chronologique : conserver tous les autres paramètres de référence, désactiver le holdout final. Repli = xgb_rounds hérité ; minimum par défaut 315 observations utilisables.")
         st.subheader("Qualification et classement")
         for field in (*WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS):
             field_input(field, st)
@@ -4370,6 +4746,9 @@ def _render_pipeline_summary(
     if not rows:
         st.info("Le manifest du pipeline n'est pas encore disponible.")
         return
+    if any(row["Statut"] == "interrupted" for row in rows):
+        st.caption("Pour les étapes interrompues, la durée va jusqu’à la dernière observation du worker. "
+                   "Le délai de détection est affiché séparément ; le temps observé inclut les attentes.")
     failed = [row for row in rows if row["Statut"] == "failed"]
     running = [row for row in rows if row["Statut"] == "running"]
     if failed:
@@ -4382,7 +4761,7 @@ def _render_pipeline_summary(
         )
     elif all(row["Statut"] in {"completed", "disabled"} for row in rows):
         st.success("Pipeline terminé.")
-    st.dataframe(
+    render_dataframe(
         pd.DataFrame(rows),
         hide_index=True,
         width="stretch",
@@ -4414,6 +4793,8 @@ def _render_pipeline_child(
         )
         return
     child_detail = service.run(str(effective_run_id))
+    if stage_key != "walk_forward":
+        _render_round_selection_summary(str(effective_run_id), child_detail)
     child_status = child_detail["status"]
     st.caption(
         f"Run : {effective_run_id} - statut : {child_status.get('status', '-')} · "
@@ -4628,7 +5009,7 @@ def _render_candidate_identity_stability(
         if tables["common"].empty:
             st.info("Aucun candidat commun entre les deux périodes.")
         else:
-            st.dataframe(
+            render_dataframe(
                 tables["common"], hide_index=True, width="stretch",
                 column_config=percent_columns,
             )
@@ -4636,7 +5017,7 @@ def _render_candidate_identity_stability(
         if tables["lost"].empty:
             st.info("Aucun candidat perdu dans la période décalée.")
         else:
-            st.dataframe(
+            render_dataframe(
                 lost_candidate_display_table(tables["lost"]),
                 hide_index=True,
                 width="stretch",
@@ -4650,7 +5031,7 @@ def _render_candidate_identity_stability(
         if tables["new"].empty:
             st.info("Aucun nouveau candidat dans la période décalée.")
         else:
-            st.dataframe(
+            render_dataframe(
                 tables["new"], hide_index=True, width="stretch",
                 column_config=percent_columns,
             )
@@ -4692,7 +5073,7 @@ def _render_temporal_validation(
         st.subheader(f"Decision: {comparison.get('final_status', 'unknown')}")
         gates = comparison.get("gates", {})
         if isinstance(gates, dict):
-            st.dataframe(
+            render_dataframe(
                 temporal_validation_gate_table(gates),
                 hide_index=True,
                 width="stretch",
@@ -4829,7 +5210,7 @@ def _render_temporal_validation(
             if table.empty:
                 st.info("Aucun candidat de référence à réévaluer.")
             else:
-                st.dataframe(table, hide_index=True, width="stretch")
+                render_dataframe(table, hide_index=True, width="stretch")
             try:
                 diagnostic = diagnostic_state(
                     service.run_service.repository, forced_id
@@ -4865,7 +5246,7 @@ def _render_temporal_validation(
                 ):
                     service.start_qualification_holdout_diagnostic(forced_id)
                     st.rerun()
-    st.dataframe(
+    render_dataframe(
         pd.DataFrame(pipeline_stage_rows([stage])), hide_index=True, width="stretch"
     )
     if stage.get("status") == "reserved":
@@ -4913,6 +5294,11 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
     root = st.session_state.lab_config.project_root / "runs"
     run_root = root / run_id
     st.caption(f"Parent run_id : {run_id}")
+    error = (detail.get("status") or {}).get("error")
+    if error:
+        st.error(error)
+    st.subheader("Logs du parent")
+    _render_run_logs(detail)
     st.subheader("Métadonnées et provenance")
     st.json(detail.get("metadata", {}))
     pipeline = _read_light_json(run_root / "orchestration" / "pipeline.json")
@@ -4950,6 +5336,7 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
 def _render_end_to_end_tabs(
     service: ExperimentService, run_id: str, detail: dict[str, object]
 ) -> None:
+    from rstock.application.selection_diagnostic_ui import render_selection_diagnostic
     child_renderers = {
         renderer_key: (
             lambda renderer_key=renderer_key: _render_pipeline_child(
@@ -4971,6 +5358,9 @@ def _render_end_to_end_tabs(
             "resources": lambda: _render_run_resources(run_id),
             **child_renderers,
             "promotion": lambda: _render_pipeline_promotion(detail),
+            "selection_diagnostic": lambda: render_selection_diagnostic(
+                st, st.session_state.lab_config.project_root / "runs" / run_id
+            ),
             "temporal_validation": lambda: _render_temporal_validation(
                 service, run_id, detail
             ),
@@ -5039,7 +5429,7 @@ def _render_qualification_holdout_diagnostic(
         column.metric(label, value)
 
     def render_results() -> None:
-        st.dataframe(results.drop(columns=["AUC WF par fenetre"], errors="ignore"), hide_index=True, width="stretch")
+        render_dataframe(results.drop(columns=["AUC WF par fenetre"], errors="ignore"), hide_index=True, width="stretch")
 
     def render_sensitivity() -> None:
         work = results.copy()
@@ -5060,7 +5450,7 @@ def _render_qualification_holdout_diagnostic(
                 "% holdouts favorables": ("Favorable", "mean"),
             },
         ).reset_index()
-        st.dataframe(table, hide_index=True, width="stretch")
+        render_dataframe(table, hide_index=True, width="stretch")
 
     def render_candidate() -> None:
         if results.empty:
@@ -5121,6 +5511,10 @@ def _render_job_detail_tabs(
     else:
         _render_standard_job_tabs(run_id, job_type, status, detail)
 
+    from rstock.application.market_context_ui import render_context_diagnostic
+    render_context_diagnostic(st, st.session_state.lab_config.project_root / "runs" / run_id / "results",
+                              st.session_state.lab_config.project_root / "runs")
+
 
 def _render_run_detail_view(
     service: ExperimentService, run_id: str,
@@ -5165,10 +5559,40 @@ def _render_run_detail_view(
         if status["job_type"] == JobType.FORWARD_SIMULATION.value:
             policy = detail.get("configuration", {}).get("forward_policy") or "FROZEN"
             st.caption("Mode : Figé" if policy == "FROZEN" else f"Mode : {policy}")
+    if status.get("status") == "interrupted":
+        timing = detail.get("timing", {})
+        st.caption(
+            f"Dernière observation : {timing.get('last_observed_at') or 'inconnue'} · "
+            f"Interruption détectée : {timing.get('interruption_detected_at') or status.get('finished_at')} · "
+            f"Délai de détection : {_duration(timing.get('detection_delay_seconds'))}. "
+            "La durée observée inclut les attentes ; l’heure exacte d’arrêt est inconnue."
+        )
+    if status.get("job_type") in {"walk_forward", "end_to_end"}:
+        from rstock.application.common_prediction_comparison import result_availability, STATE_LABELS
+        availability = result_availability(st.session_state.lab_config.project_root / "runs" / run_id)
+        st.caption(" · ".join(STATE_LABELS[value] for value in availability.values()))
     _render_resume_controls(run_id, status, detail)
     _render_job_detail_tabs(service, run_id, status=status, detail=detail)
     return
 def _render_end_to_end_comparison(run_ids: list[str]) -> None:
+    _render_common_prediction_comparison(run_ids)
+    # Reuse the same WF comparison, preserving every inherited input candidate.
+    repository = RunRepository(st.session_state.lab_config.project_root / "runs")
+    wf_ids, wf_details = [], []
+    for parent_id in run_ids:
+        parent_manifest = load_pipeline_manifest(repository, parent_id)
+        if parent_manifest:
+            from rstock.application.end_to_end import effective_stage_run_id
+            wf_id = effective_stage_run_id(parent_manifest, "walk_forward")
+            if wf_id:
+                wf_ids.append(wf_id)
+                wf_details.append({"configuration": repository.load_spec(wf_id).to_dict()})
+    if len(wf_ids) == len(run_ids):
+        for wf_id, wf_detail in zip(wf_ids, wf_details):
+            _render_round_selection_summary(wf_id, wf_detail)
+        _render_paired_round_comparison(wf_details, wf_ids)
+    st.caption("La comparaison WF porte sur les candidats d’entrée ; les étapes aval suivent "
+               "la qualification propre à chaque run. Les métriques aval ne démontrent pas seules une supériorité statistique.")
     analyses = [
         load_end_to_end_comparison(st.session_state.lab_config.project_root, run_id)
         for run_id in run_ids
@@ -5222,7 +5646,7 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
             "Commit scientifique": item.scientific_commit[:10] if item.scientific_commit else "—",
             "Digest dataset": item.dataset_digest[:12] if item.dataset_digest else "—",
         })
-    st.dataframe(pd.DataFrame(comparison_rows), hide_index=True, width="stretch")
+    render_dataframe(pd.DataFrame(comparison_rows), hide_index=True, width="stretch")
     with st.expander("Paramètres scientifiques comparés"):
         details = []
         for group in protocol_groups:
@@ -5230,7 +5654,7 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
                 item.run_id: str(profile.get(group, "—"))
                 for item, profile in zip(analyses, profiles)
             }})
-        st.dataframe(pd.DataFrame(details), hide_index=True, width="stretch")
+        render_dataframe(pd.DataFrame(details), hide_index=True, width="stretch")
         st.caption("Les workers, tailles de lots et autres réglages d’exécution sont exclus de la comparabilité scientifique.")
 
     st.subheader("Funnel scientifique")
@@ -5246,12 +5670,12 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
             "Non calculé" if item.temporal_requested else "Non requise"),
         ("Candidats finaux", lambda item: count(item.final_candidates)),
     ]
-    st.dataframe(pd.DataFrame([
+    render_dataframe(pd.DataFrame([
         {"Étape": label, **{item.run_id: render(item) for item in analyses}}
         for label, render in funnel
     ]), hide_index=True, width="stretch")
     st.caption("Taux affichés uniquement quand le dénominateur représente la population de l’étape précédente. La validation temporelle globale peut bloquer le déclenchement opérationnel sans remplacer la qualification individuelle forcée.")
-    st.dataframe(pd.DataFrame([{
+    render_dataframe(pd.DataFrame([{
         "Run": item.run_id,
         "Validation globale": item.temporal_status or ("Non calculé" if item.temporal_requested else "Non requise"),
         "Confirmées holdout WF": "Non calculé" if item.wf_final_holdout_evaluated is False else count(item.confirmed),
@@ -5314,7 +5738,7 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
     for category, _, involved_label in reason_labels:
         rejection_rows.append((involved_label, lambda item, name=category: count(
             item.rejection_analysis.involved.get(name, 0)) if item.rejection_analysis else "—"))
-    st.dataframe(pd.DataFrame([{
+    render_dataframe(pd.DataFrame([{
         "Mesure": "Qualification source",
         **{item.run_id: item.rejection_qualification_source or "—" for item in analyses},
     }, *[
@@ -5326,7 +5750,7 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
 
     st.subheader("Holdout E2E — population évaluable")
     st.caption("Toutes les combinaisons Up évaluées avant la qualification. Rendements : moyenne et médiane des rendements directionnels moyens par modèle; n indique le nombre de modèles renseignés.")
-    st.dataframe(pd.DataFrame([{
+    render_dataframe(pd.DataFrame([{
         "Run": item.run_id,
         "Up évaluables": count((item.holdout_population or {}).get("count")),
         "AUC médiane": number((item.holdout_population or {}).get("auc_median")),
@@ -5340,7 +5764,7 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
 
     st.subheader("Candidats finaux")
     st.caption("Qualité des candidats individuellement qualifiés; après revalidation forcée lorsqu’elle existe.")
-    st.dataframe(pd.DataFrame([{
+    render_dataframe(pd.DataFrame([{
         "Run": item.run_id,
         "Candidats": count(item.final_candidates),
         "Candidate yield / WF évaluées": percent(
@@ -5375,7 +5799,7 @@ def _render_prefilter_comparison(run_ids: list[str]) -> None:
         ["Cutoff résolu", "_worst_sort", "Run ID"], na_position="last",
         kind="stable",
     ).drop(columns="_worst_sort")
-    st.dataframe(
+    render_dataframe(
         summary_grid,
         hide_index=True, width="stretch",
     )
@@ -5391,14 +5815,14 @@ def _render_prefilter_comparison(run_ids: list[str]) -> None:
     differences = prefilter_profile_differences(items)
     if differences:
         st.warning("Profils ou paramètres différents : " + ", ".join(differences) + ".")
-        st.dataframe(pd.DataFrame([
+        render_dataframe(pd.DataFrame([
             {"Paramètre": field, **values}
             for field, values in differences.items()
         ]), hide_index=True, width="stretch")
     else:
         st.caption("Aucune différence de profil ou de paramètres enregistrés.")
     with st.expander("Tous les paramètres de préfiltre enregistrés"):
-        st.dataframe(pd.DataFrame([
+        render_dataframe(pd.DataFrame([
             {"Paramètre": field, **{
                 run_id: profiles[run_id].get(field, ND) for run_id in run_ids
             }} for field in fields
@@ -5415,7 +5839,7 @@ def _render_prefilter_comparison(run_ids: list[str]) -> None:
         "Recouvrement intersection / union",
         ND if overlap.overlap_rate is None else f"{overlap.overlap_rate:.1%}",
     )
-    st.dataframe(pd.DataFrame([{
+    render_dataframe(pd.DataFrame([{
         "Run ID": item.run_id,
         "Candidats retenus": item.retained if item.retained is not None else ND,
         "Propres à ce run": (
@@ -5435,7 +5859,7 @@ def _render_prefilter_comparison(run_ids: list[str]) -> None:
                     for run_id, item in zip(run_ids, items, strict=True)
                 },
             })
-        st.dataframe(pd.DataFrame(candidate_rows), hide_index=True, width="stretch")
+        render_dataframe(pd.DataFrame(candidate_rows), hide_index=True, width="stretch")
     else:
         st.info("Recouvrement indisponible : la sélection finale manque pour au moins un run.")
     st.download_button(
@@ -5454,7 +5878,16 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
     mode = comparison_types(types)
     if mode is None:
         _page_header("Historique")
-        st.error("Sélectionnez de 2 à 6 runs du même type : Walk-forward, End-to-End ou Préfiltre.")
+        st.error("Sélectionnez de 2 à 6 runs du même type : Walk-forward, End-to-End, Préfiltre ou Forward Simulation.")
+        return
+    if mode == JobType.FORWARD_SIMULATION.value:
+        from rstock.application.forward_diagnostic_ui import render_comparison
+        _page_header("Historique")
+        st.caption("Historique > Comparaison de runs")
+        if st.button("← Retour à Historique", key="history-back-comparison"):
+            _clear_history_navigation()
+        st.subheader("Comparaison de runs — Forward Simulation")
+        render_comparison(st, render_dataframe, st.session_state.lab_config.project_root / "runs", run_ids)
         return
     if mode == JobType.END_TO_END.value:
         _page_header("Historique")
@@ -5485,6 +5918,7 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
     if st.button("← Retour à Historique", key="history-back-comparison"):
         _clear_history_navigation()
     st.subheader("Comparaison de runs — Walk-forward")
+    _render_common_prediction_comparison(run_ids)
     cards = st.columns(len(analytics))
     for index, (column, analysis, detail) in enumerate(
         zip(cards, analytics, details, strict=True), start=1
@@ -5515,9 +5949,12 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
         kpis[1].metric("Combinaisons qualifiées max", max(item.qualified_count for item in analytics))
         kpis[2].metric("Run le plus rapide", "—" if fastest is None else history_row(next(detail["status"] for detail in details if detail["status"]["run_id"] == fastest.run_id), next(detail for detail in details if detail["status"]["run_id"] == fastest.run_id), {}).duration)
         kpis[3].metric("Delta dev→holdout le plus stable", _format_metric(None if stable_delta is None else stable_delta.delta_median))
-        st.dataframe(comparison_display_table(summary), hide_index=True, width="stretch")
+        render_dataframe(comparison_display_table(summary), hide_index=True, width="stretch")
     with tabs[1]:
         quality, durations = comparison_chart_frames(analytics, labels)
+        for run_id, detail in zip(run_ids, details):
+            _render_round_selection_summary(run_id, detail)
+        _render_paired_round_comparison(details, run_ids)
         st.subheader("Qualité prédictive")
         quality_long = quality.melt(
             id_vars=["Run", "Date / heure"],
@@ -5535,7 +5972,7 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
                 tooltip=["Run:N", "Métrique:N", alt.Tooltip("AUC:Q", format=".3f"), "Date / heure:N"],
             )
             st.altair_chart(quality_chart, width="stretch")
-        st.dataframe(
+        render_dataframe(
             quality[["Run", "Delta dev→holdout", "Date / heure"]],
             hide_index=True, width="stretch",
             column_config={"Delta dev→holdout": st.column_config.NumberColumn(format="%.3f")},
@@ -5558,10 +5995,10 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
             if top.empty:
                 st.caption("Aucune combinaison qualifiée disponible.")
             else:
-                st.dataframe(top.drop(columns=["Eligible", "Holdout confirmé"]), hide_index=True, width="stretch")
+                render_dataframe(top.drop(columns=["Eligible", "Holdout confirmé"]), hide_index=True, width="stretch")
     with tabs[3]:
         validation = summary[summary["Indicateur"].isin(["% qualifiées", "% confirmées", "Delta dev→holdout", "Combinaisons qualifiées", "Confirmées holdout"])]
-        st.dataframe(validation, hide_index=True, width="stretch")
+        render_dataframe(validation, hide_index=True, width="stretch")
     with tabs[4]:
         differences = configuration_differences(
             [detail["configuration"] for detail in details],
@@ -5571,7 +6008,7 @@ def _render_run_comparison_view(service: ExperimentService, run_ids: list[str]) 
             st.caption("Aucun paramètre expérimental suivi ne diffère entre ces runs.")
         else:
             st.subheader("Paramètres différents")
-            st.dataframe(differences, hide_index=True, width="stretch")
+            render_dataframe(differences, hide_index=True, width="stretch")
         for detail, analysis in zip(details, analytics, strict=True):
             with st.expander(labels[analysis.run_id]):
                 st.caption(f"ID technique : {analysis.run_id}")
@@ -5608,7 +6045,8 @@ def _history_runs_panel(
     delete_result = st.session_state.pop(f"{key_prefix}-batch-delete-result", None)
     if isinstance(delete_result, BatchDeleteOutcome):
         _render_batch_delete_outcome(delete_result)
-    history_runs = service.history_runs(job_types=allowed_types)
+    st.button("Actualiser", key=f"{key_prefix}-refresh")
+    history_runs = service.history_index(job_types=allowed_types)
     runs = [record.status for record in history_runs]
     details_by_run_id = {
         str(record.status["run_id"]): record.detail() for record in history_runs
@@ -5626,6 +6064,12 @@ def _history_runs_panel(
     )
     if not filtered:
         st.session_state[f"{key_prefix}-selected-runs"] = []
+        from rstock.application.history_selection import prepare_history_selection
+        protocol_key = f"{key_prefix}-grid-selection-protocol"
+        _, state, _ = prepare_history_selection(
+            [], st.session_state.get(protocol_key), None, [], [],
+        )
+        st.session_state[protocol_key] = state
         st.info("Aucun run ne correspond aux filtres.")
         return
     page_controls = st.columns([1, 1, 4])
@@ -5651,13 +6095,12 @@ def _history_runs_panel(
         row, details_by_run_id[row.run_id], universe_labels=universe_labels,
         related_details=details_by_run_id, runs_root=st.session_state.lab_config.project_root / "runs",
     ) for row in rows]
-    selection = render_history_grid(
-        grid_rows, key=f"{key_prefix}-grid",
-        selected_ids=st.session_state.get(f"{key_prefix}-selected-runs", []),
-    )
-    selected_rows = _selected_rows(selection, len(rows))
     selected_key = f"{key_prefix}-selected-runs"
-    st.session_state[selected_key] = [rows[index].run_id for index in selected_rows]
+    render_history_grid(
+        grid_rows, key=f"{key_prefix}-grid",
+        selection_key=selected_key,
+        filtered_ids=[str(run["run_id"]) for run in filtered],
+    )
     selected = st.session_state.get(selected_key, [])
     if isinstance(selected, str):
         selected = [selected]
@@ -5686,8 +6129,11 @@ def _history_runs_panel(
         "Supprimer définitivement les runs sélectionnés",
         key=f"delete-selected-{key_prefix}",
     ):
-        st.session_state[f"{key_prefix}-pending-batch-delete"] = preview_batch_delete(service, selected)
-        st.rerun()
+        with st.spinner("Vérification des dépendances…"):
+            review = preview_batch_delete(service, selected)
+        st.session_state[f"{key_prefix}-pending-batch-delete"] = review
+        _render_batch_delete_confirmation(service, review, key_prefix=key_prefix)
+        return
     action = selected_run_action(selected)
     if action == "detail":
         selected_run_id = selected[0]
@@ -5736,11 +6182,10 @@ def _history_runs_panel(
             "Supprimer définitivement", key=f"delete-history-{key_prefix}",
         ):
             try:
-                st.session_state["pending-run-delete"] = service.delete_preview(selected_run_id)
+                with st.spinner("Vérification des dépendances…"):
+                    st.session_state["pending-run-delete"] = service.delete_preview(selected_run_id)
             except (OSError, ValueError, RuntimeError) as error:
                 st.error(f"Suppression impossible : {error}")
-            else:
-                st.rerun()
         pending_run_delete = st.session_state.get("pending-run-delete")
         if isinstance(pending_run_delete, DeletePlan) and pending_run_delete.run_id == selected_run_id:
             _render_run_delete_confirmation(service, pending_run_delete)
@@ -5753,12 +6198,18 @@ def _history_runs_panel(
         if selected_types not in (
             {JobType.WALK_FORWARD.value}, {JobType.END_TO_END.value},
             {JobType.PREDICTOR_PREFILTER.value},
+            {JobType.FORWARD_SIMULATION.value},
         ):
-            st.caption("Sélectionnez uniquement des runs du même type : Walk-forward, End-to-End ou Préfiltre.")
+            st.caption("Sélectionnez uniquement des runs du même type : Walk-forward, End-to-End, Préfiltre ou Forward Simulation.")
         elif st.button("Comparer les runs", type="primary", key=f"compare-history-{key_prefix}"):
             _history_navigation("comparison", selected)
         return
     st.warning("Sélectionnez au maximum 6 runs pour une comparaison.")
+
+
+# Widget interactions update History alone; no periodic timer is installed.
+if hasattr(st, "fragment"):
+    _history_runs_panel = st.fragment(_history_runs_panel)
 
 
 def _format_storage_size(size_bytes: int) -> str:
@@ -5895,7 +6346,6 @@ def _render_batch_delete_confirmation(
             "Suppression définitive et irréversible : "
             f"{len(review.requested_run_ids)} runs sélectionnés, "
             f"{len(review.affected_run_ids)} runs à supprimer, enfants propriétaires inclus. "
-            f"({_format_storage_size(review.size_bytes)}). "
             "Leurs dossiers, logs, manifests, checkpoints, résultats et métadonnées disparaîtront."
         )
         st.caption("Par type : " + ", ".join(
@@ -5929,8 +6379,7 @@ def _render_run_delete_confirmation(service: ExperimentService, plan: DeletePlan
     with st.container(border=True):
         st.warning(
             "Suppression définitive et irréversible : "
-            f"{len(plan.run_ids)} runs, enfants propriétaires inclus "
-            f"({_format_storage_size(plan.size_bytes)}). "
+            f"{len(plan.run_ids)} runs, enfants propriétaires inclus. "
             "Tous leurs fichiers et métadonnées disparaîtront de l’Historique."
         )
         st.caption("Par type : " + ", ".join(
@@ -6230,9 +6679,10 @@ def _universes_page() -> None:
         }
         for record in records
     ])
-    event = st.dataframe(
+    event = render_dataframe(
         table, hide_index=True, width="stretch",
         on_select="rerun", selection_mode="single-row", key="saved-universes-grid",
+        row_ids=[record.universe_id for record in records],
     )
     selected = _selected_rows(event, len(records))
     if selected:
@@ -6263,7 +6713,7 @@ def _submit_operational_job(
         return
     spec = ExperimentSpec(
         job_type=job_type,
-        config=st.session_state.lab_config,
+        config=replace(st.session_state.lab_config, predictive_model_type="external_only"),
         symbols=symbols,
         calendar=st.session_state.lab_calendar,
         model_id=model_id,
@@ -6317,21 +6767,21 @@ def _render_prediction_audit_details(
     if lagged_features.empty and other_features.empty:
         st.caption("Non disponible pour cette prédiction historique.")
     if not lagged_features.empty:
-        st.dataframe(lagged_features, hide_index=True, width="stretch")
+        render_dataframe(lagged_features, hide_index=True, width="stretch")
     if not other_features.empty:
         if not lagged_features.empty:
             st.caption("Autres features")
-        st.dataframe(other_features, hide_index=True, width="content")
+        render_dataframe(other_features, hide_index=True, width="content")
     observations, other_observations = source_observation_tables(record)
     st.markdown("**Observations sources**")
     if observations.empty and other_observations.empty:
         st.caption("Non disponible pour cette prédiction historique.")
     if not observations.empty:
-        st.dataframe(observations, hide_index=True, width="stretch")
+        render_dataframe(observations, hide_index=True, width="stretch")
     if not other_observations.empty:
         if not observations.empty:
             st.caption("Autres observations")
-        st.dataframe(other_observations, hide_index=True, width="stretch")
+        render_dataframe(other_observations, hide_index=True, width="stretch")
     with st.expander(technical_title, expanded=False):
         st.json(record if technical_payload is None else technical_payload)
 
@@ -6865,7 +7315,7 @@ def _render_next_session_signals(
         if table.empty:
             st.info(f"Aucun signal haussier pour la {session_label}.")
         else:
-            st.dataframe(
+            render_dataframe(
                 _styled_surveillance_table(
                     table, ("P(Up)", "Rendement moyen historique (63 séances)", "Trades gagnants")
                 ),
@@ -6882,7 +7332,7 @@ def _render_latest_session_results(view: OperationalTableView) -> None:
         if view.table.empty:
             st.info("Aucun signal évalué disponible.")
         else:
-            st.dataframe(
+            render_dataframe(
                 _styled_surveillance_table(
                     view.table, ("P(Up)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
                 ),
@@ -6921,7 +7371,7 @@ def _render_signals_card(
             empty_message = "Aucun signal haussier aujourd’hui ou demain."
             st.info(empty_message)
         else:
-            event = st.dataframe(
+            event = render_dataframe(
                 _styled_signal_table(displayed.signals.table),
                 hide_index=True,
                 width="stretch",
@@ -6960,7 +7410,7 @@ def _render_signals_followup(
         if displayed.no_signal.table.empty:
             st.caption("Aucune prédiction sans signal.")
         else:
-            event = st.dataframe(
+            event = render_dataframe(
                 displayed.no_signal.table,
                 hide_index=True,
                 width="stretch",
@@ -7356,7 +7806,7 @@ def _evaluated_predictions_panel(
         )
         displayed_view = filter_evaluated_predictions_view(view, status_filter)
         main_table = evaluated_predictions_main_table(displayed_view.table)
-        event = st.dataframe(
+        event = render_dataframe(
             main_table, hide_index=True, width="stretch",
             on_select="rerun", selection_mode="single-row", key="surveillance-evaluated-predictions",
         )
@@ -7369,7 +7819,7 @@ def _evaluated_predictions_panel(
             _render_real_trade_from_prediction(selected_record, project_root=project_root)
         if not displayed_view.pending.empty:
             st.markdown("**Prédictions en attente**")
-            st.dataframe(
+            render_dataframe(
                 build_predictions_view(
                     displayed_view.pending, limit=len(displayed_view.pending)
                 ).table,
@@ -7425,7 +7875,7 @@ def _render_watching_surveillance_section(
         if upcoming.table.empty:
             st.caption(f"Aucun signal en observation pour la {session_label}.")
         else:
-            st.dataframe(
+            render_dataframe(
                 _styled_surveillance_table(
                     upcoming.table, ("P(Up)", "Rendement moyen historique (63 séances)", "Trades gagnants")
                 ),
@@ -7437,7 +7887,7 @@ def _render_watching_surveillance_section(
         if latest.table.empty:
             st.caption("Aucun signal en observation évalué récemment.")
         else:
-            st.dataframe(
+            render_dataframe(
                 _styled_surveillance_table(
                     latest.table, ("P(Up)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
                 ),
@@ -7463,7 +7913,7 @@ def _render_surveillance_model_history(project_root: Path) -> None:
         if history.empty:
             st.info("Aucun événement historique pour les modèles suivis.")
         else:
-            st.dataframe(history, hide_index=True, width="stretch")
+            render_dataframe(history, hide_index=True, width="stretch")
 
 
 def _render_surveillance_page(*, polling: bool) -> None:
@@ -7618,7 +8068,7 @@ def _returns_page() -> None:
         "Date", "Cible", "Modèle / combinaison", "Prix d’achat", "Prix de vente", "Quantité",
         "Rendement réel", "P&L", "Rendement théorique", "Écart réel vs théorique", "Note",
     ]
-    event = st.dataframe(display.loc[:, visible], hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="real-trades-grid")
+    event = render_dataframe(display.loc[:, visible], hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="real-trades-grid", row_ids=filtered["transaction_id"].astype(str).tolist())
     selected = _selected_rows(event, len(filtered))
     if not selected:
         return
@@ -7698,7 +8148,7 @@ def _legacy_models_page() -> None:
         }
         for model in visible_models
     ])
-    event = st.dataframe(
+    event = render_dataframe(
         table,
         hide_index=True,
         width="stretch",
@@ -8218,7 +8668,7 @@ def _render_model_quality_detail(model_id: str) -> None:
             _model_detail_currency(since.get("max_drawdown_dollars")),
             since.get("max_drawdown_dollars"), "trending_down",
         )
-    st.dataframe(
+    render_dataframe(
         style_directional_columns(
             performance_windows_display_table(windows),
             ("Rendement moyen", "Trades gagnants"),
@@ -8231,7 +8681,7 @@ def _render_model_quality_detail(model_id: str) -> None:
     if detail.observations.empty:
         st.caption("Aucune observation évaluée pour comparer les périodes.")
     else:
-        st.dataframe(
+        render_dataframe(
             style_directional_columns(
                 model_phase_comparison_table(detail.observations, detail.series),
                 ("Rendement moyen", "Trades gagnants", "P&L cumulé", "Drawdown"),
@@ -8303,7 +8753,7 @@ def _render_model_quality_detail(model_id: str) -> None:
             )
             st.info(f"Baseline indisponible : {reason}")
         else:
-            st.dataframe(
+            render_dataframe(
                 style_directional_columns(
                     comparison_table, ("À la promotion", "Actuel", "Écart")
                 ),
@@ -8328,7 +8778,7 @@ def _render_model_quality_detail(model_id: str) -> None:
                     "Historique antérieur"
                 )
             )
-            st.dataframe(
+            render_dataframe(
                 style_directional_columns(
                     signal_table[["Date", "Période", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
                     ("Rendement", "P&L", "MFE", "MAE"),
@@ -8339,7 +8789,7 @@ def _render_model_quality_detail(model_id: str) -> None:
         excluded = quality_excluded_observations(detail.observations)
         if not excluded.empty:
             with st.expander(f"Observations exclues ({len(excluded)})"):
-                st.dataframe(
+                render_dataframe(
                     excluded_observations_display_table(excluded), hide_index=True,
                     width="stretch",
                 )
@@ -8353,6 +8803,7 @@ def _render_model_quality_detail(model_id: str) -> None:
             "down_threshold": model.down_threshold,
             "cutoff_date": lineage.get("cutoff_date"),
             "source_configuration": model.source_configuration,
+            "round_selection_policy": model.round_selection_policy,
             "training_metadata": model.training_metadata,
             "watching_started_at": model.watching_started_at,
             "activated_at": model.activated_at,
@@ -8401,16 +8852,8 @@ def _models_page() -> None:
         _live_job_panel(_service(), domain="model")
         return
     window = st.selectbox("Fenêtre d’analyse", (20, 63, 126), index=1, format_func=lambda value: f"{value} séances", key="models-quality-window")
-    values = global_quality_kpis(master, window=window)
     _render_models_kpi_density_style()
-    with st.container(key="models-kpis"):
-        kpis = st.columns(6, gap="small")
-        _render_models_kpi_card(kpis[0], "Modèles actifs", int(values["active_models"]), "model_training")
-        _render_models_kpi_card(kpis[1], "Données insuffisantes", int(values["data_insufficient"]), "info")
-        _render_models_kpi_card(kpis[2], f"Rendement moyen {window} séances", _models_percent(values["mean_return"]), "trending_up")
-        _render_models_kpi_card(kpis[3], "P&L cumulé", _models_currency(values["pnl"]), "payments", help="P&L théorique basé sur un notionnel de 10 000 $ par signal et par modèle.")
-        _render_models_kpi_card(kpis[4], "Trades gagnants", _models_percent(values["win_rate"]), "target")
-        _render_models_kpi_card(kpis[5], f"Signaux {window} séances", int(values["signals"]), "notifications")
+    kpi_container = st.container(key="models-kpis")
 
     filters = st.columns((1, 1, 1.35, 1, 1.35), gap="small")
     status_options = [
@@ -8431,6 +8874,16 @@ def _models_page() -> None:
     query = filters[4].text_input("Recherche", placeholder="Cible ou prédicteur", key="models-predictor-filter")
     visible = filter_quality_models(master, statuses=statuses, universes=universes, sources=sources, health=health, query=query)
     visible = sort_quality_models(visible, window=window)
+    values = global_quality_kpis(visible, window=window)
+    with kpi_container:
+        kpis = st.columns(6, gap="small")
+        _render_models_kpi_card(kpis[0], "Modèles actifs", int(values["active_models"]), "model_training")
+        _render_models_kpi_card(kpis[1], "Données insuffisantes", int(values["data_insufficient"]), "info")
+        _render_models_kpi_card(kpis[2], f"Rendement moyen {window} séances", _models_percent(values["mean_return"]), "trending_up")
+        _render_models_kpi_card(kpis[3], "P&L cumulé", _models_currency(values["pnl"]), "payments", help="P&L théorique basé sur un notionnel de 10 000 $ par signal et par modèle.")
+        _render_models_kpi_card(kpis[4], "Trades gagnants", _models_percent(values["win_rate"]), "target")
+        _render_models_kpi_card(kpis[5], f"Signaux {window} séances", int(values["signals"]), "notifications")
+
     updated = pd.to_datetime(master["quality_updated_at"], errors="coerce", utc=True).max()
     st.caption("Qualité non calculée" if pd.isna(updated) else f"Dernière mise à jour qualité modèles : {updated.tz_convert('America/Toronto').strftime('%Y-%m-%d %H:%M')}")
     pagination = st.columns((0.8, 0.45, 2.75), gap="small")
@@ -8443,7 +8896,7 @@ def _models_page() -> None:
     displayed = visible.iloc[(int(page) - 1) * page_size:int(page) * page_size]
     st.caption(f"{len(visible)} modèles affichés sur {len(master)} · page {int(page)} / {page_count}")
     table = models_grid(displayed, window=window)
-    event = st.dataframe(
+    event = render_dataframe(
         style_directional_columns(
             table,
             ("Rendement moyen", "P&L cumulé", "Drawdown"),
@@ -8454,6 +8907,7 @@ def _models_page() -> None:
         selection_mode="single-row",
         key="models-grid",
         column_config=_models_grid_column_config(_models_trend_y_bounds(table)),
+        page_size=None,
     )
     selected_rows = _selected_rows(event, len(displayed))
     selected_key = "selected-model-id"
@@ -8522,7 +8976,7 @@ def _history_page() -> None:
     if tabs[1].open:
         st.caption("Les métriques holdout restent attachées aux runs expérimentaux et aux modèles promus.")
         models = ModelService(st.session_state.lab_config.project_root).models()
-        st.dataframe(
+        render_dataframe(
             [{"model_id": model.model_id, **model.holdout_metrics} for model in models],
             hide_index=True, width="stretch",
         )
@@ -8556,7 +9010,7 @@ def _history_page() -> None:
                 retour_moyen=("intraday_return", "mean"), mfe_moyenne=("mfe", "mean"),
                 mae_moyenne=("mae", "mean"), fortes_baisses=("down_target", "mean"),
             ).reset_index()
-            st.dataframe(summary, hide_index=True, width="stretch")
+            render_dataframe(summary, hide_index=True, width="stretch")
             if (summary["prédictions_réalisées"] < 30).any():
                 st.warning(
                     "Au moins un modèle compte moins de 30 prédictions réalisées; "
@@ -8570,11 +9024,11 @@ def _history_page() -> None:
                     "Nombre de prédictions"
                 )
             )
-            st.dataframe(results.tail(100), hide_index=True, width="stretch")
+            render_dataframe(results.tail(100), hide_index=True, width="stretch")
         with st.expander("Historique des prédictions de production"):
-            st.dataframe(predictions.tail(200), hide_index=True, width="stretch")
+            render_dataframe(predictions.tail(200), hide_index=True, width="stretch")
         with st.expander("Historique des signaux de production"):
-            st.dataframe(signals.tail(200), hide_index=True, width="stretch")
+            render_dataframe(signals.tail(200), hide_index=True, width="stretch")
 
 
 def _simulation_currency(value: float) -> str:
@@ -8717,7 +9171,7 @@ def _render_simulation_results(result: SimulationResult) -> None:
     displayed_trades = filtered_trades.sort_values(
         "Date signal", ascending=False, kind="stable"
     )
-    st.dataframe(
+    render_dataframe(
         displayed_trades,
         hide_index=True,
         width="stretch",

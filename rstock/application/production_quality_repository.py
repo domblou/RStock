@@ -168,6 +168,31 @@ class ProductionQualityRepository:
         path = self.lineage_path(model_id)
         return None if not path.exists() else self._load_json(path)
 
+    def load_current_lineage(self, model_id: str) -> dict[str, Any] | None:
+        """Resolve current registry identity without overwriting promotion history."""
+        from .production_quality_baseline import build_model_lineage
+        from .production_repository import ProductionRepository
+        from .repository import RunRepository
+
+        historical = self.load_lineage(model_id)
+        project_root = self.root.parent.parent
+        production = ProductionRepository(project_root)
+        try:
+            model = production.get(model_id)
+        except KeyError:
+            # Standalone/historical quality stores have no authoritative registry.
+            return historical
+        if historical and historical.get("model_version") == model.artifact_version:
+            return {**historical, "status": model.status.value}
+        names = {
+            "primary": (historical or {}).get("primary_universe_name_at_promotion"),
+            "context": (historical or {}).get("market_context_universe_name_at_promotion"),
+        }
+        return build_model_lineage(
+            model, RunRepository(project_root / "runs"), project_root=project_root,
+            promotion_time_universe_names=names,
+        )
+
     def _write_quality_json(
         self, path: Path, payload: dict[str, Any], *, overwrite: bool
     ) -> bool:
@@ -617,20 +642,3 @@ class ProductionQualityRepository:
             manifest["status"] = "dirty" if dirty else "ready"
             self._write_manifest(manifest)
             return manifest
-
-
-def reconcile_quality_observations(
-    quality_repository: ProductionQualityRepository,
-    observations: pd.DataFrame,
-) -> dict[str, ObservationUpsertResult]:
-    """Explicit migration/reconciliation entry point; never runs automatically."""
-
-    normalized = normalize_quality_observations(observations)
-    results: dict[str, ObservationUpsertResult] = {}
-    for model_id, group in normalized.groupby("model_id", sort=True, dropna=False):
-        if pd.isna(model_id):
-            raise ValueError("Canonical observation is missing model_id")
-        results[str(model_id)] = quality_repository.upsert_observations(
-            str(model_id), group
-        )
-    return results

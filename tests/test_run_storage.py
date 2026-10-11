@@ -121,6 +121,12 @@ def test_completed_scientific_runs_purge_only_explicit_heavy_artifacts(
     heavy.write_bytes(b"x" * 37)
     unknown = directory / "results" / "future_unknown_artifact.bin"
     unknown.write_bytes(b"keep")
+    diagnostic_files = [directory / "results" / name for name in (
+        "forward_t0_reference.json", "forward_diagnostic_manifest.json",
+        "forward_diagnostic_metrics.csv", "forward_probability_bins.csv",
+    )]
+    for path in diagnostic_files:
+        path.write_bytes(b"diagnostic evidence")
     checkpoint = directory / "checkpoints" / "batches" / "payload.pkl"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"checkpoint")
@@ -143,6 +149,7 @@ def test_completed_scientific_runs_purge_only_explicit_heavy_artifacts(
     assert not (directory / "checkpoints").exists()
     assert not (directory / "_working").exists()
     assert unknown.read_bytes() == b"keep"
+    assert all(path.read_bytes() == b"diagnostic evidence" for path in diagnostic_files)
     for name in ESSENTIALS[job_type]:
         assert (directory / "results" / name).exists()
     assert (directory / "config.json").exists()
@@ -283,6 +290,48 @@ def test_active_worker_and_missing_essential_artifact_block_purge(
     missing = RunStorageService(repository).eligibility(run_id)
     assert not missing.eligible
     assert "qualification.csv" in str(missing.reason)
+
+
+def test_reused_historical_pid_does_not_block_purge(tmp_path, monkeypatch):
+    from datetime import datetime
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _completed_run(repository, tmp_path, JobType.WALK_FORWARD)
+    status = repository.status(run_id)
+    status.update(pid=123, launcher_pid=123)
+    repository.write_json(run_id, "status.json", status)
+    monkeypatch.setattr("rstock.application.run_storage.process_alive", lambda pid: pid == 123)
+    boundary = datetime.fromisoformat(status["finished_at"]).timestamp()
+    monkeypatch.setattr("rstock.application.processes.process_creation_time", lambda _: boundary + 60)
+    service = RunStorageService(repository)
+    assert service.eligibility(run_id).eligible
+    service.purge(run_id)
+    assert repository.storage(run_id)["state"] == "purged"
+
+
+def test_completed_worker_still_finalizing_is_protected(tmp_path, monkeypatch):
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _completed_run(repository, tmp_path, JobType.WALK_FORWARD)
+    status = repository.status(run_id)
+    status.update(pid=123, pid_created_at=100.0)
+    repository.write_json(run_id, "status.json", status)
+    monkeypatch.setattr("rstock.application.run_storage.process_alive", lambda pid: pid == 123)
+    monkeypatch.setattr("rstock.application.processes.process_creation_time", lambda _: 100.0)
+    assert not RunStorageService(repository).eligibility(run_id).eligible
+
+
+def test_worker_lease_detects_real_owner_and_reused_owner_pid(tmp_path, monkeypatch):
+    import json
+    repository = RunRepository(tmp_path / "runs")
+    run_id = _completed_run(repository, tmp_path, JobType.WALK_FORWARD)
+    owner = repository.run_directory(run_id) / ".worker.lock/owner.json"
+    owner.parent.mkdir()
+    owner.write_text(json.dumps({"run_id": run_id, "pid": 123, "pid_created_at": 100.0}))
+    monkeypatch.setattr("rstock.application.run_storage.process_alive", lambda pid: pid == 123)
+    monkeypatch.setattr("rstock.application.processes.process_creation_time", lambda _: 100.0)
+    service = RunStorageService(repository)
+    assert not service.eligibility(run_id).eligible
+    monkeypatch.setattr("rstock.application.processes.process_creation_time", lambda _: 200.0)
+    assert service.eligibility(run_id).eligible
 
 
 def test_interrupted_purge_is_reconciled_and_second_purge_is_idempotent(

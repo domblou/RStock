@@ -1,0 +1,28 @@
+         11965613 function calls (11744269 primitive calls) in 6.545 seconds
+
+   Ordered by: cumulative time
+   List reduced from 1234 to 20 due to restriction <20>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        8    0.114    0.014    6.472    0.809 C:\Dev\RStock\rstock\application\market_context.py:334(aggregate_context)
+     2644    0.021    0.000    2.032    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\generic.py:3998(take)
+2380/2348    0.005    0.000    1.894    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\indexing.py:1192(__getitem__)
+     2380    0.006    0.000    1.883    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\indexing.py:1415(_getitem_axis)
+     2348    0.004    0.000    1.851    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\indexing.py:1221(_getbool_axis)
+     1836    0.006    0.000    1.610    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\internals\managers.py:1065(take)
+     1852    0.083    0.000    1.551    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\internals\managers.py:813(reindex_indexer)
+      728    0.024    0.000    1.387    0.002 C:\Dev\RStock\rstock\application\forward_diagnostic.py:175(probability_metrics)
+    63616    0.081    0.000    1.374    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\internals\blocks.py:995(take_nd)
+    63864    0.073    0.000    1.187    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\array_algos\take.py:57(take_nd)
+12344/9128    0.013    0.000    0.894    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\ops\common.py:67(new_method)
+    38248    0.121    0.000    0.893    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\arrays\arrow\array.py:1568(take)
+    75848    0.221    0.000    0.862    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\arrays\arrow\array.py:721(__getitem__)
+     6136    0.072    0.000    0.813    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\internals\managers.py:399(apply)
+     2016    0.003    0.000    0.719    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\generic.py:6548(copy)
+     2016    0.006    0.000    0.701    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\internals\managers.py:739(copy)
+     1120    0.003    0.000    0.697    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\groupby\ops.py:615(get_iterator)
+    17872    0.093    0.000    0.641    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\series.py:369(__init__)
+   103400    0.073    0.000    0.618    0.000 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\arrays\string_arrow.py:162(_from_pyarrow_array)
+     1120    0.005    0.000    0.603    0.001 C:\Users\domin\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\groupby\ops.py:1247(__iter__)
+
+

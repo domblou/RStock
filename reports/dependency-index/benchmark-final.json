@@ -1,0 +1,63 @@
+{
+  "python": "3.12.10",
+  "runs_root": "C:\\Dev\\RStock\\runs",
+  "measurement": "complete source discovery + dependency parsing/checks + index synchronization; no deletion",
+  "baseline_ref": "16f20d3fada3ac178e8cf6c7085ecc411b9a1628",
+  "scope": "runs + production + simulations",
+  "results": {
+    "before": {
+      "median_seconds": 48.486446799943224,
+      "samples": [
+        {
+          "seconds": 48.486446799943224,
+          "file_reads": 9348,
+          "json_reads": 7664,
+          "csv_reads": 1684,
+          "files_with_json_edges": 7664
+        }
+      ]
+    },
+    "after_cold": {
+      "median_seconds": 46.81507470016368,
+      "samples": [
+        {
+          "seconds": 46.81507470016368,
+          "file_reads": 9349,
+          "json_reads": 7665,
+          "csv_reads": 1684,
+          "files_with_json_edges": 7664,
+          "hits": 0,
+          "parsed": 9348
+        }
+      ]
+    },
+    "after_persistent_reload": {
+      "median_seconds": 4.713649000041187,
+      "samples": [
+        {
+          "seconds": 4.713649000041187,
+          "file_reads": 3,
+          "json_reads": 3,
+          "csv_reads": 0,
+          "files_with_json_edges": 7664,
+          "hits": 9348,
+          "parsed": 0
+        }
+      ]
+    },
+    "after_warm": {
+      "median_seconds": 4.609341599978507,
+      "samples": [
+        {
+          "seconds": 4.609341599978507,
+          "file_reads": 2,
+          "json_reads": 2,
+          "csv_reads": 0,
+          "files_with_json_edges": 7664,
+          "hits": 9348,
+          "parsed": 0
+        }
+      ]
+    }
+  }
+}

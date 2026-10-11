@@ -48,6 +48,8 @@ class ProductionModel:
     xgboost_seed: int = 1234
     xgboost_threads: int = 2
     source_configuration: dict[str, Any] = field(default_factory=dict)
+    # Absent historical policy means fixed; never infer modern config defaults.
+    round_selection_policy: dict[str, Any] | None = None
     calibrated_signal_threshold: float | None = None
     calibration_source_run: str | None = None
     calibration_metrics: dict[str, Any] = field(default_factory=dict)
@@ -114,6 +116,7 @@ class ProductionModel:
         restored.setdefault("xgboost_seed", 1234)
         restored.setdefault("xgboost_threads", 2)
         restored.setdefault("source_configuration", {})
+        restored.setdefault("round_selection_policy", None)
         restored.setdefault("calibrated_signal_threshold", None)
         restored.setdefault("calibration_source_run", None)
         restored.setdefault("calibration_metrics", {})

@@ -423,6 +423,7 @@ def _prepared_experiment(
         spec.config.permutation_depth,
         target_symbols=target_symbols,
         max_sets=spec.config.max_generated_sets,
+        predictive_model_type=spec.config.predictive_model_type,
     )
     _phase(progress_callback, "combination_generation", "completed", combinations=len(generated))
     return prepared, generated, calendars
@@ -465,7 +466,8 @@ def _inherit_walk_forward_prefilter(
         contract = load(repository, spec)
         source = repository.run_directory(spec.source_prefilter_run) / "results"
         output.mkdir(parents=True, exist_ok=True)
-        for filename in ("predictor_prefilter.csv", "predictor_prefilter.json", "prefilter_contract.json"):
+        for filename in ("predictor_prefilter.csv", "predictor_prefilter.json", "prefilter_contract.json",
+                         "prefilter_round_selection_training.csv", "prefilter_round_selection.json"):
             path = source / filename
             if path.is_file():
                 (output / filename).write_bytes(path.read_bytes())
@@ -505,10 +507,13 @@ def _inherit_walk_forward_prefilter(
     }
 
 
-def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager) -> None:
+def _ensure_prefilter_checkpoint_protocol(checkpoint: CheckpointManager, config: RStockConfig | None = None) -> None:
     """Reject only legacy prefilter work; full WF checkpoints remain compatible."""
 
     protocol_artifact = "prefilter_execution_protocol"
+    if config is not None:
+        from rstock.walk_forward import ensure_prefilter_training_policy
+        ensure_prefilter_training_policy(checkpoint, config)
     if checkpoint.artifact_exists(protocol_artifact):
         if checkpoint.load_artifact(protocol_artifact) != PREFILTER_POLICY_VERSION:
             raise CheckpointIncompatibleError(
@@ -553,6 +558,8 @@ def _qualified_sets_from_walk_forward_source(
     frozen_fields = (
         "target_symbols", "context_symbols", "predictor_symbols", "calendar",
     )
+    if source_spec.config.predictive_model_type != spec.config.predictive_model_type:
+        raise ValueError("Calibration source has a different predictive model type")
     if any(getattr(source_spec, name) != getattr(spec, name) for name in frozen_fields):
         raise ValueError("Threshold calibration source has a different frozen population")
     path = runs.run_directory(source_run) / "results" / "qualification.csv"
@@ -569,7 +576,7 @@ def _qualified_sets_from_walk_forward_source(
             symbols = json.loads(str(value))
         except json.JSONDecodeError as error:
             raise ValueError("Source walk-forward contains an invalid set identifier") from error
-        if not isinstance(symbols, list) or len(symbols) < 2:
+        if not isinstance(symbols, list) or len(symbols) < 1:
             raise ValueError("Source walk-forward contains an invalid qualified set")
         normalized = [str(symbol) for symbol in symbols]
         set_id = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
@@ -769,6 +776,65 @@ def _walk_forward(
     return summary
 
 
+def _persist_prefilter_training(output: Path, checkpoints, config: RStockConfig) -> dict[str, object]:
+    """Export reconciled atomic batch audits through the existing result contract."""
+    from rstock.modeling import RoundSelectionPolicy, round_selection_coverage
+    frames = []
+    origins = []
+    for manager in checkpoints:
+        if manager.artifact_exists("prefilter_round_selection_training"):
+            frame = manager.load_artifact("prefilter_round_selection_training")
+            frames.append(frame)
+            if manager.artifact_exists("prefilter_round_selection_telemetry"):
+                origins.append(manager.load_artifact("prefilter_round_selection_telemetry"))
+    training = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    def losses(frame):
+        # Descriptive OOS losses retain the existing overlapping-window weighting;
+        # they are not an independent-sample significance test.
+        metrics = {}
+        if "TestObservations" not in frame:
+            return metrics
+        weights = pd.to_numeric(frame["TestObservations"], errors="coerce")
+        for metric in ("UpLogLoss", "UpBrier"):
+            if metric in frame:
+                values = pd.to_numeric(frame[metric], errors="coerce")
+                valid = values.notna() & weights.gt(0)
+                if valid.any():
+                    metrics[metric] = float((values[valid] * weights[valid]).sum() / weights[valid].sum())
+        for metric in ("UpROCAUC", "UpPRAUC"):
+            if metric in frame:
+                values = pd.to_numeric(frame[metric], errors="coerce").dropna()
+                if len(values):
+                    metrics[metric + "Median"] = float(values.median())
+                    metrics[metric + "Windows"] = int(len(values))
+        return metrics
+    summary = {
+        "round_selection_policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot(),
+        "round_selection_coverage": {**round_selection_coverage(training),
+            "Down": {"available": False, "status": "not_applicable"}},
+        "round_selection_origins": origins,
+        "selection_worker_seconds": sum(item.get("selection_worker_seconds", 0) for item in origins),
+        "refit_worker_seconds": sum(item.get("refit_worker_seconds", 0) for item in origins),
+        "selection_rounds_run": sum(item.get("selection_rounds_run", 0) for item in origins),
+        "refit_rounds": sum(item.get("refit_rounds", 0) for item in origins),
+        "all_evaluated_windows": losses(training),
+        "optimized_windows_only": losses(training.loc[training["UpRoundSelectionUsed"].eq(True)]) if "UpRoundSelectionUsed" in training else {},
+        "comparison_status": "résultat exploratoire",
+    }
+    if config.prefilter_xgb_round_selection_mode == "fixed":
+        for key in ("selection_rounds_run", "refit_rounds", "selection_worker_seconds", "refit_worker_seconds"):
+            summary.pop(key)
+    if config.prefilter_xgb_round_selection_mode == "chronological":
+        output.mkdir(parents=True, exist_ok=True)
+        # Schema remains readable even if every candidate was locally excluded.
+        if training.empty and not len(training.columns):
+            training = pd.DataFrame(columns=["Set", "Observation", "Predictors", "Window", "OriginCutoff", "UpRoundSelectionMode"])
+        training.to_csv(output / "prefilter_round_selection_training.csv", index=False)
+        (output / "prefilter_round_selection.json").write_text(
+            json.dumps(_json_value(summary), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return summary
+
+
 def _predictor_prefilter(spec, output, progress_callback, cancellation_check):
     result = _execute_predictor_prefilter(spec, output, progress_callback, cancellation_check)
     from .prefilter_contract import publish
@@ -798,7 +864,7 @@ def _execute_predictor_prefilter(
         ),
         batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
     )
-    _ensure_prefilter_checkpoint_protocol(checkpoint)
+    _ensure_prefilter_checkpoint_protocol(checkpoint, spec.config)
     if checkpoint.artifact_exists("prepared_snapshot"):
         prepared, preparation = checkpoint.load_snapshot()
         predictor_symbols = list(preparation["predictor_symbols"])
@@ -824,10 +890,13 @@ def _execute_predictor_prefilter(
     else:
         checkpoint.phase_started("predictor_prefilter_generation")
         _phase(progress_callback, "predictor_prefilter_generation", "started")
-        univariate_sets = generate_symbol_sets(
-            predictor_symbols, 1, target_symbols=target_symbols,
-            max_sets=spec.config.max_generated_sets,
-        )
+        from .prefilter_experiments import inherited_prefilter_input_sets
+        univariate_sets = inherited_prefilter_input_sets(repository, spec)
+        if univariate_sets is None:
+            univariate_sets = generate_symbol_sets(
+                predictor_symbols, 1, target_symbols=target_symbols,
+                max_sets=spec.config.max_generated_sets,
+            )
         checkpoint.commit_artifact("prefilter_univariate_sets", univariate_sets)
         checkpoint.phase_completed("predictor_prefilter_generation")
         _phase(progress_callback, "predictor_prefilter_generation", "completed",
@@ -874,6 +943,7 @@ def _execute_predictor_prefilter(
     manifest = {
         "schema_version": 1,
         "prepared_dataset_as_of": as_of,
+        **_persist_prefilter_training(output, [checkpoint], spec.config),
         "prepared_dataset_sha256": traceability["prepared_dataset_sha256"],
         "snapshot_source": (None if spec.prefilter_derivation is None
                             else spec.prefilter_derivation["source_run_id"]),
@@ -939,7 +1009,7 @@ def _temporal_stability_prefilter(
             ).hexdigest(),
             batch_sizes=prefilter_checkpoint_batch_sizes(spec.config),
         )
-        _ensure_prefilter_checkpoint_protocol(origin_checkpoint)
+        _ensure_prefilter_checkpoint_protocol(origin_checkpoint, spec.config)
         origin_checkpoints.append(origin_checkpoint)
     progress = TemporalPrefilterProgress(
         progress_callback, [o.date().isoformat() for o in origins], len(univariate_sets),
@@ -1001,6 +1071,7 @@ def _temporal_stability_prefilter(
     manifest = {
         "schema_version": 1,
         "prefilter_method": "temporal_stability",
+        **_persist_prefilter_training(output, origin_checkpoints, spec.config),
         "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
         "stability_origin_count": spec.stability_origin_count,
         "stability_step_sessions": spec.stability_step_sessions,
@@ -1158,7 +1229,7 @@ def _resumable_walk_forward(
         else:
             checkpoint.commit_artifact("generated_sets", generated)
     elif spec.config.predictor_prefilter_enabled:
-        _ensure_prefilter_checkpoint_protocol(checkpoint)
+        _ensure_prefilter_checkpoint_protocol(checkpoint, spec.config)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:
@@ -1254,6 +1325,7 @@ def _resumable_walk_forward(
                 spec.config.permutation_depth,
                 target_symbols=target_symbols,
                 max_sets=spec.config.max_generated_sets,
+                predictive_model_type=spec.config.predictive_model_type,
             )
             checkpoint.commit_artifact("generated_sets", generated)
             checkpoint.phase_completed("combination_generation")
@@ -1382,6 +1454,14 @@ def _xgboost_calibration(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
+    if spec.config.predictive_model_type == "constant_probability":
+        if not spec.source_end_to_end_run:
+            raise ValueError("XGBoost calibration is not applicable to a constant model")
+        provenance = {"status": "not_applicable", "reason": "constant_probability",
+                      "predictive_model_type": "constant_probability"}
+        for filename in ("selected_configurations.json", "sampling_manifest.json"):
+            (output / filename).write_text(json.dumps(provenance), encoding="utf-8")
+        return {"job_type": spec.job_type.value, **provenance}
     prepared, generated, qualified_source = _prepared_calibration_population(
         spec, progress_callback, cancellation_check
     )
@@ -1409,6 +1489,8 @@ def _xgboost_calibration(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
         checkpoint_manager=checkpoint,
+        evaluate_final_holdout=(not spec.source_end_to_end_run
+                               or spec.e2e_xgboost_protocol_version == 1),
     )
     period = _persist_walk_forward_period(result.run_configuration, prepared, spec.config)
     traceability = _persist_prepared_traceability(
@@ -1593,6 +1675,9 @@ def _holdout_evaluation(
         predictions.to_csv(output / "holdout_predictions.csv", index=False)
     configuration = {
         "protocol": "frozen_threshold_holdout_v1",
+        "predictive_model_type": spec.config.predictive_model_type,
+        "holdout_status": "executed" if spec.evaluate_final_holdout and eligible else "not_executed",
+        "data_status": "available",
         "holdout_requested": spec.evaluate_final_holdout,
         "holdout_evaluated": spec.evaluate_final_holdout and eligible,
         "holdout_skipped_reason": (
@@ -1617,6 +1702,8 @@ def _holdout_evaluation(
         "source_walk_forward_run": spec.source_walk_forward_run,
         "source_prepared_dataset_sha256": spec.source_prepared_dataset_sha256,
     }
+    from rstock.modeling import write_probability_training_audit
+    write_probability_training_audit(predictions, output, configuration)
     configuration["traceability"] = _persist_prepared_traceability(
         {}, prepared, spec
     )
@@ -1972,6 +2059,8 @@ def _fixed_candidate_evaluation(
     _phase(progress_callback, "result_writing", "started")
     output.mkdir(parents=True, exist_ok=True)
     generated.to_csv(output / "sampled_combinations.csv", index=False)
+    from rstock.modeling import write_probability_training_audit
+    write_probability_training_audit(holdout_predictions, output, run_configuration)
     holdout_predictions.to_csv(output / "holdout_predictions.csv", index=False)
     holdout_metrics.to_csv(output / "holdout_metrics.csv", index=False)
     (output / "selected_thresholds_by_set.json").write_text(
@@ -2368,9 +2457,11 @@ def _planned_effective_plan(
             raise ValueError("Derived Walk-forward expected a frozen combination plan")
         source_spec = repository.load_spec(source_id)
         source_checkpoint = _walk_forward_checkpoint(repository, source_id, source_spec)
-        raw_plan = CombinationPlan.from_dict(
+        raw_plan = (effective_plan if (source_spec.config.predictive_model_type != spec.config.predictive_model_type
+            and (source_spec.config.predictive_model_type in {"constant_probability", "target_only"}
+                 or spec.config.predictive_model_type in {"constant_probability", "target_only"})) else CombinationPlan.from_dict(
             source_checkpoint.load_artifact("raw_combination_plan")
-        )
+        ))
         for name, plan in (
             ("raw_combination_plan", raw_plan),
             ("effective_combination_plan", effective_plan),
@@ -2389,6 +2480,7 @@ def _planned_effective_plan(
         target_symbols=target_symbols,
         predictor_symbols=predictor_symbols,
         permutation_depth=spec.config.permutation_depth,
+        predictive_model_type=spec.config.predictive_model_type,
     )
     if checkpoint.artifact_exists("raw_combination_plan"):
         persisted_raw = CombinationPlan.from_dict(
@@ -2411,7 +2503,7 @@ def _planned_effective_plan(
         digest = prefilter_digest(effective_plan.predictors_by_target)
     elif spec.config.predictor_prefilter_enabled:
         policy_version = PREFILTER_POLICY_VERSION
-        _ensure_prefilter_checkpoint_protocol(checkpoint)
+        _ensure_prefilter_checkpoint_protocol(checkpoint, spec.config)
         if checkpoint.artifact_exists("prefilter_univariate_sets"):
             univariate_sets = checkpoint.load_artifact("prefilter_univariate_sets")
         else:
@@ -2915,6 +3007,9 @@ def _resolve_threshold_xgboost_parameters(
 ) -> DirectionalXGBoostParameters:
     """Resolve threshold-model parameters from the immutable experiment spec."""
 
+    if spec.config.predictive_model_type == "constant_probability":
+        resolved = resolve_directional_xgboost_parameters(spec.config)
+        return DirectionalXGBoostParameters(resolved.up, resolved.down, "not_applicable")
     referenced: dict[str, Any] | None = None
     if (
         spec.frozen_xgboost_parameters is None
@@ -2958,6 +3053,13 @@ def _operational_prepared(
     effective_spec = (
         spec if preparation_config is None else replace(spec, config=preparation_config)
     )
+    if spec.job_type is not JobType.PRODUCTION_TRAINING:
+        tracked = ProductionRepository(spec.config.project_root).tracked_models()
+        windows = [int(m.source_configuration.get("rstock_config", {}).get("target_volatility_sessions", 21))
+                   for m in tracked if m.source_configuration.get("rstock_config", {}).get("target_volatility_enabled", False)]
+        # Acquire the largest required prefix once; each model resolves its own N.
+        effective_spec = replace(effective_spec, config=replace(effective_spec.config,
+            target_volatility_enabled=bool(windows), target_volatility_sessions=max(windows, default=21)))
     _phase(progress_callback, phase_name, "started", symbols=len(spec.symbols))
     downloaded, _ = MarketDataService().load(
         effective_spec,
@@ -2986,6 +3088,8 @@ def _production_training(
     effective_config = replace(
         spec.config,
         lag_depth=candidate.lag_depth,
+        target_volatility_enabled=source_rstock.get("target_volatility_enabled", False),
+        target_volatility_sessions=source_rstock.get("target_volatility_sessions", 21),
         intraday_target_threshold=candidate.up_target_threshold,
         intraday_down_threshold=candidate.down_target_threshold,
         xgb_seed=candidate.xgboost_seed,
@@ -3410,4 +3514,41 @@ class WorkflowRegistry:
         handler = self.handlers.get(spec.job_type)
         if handler is None:
             raise ValueError(f"No workflow is registered for {spec.job_type.value}")
-        return handler(spec, output, progress_callback, cancellation_check)
+        result = handler(spec, output, progress_callback, cancellation_check)
+        from rstock.target_volatility import enabled, contract
+        if enabled(spec.config) and spec.job_type is not JobType.PREDICTOR_PREFILTER:
+            result["target_volatility"] = {**contract(spec.config), "source_quality": "retrospective_not_pit",
+                                         "source": spec.target_volatility_source}
+            path = output / "run_configuration.json"
+            if path.is_file():
+                recorded = json.loads(path.read_text(encoding="utf-8"))
+                prior = recorded.get("target_volatility", {})
+                result["target_volatility"] = {**prior, **result["target_volatility"],
+                    "source": spec.target_volatility_source or prior.get("provenance", {}).get("source")}
+                recorded["target_volatility"] = result["target_volatility"]
+                path.write_text(json.dumps(recorded, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if spec.config.market_context_enabled:
+            from .market_context_runtime import optional_context_diagnostic, INPUTS
+
+            measured = spec.job_type.value in INPUTS
+            if measured:
+                _phase(progress_callback, "market_context_diagnostic", "started")
+            diagnostic = (optional_context_diagnostic(spec, output)
+                          if progress_callback is None and cancellation_check is None else
+                          optional_context_diagnostic(spec, output, progress_callback=progress_callback,
+                                                      cancellation_check=cancellation_check))
+            if measured:
+                _phase(progress_callback, "market_context_diagnostic", "completed",
+                       status=(diagnostic or {}).get("status"))
+            if diagnostic is not None:
+                result["market_context_diagnostic"] = {
+                    "status": diagnostic["status"],
+                    "protocol_id": diagnostic.get("protocol_id"),
+                    "reason": diagnostic.get("reason"),
+                }
+        if spec.job_type in {JobType.END_TO_END, JobType.FORWARD_SIMULATION}:
+            from .selection_diagnostic import optional_selection_diagnostic
+            selection_diagnostic = optional_selection_diagnostic(spec, output)
+            if selection_diagnostic is not None:
+                result["selection_diagnostic"] = {key: selection_diagnostic.get(key) for key in ("status", "reason", "protocol")}
+        return result

@@ -1045,6 +1045,53 @@ def test_resume_uses_persisted_fingerprint_for_a_historical_snapshot(tmp_path):
     assert repository.read_json(run_id, "config.json")["schema_version"] == 1
 
 
+def test_threshold_parameter_worker_resumes_historical_checkpoint(tmp_path):
+    from rstock.checkpoints import CheckpointManager
+
+    repository = RunRepository(tmp_path / "runs")
+    run_id = repository.create(_spec(
+        tmp_path, JobType.THRESHOLD_PARAMETER_CALIBRATION,
+        market_context_enabled=False,
+    ))
+    historical = repository.read_json(run_id, "config.json")
+    historical["rstock_config"].pop("predictive_model_type")
+    repository.write_json(run_id, "config.json", historical)
+    fingerprint = repository.load_spec(run_id).fingerprint
+    status = repository.status(run_id)
+    status["configuration_fingerprint"] = fingerprint
+    repository.write_json(run_id, "status.json", status)
+    assert replace(repository.load_spec(run_id), execution_run_id=run_id).fingerprint != fingerprint
+    original_config = repository.read_json(run_id, "config.json")
+    calls = []
+
+    def handler(spec, output, progress, cancellation):
+        assert spec.execution_run_id == run_id
+        assert spec.fingerprint == fingerprint
+        checkpoint = CheckpointManager(
+            output.parent, run_id=run_id, job_type=spec.job_type.value,
+            configuration_fingerprint=spec.fingerprint, batch_sizes={},
+        )
+        calls.append(checkpoint.manifest["attempt_count"])
+        if len(calls) == 1:
+            checkpoint.commit_artifact("saved_batch", {"rows": [1, 2]})
+            raise RuntimeError("interrupted calculation")
+        assert checkpoint.load_artifact("saved_batch") == {"rows": [1, 2]}
+        (output / "result.txt").write_text("ok", encoding="utf-8")
+        return {"job_type": spec.job_type.value}
+
+    registry = WorkflowRegistry({JobType.THRESHOLD_PARAMETER_CALIBRATION: handler})
+    execute_run(repository, run_id, 1, registry=registry)
+    assert repository.status(run_id)["status"] == "failed"
+    RunService(repository, backend=FakeBackend()).resume(run_id)
+    execute_run(repository, run_id, 1, registry=registry)
+    assert repository.status(run_id)["status"] == "completed"
+    assert calls == [1, 2]
+    manifest = repository.read_json(run_id, "checkpoints/manifest.json")
+    assert manifest["configuration_fingerprint"] == fingerprint
+    assert [attempt["status"] for attempt in manifest["attempts"]] == ["failed", "completed"]
+    assert repository.read_json(run_id, "config.json") == original_config
+
+
 def test_restart_creates_new_run_and_keeps_failed_source_intact(tmp_path):
     repository = RunRepository(tmp_path / "runs")
     source = repository.create(_spec(tmp_path))

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import pickle
 from dataclasses import fields, replace
 from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping
 
+import pandas as pd
+
 from rstock.config import PREFILTER_XGBOOST_LEGACY_FIELDS, RStockConfig
+from rstock.modeling import PREFILTER_ROUND_SELECTION_FIELDS
 
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
@@ -28,7 +33,7 @@ PREFILTER_DERIVATION_FIELDS = frozenset({
     "predictor_prefilter_min_worst_auc",
     "predictor_prefilter_max_auc_std",
     "predictor_prefilter_correlation_threshold",
-}) | frozenset(PREFILTER_XGBOOST_FIELDS) | frozenset({
+}) | frozenset(PREFILTER_XGBOOST_FIELDS) | frozenset(PREFILTER_ROUND_SELECTION_FIELDS) | frozenset({
     "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
 })
 PREFILTER_METHOD_FIELDS = frozenset({
@@ -79,7 +84,7 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> 
                 or (upper is not None and value > upper)):
             raise ValueError(f"{field} is outside its valid XGBoost range")
     for field in PREFILTER_DERIVATION_FIELDS - {
-        "predictor_prefilter_top_n", *PREFILTER_XGBOOST_FIELDS,
+        "predictor_prefilter_top_n", *PREFILTER_XGBOOST_FIELDS, *PREFILTER_ROUND_SELECTION_FIELDS,
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }:
         value = effective.get(field, getattr(config, field))
@@ -95,6 +100,24 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> 
             raise ValueError(f"{field} must be a positive integer")
     replace(config, **{k: v for k, v in effective.items() if k in PREFILTER_DERIVATION_FIELDS})
     return effective
+
+
+def inherited_prefilter_input_sets(repository: RunRepository, spec: ExperimentSpec) -> pd.DataFrame | None:
+    """Reuse exactly the reference input pairs when the derivation records them."""
+    provenance = spec.prefilter_derivation or {}
+    expected = provenance.get("source_univariate_sets_sha256")
+    if expected is None:
+        return None  # Historical derivations retain their deterministic generation.
+    path = repository.run_directory(provenance["source_run_id"]) / "checkpoints/artifacts/prefilter_univariate_sets.pkl"
+    raw = path.read_bytes()
+    metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    if (hashlib.sha256(raw).hexdigest() != expected or metadata.get("sha256") != expected
+            or metadata.get("configuration_fingerprint") != provenance["source_fingerprint"]):
+        raise ValueError("Frozen Prefilter input pairs changed")
+    pairs = pickle.loads(raw)
+    if not isinstance(pairs, pd.DataFrame):
+        raise ValueError("Frozen Prefilter input pairs are invalid")
+    return pairs
 
 
 def validate_prefilter_source(
@@ -121,6 +144,7 @@ def validate_prefilter_source(
         raise ValueError("Predictor prefilter cutoff or dataset digest differs")
     if source.historical_data_cutoff != spec.historical_data_cutoff:
         raise ValueError("Predictor prefilter source cutoff differs")
+    inherited_prefilter_input_sets(repository, spec)
     frozen_fields = {item.name for item in fields(RStockConfig)} - PREFILTER_DERIVATION_FIELDS
     # Already persisted prefilter derivations used general XGBoost field names.
     # Preserve their execution contract; new derivations accept dedicated fields only.
@@ -194,6 +218,11 @@ def build_derived_prefilter_spec(
             for field, value in sorted(effective.items())
         },
     }
+    input_path = repository.run_directory(source_run_id) / "checkpoints/artifacts/prefilter_univariate_sets.pkl"
+    if input_path.is_file():
+        provenance["source_univariate_sets_sha256"] = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    elif effective.get("prefilter_xgb_round_selection_mode", source.config.prefilter_xgb_round_selection_mode) == "chronological":
+        raise ValueError("Chronological derivation requires frozen Prefilter input pairs")
     config_changes = {
         field: value for field, value in effective.items()
         if field in PREFILTER_DERIVATION_FIELDS

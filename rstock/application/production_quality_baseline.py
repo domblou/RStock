@@ -316,22 +316,3 @@ class PromotionQualityService:
         self.quality.write_lineage(model.model_id, lineage)
         baseline = build_promotion_baseline(model, self.runs)
         self.quality.write_baseline(model.model_id, baseline)
-
-    def rebuild_baseline_for_model(self, model_id: str) -> dict[str, Any]:
-        model = self.production.get(model_id)
-        baseline = build_promotion_baseline(model, self.runs)
-        self.quality.write_baseline(model_id, baseline, overwrite=True)
-        return baseline
-
-    def rebuild_lineage_for_model(self, model_id: str) -> dict[str, Any]:
-        model = self.production.get(model_id)
-        existing = self.quality.load_lineage(model_id) or {}
-        names = {
-            "primary": existing.get("primary_universe_name_at_promotion"),
-            "context": existing.get("market_context_universe_name_at_promotion"),
-        }
-        lineage = build_model_lineage(
-            model, self.runs, promotion_time_universe_names=names
-        )
-        self.quality.write_lineage(model_id, lineage, overwrite=True)
-        return lineage

@@ -164,7 +164,6 @@ def test_renderer_has_secondary_line_and_scoped_styles():
     assert 'secondary.textContent = row[secondaryKey]' in html
     assert '.lineage { font-size: 11px; opacity: .65;' in html
     assert 'check.type = "checkbox"' in html
-    assert 'value: [...selected]' in html
     assert 'text.textContent = value' in html  # Plain text, no run-provided HTML.
 
 

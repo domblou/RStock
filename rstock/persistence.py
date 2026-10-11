@@ -34,6 +34,7 @@ class ModelMetadata:
     target_threshold: float
     lag_depth: int
     classification_metrics: dict[str, Any] = field(default_factory=dict)
+    round_selection_record: dict[str, Any] = field(default_factory=dict)
 
 
 def _validate_replaceable_store(path: Path) -> None:

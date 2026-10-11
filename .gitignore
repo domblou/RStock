@@ -26,5 +26,13 @@ __pycache__/
 .pytest_cache/
 .pytest_tmp/
 .pytest_*/
+.pytest-*/
 *.egg-info/
 .venv/
+
+# Reconstructible local dependency index
+.rstock-dependency-index/
+
+# Historical migration artifacts
+/phase9_backups/
+/reports/production_quality_phase9/
