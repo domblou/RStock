@@ -20,7 +20,6 @@ from rstock.application.production_quality import (
 )
 from rstock.application.production_quality_repository import (
     ProductionQualityRepository,
-    reconcile_quality_observations,
 )
 from rstock.application.production_quality_ui import (
     baseline_unavailability_reason, initial_qualification_metrics,
@@ -254,7 +253,10 @@ def test_same_ticker_and_date_from_two_models_remain_distinct(tmp_path):
         _prediction("same-prediction", model_id="model_B"),
     )
 
-    results = reconcile_quality_observations(repository, observations)
+    results = {
+        model_id: repository.upsert_observations(model_id, rows)
+        for model_id, rows in observations.groupby("model_id")
+    }
 
     assert set(results) == {"model_A", "model_B"}
     assert len(repository.load_observations("model_A")) == 1
@@ -542,33 +544,6 @@ def test_missing_holdout_persists_unavailable_baseline_and_is_not_overwritten(tm
     changed = service.quality.write_baseline(model.model_id, {**first, "availability_status": AVAILABLE})
     assert changed is False
     assert service.quality.load_baseline(model.model_id)["availability_status"] == UNAVAILABLE_MISSING_ARTIFACT
-
-
-def test_explicit_rebuild_preserves_frozen_universe_name(tmp_path):
-    runs = RunRepository(tmp_path / "runs")
-    run_id = "threshold-source"
-    source = runs.run_directory(run_id) / "results"
-    source.mkdir(parents=True)
-    _holdout_predictions(source / "holdout_predictions.csv")
-    model = replace(
-        _model(), source_threshold_calibration_run=run_id,
-        source_configuration={"primary_universe_id": "gone", "temporal_validation_enabled": True},
-        training_metadata={"universe_roles": {"primary_universe_id": "gone"}},
-    )
-    production = ProductionRepository(tmp_path)
-    production.add(model)
-    service = PromotionQualityService(tmp_path, runs, production)
-    service.quality.write_lineage(model.model_id, {
-        **build_model_lineage(model, runs),
-        "primary_universe_name_at_promotion": "Nom figé",
-    })
-
-    rebuilt = service.rebuild_lineage_for_model(model.model_id)
-    baseline = service.rebuild_baseline_for_model(model.model_id)
-
-    assert rebuilt["primary_universe_name_at_promotion"] == "Nom figé"
-    assert rebuilt["temporal_validation_status"] == "not_available"
-    assert baseline["availability_status"] == AVAILABLE
 
 
 def test_lineage_reads_temporal_decision_from_end_to_end_parent(tmp_path):

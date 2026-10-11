@@ -1562,16 +1562,6 @@ Il reconstruit uniquement les séries, snapshots individuels et snapshot maître
 à partir des observations canoniques, puis publie une génération atomique. Une
 génération incomplète n’est jamais rendue active.
 
-La migration finale peut être exécutée explicitement avec :
-
-```powershell
-python -m rstock.application.production_quality_phase9 --project-root C:\Dev\RStock
-```
-
-Elle produit un inventaire, un dry-run de provenance, une sauvegarde, les
-rapports de migration et les benchmarks sous `reports/production_quality_phase9/`.
-La commande de rollback exacte est enregistrée dans le rapport final.
-
 ---
 
 # 28. Modèles en observation

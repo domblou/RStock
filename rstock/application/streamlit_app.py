@@ -1578,13 +1578,13 @@ def _settings() -> None:
         max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
         st.subheader('Types de modèles')
         predictive_model_type = _predictive_model_input(current.predictive_model_type, "settings-predictive-model-type", widget=st)
+        if predictive_model_type != "external_only":
+            st.caption("Type expérimental : disponible uniquement en Walk-forward (WF) et, pour « Titre cible + externes », avec préfiltre des externes. Non disponible pour les calibrations, les seuils, la promotion ou le Forward/Production.")
         st.subheader("Volatilité passée du titre cible")
         target_volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=current.target_volatility_enabled,
             disabled=predictive_model_type == "constant_probability", key="settings-target-volatility",
             help="Une seule variable par cible : volatilité annualisée des rendements logarithmiques ajustés, arrêtée à J−1. Les données Yahoo sont rétrospectives, sans garantie point-in-time.")
         target_volatility_sessions = st.number_input("Nombre de séances", min_value=2, value=current.target_volatility_sessions, key="settings-target-volatility-sessions")
-        if predictive_model_type != "external_only":
-            st.caption("Type expérimental : disponible uniquement en Walk-forward (WF) et, pour « Titre cible + externes », avec préfiltre des externes. Non disponible pour les calibrations, les seuils, la promotion ou le Forward/Production.")
         st.caption("Un seul type par job. Les résultats se comparent dans Comparer.")
     with tabs[2]:
         st.subheader("Pré-filtrage des prédicteurs")

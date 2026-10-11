@@ -1669,7 +1669,7 @@ Mettre à jour au minimum :
 README.md
 MIGRATION.md
 rstock/docs/user_guide.md
-ROADMAP.MD si pertinent
+RSTOCK_ROADMAP.md si pertinent
 AGENTS.md seulement si une règle durable nouvelle doit être imposée
 ```
 

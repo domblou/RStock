@@ -642,20 +642,3 @@ class ProductionQualityRepository:
             manifest["status"] = "dirty" if dirty else "ready"
             self._write_manifest(manifest)
             return manifest
-
-
-def reconcile_quality_observations(
-    quality_repository: ProductionQualityRepository,
-    observations: pd.DataFrame,
-) -> dict[str, ObservationUpsertResult]:
-    """Explicit migration/reconciliation entry point; never runs automatically."""
-
-    normalized = normalize_quality_observations(observations)
-    results: dict[str, ObservationUpsertResult] = {}
-    for model_id, group in normalized.groupby("model_id", sort=True, dropna=False):
-        if pd.isna(model_id):
-            raise ValueError("Canonical observation is missing model_id")
-        results[str(model_id)] = quality_repository.upsert_observations(
-            str(model_id), group
-        )
-    return results
