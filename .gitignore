@@ -36,3 +36,6 @@ __pycache__/
 # Historical migration artifacts
 /phase9_backups/
 /reports/production_quality_phase9/
+
+# Local ad hoc analysis reports and artifacts
+/reports/adhoc/

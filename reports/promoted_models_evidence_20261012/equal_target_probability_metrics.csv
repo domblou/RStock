@@ -1,5 +1,0 @@
-Scope,Weighting,Targets,UpLogLoss,UpBrier,ReconstructedDeltaLL,ReconstructedDeltaBrier,ModelsWithBaseline,ModelsBeatReconstructedConstant
-post_decision_all_origins,equal target then equal model/version within target; each model dates equal,15,0.6384994400228552,0.21334658955343536,0.07107516377933984,0.022374022711779674,23,8
-post_decision_live_tag,equal target then equal model/version within target; each model dates equal,15,0.6483218427060736,0.21453477734333098,0.07825499699144456,0.022766040556379392,23,10
-preopen_original_version_matched,equal target then equal model/version within target; each model dates equal,15,0.6729039335832204,0.22285849420260934,0.08159368814138811,0.022463819239910796,23,10
-preopen_updated_version_matched,equal target then equal model/version within target; each model dates equal,1,0.18712126050855718,0.04112370347817992,,,0,0

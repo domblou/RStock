@@ -269,6 +269,15 @@ son comportement lorsqu’il est absent d’un snapshot historique.
 
 ## Portée et validation des modifications
 
+- Tous les agents, y compris les agents spécialisés et délégués, enregistrent
+  systématiquement les rapports et tous les fichiers générés pour une analyse
+  ponctuelle (ad hoc) dans `reports/adhoc/`, de préférence dans un sous-répertoire
+  identifiable par analyse. Cela inclut scripts ad hoc, données dérivées, tableaux,
+  figures, exports et autres artefacts : ils ne font pas partie de l'application
+  RStock. Ce répertoire est ignoré par Git. Cette règle ne déplace pas les archives
+  existantes et ne remplace pas les emplacements officiels des runs, de la
+  documentation ou des registres scientifiques. Elle n'autorise aucune écriture
+  dans une mission en lecture seule ; transmettre ce périmètre aux agents délégués.
 - Limiter les changements à la demande autorisée ; éviter les refactors annexes.
 - Choisir les validations pertinentes au changement. Pour une petite correction
   de présentation, une vérification ciblée suffit ; ne pas imposer un entraînement
