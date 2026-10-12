@@ -4540,10 +4540,10 @@ def _render_walk_forward_derived_creation(
     can_derive = (isinstance(status, Mapping) and status.get("status") == "completed"
         and not (isinstance(storage, Mapping) and storage.get("state") == "purged"))
     key = f"wf-derive-open-{run_id}"
-    left, right = st.columns(2)
-    with left:
-        derive_clicked = can_derive and st.button("Créer une expérience dérivée", key=f"wf-derive-button-{run_id}")
-    with right:
+    with st.container(horizontal=True, wrap=False, horizontal_alignment="left",
+                      vertical_alignment="center", gap="small"):
+        derive_clicked = st.button("Créer une expérience dérivée", key=f"wf-derive-button-{run_id}",
+                                   disabled=not can_derive)
         from rstock.application.scientific_analysis_ui import render_analysis_launcher, render_analysis_form
         selected_analysis = render_analysis_launcher(st, service, str(detail.get("analysis_owner_run_id", run_id)),
             key=f"wf-analysis-{run_id}", navigate=_history_navigation)

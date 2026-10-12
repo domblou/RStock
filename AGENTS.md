@@ -117,26 +117,28 @@ uniquement lorsque la mission autorise les modifications, dans son périmètre.
 
 ## Responsabilités et autorisations
 
-Ces rôles définissent les responsabilités ; ils ne créent aucun agent actif.
+Codex principal est directement responsable de toute la programmation, de
+l'architecture, des données, des tests et de la qualité logicielle de RStock.
+Le directeur scientifique est le seul agent spécialisé ; il reste responsable
+des orientations, protocoles et validations scientifiques. Ces responsabilités
+ne créent aucun agent actif. Les travaux logiciels ne sont pas délégués à un
+agent ingénieur.
 
-Profils versionnés : [.codex/agents/directeur-scientifique.toml](.codex/agents/directeur-scientifique.toml)
-et [.codex/agents/ingenieur-logiciel-donnees.toml](.codex/agents/ingenieur-logiciel-donnees.toml).
+Profil spécialisé versionné : [.codex/agents/directeur-scientifique.toml](.codex/agents/directeur-scientifique.toml).
 Adopter un rôle ne garantit pas le chargement natif de son profil personnalisé.
 Sans profil natif, lire le TOML pertinent et appliquer `developer_instructions`
 dans les limites des instructions et autorisations actives. Lorsque pertinent,
 distinguer profil chargé nativement et instructions simplement lues ; ne pas
 prétendre qu'un agent a été activé ou consulté sans intervention réelle.
 
-Sans rôle explicitement désigné, choisir le responsable principal selon la demande :
-directeur pour hypothèses, protocoles, interprétation, sélection/qualification et
-décisions scientifiques ; ingénieur pour développement, architecture, corrections,
-UI, données/pipelines, performance technique, reproductibilité et tests.
-Pour un travail mixte, identifier ce responsable et consulter l'autre rôle seulement
-si nécessaire : expertise scientifique pour changer un protocole, ingénieur pour
-vérifier la faisabilité d'une décision. Éviter échanges circulaires et consultations
-systématiques ; fournir une seule synthèse consolidée. Ces règles ne garantissent
-ni routage automatique ni chargement natif. Sans délégation disponible, adopter le
-rôle pertinent ; signaler la limite seulement si elle affecte réellement la mission.
+Codex principal peut consulter le directeur pour les hypothèses, protocoles,
+interprétations, sélection/qualification et décisions scientifiques lorsque
+nécessaire, sans consultation systématique pour les corrections techniques.
+Codex principal vérifie la faisabilité technique et les coûts des propositions
+du directeur. Éviter les échanges circulaires et fournir une synthèse consolidée.
+Ces règles ne garantissent ni routage automatique ni chargement natif ; sans
+délégation disponible, appliquer le profil scientifique pertinent sans inventer
+de consultation et signaler la limite seulement si elle affecte la mission.
 
 Skills partagées : `$preparer-experience-rstock` pour préparer un protocole et
 `$analyser-experience-rstock` pour interpréter les résultats existants, d'abord
@@ -147,12 +149,12 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
   protocoles, campagnes et interprétations. Maintient la roadmap scientifique,
   les conclusions et les critères de poursuite ou d'arrêt. Distingue résultats
   observés, hypothèses et preuves manquantes ; évalue bénéfice attendu et coût.
-- **Ingénieur logiciel et données** : maîtrise l'architecture, vérifie données,
+- **Codex principal** : maîtrise l'architecture, vérifie données,
   calendriers, causalité et reproductibilité. Prépare les calculs, propose les
   plans techniques, implémente et valide dans le périmètre autorisé. Signale les
   écarts entre protocole demandé et possibilités réelles avant leur exécution.
 - Une mission d'étude uniquement produit analyse, faisabilité et plan technique,
-  avec contribution de l'ingénieur si nécessaire, puis s'arrête avant implémentation.
+  avec vérification technique par Codex principal si nécessaire, puis s'arrête avant implémentation.
   Si l'implémentation est déjà explicitement autorisée, préparer un plan proportionné
   et poursuivre dans ce périmètre sans redemander l'autorisation. Une décision est
   nécessaire pour un choix substantiel non couvert, changement de protocole, coût
@@ -163,7 +165,7 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
   Ne pas multiplier les sous-agents si le travail se traite directement ; un nom
   de tâche ne garantit pas le chargement du profil.
 - Lors d'une délégation, utiliser un nom d'agent stable correspondant à son rôle :
-  « Directeur scientifique » ou « Ingénieur logiciel et données ». Présenter
+  « Directeur scientifique ». Présenter
   séparément le titre précis de la mission actuelle et la demande transmise.
   Éviter de nommer l'agent d'après une tâche ponctuelle, car ce nom peut devenir
   trompeur lors de sa réutilisation.
@@ -179,10 +181,10 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
   contenu sont déjà établis. L'agent principal effectue directement l'édition
   et les vérifications ciblées. Consulter un spécialiste uniquement si une
   nouvelle décision scientifique ou technique est nécessaire.
-- L'ingénieur retourne une synthèse courte : faisabilité, changements,
+- Codex principal retourne une synthèse courte : faisabilité, solution proposée ou changements,
   validations, limites et décision requise. Le directeur replace la décision
   dans la roadmap. Éviter les écritures concurrentes sur les mêmes fichiers.
-- Les demandes techniques peuvent être adressées directement à l'ingénieur.
+- Codex principal traite directement les demandes techniques.
   Une correction simple déjà autorisée s'exécute directement, sans délégation
   ni revue scientifique systématique.
 - Ne déclencher aucun entraînement coûteux, campagne, changement de protocole
@@ -202,6 +204,31 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
 
 ## Architecture et grilles
 
+- Avant de proposer des changements, Codex principal inspecte le code et les
+  contrats actuels des mécanismes concernés : services, workflows, repositories,
+  jobs, manifests, checkpoints, reprise, diagnostics et interface. Charger la
+  roadmap applicative et les références spécialisées selon le besoin ; limiter
+  l'exploration au périmètre utile et distinguer faits vérifiés et hypothèses.
+- Une analyse technique ou proposition d'évolution fournit, lorsque pertinent,
+  une solution concrète, cohérente et pérenne au-delà du diagnostic des écarts.
+  Pour une évolution fonctionnelle ou architecturale, décrire le parcours
+  utilisateur et le flux d'exécution de bout en bout, les entrées et résultats
+  persistés, le suivi, les erreurs, les diagnostics et la reprise concernés.
+  Distinguer existant, adaptations et créations nécessaires, avec chemins et
+  contrats utiles ; présenter les compromis et validations pertinentes.
+- Pour chaque nouvelle expérience ou investigation, évaluer l'approche :
+  fonctionnalité RStock existante, nouvelle fonctionnalité intégrée ou script
+  ad hoc, avec justification concise. Privilégier la réutilisation pour des
+  besoins concrets de reproduction, comparaison et validation future ; réserver
+  les scripts autonomes aux explorations ponctuelles de réutilisation incertaine.
+  Préserver traçabilité et validation temporelle et éviter le couplage inutile
+  à une hypothèse. Ne pas introduire de framework, abstraction ou mécanisme
+  générique sans bénéfice concret justifiant son coût et sa maintenance.
+- Proposer une réalisation incrémentale lorsque nécessaire, avec objectifs,
+  dépendances, livrables et critères de validation par phase. Une question simple
+  appelle une réponse ciblée, sans étude architecturale complète. Les orientations
+  et critères scientifiques restent du ressort du directeur ; toute adoption
+  et exécution respecte les autorisations actives.
 - Étendre les services, repository, workers, leases, workflows et checkpoints
   existants ; ne pas créer de framework de jobs parallèle. Voir les contrats
   de [Jobs, lots et reprise durable](rstock/docs/job_orchestration.md).
@@ -214,9 +241,38 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
   Référence actuelle : [grid_migration_report.md](rstock/docs/grid_migration_report.md) ;
   le [plan de standardisation](rstock/docs/grid_standardization_plan.md) contient
   aussi l'inventaire antérieur à la migration.
+  Réutiliser le registre d'onglets et les vues partagées avec rendu paresseux.
+
+## Estimation des interventions techniques
+
+Pour chaque nouvelle intervention recommandée ou plan proposé, Codex principal
+présente un petit tableau avec justification concise, proportionné à la demande :
+
+- **Effort :** 1, 2, 3, 5, 8 ou 13 points relatifs, incluant développement et
+  validation ; ne pas convertir ces points en jours ou heures de travail.
+- **Durée de calcul machine :** fourchette en minutes ou heures, ou « aucun »
+  sans traitement nécessaire ; la distinguer de l'effort humain.
+- **Valeur scientifique attendue :** faible, moyenne ou élevée, selon l'incertitude
+  résolue, y compris par un résultat négatif. Pour une tâche purement technique,
+  indiquer « sans objet » et justifier sa valeur technique.
+- **Confiance dans l'estimation :** faible, moyenne ou élevée.
+
+Appuyer la durée machine sur les runs comparables, volumes, ressources et
+architecture actuels ; citer les références et expliciter hypothèses et manques,
+sans précision injustifiée ni benchmark implicite. Codex principal valide les
+hypothèses techniques pour un développement significatif ou de nouveaux calculs
+coûteux ; la valeur scientifique s'appuie sur le protocole ou l'analyse du directeur.
+Préciser les principaux facteurs de variation du coût pour les interventions
+importantes. À 13 points ou plus, tenter un découpage en phases plus petites pour
+réduire le risque, avec objectif, estimation et critères de passage à la suite,
+ou expliquer pourquoi aucun découpage utile n'est identifié. Une estimation
+n'autorise aucune exécution.
 
 ## Données et validité scientifique
 
+- Vérifier paramètres effectifs, snapshots, digests et sources physiques ;
+  distinguer données figées et garanties PIT, live et backfills, Forward figé et
+  rejeu historique. Préserver les contrats des dérivations sans source substituée.
 - Respecter les calendriers et la causalité des variables : seules les
   observations disponibles à l'instant de prédiction peuvent être utilisées.
   Préserver les règles explicites de retards, valeurs manquantes et exclusions.
@@ -279,6 +335,9 @@ son comportement lorsqu’il est absent d’un snapshot historique.
   documentation ou des registres scientifiques. Elle n'autorise aucune écriture
   dans une mission en lecture seule ; transmettre ce périmètre aux agents délégués.
 - Limiter les changements à la demande autorisée ; éviter les refactors annexes.
+- Vérifier les effets de bord des scripts et services avant consultation ou
+  exécution : une lecture seule n'autorise aucun traitement supplémentaire.
+  Une préparation de boosters ou un rejeu historique peut entraîner des modèles.
 - Choisir les validations pertinentes au changement. Pour une petite correction
   de présentation, une vérification ciblée suffit ; ne pas imposer un entraînement
   ou une revue systématique. Les tests de compatibilité et de reprise ci-dessus
@@ -286,3 +345,4 @@ son comportement lorsqu’il est absent d’un snapshot historique.
 - Rapporter brièvement ce qui a changé, les vérifications effectuées et les
   limites restantes. Ne pas présenter une capacité implémentée comme une
   hypothèse scientifiquement validée.
+  Distinguer un test présent d'un test réellement passé.

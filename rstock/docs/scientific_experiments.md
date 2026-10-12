@@ -301,6 +301,14 @@ significativité ; moyenne des scores, pas ensemble ni sélecteur. Aucun nouvel
 entraînement, Holdout ou Forward. Statut non concluant pour la généralisation ;
 les effectifs qualifiés ne classent pas la valeur prédictive.
 
+Suivi méthodologique du 12 octobre 2026 : la fonctionnalité « Persistance des
+relations rares » implémente maintenant une sélection préalable Up sur 60 % des
+séances et une évaluation sur les 40 % restants, avec référence train exacte,
+HAC/Holm, support et couverture complets, et contrôle des tiers d'évaluation.
+Les règles sont détaillées dans le [guide](user_guide.md); les seuils restent
+non validés empiriquement. Tests synthétiques uniquement, aucun nouveau run
+scientifique ni résultat de persistance; statut et conclusions EXP-010 inchangés.
+
 <a id="exp-011"></a>
 
 EXP-011 : [comparaison alignée sauvegardée](../../diagnostics/aligned_constant_20261011/README.md),

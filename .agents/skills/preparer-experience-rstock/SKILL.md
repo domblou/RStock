@@ -6,7 +6,7 @@ description: Préparer un protocole, une comparaison ou une campagne RStock avec
 # Préparer une expérience RStock
 
 Skill partagée : le directeur définit la question et la décision scientifique ;
-l'ingénieur vérifie données, contrats, faisabilité et coût. Lire les
+Codex principal vérifie données, contrats, faisabilité et coût. Lire les
 [instructions communes](../../../AGENTS.md) et la
 [roadmap scientifique](../../../rstock/docs/scientific_roadmap.md), les
 [stratégies](../../../rstock/docs/scientific_strategies.md) et les
@@ -67,8 +67,8 @@ Préparer n'autorise pas le lancement. Appliquer les autorisations existantes da
 leur périmètre ; demander uniquement ce qui manque avant une opération dépendante.
 Ne pas soumettre un job, préparer des boosters, lancer un rejeu, télécharger des
 données ou modifier un protocole sous couvert d'une simple lecture. Une étude
-technique peut être déléguée si elle apporte une valeur réelle, sans multiplier
-les agents ni partager l'historique complet.
+technique est réalisée directement par Codex principal ; consulter le directeur
+seulement pour une décision scientifique nécessaire, sans partager l'historique complet.
 
 ## Références selon le besoin
 

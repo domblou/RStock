@@ -34,7 +34,7 @@ def setup(tmp_path, monkeypatch):
         (ctx.output / "specialized.csv").write_text("value\n2\n", encoding="utf-8")
         return {"value":2, "complete":True, "result_files":["specialized.csv"]}
     item = analysis.AnalysisDefinition("tiny", "1", "Analyse fixture", "Tiny", ("results/tiny.json",),
-        lambda p: p, lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]},execute)
+        lambda p: p, lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]},execute, light_preflight=lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]})
     monkeypatch.setattr(analysis, "analysis_catalogue", lambda:(item,))
     return repo,service,source,item,backend
 
@@ -72,9 +72,11 @@ def test_changed_source_and_definition_block_resume(setup, monkeypatch):
     job=service.start_analysis(source,"tiny",{"inputs_ready":True},request_id="one")
     repo.transition(job.run_id,JobStatus.FAILED,error="fixture interruption")
     repo.write_json(source,"results/tiny.json",{"value":3})
-    with pytest.raises(ValueError,match="digest_changed"):
-        service.run_service.resume(job.run_id)
-    assert len(backend.calls)==1
+    service.run_service.resume(job.run_id)
+    with pytest.raises(ValueError,match="identity_changed"):
+        analysis.execute_analysis(repo.load_spec(job.run_id), repo.run_directory(job.run_id)/"results", None, None)
+    assert len(backend.calls)==2
+    repo.transition(job.run_id, JobStatus.FAILED, error="changed source")
     repo.write_json(source,"results/tiny.json",{"value":2})
     monkeypatch.setattr(analysis,"analysis_catalogue",lambda:(replace(item,version="2"),))
     with pytest.raises(ValueError,match="version_changed"):
@@ -184,17 +186,17 @@ def test_launch_control_is_right_of_derivation_and_uses_pipeline_owner(monkeypat
         def __init__(self,index):self.index=index
         def __enter__(self):calls.append(("column",self.index))
         def __exit__(self,*args):pass
-    fake=SimpleNamespace(session_state={},columns=lambda n:[Column(i) for i in range(n)],
+    fake=SimpleNamespace(session_state={},container=lambda **kw:Column(0),
         button=lambda label,**kw:calls.append(("button",label)) or False)
     monkeypatch.setattr(app,"st",fake)
     monkeypatch.setattr(ui,"render_analysis_launcher",lambda st,service,source,**kw:calls.append(("launch",source)))
     monkeypatch.setattr(ui,"render_analysis_form",lambda st,service,source,selected,**kw:calls.append(("inline",source)))
     app._render_walk_forward_derived_creation("wf-child",{
         "status":{"status":"completed"},"storage":{"state":"full"},"analysis_owner_run_id":"e2e-owner"},object())
-    assert calls==[("column",0),("button","Créer une expérience dérivée"),("column",1),("launch","e2e-owner"),("inline","e2e-owner")]
+    assert calls==[("column",0),("button","Créer une expérience dérivée"),("launch","e2e-owner"),("inline","e2e-owner")]
 
 
-def test_menu_only_selects_and_form_is_inline_without_raw_json(setup, monkeypatch):
+def test_selection_displays_inline_form_without_raw_json(setup, monkeypatch):
     from rstock.application import scientific_analysis_ui as ui
     repo, service, source, item, _ = setup
     calls = []
@@ -206,7 +208,6 @@ def test_menu_only_selects_and_form_is_inline_without_raw_json(setup, monkeypatc
                 def __enter__(self): surface.scope = name
                 def __exit__(self, *args): surface.scope = "page"
             return Region()
-        def popover(self, label): return self.region("menu")
         def container(self, **kwargs): return self.region("inline")
         def selectbox(self, label, values, **kwargs):
             calls.append((self.scope, "selector")); return "tiny"
@@ -220,27 +221,36 @@ def test_menu_only_selects_and_form_is_inline_without_raw_json(setup, monkeypatc
         def caption(self, text): calls.append((self.scope, "caption", text))
         def write(self, text): calls.append((self.scope, "text", text))
     fake = Surface()
-    item = replace(item, render_parameters=lambda key: calls.append((fake.scope, "parameters")) or {})
+    item = replace(item, render_parameters=lambda key: calls.append((fake.scope, "parameters")) or {},
+        preflight=lambda *_: pytest.fail("Deep preparation during form rendering"))
     monkeypatch.setattr(ui, "get_analysis", lambda _: item)
     selected = ui.render_analysis_launcher(fake, service, source, key="fixture", navigate=lambda *_: None)
-    assert calls == [("menu", "selector")]
+    assert selected == "tiny"
+    assert calls == [("page", "Lancer une analyse", True), ("page", "selector")]
+    calls.clear()
     ui.render_analysis_form(fake, service, source, selected, key="fixture", navigate=lambda *_: None)
     assert ("inline", "parameters") in calls and ("inline", "confirmation") in calls
     assert ("inline", "Lancer l’analyse sélectionnée", True) in calls
-    assert all(call[0] == "inline" for call in calls[1:])
+    assert all(call[0] == "inline" for call in calls)
 
 
 def test_resolved_parameters_are_frozen_by_common_submission(setup, monkeypatch):
     repo, service, source, item, _ = setup
     resolved = {"selection_mode": "sessions", "selection_sessions": 3,
                 "resolved_split": {"selection_end": "2025-07-15", "evaluation_start": "2025-07-16"}}
-    # Only a synthetic plugin exercises submission; the real rare analysis stays blocked.
+    # Only a synthetic plugin exercises this common submission contract.
     monkeypatch.setattr(analysis, "analysis_catalogue", lambda: (replace(item,
-        preflight=lambda *_: {"ready": True, "resolved_parameters": resolved}),))
+        preflight=lambda *_: {"ready": True, "resolved_parameters": resolved},
+        light_preflight=lambda *_: {"ready":True}),))
     spec = analysis.prepare_analysis(repo, source, "tiny", {}, request_id="resolved")
-    assert spec.scientific_analysis["parameters"] == resolved
-    assert "results/tiny.json" in spec.scientific_analysis["source_sha256"]
-    assert spec.to_dict()["scientific_analysis"]["parameters"] == resolved
+    assert spec.scientific_analysis["parameters"] == {}
+    output = repo.run_directory(source)/"_fixture_output"
+    analysis.execute_analysis(spec, output, None, None)
+    from rstock.checkpoints import CheckpointManager
+    checkpoint = CheckpointManager(output.parent, run_id=output.parent.name, job_type=spec.job_type.value, configuration_fingerprint=spec.fingerprint, batch_sizes={"scientific_analysis":1})
+    assert checkpoint.load_artifact("prepared_contract")["parameters"] == resolved
+    assert "results/tiny.json" in spec.scientific_analysis["source_identities"]
+    assert spec.to_dict()["scientific_analysis"]["parameters"] == {}
 
 
 def test_legacy_analysis_metadata_remains_readable_without_active_dependency(setup):
@@ -255,3 +265,109 @@ def test_legacy_analysis_metadata_remains_readable_without_active_dependency(set
     assert loaded.to_dict()["scientific_analysis"] == raw["scientific_analysis"]
     import hashlib
     assert loaded.fingerprint == hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def test_ui_submission_history_and_resume_never_read_source_payload(setup, monkeypatch):
+    from rstock.application.history_index import clear_history_cache
+    from rstock.application.history_ui import EXPERIMENT_JOB_TYPES, filter_runs, history_row
+    from rstock.application.history_grid import history_grid_row
+    repo, service, source, item, backend = setup
+    monkeypatch.setattr(analysis, "analysis_catalogue", lambda: (replace(item,
+        preflight=lambda *_: pytest.fail("Deep preflight in UI")),))
+    monkeypatch.setattr(analysis, "digest", lambda *a, **kw: pytest.fail("Hash in UI"))
+    original_open = Path.open
+    payload = repo.run_directory(source)/"results/tiny.json"
+    def guarded(path, *args, **kw):
+        if path == payload or path.suffix in {".csv", ".pkl"}:
+            pytest.fail("Source payload read in UI: " + str(path))
+        return original_open(path, *args, **kw)
+    monkeypatch.setattr(Path, "open", guarded)
+    for _ in range(3):
+        assert service.analysis_preflight(source, "tiny", {"inputs_ready": True})["ready"]
+        assert analysis.compatible_analyses(repo, source)
+    job = service.start_analysis(source, "tiny", {"inputs_ready": True}, request_id="light")
+    assert repo.status(job.run_id)["status"] == "pending"
+    for _ in range(2):
+        clear_history_cache()
+        records = service.history_index(job_types=EXPERIMENT_JOB_TYPES)
+        details = {x.status["run_id"]: x.detail() for x in records}
+        filtered = filter_runs([x.status for x in records], allowed_types=EXPERIMENT_JOB_TYPES,
+                               detail_loader=details.__getitem__)
+        assert any(x["run_id"] == job.run_id for x in filtered)
+        for status in filtered:
+            row = history_row(status, details[status["run_id"]], {}, related_details=details)
+            history_grid_row(row, details[row.run_id], universe_labels={}, related_details=details, runs_root=repo.root)
+    repo.transition(job.run_id, JobStatus.FAILED, error="fixture")
+    service.resume(job.run_id)
+    assert len(backend.calls) == 2
+    service.restart(job.run_id)
+    assert len(backend.calls) == 3
+
+
+def test_builtin_missing_artifacts_detected_without_calendar_or_hash(setup, monkeypatch):
+    from rstock.application import rare_relations_analysis as rare
+    repo, service, source, _, backend = setup
+    monkeypatch.setattr(analysis, "analysis_catalogue", lambda: (rare.definition(),))
+    monkeypatch.setattr(rare, "source_calendar", lambda *a: pytest.fail("Calendar in UI"))
+    monkeypatch.setattr(analysis, "digest", lambda *a: pytest.fail("Hash in UI"))
+    result = service.analysis_preflight(source, rare.ANALYSIS_ID, {})
+    assert not result["ready"] and not rare.definition().blocking_reasons
+    with pytest.raises(ValueError, match="Artefacts manquants"):
+        service.start_analysis(source, rare.ANALYSIS_ID, {}, request_id="blocked")
+    assert not backend.calls
+
+
+def test_preparation_cancellation_is_recorded_and_reuses_contract(setup, monkeypatch):
+    from rstock.progress import CancellationRequested
+    repo, service, source, item, _ = setup
+    job = service.start_analysis(source, "tiny", {"inputs_ready": True}, request_id="cancel")
+    spec = repo.load_spec(job.run_id)
+    with pytest.raises(CancellationRequested):
+        analysis.execute_analysis(spec, repo.run_directory(job.run_id)/"_cancelled", None, lambda: True)
+    assert analysis.execute_analysis(spec, repo.run_directory(job.run_id)/"_resumed", None, None)["complete"]
+    monkeypatch.setattr(analysis, "analysis_catalogue", lambda: (replace(item,
+        preflight=lambda *_: pytest.fail("Preparation must be reused"),
+        execute=lambda *_: pytest.fail("Analysis must be reused")),))
+    assert analysis.execute_analysis(spec, repo.run_directory(job.run_id)/"_republished", None, None)["complete"]
+
+
+def test_legacy_manifest_executes_with_original_hash_contract(setup):
+    repo, service, source, item, _ = setup
+    requested = analysis.prepare_analysis(repo, source, "tiny", {"inputs_ready": True}, request_id="legacy")
+    source_dir = repo.run_directory(source)
+    legacy = {**requested.scientific_analysis, "schema_version": 1,
+              "source_sha256": {name: analysis.digest(source_dir/name) for name in requested.scientific_analysis["source_identities"]},
+              "owner_manifest_sha256": None}
+    spec = replace(requested, scientific_analysis=legacy)
+    job = service.submit(spec)
+    assert analysis.execute_analysis(repo.load_spec(job.run_id), repo.run_directory(job.run_id)/"results", None, None)["complete"]
+
+
+def test_source_digest_change_after_preparation_refuses_reuse(setup):
+    repo, service, source, _, _ = setup
+    job = service.start_analysis(source, "tiny", {"inputs_ready": True}, request_id="changed-after")
+    spec = repo.load_spec(job.run_id)
+    analysis.execute_analysis(spec, repo.run_directory(job.run_id)/"_first", None, None)
+    repo.write_json(source, "results/tiny.json", {"value": 9})
+    with pytest.raises(ValueError, match="digest_changed"):
+        analysis.execute_analysis(spec, repo.run_directory(job.run_id)/"_second", None, None)
+
+
+def test_results_renderer_reads_only_worker_preview(tmp_path, monkeypatch):
+    import streamlit as st
+    from rstock.application import rare_relations_analysis as rare, grid_dataframe
+    results = tmp_path/"results"
+    results.mkdir()
+    csv = results/"persistence.csv"
+    csv.write_text("Raw payload must not be opened")
+    csv.with_name(csv.name+".preview.json").write_text(json.dumps({"columns":["Value"], "data":[[2]], "row_limit":500}))
+    original_open = Path.open
+    def guarded(path, *args, **kw):
+        if path.suffix == ".csv": pytest.fail("CSV read during UI rendering")
+        return original_open(path, *args, **kw)
+    monkeypatch.setattr(Path, "open", guarded)
+    monkeypatch.setattr(st, "caption", lambda *_: None)
+    rendered = []
+    monkeypatch.setattr(grid_dataframe, "dataframe", lambda data, **kw: rendered.append(data))
+    rare.render_results("persistence", "fixture", {"run_directory":str(tmp_path)})
+    assert rendered[0].Value.tolist() == [2]

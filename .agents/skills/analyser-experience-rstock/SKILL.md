@@ -6,7 +6,7 @@ description: Interpréter les résultats existants d'une expérience ou comparai
 # Analyser les résultats d'une expérience RStock
 
 Skill partagée : le directeur interprète et replace la décision dans la roadmap ;
-l'ingénieur vérifie sources et calculs lorsque nécessaire. Lire les
+Codex principal vérifie sources et calculs lorsque nécessaire. Lire les
 [instructions communes](../../../AGENTS.md) et la
 [roadmap scientifique](../../../rstock/docs/scientific_roadmap.md), les
 [stratégies](../../../rstock/docs/scientific_strategies.md) et les

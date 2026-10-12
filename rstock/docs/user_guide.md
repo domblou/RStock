@@ -963,8 +963,10 @@ Le catalogue contient des analyses programmées ; il n'existe pas d'éditeur lib
 Une analyse exploite les artefacts archivés sans entraîner de modèles ni modifier
 le run source. Une expérience dérivée peut, elle, recalculer des étapes.
 
-Le menu sert uniquement à choisir l'analyse. Son formulaire s'affiche ensuite
-dans la page, sous les deux actions, sans fenêtre flottante ni JSON technique.
+Les trois composants sont rapprochés sur une seule ligne alignée à gauche :
+**Créer une expérience dérivée**, **Lancer une analyse**, puis **Sélectionner une analyse**.
+Sélectionner une analyse affiche immédiatement son formulaire dans la page,
+sous cette ligne, sans fenêtre flottante ni JSON technique.
 Configurer ses paramètres, lire le résumé, puis cocher la confirmation avant
 soumission. Artefacts manquants, source incompatible ou règles scientifiques
 indéfinies empêchent le lancement avec une explication.
@@ -974,6 +976,17 @@ Les résultats non terminés sont signalés comme partiels. Une reprise conserve
 paramètres et empreintes ; une exécution indépendante reçoit un nouvel identifiant.
 Les liens permettent de revenir au run source et d'ouvrir ses analyses précédentes.
 La consultation des résultats d'analyse ne relance pas leur traitement.
+
+Le formulaire valide les paramètres et métadonnées sans lire les prédictions.
+Les blocages scientifiques connus sont affichés immédiatement. Pour une analyse
+disponible, la confirmation crée un run `pending` avant la préparation approfondie.
+Le worker effectue ensuite les empreintes, la validation du snapshot, le calendrier
+et les calculs sous le contrôle des ressources habituel. Les paramètres demandés
+restent immuables ; le contrat résolu est publié dans `analysis_preparation.json`.
+Les erreurs de préparation restent attachées au run ; une reprise conserve son ID.
+Les résultats tabulaires utilisent un aperçu préparé par le worker, limité à 500
+lignes. Les filtres portent sur cet aperçu. Un ancien résultat sans aperçu n'est
+pas chargé intégralement dans l'interface.
 
 **Persistance des relations rares** hérite des séances réellement évaluables dans
 les prédictions archivées du WF. Le formulaire propose soit une proportion de
@@ -986,14 +999,46 @@ résolues dans le service, par lecture en blocs, et mises en cache en mémoire t
 que les artefacts source ne changent pas ; la première lecture peut prendre du temps.
 Les dates résolues et références source font partie des paramètres figés du job.
 
-Le découpage 60/40 est retenu, sans prétendre à un optimum statistique. Le lancement
-reste bloqué : critères de sélection, support minimal, traitement des couvertures
-incomplètes, contrôle des recherches multiples et dépendances, critères d'évaluation
-et de décision restent à définir. Il n'existe aucun sélecteur, registre ou système
-d'approbation de protocoles dans cette fonctionnalité. Les 674 qualifiés sur
-l'ensemble du WF ne constituent pas une sélection préalable. L'analyse porte sur
-les relations à travers les modèles réentraînés du WF, pas sur la survie de modèles
-figés. Les anciens jobs et résultats restent consultables, sans migration en place.
+Le lancement est disponible depuis le 12 octobre 2026, avec la définition version 3.
+Le découpage 60/40 est retenu, sans prétendre à un optimum statistique. Les seuils
+ci-dessous ont été retenus pour l'implémentation, **sans validation empirique** :
+
+- Population : toutes les relations archivées, avant qualification, en Up. Les 674
+  qualifiés sur l'ensemble du WF ne constituent pas une sélection préalable.
+- Référence : fréquence Up du train exact de chaque fenêtre, avec le masque des
+  variables et des labels Up/Down. Gain quotidien = log loss constante moins modèle.
+  Gain relatif = gain moyen divisé par log loss moyenne de la constante.
+- Support par période : au moins 100 séances, 20 observations de chaque classe et
+  `floor(n/(2*ceil(cuberoot(n)))) >= 10`. Couverture de 100 % du calendrier commun.
+- Sélection : gain relatif ≥ 1 % et p ajustée Holm ≤ 5 %, avec variance HAC
+  Newey–West aux retards `L=ceil(cuberoot(n))` et `2L`; retenir la plus grande p.
+  La famille Holm inclut toutes les relations source, avec p=1 pour les non admissibles.
+  Classement par gain relatif décroissant, p ajustée croissante, puis identifiant.
+  Toutes les relations retenues sont conservées, sans top-k. Brier est descriptif.
+- Évaluation : liste sélectionnée figée, nouvelle correction Holm sur cette liste,
+  y compris les relations indéterminées avec p=1. Une couverture ou un support
+  insuffisant, ou une variance HAC non positive/non finie, donne « indéterminé ».
+  Il n'y a aucune imputation ni modification rétrospective de la sélection.
+- « Persistance historique soutenue » : gain relatif ≥ 1 %, Holm ≤ 5 %, gain
+  strictement positif dans au moins deux des trois segments chronologiques de
+  l'évaluation, et gain strictement positif après retrait du meilleur segment.
+  Les segments sont aussi égaux que possible; le reste va aux premiers segments.
+  Les autres relations évaluables donnent « persistance non démontrée ».
+
+Les vues Sélection, Persistance, Couverture, Cibles et Population présentent les
+pertes, supports, exclusions et décisions. Les CSV complets et `scientific_rules.json`
+conservent les règles, la sélection et la provenance; l'interface utilise seulement
+les aperçus bornés. Le résumé conserve toutes les relations sélectionnées comme
+dénominateur, y compris les indéterminées. Une absence de relation admissible,
+sélectionnée ou évaluable termine le job avec diagnostics, sans assouplissement.
+Une incohérence de contrat ou d'empreinte fait échouer le job.
+
+L'analyse porte sur les relations à travers les modèles réentraînés du WF, pas sur
+la survie de modèles figés. HAC est une approximation asymptotique; les résultats
+restent historiques conditionnels, sans confirmation indépendante Forward ni
+preuve de rentabilité ou du MVP. Aucun entraînement ni recalibrage n'est effectué.
+Les anciens jobs restent consultables sans migration; les versions 1/2 ne peuvent
+pas reprendre silencieusement sous les règles de la version 3.
 
 ### Purge et suppression définitive
 

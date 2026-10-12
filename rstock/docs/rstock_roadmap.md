@@ -6,6 +6,15 @@ leur présence ne démontre pas leur efficacité prédictive ni une validation c
 Les protocoles, expériences et conclusions restent dans [scientific_roadmap.md](scientific_roadmap.md).
 Mise à jour du 12 octobre 2026 : mécanisme d'analyses programmées intégré et vérifié
 sur fixtures techniques ; aucune nouvelle expérience scientifique exécutée.
+Correction UX du 12 octobre 2026 : détails WF autonomes/E2E avec deux boutons
+et une liste d'analyses rapprochés sur une ligne ; formulaire affiché dès la sélection.
+Correction technique du 12 octobre 2026 : soumission et reprise légères ; préparation
+approfondie checkpointée dans le worker, contrat résolu séparé et aperçus bornés
+des résultats.
+Implémentation du 12 octobre 2026 : persistance des relations rares débloquée
+(définition 3), sélection log loss/HAC/Holm, support et couverture complets,
+évaluation temporelle et sélection checkpointée. Validation sur fixtures synthétiques
+uniquement; aucune analyse scientifique réelle lancée et aucun seuil validé empiriquement.
 
 ## A. État actuel de RStock
 
@@ -14,7 +23,7 @@ sur fixtures techniques ; aucune nouvelle expérience scientifique exécutée.
 | Données et univers | Cache marché, calendriers, variables retardées ; univers manuels et sauvegardés, échantillons reproductibles. |
 | Laboratoire | WF, préfiltre et consensus, XGBoost Up/Down, calibration des modèles et seuils, qualification, Holdout et chaîne E2E. Types de variables expérimentaux et volatilité cible disponibles en recherche, avec restrictions selon le parcours. |
 | Validation et analyse | Forward à candidats, modèles et seuils figés après cutoff ; comparaisons, référence constante alignée, diagnostics de sélection, vieillissement et contexte de marché. |
-| Analyses programmées | Catalogue et jobs distincts des dérivés, sources WF autonomes/E2E, Historique et détail commun, provenance et reprise. Formulaire intégré sous les actions ; persistance avec calendrier source et coupure commune 60/40 ou nombre de séances. Gestion des protocoles retirée et reportée ; lancement bloqué par les règles de sélection/évaluation encore indéfinies. |
+| Analyses programmées | Catalogue et jobs distincts des dérivés, sources WF autonomes/E2E, Historique et détail commun, provenance et reprise. Formulaire intégré sous les actions ; persistance disponible avec coupure commune 60/40 ou nombre de séances, sélection Up log loss/HAC/Holm et évaluation à liste figée. Gestion des protocoles reportée. |
 | Maintenance et présentation | Grille commune et onglets chargés à la demande ; télémétrie des tentatives ; purge, suppression avec dépendances et index reconstructible. |
 | Exécution et traçabilité | Jobs asynchrones, parallélisme, batches, checkpoints et reprises ; configurations figées, historique, duplication et dérivation de runs. |
 | Opérationnel | Promotion manuelle et promotion automatique optionnelle E2E, registre versionné, entraînement Up/Down, activation, observation (`Watching`), désactivation et retrait ; mise à jour marché, prédictions, screening et résultats réalisés. |

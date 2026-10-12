@@ -9,23 +9,23 @@ from .scientific_analysis import compatible_analyses, get_analysis
 
 
 def render_analysis_launcher(st, service, source_run_id, *, key, navigate):
-    """Only the catalogue selector belongs in the action menu."""
-    with st.popover("Lancer une analyse"):
-        try:
-            definitions = compatible_analyses(service.run_service.repository, source_run_id)
-        except (OSError, ValueError) as error:
-            st.warning(str(error))
-            return None
-        if not definitions:
-            st.info("Aucune analyse programmée compatible.")
-            return None
-        return st.selectbox("Analyse programmée", [x.id for x in definitions],
-            index=None, placeholder="Choisir une analyse",
-            format_func=lambda value: next(x.label for x in definitions if x.id == value), key=key+"-type")
+    """Keep the launch button and catalogue selector on the action row."""
+    try:
+        definitions = compatible_analyses(service.run_service.repository, source_run_id)
+    except (OSError, ValueError) as error:
+        st.warning(str(error))
+        definitions = []
+    st.button("Lancer une analyse", key=key+"-configure",
+                        disabled=not st.session_state.get(key+"-type"))
+    selected = st.selectbox("Sélectionner une analyse", [x.id for x in definitions],
+        index=None, placeholder="Sélectionner une analyse", label_visibility="collapsed",
+        width=315, disabled=not definitions,
+        format_func=lambda value: next(x.label for x in definitions if x.id == value), key=key+"-type")
+    return selected
 
 
 def render_analysis_form(st, service, source_run_id, selected, *, key, navigate):
-    """Inline configuration below the actions, outside their columns/popover."""
+    """Inline configuration below the action row."""
     request_key = key+"-request"
     st.session_state.setdefault(request_key, uuid.uuid4().hex)
     if selected:
@@ -86,10 +86,13 @@ def render_analysis_detail(st, service, run_id, status, detail, *, render_resour
         st.subheader(item.label)
         st.json({"status": status, "progress": detail.get("progress"), "parameters": manifest.get("parameters"),
                  "source_run_id": manifest.get("source_run_id"), "definition_version": manifest.get("definition_version")})
+        prepared = root / "results/analysis_preparation.json"
+        if prepared.is_file() and prepared.stat().st_size <= 2 * 1024 * 1024:
+            st.json({"parameters_effectifs": json.loads(prepared.read_text(encoding="utf-8"))["parameters"]})
         path = root / "results/analysis_result.json"
         if status.get("status") != "completed":
             st.info("Exécution non terminée : les artefacts disponibles sont partiels.")
-        elif path.is_file():
+        elif path.is_file() and path.stat().st_size <= 2 * 1024 * 1024:
             st.json(json.loads(path.read_text(encoding="utf-8")))
         if st.button("Ouvrir le run source", key=f"analysis-source-{run_id}"):
             navigate("detail", [manifest["owner_run_id"]])

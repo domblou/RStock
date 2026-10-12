@@ -69,8 +69,15 @@ Temporal Stability contre Single Origin reste historiquement non concluant.
    un nombre de séances explicite peut remplacer la proportion. Calendrier et
    dates sont hérités des prédictions évaluables du source, sans ajustement par
    relation ni optimisation du découpage. Cette règle n'est pas un optimum prouvé.
-   Les critères de sélection, support, couvertures, contrôle des recherches
-   multiples/dépendances et décision restent à définir : lancement bloqué.
+   Les règles finalisées par le directeur puis autorisées pour l'implémentation
+   le 12 octobre sont disponibles en définition 3 : gain relatif log loss ≥ 1 %,
+   HAC aux retards L/2L, Holm 5 %, support de 100 séances/20 observations par classe,
+   au moins 10 blocs de longueur 2L et couverture complète; évaluation avec gain
+   positif dans deux tiers et après retrait du meilleur tiers. Voir le
+   [guide](user_guide.md). Ces seuils ne sont pas validés empiriquement.
+   Implémentation vérifiée sur fixtures synthétiques seulement; aucun nouveau
+   run scientifique, résultat de persistance ou preuve Forward. Les archives
+   déjà examinées ne constituent pas une confirmation indépendante.
    La gestion applicative de protocoles est reportée et retirée du code ; aucun
    résultat scientifique nouveau n'est établi par cette correction technique.
 2. **Démontrer la généralisation.** Expliquer l’écart WF/Holdout/Forward ; définir

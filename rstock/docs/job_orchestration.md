@@ -49,9 +49,8 @@ propres au job ; la publication complète et la restauration des sorties doivent
 rester distinctes des artefacts partiels. Une reprise refuse des paramètres ou
 une source modifiés. Aucun entraînement n'est une étape de ce workflow.
 
-Le module `rare_relations_analysis.py` conserve les contrôles des masques,
-constantes train et pertes appariées, mais n'exécute pas de sélection scientifique
-indéfinie. Son calendrier est l'union ordonnée des séances évaluables réellement
+Le module `rare_relations_analysis.py` exécute la sélection et l'évaluation Up sur
+les pertes appariées à la constante du train exact. Son calendrier est l'union ordonnée des séances évaluables réellement
 archivées, vérifiées contre les fenêtres et le snapshot. Une matrice booléenne
 compacte conserve la couverture de chaque relation, sans inventer de lignes.
 Les fenêtres partielles restent visibles. Une proportion de sélection (60 % par
@@ -60,13 +59,28 @@ l'évaluation couvre toutes les séances restantes. Le précontrôle retourne le
 paramètres résolus, dates, empreinte du calendrier et références source à figer
 dans le manifeste normal du job.
 
-La gestion de protocoles est reportée, sans registre, structure, empreinte ou
-approbation dédiée dans le code des analyses. Le lancement de persistance reste
-bloqué par l'absence de critères de sélection, support, traitement des couvertures,
-contrôle des recherches multiples/dépendances et critères d'évaluation/décision.
-Le découpage temporel seul ne définit pas ces règles. Les anciennes métadonnées
-restent lisibles sans dépendance active ni migration ; une ancienne exécution ne
-reprend pas silencieusement avec la nouvelle sémantique (définition version 2).
+La gestion de protocoles reste reportée, sans registre ni approbation dédiée.
+La définition version 3 fige `rules` dans les paramètres à la soumission et refuse
+leur modification. Le contrat préparé conserve calendrier, références et empreintes.
+Les contrôles scientifiques sont décrits dans le [guide](user_guide.md).
+La sélection est commitée dans l'artefact `rare_selection`, puis marquée terminée;
+une interruption avant cette marque recalcule la sélection. Une reprise après
+cette marque recharge la liste et les scores figés, sans nouvelle sélection.
+La lecture des prédictions en blocs valide les doublons interblocs et les labels;
+quatre tableaux numériques conservent les pertes par relation/séance, sans imputation.
+Une lecture interrompue est recommencée; aucune sortie partielle n'est publiée comme
+résultat terminé. Le workflow commun revalide la source avant gel/publication des
+sorties et restaure les sorties terminées depuis leurs empreintes checkpointées.
+
+Pour chaque relation complète, avec `x_t=g_t-mean(g)` et `gamma_k=sum(x_t*x_(t-k))/n`,
+la variance HAC est `gamma_0+2*sum((1-k/(q+1))*gamma_k)` et l'erreur-type sa racine
+divisée par `sqrt(n)`. La p unilatérale est `1-Phi(mean(g)/SE)`; retenir le maximum
+aux deux retards L et 2L. Variance non positive/non finie : inférence indisponible.
+Holm conserve tous les membres de chaque famille, les non admissibles avec p=1;
+ses p ajustées sont le maximum cumulatif de `(m-j+1)*p_(j)`, borné à 1.
+`scientific_rules.json` conserve version, règles, coupure, sélection et empreintes.
+Les anciennes métadonnées restent lisibles sans migration; les définitions 1/2
+ne reprennent pas silencieusement avec la sémantique de la version 3.
 
 ## Walk-forward : deux niveaux de lots
 
@@ -182,3 +196,38 @@ Contrats de tests : `test_combination_planning.py`, `test_walk_forward_batching.
 `test_heavy_slot_leases.py`, `test_heavy_slot_fairness.py`, `test_publication_recovery.py`
 et `test_calibration_sampling.py`, sous `tests/`. Aucun calcul métier ou test de
 performance n'est nécessaire pour consulter ce document.
+
+
+## Analyses scientifiques : demande légère et préparation worker
+
+Les nouveaux manifests `scientific_analysis.schema_version=2` figent la définition,
+sa version, les paramètres demandés, les sources propriétaire/physique et l'identité
+(taille, mtime, ctime, inode) des artefacts. L'UI et les méthodes `submit`, `resume`
+et `restart` ne parcourent pas les prédictions ni ne calculent leurs empreintes.
+La validation légère vérifie disponibilité scientifique, paramètres et métadonnées.
+Un protocole connu comme bloqué empêche immédiatement la soumission.
+
+Le run est persisté avant le lancement via `LocalProcessBackend`. Le worker utilise
+les leases, slots, ressources et progression existants. Sa phase `preparation`
+calcule les digests, vérifie la stabilité des sources et les contrats hérités E2E,
+puis résout calendrier et paramètres. Son artefact checkpointé `prepared_contract`
+est distinct de la demande : ni `config.json` ni le fingerprint ne sont enrichis.
+Le contrat est aussi publié dans `results/analysis_preparation.json`.
+
+La reprise revalide les empreintes dans le worker et réutilise la préparation et
+les résultats terminés ; une interruption avant validation complète ne valide pas
+une phase. Les erreurs et annulations restent dans le run. Les manifests historiques
+v1 conservent leurs paramètres et digests ; leurs validations approfondies sont
+également réservées au worker. La publication vérifie les résultats checkpointés.
+
+Les identités de fichiers détectent les mutations ordinaires entre demande et
+préparation ; elles ne prouvent pas une immutabilité cryptographique au moment de
+la confirmation. Les digests établis par le worker deviennent le contrat de reprise.
+Les digests de snapshot et de stages E2E déjà persistés sont vérifiés lorsqu'ils existent.
+Aucun protocole scientifique nouveau n'est défini par cette séparation technique.
+
+Le worker produit des fichiers `*.csv.preview.json`, limités à 500 lignes et environ
+2 Mio. Les vues d'analyse ne lisent plus les CSV complets. Les anciennes publications
+sans aperçu restent archivées ; la vue signale l'absence au lieu de scanner les données.
+Tests de contrat : `test_scientific_analysis.py`, `test_rare_relations_analysis.py`,
+`test_history_index.py` et `test_publication_recovery.py`, sur fixtures uniquement.

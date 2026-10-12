@@ -223,8 +223,8 @@ class RunService:
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
         if spec.job_type is JobType.SCIENTIFIC_ANALYSIS:
-            from .scientific_analysis import validate_analysis_spec
-            validate_analysis_spec(self.repository, spec)
+            from .scientific_analysis import validate_analysis_request
+            validate_analysis_request(self.repository, spec)
         if (spec.job_type is JobType.WALK_FORWARD and (spec.source_prefilter_run or (
                 spec.prefilter_execution_version >= 2
                 and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None))):
@@ -675,8 +675,8 @@ class RunService:
                 raise ValueError("Ce run est déjà en cours ou en attente.")
             spec = self.repository.load_spec(run_id)
             if spec.job_type is JobType.SCIENTIFIC_ANALYSIS:
-                from .scientific_analysis import validate_analysis_spec
-                validate_analysis_spec(self.repository, spec)
+                from .scientific_analysis import validate_analysis_request
+                validate_analysis_request(self.repository, spec)
             if spec.job_type is JobType.WALK_FORWARD and spec.source_prefilter_run:
                 from .prefilter_contract import load
                 load(self.repository, spec)
