@@ -14,6 +14,7 @@ from threading import RLock
 from .domain import RunMetadata
 
 _CONFIG_FIELDS = frozenset({
+    "scientific_analysis",
     "job_type", "model_id", "symbols", "target_symbols", "run_description",
     "primary_universe_id", "universe_selection", "derivation",
     "prefilter_derivation", "walk_forward_derivation", "source_prefilter_run",

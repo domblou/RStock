@@ -8,14 +8,18 @@ description: Préparer un protocole, une comparaison ou une campagne RStock avec
 Skill partagée : le directeur définit la question et la décision scientifique ;
 l'ingénieur vérifie données, contrats, faisabilité et coût. Lire les
 [instructions communes](../../../AGENTS.md) et la
-[roadmap scientifique](../../../SCIENTIFIC_ROADMAP.md). Les chemins ci-dessous
+[roadmap scientifique](../../../rstock/docs/scientific_roadmap.md), les
+[stratégies](../../../rstock/docs/scientific_strategies.md) et les
+[expériences](../../../rstock/docs/scientific_experiments.md) pertinentes. Les chemins ci-dessous
 sont relatifs à cette skill ; travailler depuis la racine du dépôt.
 
 ## Préparation
 
 - Rattacher la question à l'axe actuel de la roadmap. Expliquer quelle décision
   l'expérience peut changer et pourquoi son potentiel justifie l'effort MVP.
-  Réutiliser les résultats existants ; une nouvelle série de microtests peu
+  Vérifier les stratégies, expériences antérieures et conclusions, identifier les
+  runs/preuves disponibles ; ne répéter une investigation non concluante qu'avec
+  un élément nouveau explicite. Réutiliser les résultats ; une série de microtests peu
   prometteurs n'est pas une réponse par défaut.
 - Identifier les sources : run IDs, rapports, commit et modifications pertinentes,
   snapshots, manifests et empreintes disponibles. Une configuration préparée
@@ -45,6 +49,15 @@ référence/population, sources et paramètres, séparation temporelle, métriqu
 critères de poursuite/arrêt proposés, coût, parcours/commandes et livrables
 reproductibles (config, manifests, résultats et synthèse référencés).
 
+Réutiliser les critères approuvés applicables. Tout critère manquant de poursuite
+ou d'arrêt est proposé explicitement comme **non approuvé**, jamais comme seuil
+historique. Faire approuver et figer ces critères avant l'évaluation destinée à
+trancher ; ne pas les ajuster après consultation des résultats pour créer un succès.
+Si l'édition est autorisée, répartir protocoles/exécutions/résultats/limites dans
+le registre des expériences, évaluation/décisions dans les stratégies et priorités/
+validations dans la roadmap, sans duplication. Une mission explicitement en
+lecture seule produit recommandations et protocole proposé sans aucune écriture.
+
 Le MVP vise Up, qualité supérieure à une référence simple et rendement brut
 positif maintenus en Forward. Ne pas imposer les coûts de transaction ni inventer
 un horizon ou seuil déjà approuvé. Préfiltre, Down et régimes suivent la roadmap ;
@@ -60,7 +73,7 @@ les agents ni partager l'historique complet.
 ## Références selon le besoin
 
 - Parcours et paramètres : [guide utilisateur](../../../rstock/docs/user_guide.md).
-- Batching/reprise : [contrats WF/E2E](../../../rstock/docs/WF_BATCHES.md).
+- Batching/reprise : [contrats des jobs](../../../rstock/docs/job_orchestration.md).
 - Variantes : [types de modèles](../../../rstock/docs/predictive_model_types.md),
   [sélection chronologique](../../../rstock/docs/CHRONOLOGICAL_XGBOOST.md).
 - Cartographie technique : [recensement](../../../reports/application_inventory_20261011/RECENSEMENT.md).

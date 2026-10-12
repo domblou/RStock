@@ -1,0 +1,7 @@
+Family,SelectedAfterFirst4,Candidates,Targets,EqualTargetDeltaLogLoss,EqualTargetDeltaBrier,EqualTargetMeanWindowAUC,Comparison,CommonTargets,TargetsWithoutSelectedCandidates,MatchedTargetAllCandidateDeltaLL,MatchedTargetRejectedDeltaLL,EqualTargetDeltaLLSelectedMinusRejected,SelectedCandidatesBeatConstant,MatchedTargetsRejectedCandidates,MatchedTargetsRejectedCandidatesBeatConstant,SelectedTargetsBeatConstant,AllCandidateSpearmanPrefixMedianAUCLaterMeanWindowAUC
+external20,False,3455.0,20.0,0.02819512219113542,0.008603026407296878,0.5026608059432253,,,,,,,,,,,
+external20,True,345.0,20.0,0.03311681212093988,0.010228378458830178,0.5035743296876106,,,,,,,,,,,
+external20,,,,,,,selected minus rejected on same target/date,20.0,[],0.028700456932163783,0.02819512219113542,0.004921689929804458,12.0,3455.0,249.0,0.0,0.020787175764512066
+mixed20,False,3327.0,20.0,0.02883674674271164,0.00889465273863692,0.5081245745895163,,,,,,,,,,,
+mixed20,True,473.0,18.0,0.030825246132775583,0.009653138559687758,0.5103690057906072,,,,,,,,,,,
+mixed20,,,,,,,selected minus rejected on same target/date,18.0,"['CSCO', 'REGN']",0.02913931485104764,0.02889183230745303,0.0019334138253225502,14.0,2947.0,180.0,0.0,-0.10587091991868709

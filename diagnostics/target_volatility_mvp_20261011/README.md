@@ -1,5 +1,9 @@
 # MVP volatilité cible — configurations préparées, aucune expérience lancée
 
+> Ce dossier décrit la préparation historique, qui n’avait créé aucun job.
+> Le dérivé `20261011T130921_392c045368` a ensuite été exécuté. Ses résultats et
+> limites sont consignés en EXP-012 du [registre scientifique](../../rstock/docs/scientific_experiments.md).
+
 Source vérifiée : `20261011T115541_2a0e278563`, 20 titres, cutoff `2026-07-06`,
 trois retards intraday, profondeur 2, eta 0,20, 20 tours fixes, seed 1234,
 lambda 5, expanding initial 252, test/pas 63, holdout séparé 63 activé.

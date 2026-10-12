@@ -222,6 +222,9 @@ class RunService:
             time.sleep(0.05)
 
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
+        if spec.job_type is JobType.SCIENTIFIC_ANALYSIS:
+            from .scientific_analysis import validate_analysis_spec
+            validate_analysis_spec(self.repository, spec)
         if (spec.job_type is JobType.WALK_FORWARD and (spec.source_prefilter_run or (
                 spec.prefilter_execution_version >= 2
                 and spec.config.predictor_prefilter_enabled and spec.forced_symbol_sets is None))):
@@ -231,6 +234,9 @@ class RunService:
             raise ValueError("Submit derived experiments through create_derived")
         with self._submission_lock():
             for status in self.repository.list_runs():
+                if (spec.job_type is JobType.SCIENTIFIC_ANALYSIS
+                        and status.get("configuration_fingerprint") == spec.fingerprint):
+                    return SubmissionResult(str(status["run_id"]), False)
                 if (
                     status["status"] in ACTIVE_STATUSES
                     and status.get("configuration_fingerprint") == spec.fingerprint
@@ -668,10 +674,14 @@ class RunService:
             if status["status"] in ACTIVE_STATUSES:
                 raise ValueError("Ce run est déjà en cours ou en attente.")
             spec = self.repository.load_spec(run_id)
+            if spec.job_type is JobType.SCIENTIFIC_ANALYSIS:
+                from .scientific_analysis import validate_analysis_spec
+                validate_analysis_spec(self.repository, spec)
             if spec.job_type is JobType.WALK_FORWARD and spec.source_prefilter_run:
                 from .prefilter_contract import load
                 load(self.repository, spec)
             resumable_types = {
+                JobType.SCIENTIFIC_ANALYSIS,
                 JobType.WALK_FORWARD,
                 JobType.PREDICTOR_PREFILTER,
                 JobType.THRESHOLD_PARAMETER_CALIBRATION,
@@ -730,6 +740,9 @@ class RunService:
         if self.repository.storage(run_id)["state"] != "full":
             raise ValueError("Un run purgé ne peut pas être relancé.")
         spec = self.repository.load_spec(run_id)
+        if spec.job_type is JobType.SCIENTIFIC_ANALYSIS:
+            import uuid
+            return self.submit(replace(spec, scientific_analysis={**spec.scientific_analysis, "request_id": uuid.uuid4().hex}))
         if spec.derivation is not None or spec.prefilter_derivation is not None:
             raise ValueError(
                 "Use Create a derived experiment to start a new branch; "

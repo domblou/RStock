@@ -98,6 +98,11 @@ def history_grid_row(row, detail, *, universe_labels, related_details, runs_root
     metadata = detail.get("metadata", {})
     metadata = metadata if isinstance(metadata, Mapping) else {}
     universe = _history_universe_label(config, metadata, universe_labels, related_details)
+    # Modern snapshots separate targets from market/context symbols. Legacy
+    # snapshots used symbols for both; absent lists must not invent a zero.
+    targets = config.get("target_symbols", config.get("symbols"))
+    if universe and isinstance(targets, (list, tuple)):
+        universe = f"{universe} ({len(set(targets))})"
     return {
         "Run ID": row.run_id, "Date / heure": row.date_time,
         "Type": row.display()["Type"], "Univers": universe or row.context,

@@ -15,6 +15,7 @@ from rstock.combinations import (
 
 
 EXPERIMENT_JOB_TYPES = frozenset({
+    "scientific_analysis",
     "walk_forward", "predictor_prefilter", "xgboost_calibration", "threshold_parameter_calibration",
     "threshold_calibration", "holdout_evaluation", "promotion_qualification", "end_to_end",
     "forward_simulation",
@@ -27,6 +28,7 @@ PRODUCTION_JOB_TYPES = frozenset({
     "daily_screening", "realized_validation", "operational_run",
 })
 JOB_LABELS = {
+    "scientific_analysis": "Analyse scientifique",
     "end_to_end": "End-to-end",
     "predictor_prefilter": "Préfiltre prédicteurs",
     "forward_simulation": "Forward Simulation",

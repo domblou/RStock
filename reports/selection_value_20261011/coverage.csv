@@ -1,0 +1,6 @@
+Family,Run,WFPopulation,WFQualified,HoldoutEvaluated,HoldoutConfirmed,TargetsInWF,TargetsWithHoldout,RejectedWithHoldout,PredictiveModelType,XGBDepth,XGBEta,XGBRounds,XGBLambda
+constant20,20261011T031914_c00cea6f22,20,0,0,0,20,0,0,constant_probability,4,0.2,20,5.0
+target20,20261011T031942_217eeee2c1,20,1,1,0,20,1,0,target_only,4,0.2,20,5.0
+mixed20,20261011T032130_4742d2f509,3800,121,121,56,20,15,0,target_and_external,4,0.2,20,5.0
+external20,20261011T032201_17ece38f7b,3800,107,107,39,20,19,0,external_only,4,0.2,20,5.0
+external150,20261011T133446_bab008d129,22350,674,674,342,150,141,0,external_only,2,0.2,20,5.0

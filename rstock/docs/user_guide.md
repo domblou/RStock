@@ -933,6 +933,12 @@ modifie ni les modèles, ni les prédictions, ni les signaux.
 
 La page Historique permet de retrouver les runs exécutés.
 
+Dans la grille, le nom de l’univers est suivi du nombre de cibles figées dans
+la configuration du run, entre parenthèses. Les anciens runs sans liste de
+cibles utilisent leur liste de symboles ; si cette information manque, aucun
+nombre n’est ajouté. Ce nombre exclut les symboles de contexte des runs modernes
+et ne représente pas le nombre de modèles qualifiés.
+
 Chaque run conserve notamment :
 
 - configuration;
@@ -948,6 +954,46 @@ Chaque run conserve notamment :
 Les expériences peuvent être dupliquées afin de comparer différentes méthodologies tout en conservant la même population de symboles.
 
 Cette approche est préférable à la reconstruction manuelle d’une expérience.
+
+### Analyses scientifiques programmées
+
+Dans **Historique → Détail du run**, **Lancer une analyse** se trouve à droite
+de **Créer une expérience dérivée**, pour un WF autonome ou l'onglet WF d'un E2E.
+Le catalogue contient des analyses programmées ; il n'existe pas d'éditeur libre.
+Une analyse exploite les artefacts archivés sans entraîner de modèles ni modifier
+le run source. Une expérience dérivée peut, elle, recalculer des étapes.
+
+Le menu sert uniquement à choisir l'analyse. Son formulaire s'affiche ensuite
+dans la page, sous les deux actions, sans fenêtre flottante ni JSON technique.
+Configurer ses paramètres, lire le résumé, puis cocher la confirmation avant
+soumission. Artefacts manquants, source incompatible ou règles scientifiques
+indéfinies empêchent le lancement avec une explication.
+Le job possède son propre identifiant dans l'Historique. Son détail comporte
+**Résumé**, **Ressources**, **Technique** et les résultats spécialisés persistés.
+Les résultats non terminés sont signalés comme partiels. Une reprise conserve
+paramètres et empreintes ; une exécution indépendante reçoit un nouvel identifiant.
+Les liens permettent de revenir au run source et d'ouvrir ses analyses précédentes.
+La consultation des résultats d'analyse ne relance pas leur traitement.
+
+**Persistance des relations rares** hérite des séances réellement évaluables dans
+les prédictions archivées du WF. Le formulaire propose soit une proportion de
+sélection (60 % par défaut), soit un nombre de séances, sans saisie de dates.
+La proportion est arrondie à l'entier inférieur ; toutes les séances restantes
+servent à l'évaluation. La coupure est commune à toutes les relations et ne se
+déplace pas pour les couvertures incomplètes. Le résumé affiche période disponible,
+effectifs, dates résolues et avertissements de couverture. Ces informations sont
+résolues dans le service, par lecture en blocs, et mises en cache en mémoire tant
+que les artefacts source ne changent pas ; la première lecture peut prendre du temps.
+Les dates résolues et références source font partie des paramètres figés du job.
+
+Le découpage 60/40 est retenu, sans prétendre à un optimum statistique. Le lancement
+reste bloqué : critères de sélection, support minimal, traitement des couvertures
+incomplètes, contrôle des recherches multiples et dépendances, critères d'évaluation
+et de décision restent à définir. Il n'existe aucun sélecteur, registre ou système
+d'approbation de protocoles dans cette fonctionnalité. Les 674 qualifiés sur
+l'ensemble du WF ne constituent pas une sélection préalable. L'analyse porte sur
+les relations à travers les modèles réentraînés du WF, pas sur la survie de modèles
+figés. Les anciens jobs et résultats restent consultables, sans migration en place.
 
 ### Purge et suppression définitive
 
@@ -982,8 +1028,11 @@ restauration, elle est signalée
 et doit être résolue avant de poursuivre. Les journaux terminés restent conservés
 pour empêcher une écriture périmée de recréer un run ou une référence supprimée.
 
-La préparation construit une seule vue temporaire des propriétaires et références,
-sans index persistant. Elle ne mesure pas le volume des dossiers et ne lit pas les
+La préparation construit une vue des propriétaires et références, assistée par
+un index de dépendances dérivé sous `.rstock-dependency-index/`. L'index réutilise
+les références extraites des fichiers dont l'identité est inchangée ; les sources
+persistantes restent autoritaires. Il est reconstructible via
+`RunDeletionService.rebuild_dependency_index()`, opération explicite de maintenance. Elle ne mesure pas le volume des dossiers et ne lit pas les
 exports numériques de diagnostics ni les marqueurs de lots des checkpoints : ces
 schémas ne portent pas de provenance. Les fichiers inconnus restent contrôlés, et
 les CSV sans colonnes de références nécessitent seulement une lecture de l’en-tête.
@@ -1027,6 +1076,28 @@ type distinct. La grille indique son parent direct et sa configuration gagnante;
 le détail présente les candidats, leur rang et les métriques de développement.
 
 ## Walk-forward batché et End-to-end
+
+Les contrats de maintenance sont dans [Jobs, lots et reprise durable](job_orchestration.md).
+Les politiques d'échantillonnage sont dans [Sélection et calibrations XGBoost](CHRONOLOGICAL_XGBOOST.md).
+
+### Capacité et paramètres figés
+
+| Paramètre | Défaut actuel | Portée |
+|---|---:|---|
+| `walk_forward_max_combinations_per_batch` | 2 200 000 | Combinaisons par enfant WF ; nombre réel de lots calculé après préfiltrage. |
+| `walk_forward_batch_size` | 25 | Sous-batch interne de calcul et checkpoint. |
+| `xgboost_global_max_qualified_combinations` | 500 | Sets qualifiés dans l'échantillonnage global V2. |
+| `threshold_parameter_calibration_max_models` | 500 | Modèles directionnels en paires Up/Down, soit 250 sets au maximum. |
+
+Ces valeurs sont figées au lancement. Une reprise garde le snapshot ; une
+relance crée un nouveau run. Pour un snapshot historique sans ces champs, la
+capacité WF vaut 2 200 000 et les plafonds de calibration valent `None`, avec la
+politique historique selon la provenance/version. Une valeur explicitement
+persistée prévaut : capacité WF `None` conserve le chemin historique mono-run.
+`max_generated_sets` reste une protection des chemins qui matérialisent les
+combinaisons ; le WF avec planificateur utilise la capacité par lot.
+
+### Lancement et suivi
 
 Un walk-forward trop volumineux est automatiquement découpé en batchs techniques
 selon la capacité configurée. La prévisualisation affiche le nombre exact de
@@ -1211,8 +1282,8 @@ Après leur achèvement, RStock compare automatiquement quatre gates : rendement
 des candidats, AUC holdout médiane, avantage de précision par rapport à la
 fréquence naturelle de la direction, puis rendement directionnel moyen. Les IC
 sont construits par bootstrap de blocs de dates déterministe. `passed`, `failed`,
-`inconclusive` et `invalid` restent des états distincts; aucun score composite
-ne produit aucun score composite. La largeur maximale d IC s applique seulement à la précision.
+`inconclusive` et `invalid` restent des états distincts ; la décision repose sur
+les gates, sans score composite. La largeur maximale d’IC s’applique seulement à la précision.
 
 Sans validation temporelle, la promotion automatique conserve son comportement
 historique après la chaîne normale. Avec validation temporelle, aucune promotion
@@ -1756,3 +1827,35 @@ corrélés limitent l'interprétation des comparaisons.
 
 **Roadmap scientifique :** drift des features et régimes de marché restent
 différés jusqu'à la définition d'un protocole de référence et de persistance.
+
+# 30. Navigation, variantes de recherche et ressources
+
+La navigation comprend **Surveillance**, **Rendement**, **Modèles**, **Historique**,
+**Expériences**, **Univers**, **Paramètres**, **Simulation** et **Documentation**.
+La page Documentation affiche les sections de ce guide ; les documents techniques
+liés ci-dessous sont consultables dans le dépôt.
+
+Dans **Expériences**, chaque run fige son type : externes, probabilité constante,
+cible seule ou cible + externes. L'option **Ajouter la volatilité du titre cible**
+ajoute une variable passée avec un nombre de séances configurable (21 par défaut).
+La constante ignore cette option. Les limites de recherche, entrées requises et
+comparaisons alignées sont dans [Types de modèles prédictifs](predictive_model_types.md).
+Le texte d'aide des Paramètres qui limite encore ces types au seul WF est plus
+restrictif que le contrat actuel WF/E2E ; promotion et Forward/Production restent
+bloqués pour les types autres que `external_only`.
+
+Dans le détail d'un run, **Technique → Ressources** affiche, lorsque disponibles,
+les tentatives, phases, attentes de slots et mesures CPU/mémoire persistées.
+Les maxima sont échantillonnés, les sommes de calcul ne sont pas des durées murales
+et une ancienne télémétrie absente n'est pas remplacée par zéro.
+
+La consultation peut actuellement appeler la récupération automatique des Forward
+pending. C'est un effet de bord connu ; consulter ne constitue pas une autorisation
+de relance. La correction reste dans la roadmap applicative.
+
+Références : [jobs et reprises](job_orchestration.md),
+[sélection et calibrations XGBoost](CHRONOLOGICAL_XGBOOST.md),
+[contexte de marché](market_context_protocol.md),
+[diagnostic de sélection](selection_diagnostic.md) et
+[stratégies scientifiques](scientific_strategies.md),
+[expériences](scientific_experiments.md) et [roadmap scientifique](scientific_roadmap.md).

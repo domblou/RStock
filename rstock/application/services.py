@@ -234,6 +234,26 @@ class ExperimentService:
     def submit(self, spec: ExperimentSpec) -> SubmissionResult:
         return self.run_service.submit(spec)
 
+    def analysis_preflight(self, source_run_id, analysis_id, parameters):
+        from .scientific_analysis import analysis_preflight
+        return analysis_preflight(self.run_service.repository, source_run_id, analysis_id, parameters)
+
+    def start_analysis(self, source_run_id, analysis_id, parameters, *, request_id):
+        from .scientific_analysis import prepare_analysis
+        spec = prepare_analysis(self.run_service.repository, source_run_id, analysis_id, parameters, request_id=request_id)
+        return self.submit(spec)
+
+    def analyses_for_source(self, source_run_id):
+        rows = []
+        for status in self.run_service.repository.list_runs():
+            if status.get("job_type") != JobType.SCIENTIFIC_ANALYSIS.value:
+                continue
+            config = self.run_service.repository.read_json(str(status["run_id"]), "config.json")
+            manifest = config.get("scientific_analysis") or {}
+            if source_run_id in {manifest.get("owner_run_id"), manifest.get("source_run_id")}:
+                rows.append({**status, "analysis_id": manifest.get("analysis_id")})
+        return rows
+
     def create_derived(
         self, source_run_id: str, fork_stage: str,
         changes: dict[str, object],

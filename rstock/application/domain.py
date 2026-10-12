@@ -41,6 +41,7 @@ class JobType(str, Enum):
     END_TO_END = "end_to_end"
     FORWARD_SIMULATION = "forward_simulation"
     PRODUCTION_QUALITY_REBUILD = "production_quality_rebuild"
+    SCIENTIFIC_ANALYSIS = "scientific_analysis"
 
     @property
     def implemented(self) -> bool:
@@ -65,6 +66,7 @@ class JobType(str, Enum):
             JobType.END_TO_END,
             JobType.FORWARD_SIMULATION,
             JobType.PRODUCTION_QUALITY_REBUILD,
+            JobType.SCIENTIFIC_ANALYSIS,
         }
 
 
@@ -254,6 +256,7 @@ class ExperimentSpec:
     context_symbols: tuple[str, ...] = ()
     predictor_symbols: tuple[str, ...] = ()
     source_experiment_run: str | None = None
+    scientific_analysis: dict[str, Any] | None = None
     source_walk_forward_run: str | None = None
     source_xgboost_calibration_run: str | None = None
     frozen_xgboost_parameters: dict[str, dict[str, int | float]] | None = None
@@ -529,7 +532,10 @@ class ExperimentSpec:
             object.__setattr__(
                 self, "frozen_threshold_calibration_parameters_sha256", None
             )
-        minimum_symbols = 1 if self.config.predictive_model_type in {"constant_probability", "target_only"} else 2
+        if self.job_type is JobType.SCIENTIFIC_ANALYSIS:
+            if not isinstance(self.scientific_analysis, dict) or not self.scientific_analysis.get("analysis_id"):
+                raise ValueError("Scientific analysis requires a frozen analysis manifest")
+        minimum_symbols = 1 if (self.job_type is JobType.SCIENTIFIC_ANALYSIS or self.config.predictive_model_type in {"constant_probability", "target_only"}) else 2
         if len(self.symbols) < minimum_symbols:
             raise ValueError("At least two symbols are required" if minimum_symbols == 2 else "At least one symbol is required")
         if self.combinations_per_target < 1:
@@ -589,6 +595,7 @@ class ExperimentSpec:
             "context_symbols": list(self.context_symbols),
             "predictor_symbols": list(self.predictor_symbols),
             "source_experiment_run": self.source_experiment_run,
+            "scientific_analysis": deepcopy(self.scientific_analysis),
             "source_walk_forward_run": self.source_walk_forward_run,
             "source_xgboost_calibration_run": self.source_xgboost_calibration_run,
             "frozen_xgboost_parameters": self.frozen_xgboost_parameters,
@@ -741,6 +748,7 @@ class ExperimentSpec:
                 if values.get("source_experiment_run") is None
                 else str(values["source_experiment_run"])
             ),
+            scientific_analysis=deepcopy(values.get("scientific_analysis")),
             source_walk_forward_run=(
                 None
                 if values.get("source_walk_forward_run") is None

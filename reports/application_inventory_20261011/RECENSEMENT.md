@@ -65,7 +65,7 @@ Références : `data.py`, `market_cache.py`, `calendars.py`, `features.py`, `tar
 - Plan combinatoire déterministe, paresseux et indexable ; cibles principales et symboles de contexte ont des rôles distincts. Le batch technique change l'exécution, pas la population scientifique.
 - Biais identifié dans la roadmap : une sélection de prédicteurs utilisant des périodes qui chevauchent les tests WF peut favoriser la qualification. La présence de plusieurs origines ne corrige pas à elle seule ce biais.
 
-Références : `predictor_prefilter.py`, `prefilter_experiments.py`, `prefilter_stability.py`, `prefilter_consensus.py`, `prefilter_contract.py`, `combination_planning.py`, `combinations.py`, `SCIENTIFIC_ROADMAP.md`.
+Références : `predictor_prefilter.py`, `prefilter_experiments.py`, `prefilter_stability.py`, `prefilter_consensus.py`, `prefilter_contract.py`, `combination_planning.py`, `combinations.py`, `rstock/docs/scientific_roadmap.md`.
 
 ### Types et entraînement
 
@@ -152,8 +152,8 @@ Références : `repository.py`, `runner.py`, `worker.py`, `atomic_io.py`, `persi
 | Source | Usage futur | Vigilance |
 |---|---|---|
 | `AGENTS.md` | Invariants communs, routage et autorisations | Garder court ; référencer les contrats plutôt qu'énumérer les 126 paramètres |
-| `SCIENTIFIC_ROADMAP.md` | Axes, approches, techniques, expériences, conclusions et décisions | Les affirmations historiques et statuts « partiellement réalisée » demandent des références aux runs/rapports |
-| `RSTOCK_ROADMAP.md` (anciennement `ROADMAP.MD`) | Roadmap produit | Mélange de souhaits et réalisations ; technologies/statuts à clarifier |
+| `rstock/docs/scientific_roadmap.md` | Axes, approches, techniques, expériences, conclusions et décisions | Les affirmations historiques et statuts « partiellement réalisée » demandent des références aux runs/rapports |
+| `rstock/docs/rstock_roadmap.md` (anciennement `ROADMAP.MD`) | Roadmap produit | Mélange de souhaits et réalisations ; technologies/statuts à clarifier |
 | `rstock/docs/WF_BATCHES.md` (anciennement à la racine) | Contrats WF/E2E et reprise | Ancien pipeline, phases de développement et valeurs d'introduction ; ne pas les appliquer à toutes les versions modernes |
 | `README.md`, `MIGRATION.md` | Entrée technique et histoire du portage | Certains parcours, métriques et phases sont historiques ; `MIGRATION.md` n'est pas le protocole actuel global |
 | `grid_standardization_plan.md`, `grid_migration_report.md` | Grille et procédure d'intégration | L'inventaire avant migration n'est pas l'état actuel ; le compte rendu distingue les fonctions livrées |
@@ -237,7 +237,56 @@ réouvrir systématiquement toutes les questions archivées.
 - **Profil ingénieur** : carte des modules/contrats, préflight des effets de bord, tests ciblés, coût et livrables techniques.
 - **Profil directeur** : statut des preuves, biais, unité économique, décisions de poursuite/arrêt et rattachement à la roadmap.
 - **Skills partagées** : préparation avec paramètres effectifs/sources/coût et analyse d'abord depuis les résultats applicatifs, vérifications techniques complémentaires si nécessaires.
-- **SCIENTIFIC_ROADMAP.md** : axes et expériences tracés, preuves/conclusions, études complémentaires ; aucune duplication intégrale des rapports.
-- **RSTOCK_ROADMAP.md et documentation** : carte fonctionnelle, architecture et limites produit. Le renommage de la roadmap produit et le déplacement de WF_BATCHES dans `rstock/docs/` ont été réalisés le 11 octobre 2026 ; l'inventaire JSON conserve les chemins historiques du recensement.
+- **rstock/docs/scientific_roadmap.md** : axes et expériences tracés, preuves/conclusions, études complémentaires ; aucune duplication intégrale des rapports.
+- **rstock/docs/rstock_roadmap.md et documentation** : carte fonctionnelle, architecture et limites produit. Le renommage de la roadmap produit et le déplacement de WF_BATCHES dans `rstock/docs/` ont été réalisés le 11 octobre 2026 ; l'inventaire JSON conserve les chemins historiques du recensement.
 
 Après réponses, ajuster les fichiers concernés à leur niveau approprié. Ce recensement constitue un support réutilisable ; il ne promet pas que tous les comportements de l'application ont été validés à l'écran ou en exécution.
+
+## 8. Complément — audit documentaire final du 11 octobre 2026
+
+Ce complément actualise les références sans réécrire l'inventaire historique.
+`WF_BATCHES.md` a été supprimé : les contrats utiles sont dans
+[Jobs, lots et reprise durable](../../rstock/docs/job_orchestration.md), le
+[guide](../../rstock/docs/user_guide.md) et les
+[calibrations](../../rstock/docs/CHRONOLOGICAL_XGBOOST.md).
+
+Le [registre scientifique](../../rstock/docs/scientific_experiments.md) regroupe
+18 investigations après lecture des métadonnées de 350 runs et des rapports/
+résultats pertinents. Treize ont des résultats sauvegardés, une est un constat
+méthodologique, quatre comparaisons restent sans preuve suffisante. Cela ne signifie
+pas treize expériences concluantes. Les simulations rétrospectives et les gates
+historiques positifs ne compensent pas les Forward bruts négatifs examinés.
+
+Les neuf pages, chaînes expérimentales, dérivations/comparaisons, snapshots,
+batching/reprise, Active/Watching, qualité, simulations, maintenance et grille
+commune ont des chemins et contrats documentés. Le guide a été complété pour les
+types/volatilité, ressources et index de suppression. Aucune tournée visuelle,
+aucun test ni calcul scientifique n'a été exécuté. La présence de tests n'est
+pas assimilée à leur réussite actuelle.
+
+### Lacunes documentaires restantes
+
+| Importance | Sujet / manque | Emplacement | Pourquoi non complété |
+|---|---|---|---|
+| Haute | Comparaisons Single Origin/stabilité, décalage d'une séance et expanding/rolling : sources et conclusions chiffrées manquantes. | Registre EXP-002/EXP-003/EXP-004 | Paires/rapports non identifiés ; autres conversations et éventuels artefacts supprimés inaccessibles. Ne pas relancer pour combler la mémoire. |
+| Haute | Contributions appariées des quatre familles et volatilité : synthèse indépendante et calendrier complet de comparaison. | Registre EXP-010/EXP-012 | Résultats bruts disponibles, mais aucune synthèse appariée persistée retrouvée ; non remplacée par les métriques globales. |
+| Haute | Preuve prospective indépendante, critères quantifiés de stabilisation et garanties PIT. | Roadmap scientifique et protocole de l'expérience retenue | Aucun résultat indépendant ni seuil/horizon approuvé retrouvé ; les inventer modifierait le protocole. |
+| Moyenne | Comparabilité du replay ancien Historique et figé ; durée de vie/renouvellement validés. | Registre EXP-016/EXP-017 | Provenance/modes historiques et populations à réconcilier ; outils existants distincts de preuve scientifique. |
+| Moyenne | Validation en usage des écrans et navigation des liens Markdown intégrés. | Présent rapport | Audit de code seulement ; application non ouverte pour éviter la récupération automatique de Forward pending. |
+
+Divergences encore présentes dans le produit : aide des types trop restrictive
+par rapport à `ExperimentSpec`, récupération automatique des Forward pending.
+Elles sont documentées ; le code n'a pas été modifié. Les anciennes listes et
+empreintes de l'inventaire restent datées, sans prétention de représenter les
+nouveaux documents ou la validation runtime actuelle.
+
+## 9. Références de pilotage regroupées
+
+Les roadmaps ont été déplacées, noms conservés, sous `rstock/docs/` :
+[application](../../rstock/docs/rstock_roadmap.md),
+[science](../../rstock/docs/scientific_roadmap.md),
+[stratégies](../../rstock/docs/scientific_strategies.md),
+[expériences](../../rstock/docs/scientific_experiments.md).
+Les 18 IDs et leurs résultats sont conservés ; 15 approches distinctes sont reliées
+aux expériences. Les noms de fichiers et empreintes de l'inventaire JSON daté
+restent des données historiques, pas des liens actifs ni un nouvel audit des runs.

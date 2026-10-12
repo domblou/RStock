@@ -109,6 +109,7 @@ WORKFLOW_PHASES: dict[JobType, list[tuple[str, float]]] = {
     JobType.PRODUCTION_QUALITY_REBUILD: [
         ("production_quality_rebuild", 98), ("publishing", 2),
     ],
+    JobType.SCIENTIFIC_ANALYSIS: [("scientific_analysis", 95), ("publishing", 5)],
     JobType.END_TO_END: [
         ("prefilter", 10),
         ("walk_forward", 18),
@@ -627,6 +628,11 @@ def _validate_publication_recovery(run: Path, summary: dict) -> None:
             raise ValueError(f"publication_result_missing:{name}")
     if summary.get("forward_simulation") and not (results / "forward_model_snapshot.json").is_file():
         raise ValueError("publication_forward_snapshot_missing")
+    configuration_path = run / "config.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8")) if configuration_path.is_file() else {}
+    if configuration.get("job_type") == JobType.SCIENTIFIC_ANALYSIS.value:
+        from .scientific_analysis import validate_analysis_publication
+        validate_analysis_publication(run)
 
 
 def _publishing_completed(repository: RunRepository, run_id: str) -> bool:

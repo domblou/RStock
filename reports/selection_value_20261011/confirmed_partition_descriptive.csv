@@ -1,0 +1,15 @@
+Family,Direction,ConfirmedOnThisHoldout,DeltaLogLoss,DeltaBrier,AUC,Weighting
+external150,Down,False,0.011283451990643161,0.0029387829130001204,0.49748889279575587,equal candidate; selected on this same holdout; descriptive only
+external150,Down,True,0.009599102536079346,0.002202916389405419,0.5075149787537779,equal candidate; selected on this same holdout; descriptive only
+external150,Up,False,0.03293898015920699,0.010462304505148604,0.43481128818912107,equal candidate; selected on this same holdout; descriptive only
+external150,Up,True,-0.0012961872880068932,-0.0011023335993744809,0.5672131616505314,equal candidate; selected on this same holdout; descriptive only
+external20,Down,False,0.023970969159145115,0.007130935592880593,0.5092135613667841,equal candidate; selected on this same holdout; descriptive only
+external20,Down,True,0.01319300068782812,0.0031618146406274424,0.5479705474059215,equal candidate; selected on this same holdout; descriptive only
+external20,Up,False,0.05918586082694864,0.01801472774766652,0.4326592714556342,equal candidate; selected on this same holdout; descriptive only
+external20,Up,True,0.002478655723989575,0.0007530759400718937,0.5769189912914578,equal candidate; selected on this same holdout; descriptive only
+mixed20,Down,False,0.024097768099299265,0.006901908345512179,0.5119808179477655,equal candidate; selected on this same holdout; descriptive only
+mixed20,Down,True,0.027113611771370193,0.007044934939109584,0.5186389519012394,equal candidate; selected on this same holdout; descriptive only
+mixed20,Up,False,0.05993525858114949,0.018734857861991392,0.43280564969606716,equal candidate; selected on this same holdout; descriptive only
+mixed20,Up,True,0.019211098363864088,0.006502208744329506,0.5472107654293915,equal candidate; selected on this same holdout; descriptive only
+target20,Down,False,0.04386232703853689,0.014650866886231313,0.4180232558139535,equal candidate; selected on this same holdout; descriptive only
+target20,Up,False,0.04720353584438404,0.019537226240813818,0.45076923076923076,equal candidate; selected on this same holdout; descriptive only

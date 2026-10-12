@@ -40,6 +40,7 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
         "summary",
         "Résumé",
         frozenset({
+            JobType.SCIENTIFIC_ANALYSIS,
             JobType.WALK_FORWARD,
             JobType.END_TO_END,
             JobType.FORCED_CANDIDATE_VALIDATION,
@@ -173,13 +174,14 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
     RunTabDefinition(
         "technical",
         "Technique",
-        frozenset({JobType.WALK_FORWARD, JobType.END_TO_END}),
+        frozenset({JobType.WALK_FORWARD, JobType.END_TO_END, JobType.SCIENTIFIC_ANALYSIS}),
         "technical",
         "manifests and run metadata",
     ),
 )
 
 _ORDER: dict[JobType, tuple[str, ...]] = {
+    JobType.SCIENTIFIC_ANALYSIS: ("summary", "technical"),
     JobType.WALK_FORWARD: (
         "summary",
         "analysis",
@@ -239,6 +241,7 @@ def tabs_for_job(
 
     keys = _ORDER.get(job_type, ("results", "configuration", "files", "logs"))
     resource_types = {
+        JobType.SCIENTIFIC_ANALYSIS,
         JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION,
         JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER, JobType.WALK_FORWARD_BATCH,
         JobType.XGBOOST_CALIBRATION, JobType.THRESHOLD_PARAMETER_CALIBRATION,

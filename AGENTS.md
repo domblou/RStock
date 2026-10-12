@@ -13,13 +13,19 @@ transaction seront étudiés ultérieurement. Priorité à la stabilisation du W
 aux signaux Up ; l'évaluation du préfiltre et l'exploration Down viendront ensuite,
 sans supprimer les capacités existantes.
 
-- [SCIENTIFIC_ROADMAP.md](SCIENTIFIC_ROADMAP.md) est la source de vérité pour les
+- [scientific_roadmap.md](rstock/docs/scientific_roadmap.md) est la source de vérité pour les
   hypothèses, approches, techniques, expériences réalisées ou prévues, conclusions
   et priorités scientifiques. La priorité actuelle est la stabilisation de la
   découverte et de la sélection ; les régimes sont reportés.
-- [RSTOCK_ROADMAP.md](RSTOCK_ROADMAP.md) décrit l'évolution du logiciel.
+- [rstock_roadmap.md](rstock/docs/rstock_roadmap.md) décrit l'évolution du logiciel.
 - Charger les références techniques selon la mission, sans recopier leur contenu
   ni l'historique des conversations. Référencer les runs et rapports existants.
+- Les registres et roadmaps sont une mémoire et un guide de priorités, pas une
+  limite à la recherche scientifique indépendante. Le directeur peut rechercher
+  au-delà des sources internes, remettre en question les approches retenues et
+  proposer une révision justifiée. Une idée n'est ni ajoutée automatiquement à la
+  roadmap ni transformée en expérience/développement : l'utilisateur décide de
+  son adoption et de sa priorité, dans les autorisations actives.
 - Certains documents contiennent des plans ou états historiques. Vérifier le
   chemin de code et les contrats applicables ; signaler les contradictions avant
   l'opération concernée, sans modifier silencieusement le protocole.
@@ -30,12 +36,19 @@ Toute intervention qui modifie l'état fonctionnel, technique ou scientifique de
 RStock doit également maintenir sa documentation à jour. Cette obligation couvre
 les développements, les corrections fonctionnelles et les expériences scientifiques.
 
+Exception prioritaire : une demande explicite d'analyse, vérification ou révision
+sans modification n'autorise aucune écriture. Examiner les sources et présenter
+conclusions/corrections recommandées sans modifier de fichier, registre ou roadmap.
+Respecter les fichiers et répertoires désignés en lecture seule. Une lacune ne
+transforme pas cette mission en édition ; l'obligation documentaire s'applique
+uniquement lorsque la mission autorise les modifications, dans son périmètre.
+
 - Avant de considérer une tâche comme terminée, vérifier et effectuer les mises
   à jour nécessaires des roadmaps, du guide utilisateur et de la documentation
   technique concernée. Ces mises à jour font partie de la tâche initiale et ne
   nécessitent aucune demande ni autorisation supplémentaire de l'utilisateur.
-- Utiliser les sources officielles existantes : [RSTOCK_ROADMAP.md](RSTOCK_ROADMAP.md)
-  pour l'évolution fonctionnelle et technique, [SCIENTIFIC_ROADMAP.md](SCIENTIFIC_ROADMAP.md)
+- Utiliser les sources officielles existantes : [rstock_roadmap.md](rstock/docs/rstock_roadmap.md)
+  pour l'évolution fonctionnelle et technique, [scientific_roadmap.md](rstock/docs/scientific_roadmap.md)
   pour les hypothèses, expériences, résultats, conclusions et prochaines validations,
   le [guide utilisateur](rstock/docs/user_guide.md) et les documents pertinents de
   `rstock/docs/` ou d'un autre emplacement officiel déjà utilisé. Ne pas créer de doublons.
@@ -61,16 +74,69 @@ les développements, les corrections fonctionnelles et les expériences scientif
 - Cette obligation documentaire n'autorise aucun lancement, entraînement,
   changement de protocole scientifique, promotion ou activation supplémentaire.
 
+## Stratégies, expériences et runs scientifiques
+
+- Une stratégie est une approche scientifique ; une expérience évalue une question
+  et peut comparer plusieurs stratégies ; un run est son exécution concrète avec
+  données, configuration et paramètres figés. Ne pas créer une stratégie par réglage.
+- Toute stratégie reçoit un identifiant `STR-XXX` et toute expérience un identifiant
+  `EXP-XXX`, unique, stable et jamais réutilisé, même après rejet ou abandon.
+  Conserver intégralement les identifiants techniques des runs. La normalisation
+  initiale préserve l'ordre : stratégies `STR-001` à `STR-015`, expériences
+  `EXP-001` à `EXP-018` ; attribuer ensuite un numéro inédit dans chaque registre.
+- Les quatre documents de pilotage sont dans `rstock/docs/` :
+  [roadmap applicative](rstock/docs/rstock_roadmap.md),
+  [roadmap scientifique](rstock/docs/scientific_roadmap.md),
+  [stratégies](rstock/docs/scientific_strategies.md) et
+  [expériences](rstock/docs/scientific_experiments.md). Préserver leurs identifiants
+  et leurs liens ; les runs et artefacts restent associés aux expériences.
+- Avant de proposer une expérience, consulter les stratégies et expériences
+  antérieures. Un manque d'archives ne justifie pas une répétition automatique :
+  préciser hypothèse nouvelle, changement méthodologique ou validation supplémentaire.
+- Après chaque investigation, mettre à jour l'expérience correspondante ; mettre
+  à jour les stratégies si leur évaluation/statut change, et la roadmap scientifique
+  si les décisions/priorités évoluent. Conserver les résultats positifs, négatifs et
+  non concluants, les limites et les décisions de rejet/remplacement lorsqu'établies.
+  Ces mises à jour restent dans le périmètre d'édition autorisé : une recommandation
+  seule n'autorise aucun changement de priorité ou de statut documenté ; ces
+  changements exigent une autorisation ou une tâche qui les prévoit explicitement.
+- Utiliser les statuts définis dans chaque registre. Une stratégie implémentée ou
+  retenue provisoirement n'est pas Validée. Une expérience non concluante n'est pas
+  une expérience jamais exécutée. Signaler explicitement les réalisations historiques
+  non confirmées sans inventer de run ou de conclusion.
+- Une expérience contrôlée conserve les mêmes données, snapshot, cutoff résolu,
+  calendrier et paramètres, sauf les variables explicitement étudiées. Identifier
+  et documenter tout écart nécessaire ; vérifier cette comparabilité avant de
+  conclure, y compris pour des variantes dérivées d'un même parent.
+- Ne jamais présenter une décision méthodologique ou une fonctionnalité implémentée
+  comme une preuve d'efficacité prédictive. Ne pas relancer une expérience non
+  concluante sans hypothèse nouvelle, preuve manquante pertinente ou changement
+  méthodologique justifié ; conserver aussi les décisions abandonnées.
+- Un simple développement applicatif ne crée pas artificiellement une expérience
+  scientifique. La maintenance documentaire n'autorise aucun lancement supplémentaire.
+
 ## Responsabilités et autorisations
 
 Ces rôles définissent les responsabilités ; ils ne créent aucun agent actif.
 
 Profils versionnés : [.codex/agents/directeur-scientifique.toml](.codex/agents/directeur-scientifique.toml)
 et [.codex/agents/ingenieur-logiciel-donnees.toml](.codex/agents/ingenieur-logiciel-donnees.toml).
-Pour choisir l'interlocuteur principal, demander explicitement son rôle dans la
-conversation. Si le client ne sélectionne pas les profils, demander de lire le
-fichier correspondant et d'en appliquer `developer_instructions` ; pour une
-délégation, transmettre une mission bornée et le profil plutôt que le seul nom.
+Adopter un rôle ne garantit pas le chargement natif de son profil personnalisé.
+Sans profil natif, lire le TOML pertinent et appliquer `developer_instructions`
+dans les limites des instructions et autorisations actives. Lorsque pertinent,
+distinguer profil chargé nativement et instructions simplement lues ; ne pas
+prétendre qu'un agent a été activé ou consulté sans intervention réelle.
+
+Sans rôle explicitement désigné, choisir le responsable principal selon la demande :
+directeur pour hypothèses, protocoles, interprétation, sélection/qualification et
+décisions scientifiques ; ingénieur pour développement, architecture, corrections,
+UI, données/pipelines, performance technique, reproductibilité et tests.
+Pour un travail mixte, identifier ce responsable et consulter l'autre rôle seulement
+si nécessaire : expertise scientifique pour changer un protocole, ingénieur pour
+vérifier la faisabilité d'une décision. Éviter échanges circulaires et consultations
+systématiques ; fournir une seule synthèse consolidée. Ces règles ne garantissent
+ni routage automatique ni chargement natif. Sans délégation disponible, adopter le
+rôle pertinent ; signaler la limite seulement si elle affecte réellement la mission.
 
 Skills partagées : `$preparer-experience-rstock` pour préparer un protocole et
 `$analyser-experience-rstock` pour interpréter les résultats existants, d'abord
@@ -85,11 +151,34 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
   calendriers, causalité et reproductibilité. Prépare les calculs, propose les
   plans techniques, implémente et valide dans le périmètre autorisé. Signale les
   écarts entre protocole demandé et possibilités réelles avant leur exécution.
-- Une fonctionnalité substantielle demandée au directeur donne lieu à une mission
-  d'étude de l'ingénieur et à un plan technique présenté à l'utilisateur avant
-  implémentation. Si la délégation est disponible, confier une mission bornée avec
-  sources, périmètre autorisé et livrable ; sinon fournir une mission transférable
-  manuellement. Ne pas supposer qu'un nom de tâche charge un profil d'agent.
+- Une mission d'étude uniquement produit analyse, faisabilité et plan technique,
+  avec contribution de l'ingénieur si nécessaire, puis s'arrête avant implémentation.
+  Si l'implémentation est déjà explicitement autorisée, préparer un plan proportionné
+  et poursuivre dans ce périmètre sans redemander l'autorisation. Une décision est
+  nécessaire pour un choix substantiel non couvert, changement de protocole, coût
+  non autorisé ou écart bloquant ; une petite correction n'impose pas de revue scientifique.
+- Une délégation transmet seulement objectif, question précise, profil pertinent,
+  références nécessaires, contraintes scientifiques, périmètre autorisé et livrable.
+  Référencer fichiers/runs sans recopier rapports volumineux ou historique complet.
+  Ne pas multiplier les sous-agents si le travail se traite directement ; un nom
+  de tâche ne garantit pas le chargement du profil.
+- Lors d'une délégation, utiliser un nom d'agent stable correspondant à son rôle :
+  « Directeur scientifique » ou « Ingénieur logiciel et données ». Présenter
+  séparément le titre précis de la mission actuelle et la demande transmise.
+  Éviter de nommer l'agent d'après une tâche ponctuelle, car ce nom peut devenir
+  trompeur lors de sa réutilisation.
+- Lorsqu'une demande est transmise à un agent spécialisé, toujours afficher
+  à l'utilisateur le contenu de la demande transmise afin qu'il voie ce qui
+  est communiqué, y compris pour les demandes de suivi. Restituer sa réponse
+  à l'utilisateur, même si elle contient seulement une intention, une question
+  ou une limite. Ne pas terminer l'échange au seul accusé de transmission.
+  Si la réponse n'accomplit pas la demande, la relayer comme telle, puis poursuivre
+  avec l'agent jusqu'au livrable attendu. Ne jamais laisser un retour reçu sans
+  restitution.
+- Ne pas déléguer une modification documentaire lorsque les décisions et le
+  contenu sont déjà établis. L'agent principal effectue directement l'édition
+  et les vérifications ciblées. Consulter un spécialiste uniquement si une
+  nouvelle décision scientifique ou technique est nécessaire.
 - L'ingénieur retourne une synthèse courte : faisabilité, changements,
   validations, limites et décision requise. Le directeur replace la décision
   dans la roadmap. Éviter les écritures concurrentes sur les mêmes fichiers.
@@ -115,7 +204,7 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
 
 - Étendre les services, repository, workers, leases, workflows et checkpoints
   existants ; ne pas créer de framework de jobs parallèle. Voir les contrats
-  de [WF_BATCHES.md](rstock/docs/WF_BATCHES.md).
+  de [Jobs, lots et reprise durable](rstock/docs/job_orchestration.md).
 - Toute grille de l'application réutilise le socle
   `rstock/application/grid.py::render_grid`, via `grid_dataframe.dataframe`
   pour les DataFrames ou l'adaptateur métier existant. Compléter le composant
@@ -176,7 +265,7 @@ son comportement lorsqu’il est absent d’un snapshot historique.
   autorité. Le statut d'un enfant se lit depuis son état persistant, pas depuis
   une copie potentiellement périmée du manifest parent.
 - Le batching doit préserver les résultats scientifiques d'un mono-run équivalent
-  sur les mêmes données et paramètres. Voir [WF_BATCHES.md](rstock/docs/WF_BATCHES.md).
+  sur les mêmes données et paramètres. Voir [Jobs, lots et reprise durable](rstock/docs/job_orchestration.md).
 
 ## Portée et validation des modifications
 

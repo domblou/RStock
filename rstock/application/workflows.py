@@ -3464,6 +3464,11 @@ def _forced_candidate_validation(
     )
 
 
+def _scientific_analysis(spec, output, progress_callback, cancellation_check):
+    from .scientific_analysis import execute_analysis
+    return execute_analysis(spec, output, progress_callback, cancellation_check)
+
+
 @dataclass(slots=True)
 class WorkflowRegistry:
     handlers: dict[JobType, WorkflowHandler]
@@ -3500,6 +3505,7 @@ class WorkflowRegistry:
                 JobType.END_TO_END: _end_to_end,
                 JobType.FORWARD_SIMULATION: _forward_simulation,
                 JobType.PRODUCTION_QUALITY_REBUILD: _production_quality_rebuild,
+                JobType.SCIENTIFIC_ANALYSIS: _scientific_analysis,
             }
         )
 

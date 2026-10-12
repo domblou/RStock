@@ -2652,6 +2652,7 @@ def _render_resume_controls(
                 st.rerun()
         return
     resumable_types = {
+        JobType.SCIENTIFIC_ANALYSIS.value,
         JobType.WALK_FORWARD.value,
         JobType.PREDICTOR_PREFILTER.value,
         JobType.THRESHOLD_PARAMETER_CALIBRATION.value,
@@ -2665,8 +2666,11 @@ def _render_resume_controls(
     manifest = detail.get("checkpoint")
     error = detail.get("checkpoint_error")
     checkpointed_resume = status.get("job_type") in {
+        JobType.SCIENTIFIC_ANALYSIS.value,
         JobType.WALK_FORWARD.value, JobType.PREDICTOR_PREFILTER.value,
     }
+    if status.get("job_type") == JobType.SCIENTIFIC_ANALYSIS.value and manifest is None:
+        checkpointed_resume = False
     if checkpointed_resume and isinstance(manifest, dict):
         completed_phases = list(manifest.get("phases_completed", []))
         current_phase = str(manifest.get("current_phase") or "—")
@@ -4533,11 +4537,21 @@ def _render_walk_forward_derived_creation(
 ) -> None:
     status = detail.get("status", {})
     storage = detail.get("storage", {})
-    if (not isinstance(status, Mapping) or status.get("status") != "completed"
-            or isinstance(storage, Mapping) and storage.get("state") == "purged"):
-        return
+    can_derive = (isinstance(status, Mapping) and status.get("status") == "completed"
+        and not (isinstance(storage, Mapping) and storage.get("state") == "purged"))
     key = f"wf-derive-open-{run_id}"
-    if st.button("Créer une expérience dérivée", key=f"wf-derive-button-{run_id}"):
+    left, right = st.columns(2)
+    with left:
+        derive_clicked = can_derive and st.button("Créer une expérience dérivée", key=f"wf-derive-button-{run_id}")
+    with right:
+        from rstock.application.scientific_analysis_ui import render_analysis_launcher, render_analysis_form
+        selected_analysis = render_analysis_launcher(st, service, str(detail.get("analysis_owner_run_id", run_id)),
+            key=f"wf-analysis-{run_id}", navigate=_history_navigation)
+    render_analysis_form(st, service, str(detail.get("analysis_owner_run_id", run_id)), selected_analysis,
+        key=f"wf-analysis-{run_id}", navigate=_history_navigation)
+    if not can_derive:
+        return
+    if derive_clicked:
         st.session_state[key] = True
     if not st.session_state.get(key):
         return
@@ -4793,6 +4807,8 @@ def _render_pipeline_child(
         )
         return
     child_detail = service.run(str(effective_run_id))
+    if stage_key == "walk_forward":
+        child_detail = {**child_detail, "analysis_owner_run_id": parent_run_id}
     if stage_key != "walk_forward":
         _render_round_selection_summary(str(effective_run_id), child_detail)
     child_status = child_detail["status"]
@@ -5496,7 +5512,12 @@ def _render_job_detail_tabs(
         job_type = JobType(str(status["job_type"]))
     except ValueError:
         job_type = JobType.XGBOOST_CALIBRATION
-    if job_type is JobType.END_TO_END:
+    if job_type is JobType.SCIENTIFIC_ANALYSIS:
+        from rstock.application.scientific_analysis_ui import render_analysis_detail
+        render_analysis_detail(st, service, run_id, status, detail,
+            render_resources=_render_run_resources, render_technical=_render_run_technical_tabs,
+            navigate=_history_navigation)
+    elif job_type is JobType.END_TO_END:
         _render_end_to_end_tabs(service, run_id, detail)
     elif job_type is JobType.FORCED_CANDIDATE_VALIDATION:
         _render_forced_candidate_validation_tabs(service, run_id, detail)

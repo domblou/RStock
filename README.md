@@ -2,7 +2,7 @@
 
 Le dépôt contient le portage Python actif et, dans `legacy_r/`, le projet R
 historique archivé sans modification. Le contrat de compatibilité et les problèmes méthodologiques sont détaillés dans
-[`MIGRATION.md`](MIGRATION.md).
+[`MIGRATION.md`](legacy_r/MIGRATION.md).
 
 ## Installation
 
@@ -256,3 +256,12 @@ Les processus en attente partagent des slots locaux atomiques; un seul job lourd
 s'exécute par défaut. Une annulation crée une demande persistante vérifiée entre
 les grandes unités de travail. Les résultats restent dans `_working` en cas
 d'échec ou d'annulation et ne sont publiés sous `results/` qu'après réussite.
+
+## Documentation de l’application
+
+- [Guide utilisateur](rstock/docs/user_guide.md)
+- [Jobs, lots et reprise durable](rstock/docs/job_orchestration.md)
+- [Sélection et calibrations XGBoost](rstock/docs/CHRONOLOGICAL_XGBOOST.md)
+
+- [Roadmap scientifique](rstock/docs/scientific_roadmap.md), [stratégies](rstock/docs/scientific_strategies.md) et [expériences](rstock/docs/scientific_experiments.md)
+- [Roadmap applicative](rstock/docs/rstock_roadmap.md)

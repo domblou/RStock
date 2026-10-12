@@ -28,10 +28,23 @@ def test_columns_lineage_universe_and_legacy_fallback(tmp_path):
     assert not {"Lignée", "Contexte", "Stockage", "Résumé"} & result.keys()
     assert result["Run ID"] == "wf"
     assert result["_lineage"] == "Préfiltre prédicteurs : prefilter"
-    assert result["Univers"] == "US Tech Growth (35)"
+    assert result["Univers"] == "US Tech Growth (35) (2)"
     legacy = record(tmp_path, _detail(symbols=("AAA", "BBB")))
     assert legacy["Univers"] == "2 symboles"
     assert legacy["Cutoff"] == "—"
+
+
+@pytest.mark.parametrize("configuration,expected", [
+    ({"target_symbols": ["AAA", "BBB"], "symbols": ["AAA", "BBB", "CTX"]}, "Univers (2)"),
+    ({"symbols": ["AAA", "BBB"]}, "Univers (2)"),
+    ({"target_symbols": []}, "Univers (0)"),
+    ({}, "Univers"),
+    ({"target_symbols": None, "symbols": ["AAA"]}, "Univers"),
+])
+def test_universe_suffix_uses_only_persisted_targets(tmp_path, configuration, expected):
+    detail = _detail()
+    detail["configuration"] = {"primary_universe_id": "primary", **configuration}
+    assert record(tmp_path, detail, labels={"primary": "Univers"})["Univers"] == expected
 
 
 @pytest.mark.parametrize("config,metadata,source_type,expected", [
@@ -133,7 +146,7 @@ def test_legacy_trace_date_and_inherited_universe(tmp_path):
     parent = _detail()
     parent["configuration"]["primary_universe_id"] = "tech"
     result = record(tmp_path, detail, related={"root": parent}, labels={"tech": "US Tech Growth (35)"})
-    assert result["Univers"] == "US Tech Growth (35)"
+    assert result["Univers"] == "US Tech Growth (35) (2)"
     assert result["Cutoff"] == "2026-07-06"
 
 

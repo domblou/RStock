@@ -1,9 +1,13 @@
-# Sélection chronologique des tours XGBoost
+# Sélection et calibrations XGBoost
 
 Le mode `fixed` reste le défaut. Le WF utilise `xgb_rounds` ; les étapes aval
 conservent les tours fixes de la configuration sélectionnée par la calibration.
 Les anciens snapshots sans les nouveaux champs restent en mode fixe et
 conservent leur nombre de tours enregistré, y compris lors d'une duplication.
+
+La comparaison exécutée fixe/chronologique et ses limites sont référencées en
+EXP-009 du [registre scientifique](scientific_experiments.md). La procédure ci-dessous
+est un parcours disponible, pas une demande de répéter cette expérience.
 
 ## Première comparaison
 
@@ -228,3 +232,35 @@ augmenter les threads ni le nombre de workers. Aucun booster interne ni courbe
 complète d'apprentissage n'est persisté. La reprise conserve les lots terminés;
 une interruption avant commit peut refaire le lot incomplet. Les manifests sont
 rechargés/réconciliés avant leur finalisation, selon le mécanisme existant.
+
+## Population et échantillonnage des calibrations
+
+La politique est résolue depuis la version persistée et la provenance : une source
+WF qualifiée avec `calibration_sampling_policy_version >= 2` utilise
+`global_stratified_v2` ; sinon `per_target_v1` conserve le quota historique
+`combinations_per_target`. Ne pas appliquer les deux réductions successivement.
+
+Sous V2, la population qualifiée du WF parent est dédupliquée par set. Le plafond
+XGBoost s'applique globalement, pas par batch ; sous le plafond, tous les sets sont
+utilisés. Au-delà, l'allocation proportionnelle par cible utilise les plus grands
+restes et un classement SHA-256 déterministe par seed, politique et identité.
+Une cible peut recevoir zéro set lorsque le plafond est inférieur au nombre de
+cibles. Le résultat ne dépend pas de l'ordre d'arrivée ou du partitionnement WF.
+
+La calibration des paramètres de seuils compte les modèles directionnels mais
+conserve les **paires Up/Down complètes** : un plafond de 500 autorise 250 sets.
+Le plafond explicite doit être pair et au moins égal à 2. La calibration finale
+V2 utilise toute la population qualifiée dédupliquée attendue ; elle ne récupère
+ni ce plafond ni le quota historique par cible. Les anciens parcours V1 gardent
+leur comportement.
+
+Chaque calibration publie `results/sampling_manifest.json` : politique, population,
+échantillon, plafond, seed, distribution par cible, identités sélectionnées et
+digest. Pour les paramètres de seuils, il indique aussi le plafond directionnel,
+les effectifs directionnels et la conservation des paires.
+
+Les paramètres et leur compatibilité sont récapitulés dans le
+[guide utilisateur](user_guide.md). L'[orchestration](job_orchestration.md) décrit
+les sources figées et les reprises. Sources : `rstock/calibration_sampling.py`,
+`calibration.py`, `threshold_parameter_calibration.py`, `threshold_calibration.py` ;
+contrats dans `tests/test_calibration_sampling.py`.
