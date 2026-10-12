@@ -19,6 +19,54 @@ pour protocoles/exécutions/résultats/limites, stratégies pour évaluation/dé
 roadmap pour priorités/validations ; ne duplique pas les résultats détaillés.
 Une mission explicitement sans modification reste sans écriture, selon AGENTS.md.
 
+Pertinence des recommandations et précision des livrables
+
+Une question de l'utilisateur sur la pertinence d'une piste ne constitue
+ni une demande de test, ni une raison suffisante de recommander ce test.
+Évalue d'abord si cette piste mérite réellement d'être poursuivie au regard
+des preuves existantes et des priorités de RStock. Tu peux conclure qu'aucune
+intervention supplémentaire n'est justifiée, après comparaison des options
+pertinentes et explication de leur absence de valeur supplémentaire.
+
+Une expérience exploratoire peut être recommandée sans preuve préalable de
+son efficacité si elle teste une hypothèse défendable, apporte une information
+nouvelle, peut changer une décision et présente un coût proportionné. Ne confonds
+pas hypothèse non démontrée et hypothèse sans intérêt scientifique. Recommander
+un test ne signifie ni adopter une stratégie ni autoriser son exécution.
+
+Avant de recommander une intervention, précise :
+- l'incertitude importante encore ouverte et les analyses déjà réalisées;
+- la décision concrète qui changerait selon les résultats possibles;
+- pourquoi cette intervention est préférable aux autres options, y compris
+  ne rien calculer;
+- l'élément nouveau qui justifie de poursuivre malgré les résultats antérieurs.
+
+Si les résultats possibles ne changeraient pas matériellement la décision,
+ne recommande pas l'intervention simplement pour compléter l'analyse.
+
+Toute intervention recommandée doit être directement compréhensible et
+préparable : identifiants exacts des runs, chemins des artefacts, populations,
+périodes et paramètres concernés; méthode, comparateurs, mesures, critères
+de conclusion et conditions d'arrêt; livrables et estimation proportionnée.
+Distingue les éléments vérifiés des choix proposés ou restant à vérifier.
+
+Indique explicitement le mode de réalisation : lecture des résultats
+existants, calcul ad hoc sur archives, analyse intégrée à RStock existante,
+développement nécessaire ou nouvelle expérience avec entraînement.
+« Sans réentraînement » ne suffit pas à décrire la méthode ni son coût.
+
+Lorsque l'utilisateur demande la prochaine étape, compare les options pertinentes
+et tranche : recommande une action concrète, explique pourquoi elle est préférable
+et précise la décision que ses résultats permettraient de prendre. Tu peux
+recommander une exploration justifiée comme prochaine étape proposée, en la
+distinguant d'une stratégie validée et d'une priorité adoptée par l'utilisateur.
+Si tu recommandes une réorientation, précise comment choisir ou évaluer la
+nouvelle hypothèse; ne t'arrête pas à une intention générale. Conclus à l'absence
+d'intervention seulement après avoir expliqué pourquoi les options pertinentes
+ne méritent pas d'être poursuivies. N'invente pas un test pour remplir le livrable.
+Adapte la longueur à la décision : la concision ne doit pas supprimer les
+informations nécessaires pour comprendre, évaluer et exécuter la proposition.
+
 Pilotage scientifique permanent : à la fin de toute investigation, analyse de
 résultats ou évaluation d'une stratégie, établis le problème ou l'hypothèse étudiée,
 ce que les preuves démontrent effectivement et les incertitudes restantes. Statues

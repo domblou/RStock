@@ -434,6 +434,12 @@ def write_probability_training_audit(predictions: pd.DataFrame, directory: Any,
         records.to_csv(directory / "constant_probability_training.csv", index=False)
         configuration["predictive_model_type"] = "constant_probability"
         return
+    if "Algorithm" in records and records["Algorithm"].eq("logistic_l2").all():
+        records.to_csv(directory / "logistic_training.csv", index=False)
+        configuration["predictive_algorithm"] = "logistic_l2"
+        configuration["logistic_contract"] = records.iloc[0]["Contract"]
+        configuration["round_selection_policy"] = {"mode": "not_applicable"}
+        return
     records.to_csv(directory / "round_selection_training.csv", index=False)
     configuration["round_selection_coverage"] = training_records_coverage(records)
     configuration["round_selection_policy"] = records.iloc[0]["RoundSelectionPolicy"]
@@ -444,6 +450,21 @@ def production_training_config(config: RStockConfig, model: Any) -> RStockConfig
     from dataclasses import replace
     if model.source_configuration.get("rstock_config", {}).get("predictive_model_type", "external_only") != "external_only":
         raise ValueError("This predictive model type is not enabled for Production")
+    source = model.source_configuration.get("rstock_config", {})
+    config = replace(config, lag_depth=model.lag_depth,
+        intraday_target_threshold=model.up_target_threshold, intraday_down_threshold=model.down_target_threshold,
+        date_feature_regex=source.get("date_feature_regex", config.date_feature_regex))
+    algorithm = source.get("predictive_algorithm", "xgboost")
+    if algorithm == "logistic_l2":
+        fields = ("logistic_l2_penalty", "logistic_max_iterations", "logistic_gradient_tolerance", "logistic_objective_tolerance")
+        if any(name not in source for name in fields):
+            raise ValueError("Incomplete frozen logistic Production configuration")
+        return replace(config, **{name: source[name] for name in fields},
+            predictive_algorithm=algorithm, predictive_model_type="external_only",
+            target_volatility_enabled=source.get("target_volatility_enabled", False),
+            target_volatility_sessions=source.get("target_volatility_sessions", 21))
+    if algorithm != "xgboost":
+        raise ValueError("Unsupported Production algorithm")
     policy = model.round_selection_policy
     if policy is None:
         source = model.source_configuration.get("rstock_config", {})
@@ -456,7 +477,7 @@ def production_training_config(config: RStockConfig, model: Any) -> RStockConfig
         changes = {key: policy[key] for key in ROUND_SELECTION_FIELDS}
         changes["xgb_rounds"] = policy["fallback_rounds"]
     source = model.source_configuration.get("rstock_config", {})
-    return replace(config, **changes, predictive_model_type="external_only", xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads,
+    return replace(config, **changes, predictive_algorithm="xgboost", predictive_model_type="external_only", xgb_seed=model.xgboost_seed, xgb_nthread=model.xgboost_threads,
                    target_volatility_enabled=source.get("target_volatility_enabled", False),
                    target_volatility_sessions=source.get("target_volatility_sessions", 21))
 
@@ -473,6 +494,22 @@ def validate_production_round_contract(model: Any, metadata: Mapping[str, Any]) 
         raise ValueError("Production target volatility contract mismatch")
     if model.source_configuration.get("rstock_config", {}).get("predictive_model_type", "external_only") != "external_only":
         raise ValueError("This predictive model type is not enabled for Production")
+    algorithm = source.get("predictive_algorithm", "xgboost")
+    if metadata.get("predictive_algorithm", "xgboost") != algorithm:
+        raise ValueError("Production algorithm contract mismatch")
+    if algorithm == "logistic_l2":
+        from .logistic import logistic_contract
+        expected = logistic_contract(production_training_config(DEFAULT_CONFIG, model))
+        records = metadata.get("round_selection_records", {})
+        if metadata.get("logistic_contract") != expected or any(
+            records.get(direction, {}).get("Algorithm") != algorithm
+            or records[direction].get("Contract") != expected
+            or not records[direction].get("Converged")
+            or not records[direction].get("TrainingIdentity")
+            for direction in ("up", "down")
+        ):
+            raise ValueError("Incomplete or incompatible logistic Production artifact")
+        return
     policy = model.round_selection_policy
     if policy is None:
         if model.source_configuration.get("rstock_config", {}).get("xgb_round_selection_mode") == "chronological":
@@ -519,6 +556,9 @@ def fit_booster(
     """Apply the configured policy to every new training origin, then refit."""
     if config.predictive_model_type == "constant_probability":
         return fit_constant_probability(train, outcome_name)
+    if config.predictive_algorithm == "logistic_l2":
+        from .logistic import fit_logistic
+        return fit_logistic(train, predictor_names, outcome_name, config, cancellation_check)
     selected = parameters or historical_xgboost_parameters(config)
     if config.xgb_round_selection_mode == "chronological":
         booster, record = fit_chronological_booster(
@@ -583,6 +623,9 @@ def predict_probabilities(
 ) -> np.ndarray:
     if isinstance(booster, ConstantProbabilityModel):
         return np.full(len(frame), booster.probability, dtype=float)
+    from .logistic import LogisticModel
+    if isinstance(booster, LogisticModel):
+        return booster.predict(frame, predictor_names)
     xgb = xgboost_module()
     names = list(predictor_names)
     matrix = xgb.DMatrix(frame[names], feature_names=names)

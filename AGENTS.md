@@ -1,5 +1,14 @@
 # Instructions communes — RStock
 
+## Respect des directives de l'utilisateur
+
+L'utilisateur dirige les travaux. Codex principal et les agents délégués ne
+doivent jamais superposer aux demandes de l'utilisateur des instructions,
+restrictions, priorités ou objectifs supplémentaires de leur propre initiative.
+Ils peuvent ajouter des détails pour préciser la demande et la rendre exécutable,
+sans en modifier l'intention, la portée ou le résultat attendu. Cette règle
+s'applique aussi aux demandes et aux suivis transmis au directeur scientifique.
+
 ## Objectif et références
 
 RStock vise à découvrir des relations prédictives entre symboles, exploitables
@@ -202,7 +211,54 @@ requises pour une correction UI ordinaire et n'autorisent aucun lancement.
   mécanisme automatique existant est un écart à examiner séparément ; ne pas
   modifier son comportement dans une tâche de documentation.
 
+## Recommandations scientifiques : utilité et précision
+
+- Une demande d'avis sur une piste n'impose ni sa recommandation ni son test.
+  Distinguer pertinence théorique, preuves disponibles et priorité réelle.
+- Une expérience exploratoire peut être recommandée sans preuve préalable de
+  son efficacité si elle teste une hypothèse défendable, apporte une information
+  nouvelle, peut changer une décision et présente un coût proportionné. Ne pas
+  confondre hypothèse non démontrée et hypothèse sans intérêt scientifique,
+  recommandation d'un test, adoption d'une stratégie et autorisation d'exécution.
+- Lorsque l'utilisateur demande la prochaine étape, comparer les options
+  pertinentes et formuler une recommandation claire avec une action concrète
+  et sa justification. Une réorientation doit préciser comment choisir ou
+  évaluer la nouvelle hypothèse; ne pas s'arrêter à une intention générale.
+  Conclure à l'absence d'action seulement après avoir expliqué pourquoi les
+  options pertinentes ne méritent pas d'être poursuivies. Ne pas inventer un
+  test simplement pour fournir une action.
+- Ne recommander une intervention que si elle résout une incertitude importante
+  et peut changer une décision concrète. Vérifier les analyses antérieures;
+  expliquer la valeur supplémentaire par rapport à ne rien faire.
+- Toute proposition doit identifier les runs et artefacts exacts, la méthode
+  de réalisation, les comparateurs, les périodes, les critères de décision,
+  les livrables et le coût proportionné. Signaler ce qui reste non vérifié.
+- Codex principal conserve ces détails utiles lorsqu'il restitue l'avis du
+  directeur. Il distingue la recommandation du directeur, sa propre validation
+  technique et une décision effectivement adoptée par l'utilisateur.
+  Si l'avis ne tranche pas la question posée ou ne fournit pas la démarche
+  demandée, signaler cette limite et poursuivre avec le directeur jusqu'au
+  livrable attendu, sans modifier la demande de l'utilisateur.
+- Ne pas annoncer une « prochaine étape » pour remplir le livrable. L'absence
+  d'intervention justifiée est une conclusion acceptable. Aucune proposition
+  ne constitue une autorisation d'exécution.
+
 ## Architecture et grilles
+
+- **Toute nouvelle analyse scientifique RStock doit obligatoirement fournir une
+  interprétation scientifique déterministe et propre à son type dans l'onglet
+  Résumé.** Le contrat `AnalysisDefinition.interpret_results` couvre « Comprendre
+  les résultats », « Interprétation des résultats » et « Limites et verdict
+  scientifique ». Faire préciser les critères par le directeur scientifique,
+  puis implémenter des règles versionnées, sans génération libre par IA ni seuil
+  supplémentaire inventé. Utiliser les résultats complets et les règles persistées
+  du run; ne jamais appliquer silencieusement les defaults actuels à des archives.
+  Distinguer zéro, absence de résultat, arrêt scientifique, résultat partiel,
+  indétermination et incompatibilité. Conserver texte, version et empreinte des
+  entrées dans les sorties ordinaires du run; inclure cet artefact dans le gel et
+  la reprise existants. La consultation du Résumé ne lance ni calcul scientifique
+  ni lecture complète des prédictions/CSV. Tester les branches de décision,
+  notamment absence de sélection, résultats incomplets et compatibilité historique.
 
 - Avant de proposer des changements, Codex principal inspecte le code et les
   contrats actuels des mécanismes concernés : services, workflows, repositories,
@@ -324,6 +380,18 @@ son comportement lorsqu’il est absent d’un snapshot historique.
   sur les mêmes données et paramètres. Voir [Jobs, lots et reprise durable](rstock/docs/job_orchestration.md).
 
 ## Portée et validation des modifications
+
+- **Tous les runs RStock doivent exposer leurs phases réelles d'exécution, leur
+  consommation de ressources et une progression significative pendant les traitements
+  longs.** Réutiliser le reporter de progression, la télémétrie, les événements de
+  phases et les checkpoints existants, sans système parallèle. Instrumenter début,
+  fin, interruption et reprise; publier régulièrement des unités de travail réellement
+  traitées (octets, lignes, fenêtres, relations, modèles ou lots), avec total connu
+  ou borne explicitée. Limiter la fréquence des écritures sans laisser un traitement
+  long figé sur une étape générique. Distinguer travail recalculé et artefacts réutilisés,
+  durée observée et ETA estimée; ne pas inventer de pourcentage, durée ou consommation
+  pour les étapes non mesurées. Couvrir ces contrats par des tests ciblés, sans exiger
+  d'expérience scientifique réelle pour les vérifier.
 
 - Tous les agents, y compris les agents spécialisés et délégués, enregistrent
   systématiquement les rapports et tous les fichiers générés pour une analyse

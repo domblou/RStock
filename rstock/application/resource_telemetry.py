@@ -244,6 +244,7 @@ class ResourceRecorder:
             self.active_phase = name
             self.attempt["phase_rows"].append({
                 "name": name, "started_at": _utc(), "finished_at": None,
+                "status": "running",
                 "duration_seconds": None, "details": details or {},
                 "completed_items": None, "item_kind": None,
                 "cpu_seconds": None, "cpu_covered_seconds": 0.0,
@@ -286,6 +287,7 @@ class ResourceRecorder:
             if phase is None:
                 return
             phase["finished_at"] = _utc()
+            phase["status"] = "completed"
             phase["duration_seconds"] = max(0.0, time.monotonic() - self.phase_starts.pop(name))
             if details:
                 phase["details"].update(details)
@@ -314,6 +316,12 @@ class ResourceRecorder:
     def batch_completed(self, phase: str, details: dict[str, object],
                         completed_units: int | None) -> None:
         if not details.get("checkpoint_written") or "batch_id" not in details:
+            if isinstance(details.get("unit"), str) and isinstance(completed_units, int):
+                with self.lock:
+                    row = self._open_phase(phase)
+                    if row is not None:
+                        row["completed_items"] = completed_units
+                        row["item_kind"] = details["unit"]
             return
         with self.lock:
             count = details.get("models") if phase == "forward_simulation" else details.get("combinations")
@@ -352,6 +360,15 @@ class ResourceRecorder:
         self.thread.join(timeout=1)
         with self.lock:
             self._sample_locked()
+            if self.active_phase is not None:
+                phase = self._open_phase(self.active_phase)
+                if phase is not None:
+                    phase["finished_at"] = _utc()
+                    phase["status"] = status
+                    phase["duration_seconds"] = max(0., time.monotonic() - self.phase_starts.pop(self.active_phase))
+                    cpu, covered = phase["cpu_seconds"], phase["cpu_covered_seconds"]
+                    phase["cpu_mean_cores"] = None if cpu is None or covered <= 0 else cpu / covered
+                self.active_phase = None
             self.attempt["status"] = status
             self.attempt["error"] = error
             self.attempt["finished_at"] = _utc()

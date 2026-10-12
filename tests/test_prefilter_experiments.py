@@ -87,6 +87,15 @@ def _fixture(tmp_path, monkeypatch):
 
     monkeypatch.setattr(workflows, "_prepared_inputs", prepare)
     monkeypatch.setattr(workflows, "evaluate_prefilter_walk_forward", evaluate)
+    # This orchestration fixture predates observed window audits. Keep it as an
+    # explicit legacy contract; real engine audits are tested separately.
+    persist_training = workflows._persist_prefilter_training
+    def legacy_training(*args):
+        result = persist_training(*args)
+        result.pop('prefilter_evaluation',None)
+        result.pop('prefilter_algorithm',None)
+        return result
+    monkeypatch.setattr(workflows, '_persist_prefilter_training', legacy_training)
     monkeypatch.setattr(workflows, "generate_symbol_sets", lambda *_args, **_kwargs: pd.DataFrame({"V1": ["BBB", "CCC", "DDD"]}))
     return repository, spec, preparation_calls, qualifications, original_prepared_inputs
 
@@ -242,6 +251,8 @@ def test_prefilter_derivation_ui_prefills_and_submits_xgboost_values(tmp_path, m
 
         def caption(self, *_args):
             pass
+        def checkbox(self, *_args, **_kwargs):
+            return False
 
         def subheader(self, *_args):
             pass
@@ -359,7 +370,7 @@ def test_prefilter_job_visible_in_history_and_derived_fields_are_bounded(tmp_pat
     assert JOB_LABELS["predictor_prefilter"] == "Préfiltre prédicteurs"
     assert job_domain(JobType.PREDICTOR_PREFILTER) == "experiment"
     assert {tab.key for tab in tabs_for_job(JobType.PREDICTOR_PREFILTER)} >= {
-        "results", "resources", "configuration", "files", "logs",
+        "results", "technical",
     }
     assert "predictor_prefilter_top_n" in PREFILTER_DERIVATION_FIELDS
 

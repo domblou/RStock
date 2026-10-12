@@ -17,6 +17,7 @@ from rstock.application.run_detail_tabs import (
     pipeline_stage_rows,
     render_lazy_tabs,
     tabs_for_job,
+    technical_tabs,
     walk_forward_batch_rows,
 )
 
@@ -35,7 +36,6 @@ def test_walk_forward_batches_are_hidden_from_history_and_parent_tab_is_conditio
     assert "walk_forward_batches" not in _keys(JobType.WALK_FORWARD)
     assert _keys(JobType.WALK_FORWARD, batched=True) == [
         "summary",
-        "resources",
         "analysis",
         "combinations",
         "validation",
@@ -48,7 +48,6 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
     assert JobType.END_TO_END.value in EXPERIMENT_JOB_TYPES
     assert _keys(JobType.END_TO_END) == [
         "summary",
-        "resources",
         "walk_forward",
         "xgboost",
         "threshold_parameters",
@@ -65,14 +64,14 @@ def test_end_to_end_exposes_every_integrated_pipeline_view():
 def test_split_jobs_have_standalone_history_and_results_tabs():
     assert JobType.HOLDOUT_EVALUATION.value in EXPERIMENT_JOB_TYPES
     assert _keys(JobType.HOLDOUT_EVALUATION) == [
-        "results", "resources", "configuration", "files", "logs",
+        "results", "technical",
     ]
     assert JobType.PROMOTION_QUALIFICATION.value in EXPERIMENT_JOB_TYPES
     assert _keys(JobType.PROMOTION_QUALIFICATION) == [
-        "results", "configuration", "files", "logs",
+        "results", "technical",
     ]
     assert _keys(JobType.FORCED_CANDIDATE_VALIDATION) == [
-        "summary", "resources", "walk_forward", "fixed_candidate_evaluation",
+        "summary", "walk_forward", "fixed_candidate_evaluation",
         "promotion_qualification", "technical",
     ]
 
@@ -156,7 +155,7 @@ class _FakeStreamlit:
 
 
 def test_lazy_tabs_executes_only_the_visible_renderer():
-    ui = _FakeStreamlit(active_index=3)
+    ui = _FakeStreamlit(active_index=2)
     called: list[str] = []
     tabs = tabs_for_job(JobType.END_TO_END)
     renderers = {
@@ -189,8 +188,8 @@ def test_summary_open_does_not_run_scientific_renderers():
     assert called == ["summary"]
 
 
-def test_individual_scientific_tabs_keep_their_existing_layout():
-    expected = ["results", "resources", "configuration", "files", "logs"]
+def test_individual_scientific_tabs_share_technical_layout():
+    expected = ["results", "technical"]
     assert _keys(JobType.XGBOOST_CALIBRATION) == expected
     assert _keys(JobType.THRESHOLD_PARAMETER_CALIBRATION) == expected
     assert _keys(JobType.THRESHOLD_CALIBRATION) == expected
@@ -234,11 +233,35 @@ def test_pipeline_children_and_individual_runs_use_the_same_tab_registry():
     xgboost = tabs_for_job(JobType.XGBOOST_CALIBRATION)
     assert [item.renderer_key for item in xgboost] == [
         "results",
-        "resources",
-        "configuration",
-        "files",
-        "logs",
+        "technical",
     ]
+
+
+@pytest.mark.parametrize("job_type", list(JobType))
+def test_all_types_end_with_one_technical_tab_without_top_level_technical_children(job_type):
+    keys = _keys(job_type)
+    assert keys[-1] == "technical" and keys.count("technical") == 1
+    assert not {"resources", "configuration", "files", "logs", "provenance"}.intersection(keys)
+
+
+def test_explicit_nested_registry_preserves_resources_and_optional_provenance():
+    assert [tab.key for tab in technical_tabs()] == ["resources", "configuration", "files", "logs"]
+    assert [tab.key for tab in technical_tabs(has_provenance=True)] == ["resources", "configuration", "files", "logs", "provenance"]
+
+
+@pytest.mark.parametrize("active,key", [(0,"resources"), (1,"configuration"), (2,"files"), (3,"logs"), (4,"provenance")])
+def test_nested_views_are_lazy_and_receive_the_current_run(monkeypatch, active, key):
+    fake = _FakeStreamlit(active_index=active)
+    fake.caption = lambda *_: None
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    calls = []
+    detail = {"configuration": {}, "files": [], "log_tail": []}
+    monkeypatch.setattr(streamlit_app, "_render_run_resources", lambda run: calls.append(("resources", run)))
+    for name in ("configuration", "files", "logs"):
+        monkeypatch.setattr(streamlit_app, f"_render_run_{name}", lambda actual, name=name: calls.append((name, actual)))
+    streamlit_app._render_run_technical_tabs("child", detail, render_provenance=lambda: calls.append(("provenance", "child")))
+    assert calls == [(key, "child" if key in {"resources", "provenance"} else detail)]
+    assert fake.options["key"] == "run-technical-child"
 
 
 @pytest.mark.parametrize("renderer_key", tuple(PIPELINE_CHILD_TABS))

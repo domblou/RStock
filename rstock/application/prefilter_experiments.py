@@ -14,6 +14,7 @@ import pandas as pd
 
 from rstock.config import PREFILTER_XGBOOST_LEGACY_FIELDS, RStockConfig
 from rstock.modeling import PREFILTER_ROUND_SELECTION_FIELDS
+from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
 
 from .derived_snapshot import load_source_prepared_snapshot
 from .domain import ExperimentSpec, JobType
@@ -26,7 +27,7 @@ PREFILTER_XGBOOST_FIELDS = (
     "prefilter_xgb_colsample_bytree", "prefilter_xgb_gamma",
     "prefilter_xgb_reg_alpha", "prefilter_xgb_reg_lambda", "prefilter_xgb_seed",
 )
-PREFILTER_DERIVATION_FIELDS = frozenset({
+PREFILTER_DERIVATION_FIELDS = frozenset(PREFILTER_MODEL_FIELDS) | frozenset({
     "predictor_prefilter_top_n",
     "predictor_prefilter_min_median_auc",
     "predictor_prefilter_min_pct_above_random",
@@ -61,6 +62,9 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> 
         key: value for key, value in changes.items()
         if value != getattr(config if key in PREFILTER_DERIVATION_FIELDS else source, key)
     }
+    if not effective and changes.get('prefilter_algorithm') == config.prefilter_algorithm:
+        # Explicit same-engine rerun can establish a clean reference from a legacy snapshot.
+        effective['prefilter_algorithm'] = config.prefilter_algorithm
     if not effective:
         raise ValueError("At least one prefilter parameter must change")
     top_n = effective.get("predictor_prefilter_top_n", config.predictor_prefilter_top_n)
@@ -85,6 +89,7 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, object]) -> 
             raise ValueError(f"{field} is outside its valid XGBoost range")
     for field in PREFILTER_DERIVATION_FIELDS - {
         "predictor_prefilter_top_n", *PREFILTER_XGBOOST_FIELDS, *PREFILTER_ROUND_SELECTION_FIELDS,
+        *PREFILTER_MODEL_FIELDS,
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }:
         value = effective.get(field, getattr(config, field))
@@ -180,6 +185,10 @@ def build_derived_prefilter_spec(
     if repository.storage(source_run_id)["state"] != "full":
         raise ValueError("Source Predictor prefilter has been purged")
     effective = _validate_changes(source, changes)
+    if effective == {'prefilter_algorithm':source.config.prefilter_algorithm}:
+        report = repository.read_json(source_run_id,'results/predictor_prefilter.json')
+        if report.get('prefilter_evaluation',{}).get('status') == 'verified':
+            raise ValueError('At least one active prefilter parameter must change')
     summary = repository.summary(source_run_id)
     trace = summary.get("traceability")
     if not isinstance(trace, dict) or not trace.get("prepared_dataset_sha256"):

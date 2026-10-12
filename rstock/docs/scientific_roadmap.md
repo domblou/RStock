@@ -75,9 +75,11 @@ Temporal Stability contre Single Origin reste historiquement non concluant.
    au moins 10 blocs de longueur 2L et couverture complète; évaluation avec gain
    positif dans deux tiers et après retrait du meilleur tiers. Voir le
    [guide](user_guide.md). Ces seuils ne sont pas validés empiriquement.
-   Implémentation vérifiée sur fixtures synthétiques seulement; aucun nouveau
-   run scientifique, résultat de persistance ou preuve Forward. Les archives
-   déjà examinées ne constituent pas une confirmation indépendante.
+   Analyse `20261012T151456_bc632969d3` désormais exécutée sur le WF
+   `20261011T133446_bab008d129` : 22 350 relations, zéro sélection sur 259 séances;
+   persistance non évaluée sur les 174 séances réservées. Ne pas proposer de
+   refaire ce diagnostic comme une validation jamais exécutée. Les archives
+   déjà examinées ne constituent pas une confirmation indépendante ni une preuve Forward.
    La gestion applicative de protocoles est reportée et retirée du code ; aucun
    résultat scientifique nouveau n'est établi par cette correction technique.
 2. **Démontrer la généralisation.** Expliquer l’écart WF/Holdout/Forward ; définir
@@ -103,6 +105,27 @@ les cinq intervalles de vieillissement restent sous
 Les [paramètres historiques et effectifs](scientific_experiments.md#parametres-correspondance)
 restent distincts ; la constante alignée est un contrôle méthodologique, pas une
 stratégie de trading à faire gagner.
+
+## Étude variables–cible–horizon du 12 octobre 2026
+
+[EXP-019](scientific_experiments.md#exp-019) : étude autorisée et terminée,
+[rapport](../../reports/adhoc/variables_cible_horizon_20261012/README.md).
+Le diagnostic logistique déjà réalisé améliore XGBoost mais reste derrière la
+constante; la sélection récente ne retient aucune relation. L'étude n'établit
+aucun motif suffisant pour changer l'horizon ouverture→clôture ou le seuil Up 1 %.
+Les rendements overnight passés sont une information distincte présente dans les
+snapshots, mais omise des prédicteurs actuels; leur efficacité reste hypothétique.
+L'ablation intraday versus intraday + overnight, autorisée séparément, est désormais
+terminée : [EXP-020](scientific_experiments.md#exp-020),
+[artefacts](../../reports/adhoc/overnight_ablation_20261012/summary.json).
+L'ajout overnight dégrade la log loss face au contrôle et à la constante sur les
+174 séances principales et dans les trois segments; aucun critère de poursuite
+atteint. Cette ablation est terminée négativement, pas une prochaine validation
+à refaire. Aucune efficacité universelle ou preuve Forward déduite de ce diagnostic.
+Le directeur recommande de ne pas adopter l'enrichissement et ne propose aucune
+nouvelle intervention suffisamment justifiée; aucune suspension générale d'autres
+avenues n'est présentée comme une décision adoptée de l'utilisateur.
+Les autres priorités restent inchangées jusqu'à décision de l'utilisateur.
 
 ## Décisions ouvertes et non-répétition
 

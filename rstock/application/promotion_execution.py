@@ -60,7 +60,8 @@ class PromotionExecution:
                 model, created = service.promote(
                     coordinator.walk_forward_run_id,
                     set_name,
-                    xgboost_calibration_run=coordinator.xgboost_calibration_run_id,
+                    xgboost_calibration_run=(None if coordinator.repository.load_spec(coordinator.walk_forward_run_id).config.predictive_algorithm == "logistic_l2"
+                                            else coordinator.xgboost_calibration_run_id),
                     threshold_calibration_run=coordinator.threshold_calibration_run_id,
                     holdout_evaluation_run=(
                         None if coordinator.promotion_provenance.get("forced_candidate_validation_run_id")

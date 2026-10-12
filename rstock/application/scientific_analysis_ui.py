@@ -5,7 +5,39 @@ from dataclasses import replace
 
 from .domain import JobType
 from .run_detail_tabs import render_lazy_tabs, tabs_for_job
-from .scientific_analysis import compatible_analyses, get_analysis
+from .scientific_analysis import compatible_analyses, get_analysis, validate_interpretation, interpretation_inputs_hash
+
+
+def _read_summary_json(path):
+    if not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def render_scientific_interpretation(st, item, result, manifest, status, persisted=None):
+    interpretation = validate_interpretation(item.interpret_results(result, manifest, status))
+    if persisted is not None:
+        try:
+            if persisted.get("input_sha256") == interpretation_inputs_hash(result, manifest, status) and all(
+                persisted.get(key) == interpretation[key] for key in ("version", "understanding", "findings", "limits", "verdict")):
+                interpretation = validate_interpretation(persisted)
+            else:
+                interpretation = validate_interpretation(item.interpret_results(None, manifest, status))
+        except (TypeError, ValueError):
+            interpretation = validate_interpretation(item.interpret_results(None, manifest, status))
+    st.subheader("Interprétation scientifique")
+    for label, key in (("Comprendre les résultats", "understanding"),
+                       ("Interprétation des résultats", "findings"),
+                       ("Limites et verdict scientifique", "limits")):
+        st.markdown(f"**{label}**")
+        for paragraph in interpretation[key]:
+            st.write(paragraph)
+        if key == "limits":
+            st.write("Verdict : " + interpretation["verdict"])
 
 
 def render_analysis_launcher(st, service, source_run_id, *, key, navigate):
@@ -75,7 +107,7 @@ def render_analysis_form(st, service, source_run_id, selected, *, key, navigate)
                 st.rerun()
 
 
-def render_analysis_detail(st, service, run_id, status, detail, *, render_resources, render_technical, navigate):
+def render_analysis_detail(st, service, run_id, status, detail, *, render_technical, navigate):
     manifest = detail.get("configuration", {}).get("scientific_analysis") or {}
     root = service.run_service.repository.run_directory(run_id)
     try:
@@ -84,26 +116,31 @@ def render_analysis_detail(st, service, run_id, status, detail, *, render_resour
         st.error(str(error)); return
     def summary():
         st.subheader(item.label)
-        st.json({"status": status, "progress": detail.get("progress"), "parameters": manifest.get("parameters"),
-                 "source_run_id": manifest.get("source_run_id"), "definition_version": manifest.get("definition_version")})
-        prepared = root / "results/analysis_preparation.json"
-        if prepared.is_file() and prepared.stat().st_size <= 2 * 1024 * 1024:
-            st.json({"parameters_effectifs": json.loads(prepared.read_text(encoding="utf-8"))["parameters"]})
-        path = root / "results/analysis_result.json"
+        prepared = _read_summary_json(root / "results/analysis_preparation.json")
+        result = _read_summary_json(root / "results/analysis_result.json")
+        persisted = _read_summary_json(root / "results/scientific_interpretation.json")
+        effective_manifest = prepared if prepared is not None else manifest
+        render_scientific_interpretation(st, item, result, effective_manifest, status, persisted)
         if status.get("status") != "completed":
             st.info("Exécution non terminée : les artefacts disponibles sont partiels.")
-        elif path.is_file() and path.stat().st_size <= 2 * 1024 * 1024:
-            st.json(json.loads(path.read_text(encoding="utf-8")))
+        with st.expander("Détails du résumé (JSON)", expanded=False):
+            st.json({"status": status, "progress": detail.get("progress"), "parameters": manifest.get("parameters"),
+                     "source_run_id": manifest.get("source_run_id"), "definition_version": manifest.get("definition_version")})
+            if prepared is not None:
+                st.json({"parameters_effectifs": prepared.get("parameters")})
+            if status.get("status") == "completed" and result is not None:
+                st.json(result)
         if st.button("Ouvrir le run source", key=f"analysis-source-{run_id}"):
             navigate("detail", [manifest["owner_run_id"]])
-    def technical():
+    def provenance():
         st.json(manifest)
         checkpoint = root / "checkpoints/manifest.json"
         if checkpoint.is_file(): st.json(json.loads(checkpoint.read_text(encoding="utf-8")))
-        render_technical(run_id, detail)
-    renderers = {"summary": summary, "resources": lambda:render_resources(run_id), "technical": technical}
+    renderers = {"summary": summary, "technical": lambda: render_technical(run_id, detail, render_provenance=provenance)}
     result_tabs = tuple(replace(tab, renderer_key=tab.key) for tab in item.result_tabs)
-    tabs = (*tabs_for_job(JobType.SCIENTIFIC_ANALYSIS), *result_tabs)
+    main_tabs = tabs_for_job(JobType.SCIENTIFIC_ANALYSIS)
+    tabs = (*[tab for tab in main_tabs if tab.key != "technical"], *result_tabs,
+            *[tab for tab in main_tabs if tab.key == "technical"])
     if item.render_results:
         result_detail = {**detail, "run_directory": str(root)}
         for tab in result_tabs:

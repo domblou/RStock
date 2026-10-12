@@ -38,6 +38,9 @@ historique fourni ; ses artefacts primaires restent à retrouver.
 EXP-014 planifie la quantification du biais ; le constat méthodologique déjà vérifié
 est conservé et n’est pas transformé en expérience quantitative exécutée.
 EXP-018 reste un ensemble de variantes, sans multiplier artificiellement les IDs.
+EXP-019 ajoute l'étude de formulation autorisée et terminée le 12 octobre 2026,
+après l'audit historique; aucune nouvelle performance prédictive n'y est calculée.
+EXP-020 est la comparaison exploratoire overnight autorisée à la suite de cette étude.
 
 | Expérience | Objectif / hypothèse à tester | Stratégies | Statut |
 |---|---|---|---|
@@ -51,6 +54,8 @@ EXP-018 reste un ensemble de variantes, sans multiplier artificiellement les IDs
 | [EXP-008](#exp-008) | Quels réglages XGBoost apportent un gain stable ? | [STR-009](scientific_strategies.md#str-009) | Réalisée — non concluante |
 | [EXP-009](#exp-009) | La sélection chronologique bat-elle le fixe et la référence ? | [STR-009](scientific_strategies.md#str-009), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
 | [EXP-010](#exp-010) | Quelle famille de variables apporte une valeur additionnelle ? | [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
+| [EXP-019](#exp-019) | Les informations préouverture correspondent-elles à la cible et à l'horizon prédits ? | [STR-006](scientific_strategies.md#str-006) | Réalisée — preuves incomplètes |
+| [EXP-020](#exp-020) | Les rendements overnight passés ajoutent-ils un gain probabiliste aux retards intrajournaliers ? | [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
 | [EXP-011](#exp-011) | Le classement cible/constante survit-il à l’alignement du train ? | [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
 | [EXP-012](#exp-012) | La volatilité passée ajoute-t-elle une valeur prédictive ? | [STR-008](scientific_strategies.md#str-008), [STR-006](scientific_strategies.md#str-006) | Réalisée — non concluante |
 | [EXP-013](#exp-013) | Enrichir les combinaisons et l’univers améliore-t-il la généralisation ? | [STR-006](scientific_strategies.md#str-006) | Réalisée — non concluante |
@@ -306,8 +311,20 @@ relations rares » implémente maintenant une sélection préalable Up sur 60 % 
 séances et une évaluation sur les 40 % restants, avec référence train exacte,
 HAC/Holm, support et couverture complets, et contrôle des tiers d'évaluation.
 Les règles sont détaillées dans le [guide](user_guide.md); les seuils restent
-non validés empiriquement. Tests synthétiques uniquement, aucun nouveau run
-scientifique ni résultat de persistance; statut et conclusions EXP-010 inchangés.
+non validés empiriquement. L'analyse `20261012T151456_bc632969d3`, terminée sur
+le WF `20261011T133446_bab008d129`, examine 22 350 relations : zéro sélection
+sur 259 séances (2024-07-12→2025-07-24), aucune persistance évaluée sur les
+174 séances suivantes (2025-07-25→2026-04-02). Le résumé signale 594 couvertures
+incomplètes. Zéro sélection ne démontre pas l'absence universelle de signal;
+statut non concluant pour la généralisation conservé.
+
+Diagnostic logistique également déjà réalisé :
+[rapport](../../reports/adhoc/simple_regularized_20261011/README.md), même source
+externe EXP-010 `20261011T032201_17ece38f7b`, 3 800 candidats, 26 600 fits Up.
+Log loss moyenne constante 0,542410, logistique L2 0,546616, XGBoost 0,575665.
+La logistique améliore XGBoost mais reste derrière la constante dans les trois
+tiers temporels. Durée mesurée 225,8 secondes. Diagnostic historique négatif,
+sans preuve indépendante, sans nouvelle qualification ni adoption de modèle.
 
 <a id="exp-011"></a>
 
@@ -347,7 +364,98 @@ Forward indépendant de cette variante retrouvé.
 | <a id="exp-016"></a>EXP-016 — Durée de vie | Les Forward EXP-007 ont 63 séances et des diagnostics temporels sauvegardés. | Partiellement réalisée : comportement négatif sur l'horizon agrégé, sans estimation validée de durée de vie ni preuve de renouvellement à 126 séances. Les outils de jalons ne prouvent pas des observations à chaque horizon. |
 | <a id="exp-017"></a>EXP-017 — Figé contre réentraîné / simulations | `simulations/20260924T161827_1e6ea729a6/simulation.json` : Historique, 2026-03-24 → 09-21, 1 117 trades, +42 896,66 $. `20260924T164308_aac8071489` : frozen_at_start, mêmes dates, 1 137 trades, +37 560,73 $. Autres simulations : `20260918T164229_4364fbe664`, `20260923T122131_3d1956d693`. | Exécutions rétrospectives réalisées, comparaison scientifique partielle : nombre de signaux différent, population active choisie après coup, appariement des modèles et provenance du mode Historique ancien à contrôler avant attribution au réentraînement. Rendements bruts à notionnel par signal, sans preuve indépendante ni capital limité. |
 
+<a id="exp-019"></a>
+
+### EXP-019 — Adéquation variables–cible–horizon
+
+**Statut : Réalisée — preuves incomplètes.** Étude autorisée le 12 octobre 2026,
+terminée par lecture du code, des résultats et de sources scientifiques primaires;
+aucun entraînement, acquisition, nouveau run ni calcul prédictif. Ce statut décrit
+l'absence de preuve d'efficacité, pas une étude restée à exécuter.
+[Rapport et références](../../reports/adhoc/variables_cible_horizon_20261012/README.md),
+empreintes des sources dans `source_manifest.json` du même dossier.
+
+Sources réutilisées : EXP-010/EXP-012, diagnostic logistique
+`reports/adhoc/simple_regularized_20261011/`, sélection
+`20261012T151456_bc632969d3`, snapshots des WF `20261011T032201_17ece38f7b`
+et `20261011T133446_bab008d129`. Empreintes des deux snapshots vérifiées;
+751 observations, 20/150 colonnes overnight et clôture→clôture, aucune colonne
+volume. Aucun volume brut lié par empreinte identifié dans les dossiers examinés.
+
+Résultat : pas de justification suffisante pour changer l'horizon ouverture→clôture
+ou l'événement Up ≥ 1 %. La segmentation overnight/intraday suggère une information
+distincte omise, mais la littérature ne démontre pas un avantage RStock à trois
+retards. Volume et horizons courts demanderaient des données supplémentaires.
+
+Recommandation non adoptée : une ablation appariée intraday versus intraday +
+trois observations overnight strictement antérieures, mêmes 3 800 combinaisons
+externes et sept fenêtres, logistique avec pénalité identique, constante train.
+Support commun obligatoire; si les masques changent, refaire le contrôle et la
+constante sur le même support. Critères détaillés section 6 du rapport, proposés
+et non approuvés : gain relatif ≥ 1 % contre contrôle et constante, HAC/Holm 5 %,
+stabilité temporelle et support explicite. Aucun optimum empirique démontré.
+Estimation vérifiée techniquement : 3 points, 5–15 minutes indicatives, valeur
+scientifique moyenne, confiance moyenne; référence mesurée du diagnostic antérieur
+225,8 secondes. Réalisation ad hoc proposée, sans intégration applicative justifiée.
+L'étude n'autorisait pas son exécution; l'autorisation distincte suivante a permis
+la comparaison [EXP-020](#exp-020), désormais terminée et négative.
+
 ## Réutilisation avant toute nouvelle proposition
+
+<a id="exp-020"></a>
+
+### EXP-020 — Ablation exploratoire intraday + overnight
+
+**Statut : Réalisée — non concluante.** Comparaison autorisée le 12 octobre 2026,
+après EXP-019, terminée avec résultat négatif pour l'apport overnight étudié.
+Artefacts : `reports/adhoc/overnight_ablation_20261012/`; source figée
+`20261011T032201_17ece38f7b`, contrôle logistique historique
+`reports/adhoc/simple_regularized_20261011/`. Même 20 cibles, 3 800 candidats,
+sept fenêtres et 433 séances test. Population réelle : 380 candidats à un externe,
+3 420 à deux externes; les colonnes passent respectivement de 3 à 6 ou de 6 à 12.
+Cette précision corrige la description du protocole préparatoire sans changer
+la population. Première tentative arrêtée avant tout fit; son manifeste est préservé.
+
+Cible Up ≥ 1 %, horizon ouverture→clôture, pénalité logistique 0,05 × somme beta²
+et solveur historiques conservés. Retards overnight strictement antérieurs via
+`previous_observed_values`; aucune source mutable, aucun téléchargement. Contrôle
+et constante refaits sur le train commun si ses masques diffèrent. La période
+principale est 2025-07-25→2026-04-02 (174 séances), historique déjà consulté;
+259 séances précédentes descriptives, aucun Holdout ni Forward.
+
+Critères préspecifiés du protocole final du directeur : gain relatif log loss ≥1 %
+contre contrôle et constante, HAC L/2L et Holm 5 % sur deux contrastes globaux,
+deux tiers positifs et gain positif hors meilleur tiers, support/couverture complets.
+Pas de recherche de gagnants individuels, ni de réglage après observation.
+Manifeste, audits, checkpoints et résultats sont conservés dans le dossier ad hoc.
+Estimation préalable : 3 points, 5–15 minutes, valeur et confiance moyennes.
+
+Résultats principaux (log loss, plus bas est meilleur) : constante **0,548681**,
+contrôle intraday **0,551669**, enrichi **0,553528**. L'enrichissement dégrade la
+perte de 0,337 % face au contrôle et de 0,883 % face à la constante. Gains négatifs
+dans les trois segments pour les deux contrastes; p unilatérales Holm = 1 pour
+une amélioration. Les critères préspecifiés échouent. Brier : 0,181619, 0,182514,
+0,183023 respectivement. Pas de preuve d'apport probabiliste sous cette formulation,
+ni d'absence universelle d'information overnight; aucune validation indépendante.
+
+Les 26 600 masques train perdent exactement leur première observation, commune
+aux deux variantes; aucun contrôle historique réutilisé, calendrier test intact.
+53 200 fits exécutés et convergés, maximum 12 itérations. Durée observée **154,07 s**,
+optimisation cumulée 25,49 s; mémoire résidente observée jusqu'à 326 Mo dans la
+télémétrie échantillonnée (pas une mesure continue du pic). Sources hachées avant/après
+et inchangées. Vérifications indépendantes : pertes/Brier depuis les probabilités,
+masques, convergence et reprise des 20 checkpoints sans fit, résultats identiques,
+sorties originales inchangées; `validation.json`. Deux tentatives techniques
+initiales arrêtées sont tracées par leurs manifests; elles ne constituent pas
+des expériences scientifiques supplémentaires.
+
+[Rapport scientifique final](../../reports/adhoc/overnight_ablation_20261012/README.md).
+Avis du directeur : terminer EXP-020, ne pas adopter l'enrichissement et ne pas
+répéter des variantes équivalentes sans élément nouveau; aucune nouvelle
+intervention suffisamment justifiée. La suspension d'autres avenues est une
+recommandation, pas une décision utilisateur adoptée. Le remplacement intraday
+par clôture→clôture n'est pas testé ici. Les p unilatérales d'amélioration ne
+constituent pas un test bilatéral de dégradation.
 
 EXP-007, EXP-009, EXP-011, EXP-012 et les grilles exploratoires EXP-001/EXP-008 ont déjà des résultats
 négatifs ou non concluants. Toute répétition exige une hypothèse nouvelle,

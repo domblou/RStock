@@ -119,6 +119,7 @@ def test_job_card_displays_global_bar_origin_and_eta(monkeypatch):
         def container(self, **kwargs): return nullcontext()
         def columns(self, *args): return [self] * 4
         def markdown(self, *args): pass
+        def subheader(self, *args): pass
         def code(self, *args): pass
         def metric(self, *args): pass
         def button(self, *args, **kwargs): return False

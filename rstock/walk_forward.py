@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from .combinations import predictive_model_identity, symbol_set_id, symbols_from_set
+from .logistic import logistic_contract
 from .config import RStockConfig
 from .target_volatility import contract as volatility_contract, enabled as volatility_enabled, column as volatility_column
 from .evaluation import binary_predictions, classification_metrics
@@ -236,14 +237,15 @@ def _walk_forward_combination(
         if train.index.max() >= test.index.min():
             raise AssertionError("Walk-forward window leaked future test data")
         constant = config.predictive_model_type == "constant_probability"
-        xgb = None if constant else xgboost_module()
+        frame_model = constant or config.predictive_algorithm == "logistic_l2"
+        xgb = None if frame_model else xgboost_module()
         effective_parameters = parameters or historical_xgboost_parameters(config)
         train_features = train[names]
         test_features = test[names]
-        test_matrix = None if constant else xgb.DMatrix(test_features, feature_names=names)
+        test_matrix = None if frame_model else xgb.DMatrix(test_features, feature_names=names)
         selection_diagnostics = {}
-        if constant:
-            up_booster = fit_booster(train, names, up_outcome_name, config)
+        if frame_model:
+            up_booster = fit_booster(train, names, up_outcome_name, config, cancellation_check=cancellation_check)
             up_selection = dict(up_booster.record)
         elif round_selection_enabled and mode == "chronological":
             up_booster, up_selection = fit_chronological_booster(
@@ -258,7 +260,7 @@ def _walk_forward_combination(
                             "RoundsRetained": effective_parameters.num_boost_round,
                             "RoundSelectionFallbackReason": None}
         selection_diagnostics.update({f"Up{k}": v for k, v in up_selection.items()})
-        up_probabilities = (predict_probabilities(up_booster, test, names) if constant
+        up_probabilities = (predict_probabilities(up_booster, test, names) if frame_model
                             else predict_probabilities_matrix(up_booster, test_matrix))
         up_predicted = binary_predictions(up_probabilities, config.prediction_threshold)
         up_actual = test[up_outcome_name].astype(int).to_numpy()
@@ -267,10 +269,11 @@ def _walk_forward_combination(
             "Observation": observation,
             "Predictors": predictors_json,
             "PredictiveModelType": config.predictive_model_type,
+            "PredictiveAlgorithm": "constant_probability" if config.predictive_model_type == "constant_probability" else config.predictive_algorithm,
             "FeatureColumns": json.dumps(names),
             "ExternalPredictors": external_json,
-            "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config)),
-            "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config)),
+            "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config), logistic_contract(config) if config.predictive_algorithm == "logistic_l2" else None),
+            "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config), logistic_contract(config) if config.predictive_algorithm == "logistic_l2" else None),
             "MarketCalendar": market_calendars.get(observation),
             "Window": window.number,
             "TrainStart": train.index.min(),
@@ -284,6 +287,10 @@ def _walk_forward_combination(
             "RowsLostToLags": rows_lost_to_lags,
         }
         window_record.update(_prefixed_metric_record("Up", up_actual, up_predicted, up_probabilities))
+        if not include_down:
+            from .prefilter_audit import window_audit
+            window_record["_prefilter_audit"] = window_audit(train, test, names, up_outcome_name,
+                up_probabilities, identity=set_name, window=window.number, holdout_start=holdout_start)
         if volatility_enabled(config):
             base_names = [n for n in names if n != volatility_column(observation, config.target_volatility_sessions)]
             base_count = len(ordered[[*base_names, up_outcome_name, down_outcome_name]].dropna())
@@ -293,8 +300,8 @@ def _walk_forward_combination(
                 TargetVolatilitySourceQuality="retrospective_not_pit")
         down_predicted = down_probabilities = None
         if include_down:
-            if constant:
-                down_booster = fit_booster(train, names, down_outcome_name, config)
+            if frame_model:
+                down_booster = fit_booster(train, names, down_outcome_name, config, cancellation_check=cancellation_check)
                 down_selection = dict(down_booster.record)
             elif round_selection_enabled and mode == "chronological":
                 down_booster, down_selection = fit_chronological_booster(
@@ -309,7 +316,7 @@ def _walk_forward_combination(
                                   "RoundsRetained": effective_parameters.num_boost_round,
                                   "RoundSelectionFallbackReason": None}
             selection_diagnostics.update({f"Down{k}": v for k, v in down_selection.items()})
-            down_probabilities = (predict_probabilities(down_booster, test, names) if constant
+            down_probabilities = (predict_probabilities(down_booster, test, names) if frame_model
                                   else predict_probabilities_matrix(down_booster, test_matrix))
             down_predicted = binary_predictions(
                 down_probabilities, config.prediction_threshold
@@ -329,10 +336,11 @@ def _walk_forward_combination(
                 "Observation": observation,
                 "Predictors": predictors_json,
                 "PredictiveModelType": config.predictive_model_type,
+                "PredictiveAlgorithm": "constant_probability" if config.predictive_model_type == "constant_probability" else config.predictive_algorithm,
                 "FeatureColumns": json.dumps(names),
                 "ExternalPredictors": external_json,
-                "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config)),
-                "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config)),
+                "UpModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Up", volatility_contract(config), logistic_contract(config) if config.predictive_algorithm == "logistic_l2" else None),
+                "DownModelIdentity": predictive_model_identity(set_name, config.predictive_model_type, "Down", volatility_contract(config), logistic_contract(config) if config.predictive_algorithm == "logistic_l2" else None),
                 "MarketCalendar": market_calendars.get(observation),
                 "Window": window.number,
                 "Date": date,
@@ -380,14 +388,13 @@ def _prefilter_combination(
         config = context[1]
         # Keep the shared evaluator's geometry and qualification untouched. Only
         # this prefilter training context receives the independent seed.
-        training_context = (
-            context[0], replace(config, xgb_seed=config.prefilter_xgb_seed, predictive_model_type="external_only", target_volatility_enabled=False), *context[2:],
-        )
+        from .prefilter_audit import training_config
+        training_context = (context[0], training_config(config), *context[2:])
         result = _walk_forward_combination(
             row_values, training_context, cancellation_check, include_down=False,
-            parameters=prefilter_xgboost_parameters(config),
-            round_selection_enabled=config.prefilter_xgb_round_selection_mode == "chronological",
-            round_selection_policy=RoundSelectionPolicy.from_config(config, scope="prefilter"),
+            parameters=None if config.prefilter_algorithm == "logistic_l2" else prefilter_xgboost_parameters(config),
+            round_selection_enabled=config.prefilter_algorithm == "xgboost" and config.prefilter_xgb_round_selection_mode == "chronological",
+            round_selection_policy=None if config.prefilter_algorithm == "logistic_l2" else RoundSelectionPolicy.from_config(config, scope="prefilter"),
         )
     except InsufficientWalkForwardObservations as error:
         _, _, _, market_calendars, _, _, _ = context
@@ -446,18 +453,23 @@ def _prefilter_combination(
         context[1],
     )
     record = qualification.drop(columns="EligibleRank").iloc[0].to_dict()
-    if config.prefilter_xgb_round_selection_mode == "chronological":
+    record["_round_selection_training"] = [
+        {**window["_prefilter_audit"], "PredictiveAlgorithm":config.prefilter_algorithm,
+         "LogisticContract": window.get("UpContract"), "Converged":window.get("UpConverged"),
+         "LogisticIterations":window.get("UpIterations"),"LogisticFitSeconds":window.get("UpFitSeconds")}
+        for window in result.window_records]
+    if config.prefilter_algorithm == "xgboost" and config.prefilter_xgb_round_selection_mode == "chronological":
         # Compact per-fit audit travels with the qualification in the same atomic
         # checkpoint batch; prediction-level detail is still released by workers.
         record["_round_selection_training"] = [
-            {key: value for key, value in window.items()
+            {**record["_round_selection_training"][index], **{key: value for key, value in window.items()
              if key.startswith("UpRound") or key.startswith("UpInternal")
              or key.startswith("UpValidation") or key.startswith("UpSelection")
              or key in {"Set", "Observation", "Predictors", "Window", "TrainStart", "TrainEnd",
                         "TrainObservations", "TestStart", "TestEnd", "TestObservations",
                         "UpTrainingIdentity", "UpBestIteration", "UpBestValidationLogLoss",
-                        "UpEarlyStoppingTriggered", "UpRefitSeconds", "UpLogLoss", "UpBrier", "UpROCAUC", "UpPRAUC"}}
-            for window in result.window_records
+                        "UpEarlyStoppingTriggered", "UpRefitSeconds", "UpLogLoss", "UpBrier", "UpROCAUC", "UpPRAUC"}}}
+            for index, window in enumerate(result.window_records)
         ]
     return record
 
@@ -956,8 +968,13 @@ def _evaluate_final_holdout(
         if development.index.max() >= holdout.index.min():
             raise AssertionError("Final holdout leaked into model development data")
 
-        up_booster = fit_booster(development, names, up_outcome_name, config)
-        down_booster = fit_booster(development, names, down_outcome_name, config)
+        up_booster = fit_booster(development, names, up_outcome_name, config, cancellation_check=cancellation_check)
+        down_booster = fit_booster(development, names, down_outcome_name, config, cancellation_check=cancellation_check)
+        if config.predictive_algorithm == "logistic_l2":
+            record["FinalPredictiveAlgorithm"] = "logistic_l2"
+            for direction, model in (("Up", up_booster), ("Down", down_booster)):
+                record.update({f"Final{direction}{key}": value for key, value in model.record.items()
+                               if key in {"Converged", "Iterations", "FitSeconds", "GradientMax", "TrainingIdentity"}})
         up_probabilities = predict_probabilities(up_booster, holdout, names)
         down_probabilities = predict_probabilities(down_booster, holdout, names)
         up_predicted = binary_predictions(
@@ -1054,12 +1071,24 @@ def ensure_prefilter_training_policy(manager, config: RStockConfig) -> None:
     from .checkpoints import CheckpointIncompatibleError
 
     name = "prefilter_round_selection_contract"
+    if config.prefilter_algorithm == "logistic_l2":
+        from .prefilter_audit import engine_contract
+        name = "prefilter_logistic_contract"
+        policy = engine_contract(config)
+        if manager.artifact_exists(name):
+            if manager.load_artifact(name) != policy:
+                raise CheckpointIncompatibleError("Prefilter logistic contract differs from checkpoint")
+        else:
+            if manager.completed_batch_ids("predictor_prefilter_walk_forward"):
+                raise CheckpointIncompatibleError("Historical Prefilter batches cannot become logistic")
+            manager.commit_artifact(name, policy)
+        return
     policy = {"schema_version": 1, "training": prefilter_xgboost_snapshot(config),
               "policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot()}
     if manager.artifact_exists(name):
         if manager.load_artifact(name) != policy:
             raise CheckpointIncompatibleError("Prefilter training policy differs from its checkpoint")
-    elif config.prefilter_xgb_round_selection_mode == "chronological":
+    elif config.prefilter_algorithm == "xgboost" and config.prefilter_xgb_round_selection_mode == "chronological":
         if manager.completed_batch_ids("predictor_prefilter_walk_forward") or any(
                 manager.artifact_exists(key) for key in ("prefilter_qualification", "prefilter_selection")):
             raise CheckpointIncompatibleError("Historical fixed Prefilter work cannot resume as chronological")
@@ -1127,8 +1156,8 @@ def evaluate_prefilter_walk_forward(
             "prepared_bytes": dataframe_bytes(ordered),
             "parent_rss_bytes": rss_before,
             "combination_workers": config.combination_workers,
-            "xgb_threads_per_worker": config.xgb_nthread,
-            "maximum_xgb_threads": config.combination_workers * config.xgb_nthread,
+            "xgb_threads_per_worker": config.xgb_nthread if config.prefilter_algorithm=='xgboost' else None,
+            "maximum_xgb_threads": config.combination_workers * config.xgb_nthread if config.prefilter_algorithm=='xgboost' else None,
         },
     )
     batch_size = config.predictor_prefilter_batch_size
@@ -1145,6 +1174,21 @@ def evaluate_prefilter_walk_forward(
         return rows
 
     if checkpoint_manager is not None:
+        from .traceability import prepared_dataset_hash
+        from .checkpoints import CheckpointIncompatibleError
+        input_contract = {'version':1,'prepared_sha256':prepared_dataset_hash(ordered),
+                          'holdout_start':str(holdout_start)}
+        if checkpoint_manager.artifact_exists('prefilter_input_contract'):
+            if checkpoint_manager.load_artifact('prefilter_input_contract') != input_contract:
+                raise CheckpointIncompatibleError('Prefilter frozen input or Holdout boundary changed')
+        else:
+            if checkpoint_manager.completed_batch_ids('predictor_prefilter_walk_forward'):
+                if not checkpoint_manager.artifact_exists('prepared_snapshot'):
+                    raise CheckpointIncompatibleError('Historical Prefilter inputs cannot be verified')
+                old, _ = checkpoint_manager.load_snapshot()
+                if prepared_dataset_hash(old) != input_contract['prepared_sha256']:
+                    raise CheckpointIncompatibleError('Historical Prefilter input differs')
+            checkpoint_manager.commit_artifact('prefilter_input_contract',input_contract)
         ensure_prefilter_training_policy(checkpoint_manager, config)
     if checkpoint_manager is None:
         batches = iter_combination_batches(
@@ -1184,14 +1228,13 @@ def evaluate_prefilter_walk_forward(
             checkpoint_started_at = perf_counter()
             first_training = len(training_records)
             payload = {"qualification": pd.DataFrame(unpack(batch.results))}
-            if config.prefilter_xgb_round_selection_mode == "chronological":
-                payload["round_selection_training"] = pd.DataFrame(training_records[first_training:])
+            payload["round_selection_training"] = pd.DataFrame(training_records[first_training:])
             batch_costs = {
                 "selection_worker_seconds": sum(float(row.get("UpSelectionSeconds", 0)) for row in training_records[first_training:]),
                 "refit_worker_seconds": sum(float(row.get("UpRefitSeconds", 0)) for row in training_records[first_training:]),
                 "selection_rounds_run": sum(int(row.get("UpSelectionRoundsRun", 0)) for row in training_records[first_training:]),
                 "refit_rounds": sum(int(row.get("UpRoundsRetained", 0)) for row in training_records[first_training:]),
-            } if config.prefilter_xgb_round_selection_mode == "chronological" else {}
+            } if config.prefilter_algorithm == "xgboost" and config.prefilter_xgb_round_selection_mode == "chronological" else {}
             manager.commit_batch(
                 "predictor_prefilter_walk_forward",
                 batch.batch_id,
@@ -1228,7 +1271,7 @@ def evaluate_prefilter_walk_forward(
             payload = manager.load_batch("predictor_prefilter_walk_forward", batch_id)
             records.extend(payload["qualification"].to_dict("records"))
             audit = payload.get("round_selection_training")
-            if config.prefilter_xgb_round_selection_mode == "chronological" and audit is None:
+            if config.prefilter_algorithm == "xgboost" and config.prefilter_xgb_round_selection_mode == "chronological" and audit is None:
                 from .checkpoints import CheckpointIncompatibleError
                 raise CheckpointIncompatibleError("Chronological Prefilter batch has no training audit")
             if audit is not None:
@@ -1247,7 +1290,7 @@ def evaluate_prefilter_walk_forward(
         "parent_rss_before_bytes": rss_before,
         "parent_rss_after_bytes": process_rss_bytes(),
         "combination_workers": config.combination_workers,
-        "xgb_threads_per_worker": config.xgb_nthread,
+        "xgb_threads_per_worker": config.xgb_nthread if config.prefilter_algorithm=='xgboost' else None,
         **population_diagnostics,
         "round_selection_policy": RoundSelectionPolicy.from_config(config, scope="prefilter").snapshot(),
         "round_selection_coverage": {**round_selection_coverage(training), "Down": {"available": False, "status": "not_applicable"}},
@@ -1261,7 +1304,7 @@ def evaluate_prefilter_walk_forward(
         # Keep its batch timings; absence must not imply zero training work.
         for key in ("selection_rounds_run", "refit_rounds", "selection_worker_seconds", "refit_worker_seconds"):
             telemetry.pop(key)
-    if checkpoint_manager is not None and config.prefilter_xgb_round_selection_mode == "chronological":
+    if checkpoint_manager is not None:
         checkpoint_manager.commit_artifact("prefilter_round_selection_training", training)
         # Scientific costs belong to the durable fits, not the current resume's
         # wall time/RSS. Exporting volatile attempt telemetry would change the
@@ -1304,7 +1347,7 @@ def evaluate_walk_forward(
 ) -> WalkForwardResult:
     """Qualify on development windows, then confirm on an untouched final holdout."""
 
-    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+    if config.predictive_model_type != "constant_probability" and config.predictive_algorithm == "xgboost" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
         raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
 
     _validate_prepared_index(prepared)
@@ -1435,8 +1478,10 @@ def evaluate_walk_forward(
     )
     report_progress(progress_callback, "metrics", substage="completed", details={"phase_event": "completed"})
     run_configuration: dict[str, object] = {
-        "round_selection": ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" else {**round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__}),
+        "round_selection": ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" or config.predictive_algorithm == "logistic_l2" else {**round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__}),
         "round_selection_coverage": round_selection_coverage(windows_frame),
+        "predictive_algorithm": "constant_probability" if config.predictive_model_type == "constant_probability" else config.predictive_algorithm,
+        "logistic_contract": logistic_contract(config) if config.predictive_algorithm == "logistic_l2" else None,
         "target": "intraday_return >= intraday_target_threshold",
         "down_target": "intraday_return <= -intraday_down_threshold",
         "intraday_target_threshold": config.intraday_target_threshold,

@@ -53,6 +53,16 @@ class RStockConfig:
     intraday_target_threshold: float = 0.01
     intraday_down_threshold: float = 0.01
     predictive_model_type: str = "external_only"
+    predictive_algorithm: str = "xgboost"
+    logistic_l2_penalty: float = 0.05
+    logistic_max_iterations: int = 1000
+    logistic_gradient_tolerance: float = 1e-8
+    logistic_objective_tolerance: float = 1e-12
+    prefilter_algorithm: str = "xgboost"
+    prefilter_logistic_l2_penalty: float = 0.05
+    prefilter_logistic_max_iterations: int = 1000
+    prefilter_logistic_gradient_tolerance: float = 1e-8
+    prefilter_logistic_objective_tolerance: float = 1e-12
     target_volatility_enabled: bool = False
     target_volatility_sessions: int = 21
     lag_depth: int = 3
@@ -187,6 +197,24 @@ class RStockConfig:
     temporal_max_ci_width: float = 0.20
 
     def __post_init__(self) -> None:
+        import math
+        if self.prefilter_algorithm not in {"xgboost", "logistic_l2"}:
+            raise ValueError("Unsupported prefilter_algorithm")
+        if self.predictive_algorithm not in {"xgboost", "logistic_l2", "constant_probability"}:
+            raise ValueError("Unsupported predictive_algorithm")
+        if self.predictive_algorithm == "constant_probability":
+            object.__setattr__(self, "predictive_model_type", "constant_probability")
+        if self.predictive_model_type == "constant_probability" and self.predictive_algorithm == "logistic_l2":
+            raise ValueError("Constant variables cannot use logistic_l2")
+        for name in ("logistic_l2_penalty", "logistic_gradient_tolerance", "logistic_objective_tolerance",
+                     "prefilter_logistic_l2_penalty", "prefilter_logistic_gradient_tolerance", "prefilter_logistic_objective_tolerance"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if isinstance(self.logistic_max_iterations, bool) or not isinstance(self.logistic_max_iterations, int) or self.logistic_max_iterations < 1:
+            raise ValueError("logistic_max_iterations must be a positive integer")
+        if isinstance(self.prefilter_logistic_max_iterations, bool) or not isinstance(self.prefilter_logistic_max_iterations, int) or self.prefilter_logistic_max_iterations < 1:
+            raise ValueError("prefilter_logistic_max_iterations must be a positive integer")
         if not isinstance(self.target_volatility_enabled, bool):
             raise ValueError("target_volatility_enabled must be boolean")
         if (not isinstance(self.target_volatility_sessions, int)
@@ -418,6 +446,17 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    "prefilter_algorithm": "xgboost",
+    "prefilter_logistic_l2_penalty": 0.05,
+    "prefilter_logistic_max_iterations": 1000,
+    "prefilter_logistic_gradient_tolerance": 1e-8,
+    "prefilter_logistic_objective_tolerance": 1e-12,
+    # Legacy constant runs keep their type sentinel; all other old runs use XGBoost.
+    "predictive_algorithm": "xgboost",
+    "logistic_l2_penalty": 0.05,
+    "logistic_max_iterations": 1000,
+    "logistic_gradient_tolerance": 1e-8,
+    "logistic_objective_tolerance": 1e-12,
     "target_volatility_enabled": False,
     "target_volatility_sessions": 21,
     "predictive_model_type": "external_only",

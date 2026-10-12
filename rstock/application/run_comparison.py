@@ -540,7 +540,7 @@ def _qualification_rejection_analysis(
 
 _SCIENTIFIC_PREFIXES = (
     "qualification_", "promotion_", "threshold_calibration_", "predictor_prefilter_",
-    "temporal_", "model_selection_", "xgb_",
+    "temporal_", "model_selection_", "xgb_", "logistic_",
 )
 _SCIENTIFIC_FIELDS = {
     "intraday_target_threshold", "intraday_down_threshold", "lag_depth", "permutation_depth",
@@ -564,7 +564,11 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
                   if (name in _SCIENTIFIC_FIELDS or name.startswith(_SCIENTIFIC_PREFIXES))
                   and name not in _TECHNICAL_FIELDS}
     return {
-        "Type de modèle prédictif": settings.get("predictive_model_type", "external_only"),
+        "Algorithme prédictif": "constant_probability" if settings.get("predictive_model_type") == "constant_probability" else settings.get("predictive_algorithm", "xgboost"),
+        "Type de variables": "sans objet" if settings.get("predictive_model_type") == "constant_probability" else settings.get("predictive_model_type", "external_only"),
+        "Pénalité L2": settings.get("logistic_l2_penalty", 0.05) if settings.get("predictive_algorithm") == "logistic_l2" else None,
+        "Paramètres logistiques": {key: value for key, value in scientific.items()
+                                  if key.startswith("logistic_")} if settings.get("predictive_algorithm") == "logistic_l2" else {},
         "Univers": {key: config.get(key) for key in ("primary_universe_id", "target_symbols", "predictor_symbols", "context_symbols", "combinations_per_target", "calendar")},
         "Profondeur": settings.get("permutation_depth"),
         "WF scientifique": {key: value for key, value in scientific.items()

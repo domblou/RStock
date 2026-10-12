@@ -73,10 +73,16 @@ class ProductionModel:
             raise ValueError("Decision thresholds must be between zero and one")
         if self.calibrated_signal_threshold is not None and not 0 <= self.calibrated_signal_threshold <= 1:
             raise ValueError("Calibrated signal threshold must be between zero and one")
-        if not self.xgboost_parameters:
+        if self.predictive_algorithm not in {"xgboost", "logistic_l2"}:
+            raise ValueError("Unsupported Production algorithm")
+        if self.predictive_algorithm == "xgboost" and not self.xgboost_parameters:
             raise ValueError("XGBoost parameters are required")
         if self.xgboost_threads < 1:
             raise ValueError("xgboost_threads must be positive")
+
+    @property
+    def predictive_algorithm(self) -> str:
+        return self.source_configuration.get("rstock_config", {}).get("predictive_algorithm", "xgboost")
 
     @property
     def symbols(self) -> tuple[str, ...]:

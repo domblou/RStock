@@ -177,7 +177,7 @@ def test_origin_contract(fake_xgb, tmp_path, monkeypatch, method):
     assert compared.settings["prefilter_xgb_round_selection_mode"] == "chronological"
     assert compared.display_row()["Fenêtres Up optimisées"] > 0
     raw = (output / "prefilter_contract.json").read_bytes()
-    assert json.loads(raw)["schema_version"] == 2
+    assert json.loads(raw)["schema_version"] == 3
     from rstock.application.end_to_end import artifact_digests
     stage_digests = artifact_digests(repository, run_id, "prefilter")
     assert "results/prefilter_round_selection_training.csv" in stage_digests

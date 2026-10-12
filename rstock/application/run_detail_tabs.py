@@ -99,15 +99,15 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
     RunTabDefinition(
         "configuration",
         "Configuration",
-        _SCIENTIFIC_RESULT_TYPES,
+        frozenset(JobType),
         "configuration",
         "run snapshot",
     ),
     RunTabDefinition(
-        "files", "Fichiers", _SCIENTIFIC_RESULT_TYPES, "files", "result file names"
+        "files", "Fichiers", frozenset(JobType), "files", "result file names"
     ),
     RunTabDefinition(
-        "logs", "Logs", _SCIENTIFIC_RESULT_TYPES, "logs", "current run log tail"
+        "logs", "Logs", frozenset(JobType), "logs", "current run log tail"
     ),
     RunTabDefinition(
         "walk_forward",
@@ -174,44 +174,41 @@ TAB_REGISTRY: tuple[RunTabDefinition, ...] = (
     RunTabDefinition(
         "technical",
         "Technique",
-        frozenset({JobType.WALK_FORWARD, JobType.END_TO_END, JobType.SCIENTIFIC_ANALYSIS}),
+        frozenset(JobType),
         "technical",
         "manifests and run metadata",
+    ),
+    RunTabDefinition(
+        "provenance", "Provenance",
+        frozenset({JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION, JobType.SCIENTIFIC_ANALYSIS}),
+        "provenance", "manifests, fingerprints and diagnostics",
     ),
 )
 
 _ORDER: dict[JobType, tuple[str, ...]] = {
-    JobType.SCIENTIFIC_ANALYSIS: ("summary", "technical"),
+    JobType.SCIENTIFIC_ANALYSIS: ("summary",),
     JobType.WALK_FORWARD: (
         "summary",
         "analysis",
         "combinations",
         "validation",
         "walk_forward_batches",
-        "technical",
     ),
-    JobType.XGBOOST_CALIBRATION: ("results", "configuration", "files", "logs"),
+    JobType.XGBOOST_CALIBRATION: ("results",),
     JobType.THRESHOLD_PARAMETER_CALIBRATION: (
         "results",
-        "configuration",
-        "files",
-        "logs",
     ),
-    JobType.THRESHOLD_CALIBRATION: ("results", "configuration", "files", "logs"),
-    JobType.HOLDOUT_EVALUATION: ("results", "configuration", "files", "logs"),
-    JobType.PROMOTION_QUALIFICATION: ("results", "configuration", "files", "logs"),
+    JobType.THRESHOLD_CALIBRATION: ("results",),
+    JobType.HOLDOUT_EVALUATION: ("results",),
+    JobType.PROMOTION_QUALIFICATION: ("results",),
     JobType.FIXED_CANDIDATE_EVALUATION: (
         "results",
-        "configuration",
-        "files",
-        "logs",
     ),
     JobType.FORCED_CANDIDATE_VALIDATION: (
         "summary",
         "walk_forward",
         "fixed_candidate_evaluation",
         "promotion_qualification",
-        "technical",
     ),
     JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC: (
         "diagnostic_results",
@@ -229,7 +226,6 @@ _ORDER: dict[JobType, tuple[str, ...]] = {
         "selection_diagnostic",
         "temporal_validation",
         "promotion",
-        "technical",
     ),
 }
 
@@ -239,25 +235,20 @@ def tabs_for_job(
 ) -> tuple[RunTabDefinition, ...]:
     """Return applicable tabs in their stable visual order."""
 
-    keys = _ORDER.get(job_type, ("results", "configuration", "files", "logs"))
-    resource_types = {
-        JobType.SCIENTIFIC_ANALYSIS,
-        JobType.END_TO_END, JobType.FORCED_CANDIDATE_VALIDATION,
-        JobType.WALK_FORWARD, JobType.PREDICTOR_PREFILTER, JobType.WALK_FORWARD_BATCH,
-        JobType.XGBOOST_CALIBRATION, JobType.THRESHOLD_PARAMETER_CALIBRATION,
-        JobType.THRESHOLD_CALIBRATION, JobType.HOLDOUT_EVALUATION,
-        JobType.FIXED_CANDIDATE_EVALUATION, JobType.FORWARD_SIMULATION,
-        JobType.PRODUCTION_TRAINING, JobType.MARKET_UPDATE,
-        JobType.PRODUCTION_QUALITY_REBUILD, JobType.OPERATIONAL_RUN,
-    }
-    if job_type in resource_types:
-        keys = (keys[0], "resources", *keys[1:])
+    keys = (*_ORDER.get(job_type, ("results",)), "technical")
     definitions = {item.key: item for item in TAB_REGISTRY}
     return tuple(
         definitions[key]
         for key in keys
         if key != "walk_forward_batches" or has_walk_forward_batches
     )
+
+
+def technical_tabs(*, has_provenance: bool = False) -> tuple[RunTabDefinition, ...]:
+    """Explicit shared nested tabs, independent of any job's main tabs."""
+    definitions = {item.key: item for item in TAB_REGISTRY}
+    keys = ("resources", "configuration", "files", "logs") + (("provenance",) if has_provenance else ())
+    return tuple(definitions[key] for key in keys)
 
 
 def render_lazy_tabs(

@@ -18,6 +18,57 @@ uniquement; aucune analyse scientifique réelle lancée et aucun seuil validé e
 
 ## A. État actuel de RStock
 
+Régression logistique L2 — phases 1 et 2 terminées le 12 octobre 2026 :
+moteur à standardisation train uniquement, configuration figée, artefacts JSON
+versionnés, WF ordinaire/streaming/lots et Holdout final. Les jobs WF utilisent
+les workers, checkpoints et mesures existants; XGBoost reste le défaut historique.
+Les tests couvrent convergence, annulation, persistance et reprise sans recalcul
+des lots/enfants terminés. Aucune expérience scientifique réelle exécutée pour
+valider cette intégration. Phase 3 terminée : sélecteurs algorithme/variables,
+paramètres logistiques, dérivations WF/E2E, calibration XGBoost sans objet,
+calibration des seuils/Holdout logistiques et Comparer avec constante alignée.
+Phase 4 terminée : gel Forward et inférence sans réentraînement, promotion,
+entraînement Production, observation et prédictions avec les contrats L2 sources.
+Reprise des modèles Forward terminés et réconciliation d'un entraînement Production
+publié avant une interruption du registre; intégrité des artefacts vérifiée.
+Les opérations restent limitées aux variables externes. Validation temporelle
+automatique logistique intégrée : offset 63, comparaison et revalidation forcée
+avec contrat L2 et seuils sources, sans calibration XGBoost active ni changement
+des critères scientifiques. Reprise des enfants terminés et promotion conditionnelle.
+Vérification visuelle du formulaire réel
+sur fixture isolée, sans services scientifiques.
+Voir [types de modèles](predictive_model_types.md#logistique-phases-1-2).
+
+Préfiltre multi-algorithmes intégré : XGBoost ou L2 indépendant du WF final,
+dérivations sur snapshots/paires figés, référence constante Up sans classement,
+audits par fenêtre et comparaison contrôlée des observations et frontières.
+Découpage Holdout existant conservé, sans double exclusion; protection du Holdout
+principal en consensus et refus de reprise sur une entrée modifiée. Archives
+compatibles, comparaisons historiques sans audit signalées non vérifiables.
+Aucune nouvelle expérience réelle ni conclusion d'efficacité prédictive.
+
+Analyses scientifiques : interprétation déterministe obligatoire dans Résumé,
+avec explication des métriques/règles, constats et limites/verdict. Persistance des
+relations rares prise en charge, y compris absence de sélection et résultats
+indéterminés. Texte versionné et empreinte des entrées gelés avec les sorties;
+compatibilité des anciens bilans sans réécriture ni recalcul. Critères fournis
+par le directeur; aucun nouveau résultat scientifique établi par cette fonction.
+
+Historique : encadré commun des jobs actifs ajouté hors des onglets, sans filtre
+de type et indépendant des filtres de grille. Rafraîchissement et contrôles existants
+réutilisés; l'encadré d'Expériences est conservé.
+
+Détails de run : navigation uniformisée avec Technique toujours en dernière
+position, puis Ressources/Configuration/Fichiers/Logs imbriqués et Provenance pour
+les pipelines et analyses scientifiques. Registre explicite des sous-onglets,
+composants existants et chargement paresseux réutilisés, sans migration des runs.
+
+Analyses scientifiques : phases réelles reliées à la télémétrie CPU/mémoire et aux
+durées, progression par octets/lignes/fenêtres/relations/fichiers avec écritures
+bornées. Reprises et annulations distinguées, publication seule à 100 %. Règle
+permanente ajoutée dans AGENTS.md pour tous les runs. Validation sur fixtures
+techniques, sans expérience scientifique ni reconstruction des anciennes mesures.
+
 | Domaine | Capacités disponibles |
 |---|---|
 | Données et univers | Cache marché, calendriers, variables retardées ; univers manuels et sauvegardés, échantillons reproductibles. |

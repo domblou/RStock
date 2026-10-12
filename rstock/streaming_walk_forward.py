@@ -603,7 +603,7 @@ def run_streamed_walk_forward(
 
     _validate_prepared_index(prepared)
     ordered = prepared.sort_index()
-    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
+    if config.predictive_model_type != "constant_probability" and config.predictive_algorithm == "xgboost" and config.xgb_round_selection_mode == "chronological" and evaluate_holdout:
         raise ValueError("Chronological round selection currently supports WF only; disable final holdout evaluation")
     holdout_size = config.final_holdout_size
     if holdout_size < 1 or holdout_size >= len(ordered):
@@ -631,8 +631,8 @@ def run_streamed_walk_forward(
         "prepared_bytes": dataframe_bytes(ordered),
         "parent_rss_start_bytes": process_rss_bytes(),
         "combination_workers": config.combination_workers,
-        "xgb_threads_per_worker": config.xgb_nthread,
-        "maximum_xgb_threads": config.combination_workers * config.xgb_nthread,
+        "xgb_threads_per_worker": config.xgb_nthread if config.predictive_algorithm == "xgboost" else None,
+        "maximum_xgb_threads": config.combination_workers * config.xgb_nthread if config.predictive_algorithm == "xgboost" else None,
         "peak_batch_prediction_rows": 0,
         "parent_rss_peak_bytes": process_rss_bytes(),
         "phase_seconds": {},
@@ -1134,7 +1134,10 @@ def run_streamed_walk_forward(
         run_configuration["candidate_status"] = "qualified_candidates" if qualification["Eligible"].any() else "no_qualified_candidates"
         run_configuration["holdout_status"] = "executed" if evaluate_holdout and len(final_holdout) else "not_executed"
         run_configuration["data_status"] = "available"
-        run_configuration["round_selection"] = ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" else {
+        from .logistic import logistic_contract
+        run_configuration["predictive_algorithm"] = "constant_probability" if config.predictive_model_type == "constant_probability" else config.predictive_algorithm
+        run_configuration["logistic_contract"] = logistic_contract(config) if config.predictive_algorithm == "logistic_l2" else None
+        run_configuration["round_selection"] = ({"mode": "not_applicable"} if config.predictive_model_type == "constant_probability" or config.predictive_algorithm == "logistic_l2" else {
             **round_selection_snapshot(config), "xgboost_version": xgboost_module().__version__,
         })
         run_configuration["round_selection_coverage"] = round_selection_coverage_batches(

@@ -205,7 +205,7 @@ def test_walk_forward_derivation_ui_inherits_and_submits_scientific_fields(tmp_p
             return 0.2 if field == "xgb_eta" else value
 
         def selectbox(self, _label, values, *, index, **_kwargs):
-            return values[index]
+            return None if index is None else values[index]
 
         def checkbox(self, _label, *, value, **_kwargs):
             return value
@@ -227,6 +227,7 @@ def test_walk_forward_derivation_ui_inherits_and_submits_scientific_fields(tmp_p
 
     service = SimpleNamespace(
         run_service=SimpleNamespace(repository=repository),
+        analyses_for_source=lambda _run_id: [],
         create_derived=lambda run_id, kind, changes: (
             submitted.append((run_id, kind, changes.copy()))
             or SimpleNamespace(run_id="child")
@@ -239,6 +240,8 @@ def test_walk_forward_derivation_ui_inherits_and_submits_scientific_fields(tmp_p
     assert set(shown) == WF_DERIVATION_CONFIG_FIELDS - {
         "target_volatility_enabled",
         "predictive_model_type", "walk_forward_window_mode", "xgb_round_selection_mode",
+        "predictive_algorithm", "logistic_l2_penalty", "logistic_max_iterations",
+        "logistic_gradient_tolerance", "logistic_objective_tolerance",
         "xgb_early_stopping_metric", "xgb_round_selection_protocol_version",
     }
     assert all(shown[field] == getattr(source.config, field) for field in shown)

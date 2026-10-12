@@ -34,6 +34,7 @@ class ModelMetadata:
     target_threshold: float
     lag_depth: int
     classification_metrics: dict[str, Any] = field(default_factory=dict)
+    predictive_algorithm: str = "xgboost"
     round_selection_record: dict[str, Any] = field(default_factory=dict)
 
 
@@ -47,7 +48,7 @@ def _validate_replaceable_store(path: Path) -> None:
         if child.is_dir()
         or (
             child.name not in allowed
-            and not child.name.endswith(".ubj")
+            and not child.name.endswith((".ubj", ".logistic.json"))
             and not child.name.endswith(".metadata.json")
         )
     ]
@@ -94,7 +95,10 @@ def model_store_transaction(destination: Path) -> Iterator[Path]:
 
 def save_model_bundle(model: Any, metadata: ModelMetadata, directory: Path, stem: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    model_path = directory / f"{stem}.ubj"
+    from .logistic import LogisticModel
+    logistic = isinstance(model, LogisticModel)
+    model_path = directory / f"{stem}{'.logistic.json' if logistic else '.ubj'}"
+    metadata.predictive_algorithm = "logistic_l2" if logistic else "xgboost"
     metadata_path = directory / f"{stem}.metadata.json"
     metadata.model_file = model_path.name
     model.save_model(model_path)
@@ -117,7 +121,32 @@ def iter_model_metadata(directory: Path) -> list[tuple[Path, ModelMetadata]]:
     return bundles
 
 
+def model_artifact_filename(direction: str, algorithm: str = "xgboost") -> str:
+    if direction not in {"up", "down"} or algorithm not in {"xgboost", "logistic_l2"}:
+        raise ValueError("Unsupported operational model artifact")
+    return direction + (".logistic.json" if algorithm == "logistic_l2" else ".ubj")
+
+
+def validate_logistic_artifacts(directory: Path, metadata: dict) -> None:
+    """Verify frozen files, ordered inputs and directional training records."""
+    if metadata.get("predictive_algorithm", "xgboost") != "logistic_l2":
+        return
+    import hashlib
+    from .logistic import LogisticModel
+    names = metadata.get("predictor_columns", metadata.get("feature_names"))
+    for direction in ("up", "down"):
+        path = directory / model_artifact_filename(direction, "logistic_l2")
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != metadata.get(f"{direction}_booster_sha256"):
+            raise ValueError("Logistic model artifact has changed or is missing")
+        model = LogisticModel.load(path)
+        if model.names != names or model.record != metadata.get("round_selection_records", {}).get(direction):
+            raise ValueError("Logistic artifact training contract mismatch")
+
+
 def load_booster(path: Path) -> Any:
+    if str(path).endswith(".logistic.json"):
+        from .logistic import LogisticModel
+        return LogisticModel.load(path)
     try:
         import xgboost as xgb
     except ImportError as exc:  # pragma: no cover - depends on runtime install

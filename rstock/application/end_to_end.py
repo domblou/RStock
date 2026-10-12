@@ -92,6 +92,9 @@ def _stage_parameter_contract(spec: ExperimentSpec, stage_key: str) -> dict[str,
         # controls here. Keep its persisted parameter contract byte-compatible.
         from .derivation import STAGE_PARAMETER_FIELDS
         values = {field: getattr(spec.config, field) for field in STAGE_PARAMETER_FIELDS[stage_key]}
+        if spec.config.predictive_algorithm != "logistic_l2":
+            values = {field: value for field, value in values.items()
+                      if field != "predictive_algorithm" and not field.startswith("logistic_")}
     if stage_key == "holdout_evaluation":
         values["evaluate_final_holdout"] = spec.evaluate_final_holdout
     if spec.e2e_xgboost_protocol_version >= 2:
@@ -102,6 +105,15 @@ def _stage_parameter_contract(spec: ExperimentSpec, stage_key: str) -> dict[str,
             values["round_selection_policy"] = round_selection_snapshot(spec.config)
         if stage_key == "xgboost_calibration":
             values["intermediate_holdout_evaluation"] = False
+    if spec.config.predictive_algorithm == "logistic_l2":
+        from rstock.logistic import logistic_contract
+        values["predictive_algorithm"] = "logistic_l2"
+        values["logistic_contract"] = logistic_contract(spec.config)
+        if "round_selection_policy" in values:
+            values["round_selection_policy"] = {"mode": "not_applicable"}
+    if stage_key in {'prefilter','walk_forward'} and spec.config.prefilter_algorithm=='logistic_l2':
+        from rstock.prefilter_audit import engine_contract
+        values['prefilter_engine_contract'] = engine_contract(spec.config)
     return {
         key: list(value) if isinstance(value, tuple) else value
         for key, value in values.items()
@@ -1101,7 +1113,7 @@ def build_stage_spec(
             cutoff, dataset_digest = _walk_forward_traceability(repository, str(source_id))
             if dataset_digest != parent.source_prepared_dataset_sha256:
                 raise ValueError("Source Walk-forward dataset digest has changed")
-            if child.config.xgb_round_selection_mode == "chronological":
+            if child.config.predictive_algorithm == "xgboost" and child.config.xgb_round_selection_mode == "chronological":
                 from .walk_forward_experiments import freeze_walk_forward_input
                 return freeze_walk_forward_input(repository, replace(child, evaluate_final_holdout=False),
                     str(source_id), str(parent.derivation.prepared_snapshot_sha256))
@@ -1217,11 +1229,11 @@ def build_stage_spec(
     selected = _read_result_json(
         repository, xgboost_id, "selected_configurations.json"
     )
-    frozen_xgboost = (None if child.config.predictive_model_type == "constant_probability"
+    frozen_xgboost = (None if child.config.predictive_model_type == "constant_probability" or child.config.predictive_algorithm == "logistic_l2"
                       else selected_xgboost_parameters(selected, config=child.config))
     child = replace(
         child,
-        source_xgboost_calibration_run=xgboost_id,
+        source_xgboost_calibration_run=None if child.config.predictive_algorithm == "logistic_l2" else xgboost_id,
         frozen_xgboost_parameters=frozen_xgboost,
     )
     if stage_key == "threshold_parameter_calibration":
@@ -1621,10 +1633,13 @@ def _forced_candidate_spec(
         for _, row in guidance.iterrows()
         if str(row.get("Statut promotion")) == "Candidat"
     }
-    reference_xgboost = _read_result_json(
-        repository, xgboost_id, "selected_configurations.json"
-    )
-    frozen_xgboost = selected_xgboost_parameters(reference_xgboost, config=parent.config)
+    if parent.config.predictive_algorithm == "logistic_l2":
+        frozen_xgboost = None
+    else:
+        reference_xgboost = _read_result_json(
+            repository, xgboost_id, "selected_configurations.json"
+        )
+        frozen_xgboost = selected_xgboost_parameters(reference_xgboost, config=parent.config)
     threshold_parameter_selection = _read_result_json(
         repository,
         threshold_parameter_id,
@@ -1716,7 +1731,7 @@ def _forced_candidate_spec(
         forced_candidate_identities=identities,
         source_walk_forward_run=(str(period_lock["temporal_walk_forward_run_id"])
                                  if period_lock else parent.source_walk_forward_run),
-        source_xgboost_calibration_run=xgboost_id,
+        source_xgboost_calibration_run=None if parent.config.predictive_algorithm == "logistic_l2" else xgboost_id,
         frozen_xgboost_parameters=frozen_xgboost,
         source_threshold_parameter_calibration_run=threshold_parameter_id,
         frozen_threshold_calibration_parameters=dict(frozen_threshold_parameters),
@@ -2111,17 +2126,17 @@ def run_end_to_end(
             }
         )
         manifest = load_pipeline_manifest(repository, root_run_id) or manifest
-        if stage_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability":
+        if stage_key == "xgboost_calibration" and (spec.config.predictive_model_type == "constant_probability" or spec.config.predictive_algorithm == "logistic_l2"):
             manifest = _persist_stage_values(repository, root_run_id, stage_key,
-                execution_status="not_applicable", not_executed_reason="constant_probability")
+                execution_status="not_applicable", not_executed_reason="logistic_l2" if spec.config.predictive_algorithm == "logistic_l2" else "constant_probability")
         if stage_key == "walk_forward":
             qualification = pd.read_csv(repository.run_directory(child_run_id) / "results/qualification.csv")
             eligible = qualification.get("Eligible", pd.Series(dtype=bool)).map(lambda value: str(value).lower() in {"true", "1"})
             if "Eligible" in qualification and not eligible.any():
                 for skipped_key, _, _ in scientific_stages[stage_index + 1:]:
                     manifest = _persist_stage_values(repository, root_run_id, skipped_key,
-                        execution_status="not_applicable" if skipped_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability" else "not_executed",
-                        not_executed_reason="constant_probability" if skipped_key == "xgboost_calibration" and spec.config.predictive_model_type == "constant_probability" else "no_qualified_candidates")
+                        execution_status="not_applicable" if skipped_key == "xgboost_calibration" and (spec.config.predictive_model_type == "constant_probability" or spec.config.predictive_algorithm == "logistic_l2") else "not_executed",
+                        not_executed_reason=("logistic_l2" if spec.config.predictive_algorithm == "logistic_l2" else "constant_probability") if skipped_key == "xgboost_calibration" and (spec.config.predictive_model_type == "constant_probability" or spec.config.predictive_algorithm == "logistic_l2") else "no_qualified_candidates")
                 result = {
                     "job_type": JobType.END_TO_END.value, "pipeline_version": spec.pipeline_version,
                     "predictive_model_type": spec.config.predictive_model_type,
@@ -2143,6 +2158,7 @@ def run_end_to_end(
         forward_snapshot = build_forward_model_snapshot(
             repository, root_run_id, spec, result_directory=output,
             cancellation_check=cancellation_check,
+            progress_callback=progress_callback,
         )
 
     # Forward evaluation is deliberately best-effort.  It is a separate child:

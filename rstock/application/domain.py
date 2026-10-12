@@ -330,6 +330,19 @@ class ExperimentSpec:
             object.__setattr__(self, "prefilter_method", self.config.prefilter_selection_mode
                                if self.job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END}
                                else "single_origin")
+        if self.job_type is JobType.PREDICTOR_PREFILTER and self.config.predictive_algorithm != "xgboost":
+            object.__setattr__(self, "config", replace(self.config, predictive_algorithm="xgboost", predictive_model_type="external_only"))
+        if self.config.predictive_algorithm == "logistic_l2":
+            if self.frozen_xgboost_parameters is not None:
+                raise ValueError("Logistic WF cannot consume XGBoost calibration parameters")
+            if self.job_type not in {JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH, JobType.SCIENTIFIC_ANALYSIS,
+                    JobType.END_TO_END, JobType.XGBOOST_CALIBRATION, JobType.THRESHOLD_PARAMETER_CALIBRATION,
+                    JobType.THRESHOLD_CALIBRATION, JobType.HOLDOUT_EVALUATION, JobType.PROMOTION_QUALIFICATION,
+                    JobType.FIXED_CANDIDATE_EVALUATION, JobType.FORCED_CANDIDATE_VALIDATION, JobType.FORWARD_SIMULATION,
+                    JobType.PRODUCTION_TRAINING, JobType.FULL_TRAINING, JobType.DAILY_PREDICTION,
+                    JobType.DAILY_SCREENING, JobType.OPERATIONAL_RUN, JobType.MARKET_UPDATE,
+                    JobType.DATA_UPDATE, JobType.REALIZED_VALIDATION, JobType.PRODUCTION_QUALITY_REBUILD}:
+                raise ValueError("This job does not support logistic models")
         if self.config.predictive_model_type != "external_only":
             if self.job_type is JobType.PREDICTOR_PREFILTER:
                 object.__setattr__(self, "config", replace(self.config, predictive_model_type="external_only"))
@@ -340,7 +353,7 @@ class ExperimentSpec:
                 raise ValueError("New predictive model types are limited to research WF/E2E jobs")
             if self.source_prefilter_run and self.config.predictive_model_type in {"constant_probability", "target_only"}:
                 raise ValueError("This predictive model type cannot consume a Prefilter reference")
-        if self.config.predictive_model_type != "constant_probability" and self.config.xgb_round_selection_mode == "chronological":
+        if self.config.predictive_model_type != "constant_probability" and self.config.predictive_algorithm == "xgboost" and self.config.xgb_round_selection_mode == "chronological":
             if self.e2e_xgboost_protocol_version != 2 and self.job_type not in {
                 JobType.WALK_FORWARD, JobType.WALK_FORWARD_BATCH, JobType.PREDICTOR_PREFILTER,
             }:

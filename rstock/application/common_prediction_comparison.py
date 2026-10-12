@@ -204,7 +204,8 @@ def compare_common_predictions(project_root: Path, run_ids: Sequence[str], *, ph
             for set_id, candidate in frame.groupby("Set", sort=False):
                 paired = candidate[candidate["Date"].isin(dates)].sort_values("Date")
                 metrics = classification_metrics(paired["Target"], paired["Prediction"], paired["Probability"])
-                rows.append({"Run": run_id, "PredictiveModelType": kinds[run_id], "TrainingAlignment": alignment,
+                rows.append({"Run": run_id, "PredictiveModelType": kinds[run_id],
+                    "PredictiveAlgorithm": "constant_probability" if kinds[run_id] == "constant_probability" else volatility[run_id].get("predictive_algorithm", "xgboost"), "TrainingAlignment": alignment,
                     "TargetVolatilityEnabled": volatility[run_id].get("target_volatility_enabled", False) and kinds[run_id] != "constant_probability",
                     "TargetVolatilitySessions": volatility[run_id].get("target_volatility_sessions", 21),
                     "PredictiveModelDescription": ("external_only + volatilité cible" if kinds[run_id] == "external_only" and volatility[run_id].get("target_volatility_enabled", False) else kinds[run_id]),

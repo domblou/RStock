@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 from rstock.modeling import ROUND_SELECTION_FIELDS, PREFILTER_ROUND_SELECTION_FIELDS
+from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
 
 
 DERIVATION_SCHEMA_VERSION = 1
@@ -57,7 +58,8 @@ STAGE_MODES = frozenset({"inherited", "recomputed", "not_executed"})
 # Other fields are added here only after their effective consumer is verified.
 STAGE_PARAMETER_FIELDS: dict[str, frozenset[str]] = {
     "walk_forward": frozenset({
-        "predictive_model_type", "target_volatility_enabled", "target_volatility_sessions", "predictor_prefilter_enabled", "predictor_prefilter_top_n",
+        "predictive_model_type", "predictive_algorithm", "logistic_l2_penalty", "logistic_max_iterations",
+        "logistic_gradient_tolerance", "logistic_objective_tolerance", "target_volatility_enabled", "target_volatility_sessions", "predictor_prefilter_enabled", "predictor_prefilter_top_n",
     }),
     "xgboost_calibration": frozenset({
         "xgboost_global_max_qualified_combinations",
@@ -107,7 +109,7 @@ SPLIT_STAGE_PARAMETER_FIELDS = {
 
 PREFILTER_STAGE_PARAMETER_FIELDS = {
     **SPLIT_STAGE_PARAMETER_FIELDS,
-    "prefilter": (STAGE_PARAMETER_FIELDS["walk_forward"] - {"predictive_model_type", "target_volatility_enabled", "target_volatility_sessions"}) | frozenset({
+    "prefilter": (STAGE_PARAMETER_FIELDS["walk_forward"] - {"predictive_model_type", "predictive_algorithm", "logistic_l2_penalty", "logistic_max_iterations", "logistic_gradient_tolerance", "logistic_objective_tolerance", "target_volatility_enabled", "target_volatility_sessions"}) | frozenset({
         "predictor_prefilter_min_median_auc", "predictor_prefilter_min_pct_above_random",
         "predictor_prefilter_min_worst_auc", "predictor_prefilter_max_auc_std",
         "predictor_prefilter_correlation_threshold",
@@ -116,10 +118,11 @@ PREFILTER_STAGE_PARAMETER_FIELDS = {
         "prefilter_xgb_colsample_bytree", "prefilter_xgb_gamma", "prefilter_xgb_reg_alpha",
         "prefilter_xgb_reg_lambda", "prefilter_xgb_seed",
         *PREFILTER_ROUND_SELECTION_FIELDS,
+        *PREFILTER_MODEL_FIELDS,
         "prefilter_method", "stability_origin_count", "stability_step_sessions",
         "temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences",
     }),
-    "walk_forward": WALK_FORWARD_XGBOOST_FIELDS | {"predictive_model_type", "target_volatility_enabled", "target_volatility_sessions"},
+    "walk_forward": WALK_FORWARD_XGBOOST_FIELDS | {"predictive_model_type", "predictive_algorithm", "logistic_l2_penalty", "logistic_max_iterations", "logistic_gradient_tolerance", "logistic_objective_tolerance", "target_volatility_enabled", "target_volatility_sessions"},
 }
 
 

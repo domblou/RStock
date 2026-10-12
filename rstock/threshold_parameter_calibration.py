@@ -424,13 +424,16 @@ def run_threshold_parameter_calibration(
     )
     sample_ids = [str(value) for value in sample.manifest["selected_set_ids"]]
     prediction_key = hashlib.sha256("|".join(sample_ids).encode("utf-8")).hexdigest()
-    if config.xgb_round_selection_mode == "chronological" or (config.target_volatility_enabled and config.predictive_model_type != "constant_probability"):
+    if config.predictive_algorithm == "logistic_l2" or config.xgb_round_selection_mode == "chronological" or (config.target_volatility_enabled and config.predictive_model_type != "constant_probability"):
         identity = {"sample": sample_ids, "policy": round_selection_snapshot(config),
             "parameters": {direction: params.as_dict() for direction, params in (xgboost_parameters_by_direction or {}).items()},
             "seed": config.xgb_seed, "features": list(development.columns),
             "data": hashlib.sha256(pd.util.hash_pandas_object(development, index=True).values.tobytes()).hexdigest(),
             "geometry": [config.walk_forward_window_mode, config.walk_forward_min_train_size,
                          config.walk_forward_train_size, config.walk_forward_test_size, config.walk_forward_step_size]}
+        if config.predictive_algorithm == "logistic_l2":
+            from .logistic import logistic_contract
+            identity["algorithm"] = logistic_contract(config)
         prediction_key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     prediction_reused = False
     if checkpoint_manager is not None and checkpoint_manager.artifact_exists("development_probabilities"):

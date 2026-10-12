@@ -16,7 +16,7 @@ from rstock.features import model_predictor_columns
 from rstock.walk_forward import walk_forward_windows
 
 
-def fixture_runs(tmp_path, *, rolling=False, different_training=False):
+def fixture_runs(tmp_path, *, rolling=False, different_training=False, algorithm="xgboost"):
     dates = pd.bdate_range("2024-01-01", periods=25)
     returns = pd.Series(np.arange(25, dtype=float), index=dates)
     returns.iloc[8] = np.nan
@@ -32,6 +32,7 @@ def fixture_runs(tmp_path, *, rolling=False, different_training=False):
     for kind in kinds:
         shorter = kind == "target_shorter_training"
         config = replace(DEFAULT_CONFIG, project_root=tmp_path,
+                         predictive_algorithm="xgboost" if kind == "constant_probability" else algorithm,
                          predictive_model_type="target_only" if shorter else kind,
                          lag_depth=2 if shorter else 3,
                          walk_forward_min_train_size=5 if shorter else 4, walk_forward_train_size=4,

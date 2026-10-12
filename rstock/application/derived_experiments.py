@@ -171,9 +171,14 @@ def build_derived_spec(
         source_temporal_validation_enabled=source_spec.temporal_validation_enabled,
         source_lineage=source_lineage,
     )
+    next_config = replace(source_spec.config, **config_changes)
+    reset_xgboost = next_config.predictive_algorithm != "xgboost" or next_config.predictive_algorithm != source_spec.config.predictive_algorithm
     derived = replace(
         source_spec,
-        config=replace(source_spec.config, **config_changes),
+        config=next_config,
+        frozen_xgboost_parameters=None if reset_xgboost else source_spec.frozen_xgboost_parameters,
+        frozen_xgboost_parameters_sha256=None if reset_xgboost else source_spec.frozen_xgboost_parameters_sha256,
+        source_xgboost_calibration_run=None if reset_xgboost else source_spec.source_xgboost_calibration_run,
         historical_data_cutoff=anchor,
         source_prepared_dataset_sha256=(
             expected_digest if fork_stage == "walk_forward"
@@ -194,7 +199,7 @@ def build_derived_spec(
         from rstock.features import require_predictive_model_inputs
         require_predictive_model_inputs(prepared, derived.target_symbols, derived.predictor_symbols,
                                        replace(derived.config, target_volatility_enabled=False))
-    if fork_stage == "walk_forward" and derived.config.predictive_model_type != "constant_probability" and derived.config.xgb_round_selection_mode == "chronological":
+    if fork_stage == "walk_forward" and derived.config.predictive_model_type != "constant_probability" and derived.config.predictive_algorithm == "xgboost" and derived.config.xgb_round_selection_mode == "chronological":
         # Prove exact candidate/snapshot reuse before creating any child job.
         from .walk_forward_experiments import freeze_walk_forward_input
         freeze_walk_forward_input(repository, replace(derived, job_type=JobType.WALK_FORWARD,

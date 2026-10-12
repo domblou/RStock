@@ -27,12 +27,104 @@ la visibilité, sans modifier l'identité scientifique.
 Sources : `application/domain.py`, `repository.py`, `runner.py`, `worker.py`,
 `workflows.py`, `walk_forward_batches.py` et `end_to_end.py`, sous `rstock/`.
 
+Les WF logistiques utilisent ces mêmes lots, checkpoints et réservations d'enfants.
+
+Les deux moteurs de préfiltre utilisent aussi ces lots. Les audits des fenêtres
+et de la constante sont committés avec chaque lot, puis exportés en
+`prefilter_windows.csv` et `prefilter_evaluation_contract.json`. Le contrat public
+schema 3 en protège les empreintes. Le checkpoint contrôle l'entrée figée, la
+frontière Holdout et le contrat L2 actif; une reprise réutilise les lots committés
+et refuse une entrée modifiée. Les archives schemas 1/2 gardent leur interprétation.
+L'algorithme et ses paramètres sont dans le snapshot/fingerprint du job; les identités
+de modèles incluent le contrat logistique versionné. Les lots terminés sont réutilisés
+après vérification, y compris après interruption de l'agrégation parent. Standardisation
+et coefficients sont propres à chaque train; ils ne sont jamais repris d'une autre
+origine. Les diagnostics de convergence/itérations/durée sont persistés par fenêtre
+et direction. Les réglages de tours XGBoost ne s'appliquent pas au moteur logistique.
+
+E2E logistique réutilise les enfants et contrats existants. Le contrat versionné L2
+est figé par étape; la calibration XGBoost conserve sa place et ses artefacts de
+provenance avec statut sans objet, sans paramètres XGBoost fictifs. Les audits
+logistiques des probabilités sont gelés avec les résultats. Les changements
+d'algorithme/L2 appartiennent au fork WF et invalident ses consommateurs; les
+paramètres des forks aval restent verrouillés. Les contrats historiques XGBoost
+ne reçoivent pas de paramètres logistiques actifs lors d'une reprise.
+
+Forward/Production logistiques utilisent les mêmes services, jobs et checkpoints,
+avec variables externes seulement. Les fichiers Up/Down `*.logistic.json` et leurs
+empreintes accompagnent les diagnostics d'entraînement et le contrat L2 source.
+Le gel Forward publie les métadonnées de chaque modèle atomiquement; une reprise
+identique vérifie son entrée, ses seuils et fichiers avant réutilisation. Le Forward
+ne réentraîne pas les modèles et conserve la précision des probabilités à la
+relecture des checkpoints CSV. Le reporter distingue gel entraîné et réutilisé.
+L'entraînement Production publie les deux modèles par la transaction existante,
+puis met à jour le registre en réconciliant son état persistant. Une interruption
+entre publication et registre permet de réutiliser le bundle L2 validé, sans
+recalcul. Chaque direction publie sa progression; les paramètres globaux ne
+remplacent jamais les réglages L2 figés. Un modèle historique reste XGBoost.
+
+La validation temporelle E2E logistique réutilise les trois passes et les jobs
+existants : référence, E2E offset 63 et revalidation forcée. Le job forcé conserve
+le contrat L2 dans sa configuration, les seuils de référence et le verrou de
+période du deuxième E2E; ses sources et paramètres XGBoost sont absents. Les
+comparaisons et critères de promotion restent inchangés. Les enfants terminés
+sont réutilisés après interruption, avec vérification des empreintes persistées.
+
 ## Analyses scientifiques sur artefacts existants
 
 `SCIENTIFIC_ANALYSIS` utilise `RunService`, `RunRepository`, `WorkflowRegistry`,
 le worker, les leases et les slots existants. Le catalogue et le contrat léger
 de module sont dans `application/scientific_analysis.py` ; un module définit
 préconditions, paramètres, traitement, sorties et vues spécialisées.
+
+Chaque `AnalysisDefinition` doit aussi fournir `interpret_results(result, manifest,
+status)`, une fonction pure et spécifique à son type. Le contrat retourné contient
+une `version`, trois listes de paragraphes non vides (`understanding`, `findings`,
+`limits`) et un `verdict` non vide. Aucun appel IA, calcul scientifique ou accès
+aux données dans cette fonction. Les règles scientifiques d'interprétation sont
+précisées par le directeur avant implémentation; les seuils proviennent des
+artefacts persistés et du contrat de version explicitement pris en charge.
+Un type/version incompatible, un résultat incomplet, une règle manquante ou des
+compteurs incohérents ne deviennent jamais un résultat nul ou positif.
+
+Le worker valide ce contrat et écrit `scientific_interpretation.json`, avec
+l'empreinte des entrées scientifiques (résultats hors liste de fichiers, type,
+version, paramètres effectifs, source et état terminé). Cet artefact fait partie
+des sorties gelées et restaurées par le checkpoint existant. Le Résumé affiche
+le texte persisté lorsqu'il correspond aux entrées; une divergence rend le verdict
+indisponible. Pour les anciens runs sans cet artefact, une interprétation en lecture
+seule est possible uniquement si le contrat est pris en charge. L'interface ne lit
+que des JSON bornés à 2 Mio, jamais les CSV complets ou snapshots pour interpréter.
+Les trois volets sont obligatoires dans le Résumé de toute nouvelle analyse.
+
+La persistance version 3 interprète les compteurs et motifs déjà calculés. Les
+nouvelles sorties ajoutent `admissible_count` et `reason_counts` au bilan; les anciens
+bilans sans ces champs ne reçoivent pas de motifs inventés. Aucune sélection rend
+la proportion de persistance « sans objet » et la grille vide attendue. Les
+indéterminées restent au dénominateur de la proportion soutenue et ne sont pas
+qualifiées d'échecs scientifiques. L'interprétation ne change aucun seuil ni
+critère de sélection/évaluation et ne démontre pas une efficacité prédictive.
+
+Le suivi utilise les événements `phase_event` du `ProgressReporter` et le
+`ResourceRecorder` du worker, sans recorder distinct. La persistance expose
+préparation/validation source, calendrier/références train, pertes appariées,
+sélection, évaluation, export, validation/gel des sorties, puis publication.
+Les durées et compteurs CPU/mémoire sont attribués aux phases réellement actives.
+Les unités sont les octets hachés/copiés, les lignes validées/scorées, les fenêtres
+reconstruites, les relations analysées et les fichiers exportés. Les mises à jour
+intermédiaires sont limitées à une par seconde, avec début et fin transmis; les
+ressources restent échantillonnées toutes les 5 secondes. Les écritures sont
+coopérativement annulables aux limites de blocs. Pour le calendrier partiel,
+le total initial est explicitement un maximum issu des fenêtres; la lecture
+complète établit le total réellement archivé.
+Le plan de progression global utilise des poids de présentation, pas des durées
+scientifiquement calibrées. Les sous-étapes peuvent changer d'unité et réinitialiser
+leur compteur; l'ETA provient du débit observé. Seule la publication réussie permet
+100 % global. Une reprise d'une analyse terminée expose préparation, restauration
+et finalisation, sans nouvelles phases de calcul. Une sélection déjà checkpointée
+est signalée comme rechargée. Une phase annulée/échouée conserve sa durée et son
+état final en télémétrie, sans événement de réussite. Les anciens artefacts ne
+sont pas reconstruits rétroactivement.
 
 La source est un WF terminé, directement ou résolu depuis le manifeste E2E,
 y compris une étape héritée. L'analyse fige propriétaire, source physique, étape,

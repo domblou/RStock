@@ -467,7 +467,8 @@ def _inherit_walk_forward_prefilter(
         source = repository.run_directory(spec.source_prefilter_run) / "results"
         output.mkdir(parents=True, exist_ok=True)
         for filename in ("predictor_prefilter.csv", "predictor_prefilter.json", "prefilter_contract.json",
-                         "prefilter_round_selection_training.csv", "prefilter_round_selection.json"):
+                         "prefilter_round_selection_training.csv", "prefilter_round_selection.json",
+                         "prefilter_windows.csv", "prefilter_evaluation_contract.json"):
             path = source / filename
             if path.is_file():
                 (output / filename).write_bytes(path.read_bytes())
@@ -558,7 +559,8 @@ def _qualified_sets_from_walk_forward_source(
     frozen_fields = (
         "target_symbols", "context_symbols", "predictor_symbols", "calendar",
     )
-    if source_spec.config.predictive_model_type != spec.config.predictive_model_type:
+    if (source_spec.config.predictive_model_type != spec.config.predictive_model_type
+            or source_spec.config.predictive_algorithm != spec.config.predictive_algorithm):
         raise ValueError("Calibration source has a different predictive model type")
     if any(getattr(source_spec, name) != getattr(spec, name) for name in frozen_fields):
         raise ValueError("Threshold calibration source has a different frozen population")
@@ -821,10 +823,14 @@ def _persist_prefilter_training(output: Path, checkpoints, config: RStockConfig)
         "optimized_windows_only": losses(training.loc[training["UpRoundSelectionUsed"].eq(True)]) if "UpRoundSelectionUsed" in training else {},
         "comparison_status": "résultat exploratoire",
     }
+    from rstock.prefilter_audit import persist_audit
+    summary.update(persist_audit(output, checkpoints, config))
+    if config.prefilter_algorithm == "logistic_l2":
+        summary["round_selection_policy"] = {"mode":"not_applicable"}
     if config.prefilter_xgb_round_selection_mode == "fixed":
         for key in ("selection_rounds_run", "refit_rounds", "selection_worker_seconds", "refit_worker_seconds"):
             summary.pop(key)
-    if config.prefilter_xgb_round_selection_mode == "chronological":
+    if config.prefilter_algorithm == "xgboost" and config.prefilter_xgb_round_selection_mode == "chronological":
         output.mkdir(parents=True, exist_ok=True)
         # Schema remains readable even if every candidate was locally excluded.
         if training.empty and not len(training.columns):
@@ -950,7 +956,7 @@ def _execute_predictor_prefilter(
         "source_snapshot_sha256": (None if spec.prefilter_derivation is None
                                    else spec.prefilter_derivation["prepared_snapshot_sha256"]),
         "score_formula": PREFILTER_SCORE_FORMULA,
-        "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
+        "xgboost_parameters": prefilter_xgboost_snapshot(spec.config) if spec.config.prefilter_algorithm=='xgboost' else None,
         "predictors_by_target": {
             target: list(items) for target, items in prefilter.predictors_by_target.items()
         },
@@ -1072,7 +1078,7 @@ def _temporal_stability_prefilter(
         "schema_version": 1,
         "prefilter_method": "temporal_stability",
         **_persist_prefilter_training(output, origin_checkpoints, spec.config),
-        "xgboost_parameters": prefilter_xgboost_snapshot(spec.config),
+        "xgboost_parameters": prefilter_xgboost_snapshot(spec.config) if spec.config.prefilter_algorithm=='xgboost' else None,
         "stability_origin_count": spec.stability_origin_count,
         "stability_step_sessions": spec.stability_step_sessions,
         "origin_cutoffs": [origin.date().isoformat() for origin in origins],
@@ -1454,10 +1460,10 @@ def _xgboost_calibration(
     progress_callback: ProgressCallback | None,
     cancellation_check: CancellationCheck | None,
 ) -> dict[str, Any]:
-    if spec.config.predictive_model_type == "constant_probability":
+    if spec.config.predictive_model_type == "constant_probability" or spec.config.predictive_algorithm == "logistic_l2":
         if not spec.source_end_to_end_run:
-            raise ValueError("XGBoost calibration is not applicable to a constant model")
-        provenance = {"status": "not_applicable", "reason": "constant_probability",
+            raise ValueError("XGBoost calibration is not applicable to this predictive algorithm")
+        provenance = {"status": "not_applicable", "reason": "logistic_l2" if spec.config.predictive_algorithm == "logistic_l2" else "constant_probability",
                       "predictive_model_type": "constant_probability"}
         for filename in ("selected_configurations.json", "sampling_manifest.json"):
             (output / filename).write_text(json.dumps(provenance), encoding="utf-8")
@@ -1886,7 +1892,7 @@ def _fixed_candidate_evaluation(
 ) -> dict[str, Any]:
     """Retrain offset models with reference parameters and apply reference thresholds."""
 
-    if spec.frozen_xgboost_parameters is None:
+    if spec.frozen_xgboost_parameters is None and spec.config.predictive_algorithm != "logistic_l2":
         raise ValueError("Reference XGBoost parameters are required")
     if spec.frozen_threshold_calibration_parameters is None:
         raise ValueError("Reference threshold-calibration parameters are required")
@@ -2129,7 +2135,7 @@ def _qualification_holdout_diagnostic(
     for identity in spec.forced_candidate_identities or ():
         set_name, direction = identity
         selection = selected.get(set_name, {}).get(direction, {})
-        if not frozen_xgb.get(direction):
+        if not frozen_xgb.get(direction) and spec.config.predictive_algorithm != "logistic_l2":
             invalid[identity] = "hyperparamètres figés absents"
         elif selection.get("status") != "selected" or selection.get("threshold") is None:
             invalid[identity] = "seuil de référence absent"
@@ -3007,7 +3013,7 @@ def _resolve_threshold_xgboost_parameters(
 ) -> DirectionalXGBoostParameters:
     """Resolve threshold-model parameters from the immutable experiment spec."""
 
-    if spec.config.predictive_model_type == "constant_probability":
+    if spec.config.predictive_model_type == "constant_probability" or spec.config.predictive_algorithm == "logistic_l2":
         resolved = resolve_directional_xgboost_parameters(spec.config)
         return DirectionalXGBoostParameters(resolved.up, resolved.down, "not_applicable")
     referenced: dict[str, Any] | None = None
@@ -3113,6 +3119,7 @@ def _production_training(
         prepared,
         effective_config,
         cancellation_check=cancellation_check,
+        progress_callback=progress_callback,
     )
     _phase(progress_callback, "production_training", "completed", model_id=model.model_id)
     (output / "trained_model.json").write_text(

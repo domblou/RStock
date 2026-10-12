@@ -82,6 +82,17 @@ Expériences : [EXP-010](scientific_experiments.md#exp-010), [EXP-011](scientifi
 **Décision et justification :** Poursuivre la contribution additionnelle ; aucune famille rejetée universellement.
 **Nouvelle évaluation :** Analyse des artefacts communs ou validation indépendante justifiée.
 
+Étude de formulation [EXP-019](scientific_experiments.md#exp-019) terminée le
+12 octobre 2026 : les composantes overnight passées sont présentes dans les
+snapshots mais omises des prédicteurs; intérêt scientifique plausible, efficacité
+non évaluée. Le diagnostic logistique antérieur reste derrière la constante et
+la sélection récente ne retient aucune relation. Statut **En évaluation** conservé.
+L'ablation [EXP-020](scientific_experiments.md#exp-020), autorisée séparément et
+terminée, dégrade la log loss face au contrôle et à la constante dans les trois
+segments principaux. Aucun apport démontré pour les retards overnight étudiés;
+pas de rejet universel de l'information overnight. Cette comparaison est close,
+sans adoption de variables ni changement de cible/horizon ou de priorité.
+
 <a id="str-007"></a>
 
 ## STR-007 — Probabilité constante alignée

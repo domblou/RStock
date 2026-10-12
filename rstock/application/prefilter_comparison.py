@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from rstock.combinations import canonical_combination_id
 from rstock.config import historical_prefilter_config_values, HISTORICAL_MISSING_CONFIG_DEFAULTS
+from .predictive_model_ui import ALGORITHM_LABELS
 from rstock.modeling import PREFILTER_ROUND_SELECTION_FIELDS
 
 
@@ -137,6 +138,7 @@ class PrefilterComparison:
     occurrence_distribution: dict[str, int] = field(default_factory=dict)
     origin_count: int | None = None
     round_selection_coverage: dict[str, Any] = field(default_factory=dict)
+    evaluation: dict[str, Any] = field(default_factory=dict)
 
     @property
     def survival_rate(self) -> float | None:
@@ -146,7 +148,12 @@ class PrefilterComparison:
         return {
             **{f"Sélection {count}/{self.origin_count}": number for count, number in self.occurrence_distribution.items()},
             "Run ID": self.run_id,
-            "Mode tours XGBoost": self.settings.get("prefilter_xgb_round_selection_mode", "fixed"),
+            "Algorithme du préfiltre": ALGORITHM_LABELS.get(self.settings.get("prefilter_algorithm", "xgboost")),
+            "Début préfiltre":self.evaluation.get("train_start",ND),
+            "Fin évaluée préfiltre":self.evaluation.get("test_end",ND),
+            "Première séance Holdout":self.evaluation.get("holdout_start",ND),
+            **self.evaluation.get("metrics",{}),
+            "Mode tours XGBoost": 'Sans objet' if self.settings.get('prefilter_algorithm')=='logistic_l2' else self.settings.get("prefilter_xgb_round_selection_mode", "fixed"),
             "Fenêtres Up optimisées": self.round_selection_coverage.get("Up", {}).get("optimized_windows", ND),
             "% fenêtres Up optimisées": self.round_selection_coverage.get("Up", {}).get("optimized_percent", ND),
             "Fenêtres Up en repli": self.round_selection_coverage.get("Up", {}).get("fallback_windows", ND),
@@ -178,6 +185,11 @@ def load_prefilter_comparison(project_root: Path, run_id: str) -> PrefilterCompa
     summary = _json(root / "summary.json")
     manifest = _json(root / "results" / "predictor_prefilter.json")
     settings = _profile_parameters(config, manifest)
+    from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
+    settings['prefilter_algorithm'] = config.get('rstock_config',{}).get('prefilter_algorithm','xgboost')
+    for name in PREFILTER_MODEL_FIELDS[1:]:
+        if name in config.get("rstock_config",{}):
+            settings[name] = config["rstock_config"][name]
     method = settings.get("prefilter_method")
     if method is not None:
         method = str(method)
@@ -232,6 +244,7 @@ def load_prefilter_comparison(project_root: Path, run_id: str) -> PrefilterCompa
         occurrence_distribution=dict(manifest.get("occurrence_distribution", {})),
         origin_count=len(manifest["origin_cutoffs"]) if "origin_cutoffs" in manifest else None,
         round_selection_coverage=dict(manifest.get("round_selection_coverage", {})),
+        evaluation={**manifest.get('prefilter_evaluation',{}),'prepared_dataset_sha256':manifest.get('prepared_dataset_sha256')},
         origin_evaluations=None if origin_rows is None else len(origin_rows),
     )
 
@@ -262,6 +275,19 @@ def compare_prefilter_candidates(items: Sequence[PrefilterComparison]) -> Prefil
         len(common) / len(union) if union else None,
         frozenset(union),
     )
+
+
+def prefilter_evaluation_comparability(items):
+    if len(items)<2 or any(item.evaluation.get('status')!='verified' or not item.evaluation.get('evaluation_sha256')
+                           or not item.evaluation.get('prepared_dataset_sha256') for item in items):
+        return {'status':'unverifiable','reason':'Comparaison directe non vérifiable : audit des fenêtres absent ou incomplet.'}
+    if (len({item.evaluation.get('evaluation_sha256') for item in items})!=1
+            or len({item.evaluation.get('prepared_dataset_sha256') for item in items})!=1
+            or len({item.resolved_cutoff for item in items})!=1
+            or len({item.settings.get('intraday_target_threshold') for item in items})!=1
+            or len({(item.evaluation.get('version'),item.evaluation.get('label_availability')) for item in items})!=1):
+        return {'status':'incompatible','reason':'Comparaison directe invalide : données, fenêtres, labels ou frontière Holdout différents.'}
+    return {'status':'verified','reason':None}
 
 
 def prefilter_profile_differences(

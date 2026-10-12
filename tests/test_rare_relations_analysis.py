@@ -136,6 +136,10 @@ def test_complete_synthetic_workflow_and_evaluation_rules(tmp_path, monkeypatch,
     assert set(rules["selected_relations"]) == {"good", "missing_evaluation"}
     assert rules["rules"] == rare.RULES and rules["source_sha256"]
     assert all((output / relative).is_file() for relative in result["result_files"])
+    interpretation = json.loads((output / "scientific_interpretation.json").read_text(encoding="utf-8"))
+    analysis.validate_interpretation(interpretation)
+    assert interpretation["input_sha256"]
+    assert "historique conditionnelle" in " ".join(interpretation["limits"]) or "historiques" in " ".join(interpretation["limits"])
     assert before == {p:p.read_bytes() for p in before}
 
 
@@ -196,6 +200,80 @@ def test_old_definition_readable_but_not_executable(tmp_path, monkeypatch):
         analysis.execute_analysis(old, output, None, None)
 
 
+def test_real_analysis_phases_feed_progress_and_resource_recorder(tmp_path, monkeypatch):
+    from rstock.application import scientific_analysis as analysis, resource_telemetry
+    from rstock.application.runner import ProgressReporter
+    from rstock.telemetry import ProcessSample
+    repo, spec, output = analysis_job(tmp_path, monkeypatch)
+    run_id = output.parent.name
+    cpu = [0.]
+    def sample(pid):
+        cpu[0] += .01
+        return ProcessSample(pid, 10, cpu[0], 1024*1024, None)
+    monkeypatch.setattr(resource_telemetry, "process_sample", sample)
+    monkeypatch.setattr(resource_telemetry, "descendant_pids", lambda _: set())
+    clock = [0.]
+    def monotonic():
+        clock[0] += .01  # deterministic sampling intervals even for the tiny publishing phase
+        return clock[0]
+    monkeypatch.setattr(resource_telemetry.time, "monotonic", monotonic)
+    recorder = resource_telemetry.ResourceRecorder(output.parent, run_id, {})
+    reporter = ProgressReporter(repo, run_id)
+    reporter.resources = recorder
+    events = []
+    original_update = analysis.AnalysisProgress.update
+    def unthrottled(self, completed):
+        self.last = float("-inf")  # expose each small synthetic unit, without sleeping
+        original_update(self, completed)
+    monkeypatch.setattr(analysis.AnalysisProgress, "update", unthrottled)
+    class Callback:
+        configure_phases = reporter.configure_phases
+        def __call__(self, event):
+            events.append(event)
+            reporter(event)
+    try:
+        result = analysis.execute_analysis(spec, output, Callback(), None)
+        # The ordinary worker owns final publication and global completion.
+        assert repo.read_json(run_id, "progress.json")["workflow_percent"] < 100
+        reporter.phase_started("publishing")
+        reporter.phase_completed("publishing")
+        reporter.complete_workflow()
+    finally:
+        recorder.close("completed")
+    assert result["sustained_count"] == 1
+    phases = json.loads(recorder.summary_path.read_text(encoding="utf-8"))["attempts"][0]["phase_rows"]
+    expected = [name for name, _ in analysis.RARE_ANALYSIS_PHASES]
+    assert [row["name"] for row in phases] == expected
+    assert all(row["status"] == "completed" and row["duration_seconds"] >= 0 for row in phases)
+    assert all(row["cpu_seconds"] > 0 and row["rss_peak_sampled_bytes"] > 0 for row in phases)
+    scoring = next(row for row in phases if row["name"] == "analysis_scoring")
+    assert scoring["completed_items"] == 1198 and scoring["item_kind"] == "lignes"
+    for stage in ("analysis_scoring", "analysis_selection", "analysis_evaluation"):
+        assert any(e.stage == stage and e.completed_units is not None and 0 < e.completed_units < e.total_units for e in events)
+    for unit in ("octets", "lignes", "fenêtres", "relations", "fichiers"):
+        assert any(e.details.get("unit") == unit for e in events)
+    assert repo.read_json(run_id, "progress.json")["workflow_percent"] == 100
+
+
+def test_resume_reports_restoration_not_recomputed_analysis(tmp_path, monkeypatch):
+    from rstock.application import scientific_analysis as analysis
+    from rstock.application.runner import ProgressReporter
+    repo, spec, output = analysis_job(tmp_path, monkeypatch)
+    analysis.execute_analysis(spec, output, None, None)
+    monkeypatch.setattr(rare, "execute", lambda *_: pytest.fail("No recalculation"))
+    events = []
+    reporter = ProgressReporter(repo, output.parent.name)
+    class Callback:
+        configure_phases = reporter.configure_phases
+        def __call__(self, event):
+            events.append(event)
+            reporter(event)
+    assert analysis.execute_analysis(spec, output.parent / "_restore", Callback(), None)["selected_count"] == 2
+    phases = [e.stage for e in events if e.details.get("phase_event") == "started"]
+    assert phases == ["analysis_preparation", "analysis_restore", "analysis_outputs"]
+    assert any(e.stage == "analysis_restore" and e.details.get("unit") == "octets" and e.completed_units == e.total_units for e in events)
+
+
 @pytest.mark.parametrize("kind,reason", [("short", "aucune relation admissible"),
     ("losers", "aucune relation sélectionnée"), ("missing_evaluation", "aucune évaluation concluante")])
 def test_scientific_stops_publish_diagnostics_without_relaxation(tmp_path, monkeypatch, kind, reason):
@@ -216,6 +294,9 @@ def test_scientific_stops_publish_diagnostics_without_relaxation(tmp_path, monke
     result = analysis.execute_analysis(spec, output, None, None)
     assert result["stop_reason"] == reason
     assert result["sustained_count"] == 0
+    interpretation = json.loads((output / "scientific_interpretation.json").read_text(encoding="utf-8"))
+    if result["selected_count"] == 0:
+        assert "sans objet" in " ".join(interpretation["findings"])
     table = pd.read_csv(output / "persistence.csv")
     assert "MeanConstantLogLoss" in table and "Segment3Gain" in table
 

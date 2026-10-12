@@ -20,6 +20,40 @@ class Backend:
     def launch(self, *args): self.calls.append(args); return None
 
 
+def test_progress_throttle_keeps_initial_final_and_periodic_real_counts(monkeypatch):
+    now = [0.]
+    monkeypatch.setattr(analysis.time, "monotonic", lambda: now[0])
+    events = []
+    progress = analysis.AnalysisProgress(events.append, "analysis_scoring", 100, "lignes")
+    progress.update(1)
+    now[0] = 1.1
+    progress.update(40)
+    progress.update(41)
+    progress.update(100)
+    assert [event.completed_units for event in events] == [0, 40, 100]
+
+
+def test_cancelled_phase_keeps_duration_and_resources_without_false_completion(tmp_path):
+    from rstock.application.resource_telemetry import ResourceRecorder
+    from rstock.progress import CancellationRequested
+    recorder = ResourceRecorder(tmp_path, "synthetic", {})
+    events = []
+    def callback(event):
+        events.append(event)
+        if event.details.get("phase_event") == "started":
+            recorder.phase_started(event.stage)
+    try:
+        with pytest.raises(CancellationRequested):
+            with analysis.analysis_phase(callback, "analysis_scoring"):
+                raise CancellationRequested("synthetic cancellation")
+    finally:
+        recorder.close("cancelled")
+    row = json.loads(recorder.summary_path.read_text(encoding="utf-8"))["attempts"][0]["phase_rows"][0]
+    assert row["status"] == "cancelled" and row["duration_seconds"] >= 0
+    assert row["finished_at"] is not None
+    assert [event.details["phase_event"] for event in events] == ["started"]
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     repo = RunRepository(tmp_path / "runs")
@@ -34,7 +68,9 @@ def setup(tmp_path, monkeypatch):
         (ctx.output / "specialized.csv").write_text("value\n2\n", encoding="utf-8")
         return {"value":2, "complete":True, "result_files":["specialized.csv"]}
     item = analysis.AnalysisDefinition("tiny", "1", "Analyse fixture", "Tiny", ("results/tiny.json",),
-        lambda p: p, lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]},execute, light_preflight=lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]})
+        lambda p: p, lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]},execute,
+        interpret_results=lambda *a: {"version":"1", "understanding":["Fixture"], "findings":["Valeur 2"], "limits":["Synthétique"], "verdict":"Technique uniquement"},
+        light_preflight=lambda s,p:{"ready":p.get("inputs_ready") is True,"reasons":[] if p.get("inputs_ready") else ["requirements_missing"]})
     monkeypatch.setattr(analysis, "analysis_catalogue", lambda:(item,))
     return repo,service,source,item,backend
 
@@ -112,7 +148,7 @@ def test_source_types_and_common_tabs(setup):
     resolved=analysis.resolve_analysis_source(repo,parent)
     assert resolved.owner_run_id==parent and resolved.run_id==source
     assert resolved.predictions_path==repo.run_directory(source)/"results/predictions.csv"
-    assert [x.key for x in tabs_for_job(JobType.SCIENTIFIC_ANALYSIS)]==["summary","resources","technical"]
+    assert [x.key for x in tabs_for_job(JobType.SCIENTIFIC_ANALYSIS)]==["summary","technical"]
     with pytest.raises(ValueError,match="invalid_analysis_source"):
         analysis.resolve_analysis_source(repo,"../unsafe")
 
@@ -128,7 +164,8 @@ def test_specialized_tabs_are_lazy_and_have_distinct_renderers(setup, monkeypatc
     monkeypatch.setattr(ui,"render_lazy_tabs",lambda st,tabs,renderers,**kw:captured.update(tabs=tabs,renderers=renderers))
     detail={"configuration":{"scientific_analysis":{"analysis_id":"tiny","owner_run_id":source}}}
     ui.render_analysis_detail(object(),service,source,{"status":"completed"},detail,
-        render_resources=lambda _:None,render_technical=lambda *_:None,navigate=lambda *_:None)
+        render_technical=lambda *a, **kw: None,navigate=lambda *_:None)
+    assert [tab.key for tab in captured["tabs"]] == ["summary", "first", "second", "technical"]
     assert calls==[]
     captured["renderers"]["first"](); captured["renderers"]["second"]()
     assert [x[0] for x in calls]==["first","second"]

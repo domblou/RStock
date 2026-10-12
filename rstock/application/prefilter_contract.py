@@ -43,8 +43,12 @@ def publish(repository: RunRepository, run_id: str, spec: ExperimentSpec, output
         stability_origin_count=spec.stability_origin_count,
         stability_step_sessions=spec.stability_step_sessions,
     )
-    if spec.config.prefilter_xgb_round_selection_mode == "chronological":
-        contract.update(schema_version=2, round_selection_policy=report["round_selection_policy"],
+    evaluation = report.get("prefilter_evaluation")
+    if evaluation is not None:
+        contract.update(schema_version=3, prefilter_evaluation=evaluation,
+            evaluation_contract_sha256=hashlib.sha256((output/"prefilter_evaluation_contract.json").read_bytes()).hexdigest())
+    if spec.config.prefilter_algorithm == "xgboost" and spec.config.prefilter_xgb_round_selection_mode == "chronological":
+        contract.update(schema_version=3 if evaluation is not None else 2, round_selection_policy=report["round_selection_policy"],
             round_selection_artifacts={name: hashlib.sha256((output / name).read_bytes()).hexdigest()
                 for name in ("prefilter_round_selection_training.csv", "prefilter_round_selection.json")})
     contract["contract_sha256"] = digest(contract)
@@ -77,7 +81,7 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
             and spec.resolved_market_session_cutoff != value["cutoff"]):
         raise ValueError("Resolved Walk-forward cutoff must match the frozen Prefilter cutoff")
     scientific = {key: item for key, item in value.items() if key != "contract_sha256"}
-    if (value.get("schema_version") not in {1, 2} or value.get("contract_sha256") != digest(scientific)
+    if (value.get("schema_version") not in {1, 2, 3} or value.get("contract_sha256") != digest(scientific)
             or value.get("source_run_id") != source
             or value.get("configuration_fingerprint") != repository.configuration_fingerprint(source)
             or value.get("selection_sha256") != digest(value["ordered_predictors_by_target"])
@@ -93,7 +97,15 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
             or source_spec.calendar != spec.calendar):
         raise ValueError("Prefilter universe or calendar differs from Walk-forward")
     source_config = source_spec.config
-    if value.get("schema_version") == 2:
+    if value.get("schema_version") == 3:
+        evaluation = value["prefilter_evaluation"]
+        for name, expected in (("prefilter_evaluation_contract.json",value["evaluation_contract_sha256"]),
+                ("prefilter_windows.csv",evaluation["artifact_sha256"])):
+            if hashlib.sha256((path.parent/name).read_bytes()).hexdigest() != expected:
+                raise ValueError("Prefilter evaluation provenance has changed")
+        if evaluation.get("status") != "verified":
+            raise ValueError("Prefilter evaluated observations or Holdout boundary cannot be verified")
+    if value.get("schema_version") == 2 or (value.get("schema_version") == 3 and source_config.prefilter_algorithm == "xgboost" and source_config.prefilter_xgb_round_selection_mode == "chronological"):
         from rstock.modeling import RoundSelectionPolicy
         if value.get("round_selection_policy") != RoundSelectionPolicy.from_config(source_config, scope="prefilter").snapshot():
             raise ValueError("Prefilter round selection policy changed")
@@ -104,7 +116,7 @@ def load(repository: RunRepository, spec: ExperimentSpec) -> dict:
         for name, expected_digest in artifacts.items():
             if hashlib.sha256((path.parent / name).read_bytes()).hexdigest() != expected_digest:
                 raise ValueError("Frozen Prefilter training audit changed")
-    elif source_config.prefilter_xgb_round_selection_mode != "fixed":
+    elif source_config.prefilter_algorithm == "xgboost" and source_config.prefilter_xgb_round_selection_mode != "fixed":
         raise ValueError("Chronological Prefilter requires its versioned training contract")
     if spec.config.final_holdout_size > source_config.final_holdout_size:
         raise ValueError("Inherited Prefilter selection overlaps the new holdout; recompute Prefilter")

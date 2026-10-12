@@ -39,8 +39,8 @@ from rstock.modeling import (
     predict_probabilities,
     resolve_directional_xgboost_parameters,
 )
-from rstock.persistence import load_booster, model_store_transaction
-from rstock.progress import CancellationCheck, check_cancellation
+from rstock.persistence import load_booster, model_store_transaction, model_artifact_filename, validate_logistic_artifacts
+from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from rstock.qualification import qualification_parameters
 from rstock.model_selection import SCORE_COLUMNS
 
@@ -176,6 +176,10 @@ class PromotionService:
         inherited_xgboost_run = provenance_spec.source_xgboost_calibration_run
         frozen_xgboost = provenance_spec.frozen_xgboost_parameters
         resolved_xgboost_run = xgboost_calibration_run or inherited_xgboost_run
+        if spec.config.predictive_algorithm == "logistic_l2":
+            if resolved_xgboost_run or frozen_xgboost is not None:
+                raise ValueError("Logistic promotion cannot consume XGBoost calibration")
+            xgb_parameters = {}
         if resolved_xgboost_run:
             self._require_completed_run(
                 resolved_xgboost_run, JobType.XGBOOST_CALIBRATION
@@ -323,7 +327,8 @@ class PromotionService:
             xgboost_seed=xgboost_seed,
             xgboost_threads=xgboost_threads,
             source_configuration=spec.to_dict(),
-            round_selection_policy=round_selection_snapshot(provenance_spec.config),
+            round_selection_policy=(None if spec.config.predictive_algorithm == "logistic_l2"
+                                    else round_selection_snapshot(provenance_spec.config)),
             calibrated_signal_threshold=calibrated_signal_threshold,
             calibration_source_run=threshold_calibration_run,
             calibration_metrics=calibration_metrics,
@@ -405,12 +410,17 @@ class PromotionService:
         walk_forward: ExperimentSpec, calibration: ExperimentSpec, label: str
     ) -> None:
         fields = (
+            "predictive_algorithm", "predictive_model_type",
             "target_volatility_enabled", "target_volatility_sessions",
             "lag_depth",
             "intraday_target_threshold",
             "intraday_down_threshold",
-            "xgb_round_selection_mode",
         )
+        if walk_forward.config.predictive_algorithm == "logistic_l2":
+            fields += ("logistic_l2_penalty", "logistic_max_iterations",
+                       "logistic_gradient_tolerance", "logistic_objective_tolerance")
+        else:
+            fields += ("xgb_round_selection_mode",)
         mismatched = [
             name
             for name in fields
@@ -420,7 +430,7 @@ class PromotionService:
             raise ValueError(
                 f"{label} is methodologically incompatible: {', '.join(mismatched)}"
             )
-        if walk_forward.config.xgb_round_selection_mode == "chronological" and (
+        if walk_forward.config.predictive_algorithm == "xgboost" and walk_forward.config.xgb_round_selection_mode == "chronological" and (
             round_selection_snapshot(walk_forward.config) != round_selection_snapshot(calibration.config)
         ):
             raise ValueError(f"{label} has an incompatible chronological policy")
@@ -437,6 +447,7 @@ class ProductionTrainingService:
         config: RStockConfig,
         *,
         cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> ProductionModel:
         model = self.repository.get(model_id)
         config = production_training_config(config, model)
@@ -453,7 +464,7 @@ class ProductionTrainingService:
         training = prepared[[*names, *outcomes.values()]].dropna()
         if training.empty:
             raise ValueError("No complete production training observations")
-        directional_parameters = {
+        directional_parameters = {"up": None, "down": None} if model.predictive_algorithm == "logistic_l2" else {
             "up": XGBoostParameters(**model.xgboost_parameters),
             "down": XGBoostParameters(**(
                 model.down_xgboost_parameters or model.xgboost_parameters
@@ -464,17 +475,36 @@ class ProductionTrainingService:
         frozen_configuration = model.to_dict()
         frozen_configuration.pop("training_metadata", None)
         frozen_configuration["artifact_version"] = version
+        from rstock.traceability import prepared_dataset_hash
+        input_digest = prepared_dataset_hash(training)
+        metadata_path = destination / "production.metadata.json"
+        if model.predictive_algorithm == "logistic_l2" and metadata_path.is_file():
+            published = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if published.get("artifact_version") == version:
+                if published.get("configuration") != frozen_configuration or published.get("training_input_sha256") != input_digest:
+                    raise ValueError("Published Production training differs from resume inputs")
+                validate_production_round_contract(model, published)
+                validate_logistic_artifacts(destination, published)
+                check_cancellation(cancellation_check)
+                report_progress(progress_callback, "production_training", substage="reused", completed_units=2, total_units=2)
+                return self._finish_training(model, version, published)
         with model_store_transaction(destination) as staging:
             training_records = {}
             for direction, outcome in outcomes.items():
                 check_cancellation(cancellation_check)
+                report_progress(progress_callback, "production_training", substage=direction,
+                                completed_units=len(training_records), total_units=2,
+                                details={"training_observations": len(training), "model_id": model_id})
                 booster = fit_booster(
                     training, names, outcome, config,
                     parameters=directional_parameters[direction],
                     cancellation_check=cancellation_check,
                 )
                 training_records[direction] = booster_training_record(booster)
-                booster.save_model(staging / f"{direction}.ubj")
+                booster.save_model(staging / model_artifact_filename(direction, model.predictive_algorithm))
+                report_progress(progress_callback, "production_training", substage=direction,
+                                completed_units=len(training_records), total_units=2,
+                                details={"training_observations": len(training), "model_id": model_id})
             check_cancellation(cancellation_check)
             metadata = {
                 "schema_version": 1,
@@ -492,10 +522,20 @@ class ProductionTrainingService:
                 "round_selection_policy": round_selection_snapshot(config),
                 "round_selection_records": training_records,
             }
+            if model.predictive_algorithm == "logistic_l2":
+                from rstock.logistic import logistic_contract
+                metadata.update(predictive_algorithm="logistic_l2", logistic_contract=logistic_contract(config),
+                                round_selection_policy={"mode": "not_applicable"}, training_input_sha256=input_digest)
+                for direction in outcomes:
+                    metadata[f"{direction}_booster_sha256"] = hashlib.sha256(
+                        (staging / model_artifact_filename(direction, "logistic_l2")).read_bytes()).hexdigest()
             (staging / "production.metadata.json").write_text(
                 json.dumps(metadata, indent=2, ensure_ascii=False, default=str) + "\n",
                 encoding="utf-8",
             )
+        return self._finish_training(model, version, metadata)
+
+    def _finish_training(self, model: ProductionModel, version: int, metadata: dict[str, Any]) -> ProductionModel:
         def finish_training(current: ProductionModel) -> ProductionModel:
             if current.status != model.status or current.artifact_version != model.artifact_version:
                 raise ValueError("Model lifecycle changed during training")
@@ -509,7 +549,7 @@ class ProductionTrainingService:
                 })
             return current
 
-        return self.repository.mutate_model(model_id, finish_training)
+        return self.repository.mutate_model(model.model_id, finish_training)
 
 
 class ProductionLifecycleService:
@@ -519,17 +559,20 @@ class ProductionLifecycleService:
     def _validate_artifacts(self, model: ProductionModel) -> None:
         directory = self.repository.artifact_directory(model.model_id)
         production_training_config(RStockConfig(project_root=directory), model)
-        required = [directory / "up.ubj", directory / "down.ubj", directory / "production.metadata.json"]
+        required = [directory / model_artifact_filename(direction, model.predictive_algorithm)
+                    for direction in ("up", "down")] + [directory / "production.metadata.json"]
         if model.feature_version not in SUPPORTED_FEATURE_VERSIONS:
             raise ValueError("The production feature version is not supported")
         # Validate every frozen modeling parameter before observation or
         # activation, independently for Up and Down.
-        XGBoostParameters(**model.xgboost_parameters)
-        XGBoostParameters(**(model.down_xgboost_parameters or model.xgboost_parameters))
+        if model.predictive_algorithm == "xgboost":
+            XGBoostParameters(**model.xgboost_parameters)
+            XGBoostParameters(**(model.down_xgboost_parameters or model.xgboost_parameters))
         if model.artifact_version is None or not all(path.is_file() for path in required):
             raise ValueError("Production artifacts are missing or incomplete")
         metadata = json.loads(required[-1].read_text(encoding="utf-8"))
         validate_production_round_contract(model, metadata)
+        validate_logistic_artifacts(directory, metadata)
         predictor_names = metadata.get("predictor_columns") or []
         required_lags = {
             intraday_lag_column(symbol, lag)
@@ -848,7 +891,7 @@ class DailyPredictionService:
                     "up": intraday_target_column(model.target),
                     "down": intraday_down_target_column(model.target),
                 }
-                directional_parameters = {
+                directional_parameters = {"up": None, "down": None} if model.predictive_algorithm == "logistic_l2" else {
                     "up": XGBoostParameters(**model.xgboost_parameters),
                     "down": XGBoostParameters(**(
                         model.down_xgboost_parameters or model.xgboost_parameters
@@ -1029,8 +1072,9 @@ class DailyPredictionService:
             as_of_date=as_of,
             market_data=market_data,
         )
-        up = float(predict_probabilities(load_booster(directory / "up.ubj"), current, names)[0])
-        down = float(predict_probabilities(load_booster(directory / "down.ubj"), current, names)[0])
+        validate_logistic_artifacts(directory, metadata)
+        up = float(predict_probabilities(load_booster(directory / model_artifact_filename("up", model.predictive_algorithm)), current, names)[0])
+        down = float(predict_probabilities(load_booster(directory / model_artifact_filename("down", model.predictive_algorithm)), current, names)[0])
         signal_status = (
             "bullish_signal"
             if up >= model.signal_threshold and down < model.down_threshold
@@ -1101,8 +1145,9 @@ class DailyPredictionService:
         source_observations = prediction_source_observations(
             prepared, names, as_of_date=as_of, market_data=market_data
         )
-        up = float(predict_probabilities(load_booster(directory / "up.ubj"), current, names)[0])
-        down = float(predict_probabilities(load_booster(directory / "down.ubj"), current, names)[0])
+        validate_logistic_artifacts(directory, metadata)
+        up = float(predict_probabilities(load_booster(directory / model_artifact_filename("up", model.predictive_algorithm)), current, names)[0])
+        down = float(predict_probabilities(load_booster(directory / model_artifact_filename("down", model.predictive_algorithm)), current, names)[0])
         signal_status = (
             "bullish_signal"
             if up >= model.signal_threshold and down < model.down_threshold

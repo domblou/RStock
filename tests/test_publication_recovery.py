@@ -29,7 +29,7 @@ def test_recovery_requires_published_files_and_forward_snapshot(tmp_path):
         _validate_publication_recovery(tmp_path,{"result_files":["../config.json"]})
 
 
-def test_e2e_technical_tab_displays_parent_log_and_failure(tmp_path,monkeypatch):
+def test_e2e_provenance_displays_failure_and_logs_are_in_shared_log_tab(tmp_path,monkeypatch):
     import rstock.application.streamlit_app as app
     messages=[];errors=[]
     st=SimpleNamespace(session_state=SimpleNamespace(lab_config=SimpleNamespace(project_root=tmp_path)),
@@ -37,5 +37,7 @@ def test_e2e_technical_tab_displays_parent_log_and_failure(tmp_path,monkeypatch)
         code=messages.append,error=errors.append,json=lambda *a,**k:None,write=lambda *a,**k:None)
     monkeypatch.setattr(app,"st",st)
     app._render_pipeline_technical("parent",{"log_tail":["publishing","WinError 183"],"status":{"error":"collision"}})
+    assert messages==[]
+    app._render_run_logs({"log_tail":["publishing","WinError 183"]})
     assert messages==["publishing\nWinError 183"]
     assert errors==["collision"]

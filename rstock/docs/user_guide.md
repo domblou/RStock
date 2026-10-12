@@ -933,6 +933,22 @@ modifie ni les modèles, ni les prédictions, ni les signaux.
 
 La page Historique permet de retrouver les runs exécutés.
 
+En bas de la page, hors des onglets, **Jobs actifs — Tous les types** affiche
+tous les jobs en attente (`pending`) ou en cours (`running`), dont les analyses
+scientifiques et les simulations Forward. L'encadré est indépendant de l'onglet
+ou des filtres de la grille et se rafraîchit aux 2 secondes. Il conserve progression,
+durée, derniers messages et bouton Annuler. Il disparaît lorsqu'aucun job n'est
+actif; les jobs terminés, échoués ou annulés restent consultables dans la grille.
+
+Tous les détails de run terminent leurs onglets principaux par **Technique**,
+après les vues métier et les résultats spécifiques. Cet onglet regroupe
+**Ressources**, **Configuration**, **Fichiers** et **Logs**. Les analyses scientifiques
+et les pipelines End-to-end/revalidation ont aussi **Provenance**, avec leurs
+manifests, empreintes et diagnostics spécifiques. Ressources n'est plus dupliqué
+au premier niveau. Les mêmes vues sont réutilisées pour les runs autonomes et
+les détails techniques des batches; la télémétrie absente conserve son message
+d'indisponibilité. Chaque onglet charge son contenu seulement à son ouverture.
+
 Dans la grille, le nom de l’univers est suivi du nombre de cibles figées dans
 la configuration du run, entre parenthèses. Les anciens runs sans liste de
 cibles utilisent leur liste de symboles ; si cette information manque, aucun
@@ -971,7 +987,39 @@ Configurer ses paramètres, lire le résumé, puis cocher la confirmation avant
 soumission. Artefacts manquants, source incompatible ou règles scientifiques
 indéfinies empêchent le lancement avec une explication.
 Le job possède son propre identifiant dans l'Historique. Son détail comporte
-**Résumé**, **Ressources**, **Technique** et les résultats spécialisés persistés.
+**Résumé**, les résultats spécialisés persistés, puis **Technique** en dernière
+position. Ressources et Provenance sont accessibles à l'intérieur de Technique.
+Résumé est le point d'entrée commun aux analyses; ses blocs JSON sont regroupés
+dans **Détails du résumé (JSON)**, fermé par défaut. L'avertissement d'exécution
+partielle et le bouton d'ouverture du run source restent visibles.
+
+Le Résumé présente aussi **Interprétation scientifique**, ouverte et lisible,
+avec trois volets : **Comprendre les résultats**, **Interprétation des résultats**,
+**Limites et verdict scientifique**. Les textes sont propres au type d'analyse,
+déterministes et construits à partir de ses règles et résultats enregistrés,
+sans génération par IA ni recalcul scientifique. Les nouvelles exécutions
+conservent l'interprétation versionnée avec les résultats. Les anciens résultats
+compatibles peuvent être interprétés sans modification de leurs fichiers.
+
+Pour Persistance des relations rares, aucune sélection signifie qu'aucune relation
+n'est retenue par la règle : la grille de persistance vide est attendue et la
+proportion soutenue est « sans objet ». Cela ne prouve pas l'absence de signal.
+Une évaluation indéterminée est distinguée d'une persistance non démontrée.
+La proportion soutenue conserve toutes les relations sélectionnées au dénominateur.
+Les motifs sont ceux enregistrés, jamais des causes inférées des seuls compteurs.
+Un run incomplet ou des artefacts incompatibles ne produisent pas de verdict final.
+Les réussites restent historiques conditionnelles; les seuils ne sont pas validés
+empiriquement et aucune validation Forward, rentabilité ou MVP n'est affirmée.
+
+La progression d'une analyse indique maintenant sa phase réelle et des unités
+traitées : octets, lignes, fenêtres, relations ou fichiers, avec mises à jour
+régulières pendant les boucles longues. Le calendrier affiche d'abord le maximum
+de lignes attendu; le total réellement archivé est connu en fin de lecture.
+**Technique → Ressources** présente les durées et ressources de préparation,
+références, pertes appariées, sélection, évaluation, export, gel des sorties et
+publication. Une reprise distingue restauration et calcul. L'ETA reste une
+estimation; les compteurs d'une sous-étape peuvent repartir à zéro lorsqu'elle
+change d'unité. La correction ne complète pas la télémétrie des anciens runs.
 Les résultats non terminés sont signalés comme partiels. Une reprise conserve
 paramètres et empreintes ; une exécution indépendante reçoit un nouvel identifiant.
 Les liens permettent de revenir au run source et d'ouvrir ses analyses précédentes.
@@ -1732,8 +1780,9 @@ et seuils sur les séances XNYS postérieures au cutoff, sans réentraînement.
 Le cutoff constitue **T0**, origine de l’âge du modèle ; il ne représente pas
 une référence de performance issue du holdout.
 
-Le détail d’un run Forward conserve les onglets **Résultats**, **Configuration**,
-**Fichiers** et **Logs**. Sous Résultats, **Synthèse**, **Modèles** et
+Le détail d’un run Forward présente les onglets **Résultats**, puis **Technique**,
+qui regroupe **Ressources**, **Configuration**, **Fichiers** et **Logs**.
+Sous Résultats, **Synthèse**, **Modèles** et
 **Évolution population** présentent des mesures descriptives. Les checkpoints
 standards sont +21, +42, +63, +84 et +126 séances, uniquement lorsqu’ils sont
 entièrement couverts. Chaque checkpoint présente le cumul depuis T0 et son
@@ -1885,9 +1934,33 @@ cible seule ou cible + externes. L'option **Ajouter la volatilité du titre cibl
 ajoute une variable passée avec un nombre de séances configurable (21 par défaut).
 La constante ignore cette option. Les limites de recherche, entrées requises et
 comparaisons alignées sont dans [Types de modèles prédictifs](predictive_model_types.md).
-Le texte d'aide des Paramètres qui limite encore ces types au seul WF est plus
-restrictif que le contrat actuel WF/E2E ; promotion et Forward/Production restent
-bloqués pour les types autres que `external_only`.
+Choisir **Algorithme prédictif** : XGBoost, Régression logistique L2 ou Probabilité
+constante; puis **Type de variables** : externes seulement, cible seule ou cible +
+externes. La constante désactive les variables. Cette séparation apparaît dans les
+paramètres, lancements et dérivations. Les réglages logistiques sont affichés pour
+L2; les réglages XGBoost sont alors désactivés ou indiqués sans objet.
+La logistique est disponible en WF et E2E, calibration des seuils et Holdout inclus.
+La calibration XGBoost est sans objet, sans optimisation L2. Avec **Externes
+seulement**, la logistique est également disponible en Forward et Production,
+avec promotion manuelle ou automatique selon les règles existantes. Le modèle
+conserve ses paramètres sources; changer les paramètres globaux ne les remplace pas.
+Forward charge les modèles gelés sans les réentraîner. L'entraînement Production
+crée les artefacts Up/Down avant l'observation ou l'activation, comme pour XGBoost.
+L'option **Exécuter une validation temporelle** est également disponible pour la
+logistique : deuxième E2E décalé de 63 séances, comparaison temporelle, puis
+revalidation forcée des candidats avec paramètres L2 et seuils de référence.
+Les règles scientifiques sont les mêmes que pour XGBoost. Cette option exige une
+référence à offset 0 sans cutoff historique explicite; la promotion automatique
+reste conditionnelle aux critères temporels et à la qualification des candidats.
+Les contrats et paramètres sont décrits dans la documentation des types de modèles;
+aucun défaut global ni règle de qualification n'est changé par cette intégration.
+Comparer distingue algorithme et variables, et conserve les exigences de calendrier,
+labels et apprentissages communs pour l'alignement avec la constante. Les anciens runs
+sans algorithme explicite gardent leur comportement, sans réécriture. Promotion et
+Forward/Production restent aussi bloqués pour les variables autres que `external_only`.
+Les reprises réutilisent les modèles de gel terminés et un entraînement Production
+déjà publié après vérification des données et contrats. Un fichier logistique
+modifié ou incomplet est refusé; les archives XGBoost restent lisibles.
 
 Dans le détail d'un run, **Technique → Ressources** affiche, lorsque disponibles,
 les tentatives, phases, attentes de slots et mesures CPU/mémoire persistées.
@@ -1897,6 +1970,22 @@ et une ancienne télémétrie absente n'est pas remplacée par zéro.
 La consultation peut actuellement appeler la récupération automatique des Forward
 pending. C'est un effet de bord connu ; consulter ne constitue pas une autorisation
 de relance. La correction reste dans la roadmap applicative.
+
+**Algorithme du préfiltre** choisit XGBoost ou Régression logistique L2, dans les
+paramètres, lancements et dérivations. Ce choix est indépendant de l'algorithme
+du WF final; les réglages L2 du préfiltre sont figés séparément. La sélection
+reste Up et conserve ses critères. La probabilité constante est seulement une
+référence train, évaluée sur les mêmes dates test, sans participer au classement.
+Le détail du préfiltre affiche début, fin évaluée, première séance Holdout et
+pertes du modèle/constante; l'affichage des fenêtres et leur export sont optionnels.
+Comparer vérifie les empreintes des fenêtres, observations, labels et Holdout,
+et signale les archives non vérifiables. Pour établir une référence propre depuis
+une archive sans audit, créer deux nouveaux dérivés XGBoost et L2 sur son snapshot
+compatible. Les fenêtres et résultats de sélection sont recalculés, sans acquisition.
+Les données restent figées jusqu'au cutoff; les évaluations du préfiltre s'arrêtent
+avant le Holdout configurable (63 séances par défaut), sans exclure celui-ci deux
+fois. Le WF de développement conserve un biais de sélection; ce n'est pas une
+validation indépendante.
 
 Références : [jobs et reprises](job_orchestration.md),
 [sélection et calibrations XGBoost](CHRONOLOGICAL_XGBOOST.md),

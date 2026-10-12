@@ -128,6 +128,8 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
                     info["predictor_symbols"] != predictors or info["target_symbols"] != targets
                     or info["calendars"] != calendars):
                 raise ValueError("Autonomous origin cutoff or universe differs")
+            if view.index[-config.final_holdout_size] > prepared.index[-config.final_holdout_size]:
+                raise ValueError("Consensus origin development overlaps principal Holdout")
             if pending_snapshot:
                 origin_checkpoint.commit_snapshot(view, info)
             if origin_checkpoint.artifact_exists("prefilter_selection"):
@@ -179,7 +181,7 @@ def execute_consensus(spec, output, checkpoint, prepared, sets, predictors, targ
         **wf._persist_prefilter_training(output, origin_checkpoints, config),
         "prepared_dataset_as_of": spec.historical_data_cutoff,
         "prepared_dataset_sha256": trace["prepared_dataset_sha256"],
-        "xgboost_parameters": wf.prefilter_xgboost_snapshot(config),
+        "xgboost_parameters": wf.prefilter_xgboost_snapshot(config) if config.prefilter_algorithm=='xgboost' else None,
         "origin_cutoffs": [origin.date().isoformat() for origin in origins],
         "origins": provenance, "step_sessions": config.temporal_consensus_step_sessions,
         "min_occurrences": config.temporal_consensus_min_occurrences,

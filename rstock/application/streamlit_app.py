@@ -262,6 +262,15 @@ EXPERIMENT_WF_MODE_KEY = "experiment-launch-wf-mode"
 EXPERIMENT_NAVIGATION_KEY = "requested-primary-page"
 _PRIMARY_PAGES: list[st.Page] | None = None
 WORKFLOW_PHASE_LABELS = {
+    "analysis_preparation": "Préparation et validation de la source",
+    "analysis_reference": "Calendrier et références train",
+    "analysis_scoring": "Calcul des pertes appariées",
+    "analysis_selection": "Sélection des relations",
+    "analysis_evaluation": "Évaluation de la persistance",
+    "analysis_export": "Export des résultats",
+    "analysis_outputs": "Validation et gel des sorties",
+    "analysis_restore": "Restauration des sorties figées",
+    "scientific_analysis": "Analyse scientifique",
     "data_preparation": "Préparation des données",
     "predictor_prefilter_generation": "Predictor prefilter",
     "predictor_prefilter_walk_forward": "Walk-forward du prefilter",
@@ -615,7 +624,7 @@ def _job_panel(
         runs = [run for run in runs if job_domain(run.get("job_type")) == domain]
     if not runs:
         return False
-    title = job_domain_title(domain) if domain is not None else None
+    title = job_domain_title(domain) if domain is not None else "Jobs actifs — Tous les types"
     if title is not None:
         st.subheader(title)
     for status in runs:
@@ -646,7 +655,8 @@ def _job_panel(
                 completed = progress.get("completed_units")
                 total = progress.get("total_units")
                 eta = progress.get("eta_seconds")
-                message = f"{completed} / {total} unités" + (" globales" if temporal_progress else "")
+                unit = origin_details.get("unit") or "unités"
+                message = f"{completed} / {total} {unit}" + (" globales" if temporal_progress else "")
                 if temporal_progress:
                     message += (f" · Origine {origin_details['origin_number']}/{origin_details['origin_count']} : "
                                 f"{origin_details['origin_completed_units']} / {origin_details['origin_total_units']}")
@@ -1098,8 +1108,9 @@ def _experiments(service: ExperimentService) -> None:
     selected_job_type = labels[choice]
     run_config = st.session_state.lab_config
     if selected_job_type in {JobType.WALK_FORWARD, JobType.END_TO_END}:
-        model_type = _predictive_model_input(run_config.predictive_model_type, "launch-predictive-model-type")
-        run_config = replace(run_config, predictive_model_type=model_type)
+        from rstock.application.predictive_model_ui import predictive_configuration_input
+        run_config = predictive_configuration_input(run_config, "launch-predictive-model", st)
+        model_type = run_config.predictive_model_type
         volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=run_config.target_volatility_enabled,
             disabled=model_type == "constant_probability", key="launch-target-volatility",
             help="Clôtures ajustées connues avant la séance prédite. Historique Yahoo rétrospectif, sans garantie point-in-time.")
@@ -1110,11 +1121,14 @@ def _experiments(service: ExperimentService) -> None:
                               disabled=not uses_externals, key="launch-predictive-prefilter")
         run_config = replace(run_config, predictor_prefilter_enabled=enabled and uses_externals)
     elif selected_job_type is JobType.PREDICTOR_PREFILTER:
-        run_config = replace(run_config, predictive_model_type="external_only", target_volatility_enabled=False)
+        run_config = replace(run_config, predictive_model_type="external_only", predictive_algorithm="xgboost", target_volatility_enabled=False)
     prefilter_method = run_config.prefilter_selection_mode if selected_job_type in {JobType.PREDICTOR_PREFILTER, JobType.END_TO_END} else "single_origin"
     stability_origin_count = 5
     stability_step_sessions = 1
     valid_consensus = True
+    if selected_job_type is JobType.PREDICTOR_PREFILTER or (selected_job_type is JobType.END_TO_END and run_config.predictor_prefilter_enabled):
+        from rstock.application.predictive_model_ui import prefilter_configuration_input
+        run_config = prefilter_configuration_input(run_config, 'launch-prefilter-model', st)
     if selected_job_type is JobType.PREDICTOR_PREFILTER or (selected_job_type is JobType.END_TO_END and run_config.predictor_prefilter_enabled):
         st.caption("Évaluation univariée et sélection uniquement; aucun Walk-forward complet."
                    if selected_job_type is JobType.PREDICTOR_PREFILTER else
@@ -1252,6 +1266,9 @@ def _experiments(service: ExperimentService) -> None:
                 "elle n'entraine et n'active aucun modele."
             ),
          disabled=run_config.predictive_model_type != "external_only")
+        if run_config.predictive_model_type != "external_only":
+            auto_promote_candidates = False
+            forward_simulation_enabled = False
         if auto_promote_candidates and not st.session_state.lab_evaluate_holdout:
             st.error("La promotion automatique exige le holdout final.")
         temporal_validation_enabled = st.checkbox(
@@ -1472,7 +1489,12 @@ def _prefilter_round_selection_inputs(
 
 
 def _prefilter_xgboost_settings(config: RStockConfig, *, disabled: bool = False) -> dict[str, object]:
-    """Edit dedicated training values within the predictor-prefilter section."""
+    """Edit dedicated prefilter values independently from the final model."""
+    from rstock.application.predictive_model_ui import prefilter_configuration_input
+    from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
+    config = prefilter_configuration_input(config, 'settings-prefilter-model', st)
+    model_values = {name:getattr(config,name) for name in PREFILTER_MODEL_FIELDS}
+    disabled = disabled or config.prefilter_algorithm != 'xgboost'
     values: dict[str, object] = {}
     with st.container(border=True):
         st.subheader("XGBoost du préfiltre")
@@ -1503,13 +1525,9 @@ def _prefilter_xgboost_settings(config: RStockConfig, *, disabled: bool = False)
                  disabled=disabled))
             values[field] = value
         values.update(_prefilter_round_selection_inputs(config, "settings-", horizontal=True, disabled=disabled))
+    values.update(model_values)
     return values
 
-
-
-def _predictive_model_input(current: str, key: str, widget=None) -> str:
-    from rstock.application.predictive_model_ui import predictive_model_input
-    return predictive_model_input(current, key, widget=st if widget is None else widget)
 
 
 def _render_common_prediction_comparison(run_ids: list[str]) -> None:
@@ -1546,7 +1564,6 @@ def _render_common_prediction_comparison(run_ids: list[str]) -> None:
         st.caption("Holdout commun indisponible : seules les prédictions individuelles effectivement exécutées sont comparables.")
 
 def _settings() -> None:
-    from rstock.application.predictive_model_ui import predictive_model_input as _predictive_model_input
     _page_header("Paramètres")
     load_warning = st.session_state.pop("_settings_load_warning", None)
     if load_warning:
@@ -1577,9 +1594,11 @@ def _settings() -> None:
         permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
         max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
         st.subheader('Types de modèles')
-        predictive_model_type = _predictive_model_input(current.predictive_model_type, "settings-predictive-model-type", widget=st)
+        from rstock.application.predictive_model_ui import predictive_configuration_input
+        predictive_config = predictive_configuration_input(current, "settings-predictive-model", st)
+        predictive_model_type = predictive_config.predictive_model_type
         if predictive_model_type != "external_only":
-            st.caption("Type expérimental : disponible uniquement en Walk-forward (WF) et, pour « Titre cible + externes », avec préfiltre des externes. Non disponible pour les calibrations, les seuils, la promotion ou le Forward/Production.")
+            st.caption("Ces variables sont disponibles en WF et en End-to-end. Le préfiltre porte sur les externes; les limites de Forward/Production restent applicables.")
         st.subheader("Volatilité passée du titre cible")
         target_volatility_enabled = st.checkbox("Ajouter la volatilité du titre cible", value=current.target_volatility_enabled,
             disabled=predictive_model_type == "constant_probability", key="settings-target-volatility",
@@ -1668,26 +1687,26 @@ def _settings() -> None:
         )
         st.subheader("XGBoost")
         x1, x2, x3 = st.columns(3)
-        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth, disabled=predictive_model_type == "constant_probability")
-        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f", disabled=predictive_model_type == "constant_probability")
-        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds, disabled=predictive_model_type == "constant_probability")
-        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight, disabled=predictive_model_type == "constant_probability")
-        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample, disabled=predictive_model_type == "constant_probability")
-        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree, disabled=predictive_model_type == "constant_probability")
-        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma, disabled=predictive_model_type == "constant_probability")
-        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha, disabled=predictive_model_type == "constant_probability")
-        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda, disabled=predictive_model_type == "constant_probability")
+        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f", disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
         st.subheader('Sélection fixe ou chronologique des tours')
         round_modes = ("fixed", "chronological")
         round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
             index=round_modes.index(current.xgb_round_selection_mode),
-            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique", disabled=predictive_model_type == "constant_probability")
+            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique", disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
         st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
         round_controls = st.columns(4)
-        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds, disabled=predictive_model_type == "constant_probability")
-        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions, disabled=predictive_model_type == "constant_probability")
-        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience, disabled=predictive_model_type == "constant_probability")
-        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations, disabled=predictive_model_type == "constant_probability")
+        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
         st.subheader("Qualification")
         q1, q2, q3 = st.columns(3)
         min_windows = q1.number_input(
@@ -2060,6 +2079,11 @@ def _settings() -> None:
             permutation_depth=int(permutation),
             max_generated_sets=int(max_sets),
             predictive_model_type=predictive_model_type,
+            predictive_algorithm=predictive_config.predictive_algorithm,
+            logistic_l2_penalty=predictive_config.logistic_l2_penalty,
+            logistic_max_iterations=predictive_config.logistic_max_iterations,
+            logistic_gradient_tolerance=predictive_config.logistic_gradient_tolerance,
+            logistic_objective_tolerance=predictive_config.logistic_objective_tolerance,
             target_volatility_enabled=target_volatility_enabled,
             target_volatility_sessions=int(target_volatility_sessions),
             lag_depth=int(lag),
@@ -2280,7 +2304,12 @@ def _render_walk_forward_promotion(
         st.info(f"Déjà promue — statut : {existing.status.value}.")
         return
     with st.expander("Sources de calibration optionnelles"):
-        xgb_run = st.text_input("Run calibration XGBoost", key=f"xgb-source-{run_id}") or None
+        source_path = project_root / "runs" / run_id / "config.json"
+        source_config = json.loads(source_path.read_text(encoding="utf-8")).get("rstock_config", {}) if source_path.is_file() else {}
+        is_logistic = source_config.get("predictive_algorithm", "xgboost") == "logistic_l2"
+        xgb_run = st.text_input("Run calibration XGBoost", key=f"xgb-source-{run_id}", disabled=is_logistic) or None
+        if is_logistic:
+            xgb_run = None
         threshold_run = st.text_input("Run calibration seuils", key=f"threshold-source-{run_id}") or None
     if st.button("Promouvoir comme candidat production", type="primary", key=f"promote-{run_id}"):
         try:
@@ -3014,18 +3043,21 @@ def _render_run_logs(detail: dict[str, object]) -> None:
     st.code("\n".join(detail["log_tail"]) or "Aucun message")
 
 
-def _render_run_technical_tabs(run_id: str, detail: dict[str, object]) -> None:
+def _render_run_technical_tabs(run_id: str, detail: dict[str, object], *, render_provenance=None) -> None:
     st.caption(f"ID technique : {run_id}")
-    technical_tabs = tabs_for_job(JobType.XGBOOST_CALIBRATION)[1:]
+    from rstock.application.run_detail_tabs import technical_tabs
+    renderers = {
+        "resources": lambda: _render_run_resources(run_id),
+        "configuration": lambda: _render_run_configuration(detail),
+        "files": lambda: _render_run_files(detail),
+        "logs": lambda: _render_run_logs(detail),
+    }
+    if render_provenance is not None:
+        renderers["provenance"] = render_provenance
     render_lazy_tabs(
         st,
-        technical_tabs,
-        {
-            "resources": lambda: _render_run_resources(run_id),
-            "configuration": lambda: _render_run_configuration(detail),
-            "files": lambda: _render_run_files(detail),
-            "logs": lambda: _render_run_logs(detail),
-        },
+        technical_tabs(has_provenance=render_provenance is not None),
+        renderers,
         key=f"run-technical-{run_id}",
     )
 
@@ -3341,6 +3373,17 @@ def _render_standard_results(
             st.info("Classement indisponible tant que le préfiltre n'est pas terminé.")
         manifest = _read_light_json(result_dir / "predictor_prefilter.json")
         if manifest is not None:
+            evaluation = manifest.get('prefilter_evaluation',{})
+            from rstock.application.predictive_model_ui import ALGORITHM_LABELS
+            st.caption('Algorithme du préfiltre : '+ALGORITHM_LABELS.get(manifest.get('prefilter_algorithm','xgboost')))
+            st.caption(f"Début : {evaluation.get('train_start','Non disponible')} · Fin évaluée : {evaluation.get('test_end','Non disponible')} · Première séance Holdout : {evaluation.get('holdout_start','Non disponible')}")
+            if evaluation.get('metrics'):
+                st.json(evaluation['metrics'])
+            audit_path = result_dir/'prefilter_windows.csv'
+            if audit_path.is_file() and st.checkbox('Afficher les fenêtres et la référence constante',key=f'prefilter-window-audit-{run_id}'):
+                render_dataframe(pd.read_csv(audit_path),hide_index=True,width='stretch')
+                st.download_button('Exporter les fenêtres du préfiltre',data=audit_path.read_bytes(),
+                    file_name=f'{run_id}_prefilter_windows.csv',mime='text/csv',key=f'prefilter-window-export-{run_id}')
             coverage = manifest.get("round_selection_coverage", {}).get("Up", {})
             policy = manifest.get("round_selection_policy", {})
             st.caption("Tours XGBoost du préfiltre : " + str(policy.get("prefilter_xgb_round_selection_mode", "fixed"))
@@ -3771,10 +3814,7 @@ def _render_standard_job_tabs(
             "results": lambda: _render_standard_results(
                 run_id, job_type, status, detail
             ),
-            "resources": lambda: _render_run_resources(run_id),
-            "configuration": lambda: _render_run_configuration(detail),
-            "files": lambda: _render_run_files(detail),
-            "logs": lambda: _render_run_logs(detail),
+            "technical": lambda: _render_run_technical_tabs(run_id, detail),
         },
         key=f"run-detail-{run_id}",
     )
@@ -3814,6 +3854,9 @@ def _render_round_selection_summary(run_id: str, detail: dict[str, object]) -> N
     configuration = detail.get("configuration", {}).get("rstock_config", {})
     if configuration.get("predictive_model_type", "external_only") == "constant_probability":
         st.caption("Tours XGBoost : non applicables. Probabilités issues des labels connus de l’apprentissage.")
+        return
+    if configuration.get("predictive_algorithm", "xgboost") == "logistic_l2":
+        st.caption(f"Algorithme : Régression logistique L2 · pénalité : {configuration.get('logistic_l2_penalty', 0.05)}. Standardisation sur l’apprentissage; tours XGBoost sans objet.")
         return
     mode = configuration.get("xgb_round_selection_mode", "fixed")
     st.caption(f"Tours XGBoost : {'chronologique' if mode == 'chronological' else 'fixe'} · repli / tours fixes : {configuration.get('xgb_rounds', '—')}")
@@ -4163,7 +4206,6 @@ def _render_walk_forward_tabs(
         tabs_for_job(JobType.WALK_FORWARD, has_walk_forward_batches=has_batches),
         {
             "summary": lambda: _render_walk_forward_summary(run_id, status, detail),
-            "resources": lambda: _render_run_resources(run_id),
             "analysis": lambda: _render_walk_forward_analysis(run_id, status, detail),
             "combinations": lambda: _render_walk_forward_combinations(
                 run_id, status, detail
@@ -4324,6 +4366,8 @@ def _render_derived_creation(
             if owner != last_stage:
                 st.subheader(labels[owner])
                 last_stage = owner
+            if field == "predictive_algorithm" or field.startswith("logistic_"):
+                continue  # rendered together with the variable selector
             try:
                 original = source_parameter_value(
                     repository, source_spec, source_manifest, field
@@ -4332,13 +4376,29 @@ def _render_derived_creation(
                 st.error(f"Valeur source indisponible pour {field} : {error}")
                 return
             effective_type = changes.get("predictive_model_type", st.session_state.get(f"derive-value-{run_id}-{fork}-predictive_model_type", source_spec.config.predictive_model_type))
-            if (field.startswith("xgb_") and effective_type == "constant_probability") or (field.startswith(("prefilter_", "predictor_prefilter_", "temporal_consensus_", "stability_")) and effective_type in {"constant_probability", "target_only"}):
+            if (field.startswith("xgb_") and (effective_type == "constant_probability" or changes.get("predictive_algorithm", source_spec.config.predictive_algorithm) != "xgboost")) or (field.startswith(("prefilter_", "predictor_prefilter_", "temporal_consensus_", "stability_")) and effective_type in {"constant_probability", "target_only"}):
                 st.caption(f"{field} : non applicable")
+                continue
+            if field == 'prefilter_algorithm':
+                from rstock.application.predictive_model_ui import prefilter_configuration_input
+                from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
+                updated = prefilter_configuration_input(source_spec.config, f'derive-prefilter-model-{run_id}', st)
+                changes.update({name:getattr(updated,name) for name in PREFILTER_MODEL_FIELDS if getattr(updated,name)!=getattr(source_spec.config,name)})
+                continue
+            if field.startswith('prefilter_logistic_'):
+                continue
+            if field.startswith('prefilter_xgb_') and changes.get('prefilter_algorithm',source_spec.config.prefilter_algorithm)!='xgboost':
+                st.caption(f'{field} : sans objet pour L2')
                 continue
             if field.startswith("prefilter_xgb_") and field in PREFILTER_ROUND_SELECTION_FIELDS:
                 value = _round_selection_input(field, original, f"derive-value-{run_id}-{fork}-{field}")
             elif field == "predictive_model_type":
-                value = _predictive_model_input(original, f"derive-value-{run_id}-{fork}-{field}")
+                from rstock.application.predictive_model_ui import predictive_configuration_input
+                updated = predictive_configuration_input(source_spec.config, f"derive-value-{run_id}-{fork}-model", st)
+                for name in ("predictive_algorithm", "predictive_model_type", "logistic_l2_penalty", "logistic_max_iterations", "logistic_gradient_tolerance", "logistic_objective_tolerance"):
+                    if getattr(updated, name) != getattr(source_spec.config, name):
+                        changes[name] = getattr(updated, name)
+                value = updated.predictive_model_type
             elif field == "xgb_round_selection_mode":
                 value = st.selectbox("Sélection des tours XGBoost (Walk-forward et aval)",
                     ("fixed", "chronological"), index=(0 if original == "fixed" else 1),
@@ -4481,6 +4541,8 @@ def _render_prefilter_derived_creation(
                 if value != original:
                     changes[field] = value
         for field in sorted(PREFILTER_DERIVATION_FIELDS - set(PREFILTER_XGBOOST_FIELDS) - set(PREFILTER_ROUND_SELECTION_FIELDS) - {"temporal_consensus_origins", "temporal_consensus_step_sessions", "temporal_consensus_min_occurrences"}):
+            if field.startswith('prefilter_logistic_') or field == 'prefilter_algorithm':
+                continue
             original = getattr(source.config, field)
             if field == "predictor_prefilter_top_n":
                 value = int(st.number_input(
@@ -4495,6 +4557,14 @@ def _render_prefilter_derived_creation(
                 ))
             if value != original:
                 changes[field] = value
+        from rstock.application.predictive_model_ui import prefilter_configuration_input
+        from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
+        updated = prefilter_configuration_input(source.config, f'prefilter-derive-model-{run_id}', st)
+        changes.update({name:getattr(updated,name) for name in PREFILTER_MODEL_FIELDS if getattr(updated,name)!=getattr(source.config,name)})
+        source_report = _read_light_json(service.run_service.repository.run_directory(run_id)/'results/predictor_prefilter.json') or {}
+        if source_report.get('prefilter_evaluation',{}).get('status') != 'verified':
+            if st.checkbox('Recalculer une référence avec audit complet',key=f'prefilter-clean-reference-{run_id}'):
+                changes['prefilter_algorithm'] = updated.prefilter_algorithm
         st.subheader("XGBoost du préfiltre")
         xgb_columns = st.columns(3)
         for index, field in enumerate(PREFILTER_XGBOOST_FIELDS):
@@ -4503,7 +4573,7 @@ def _render_prefilter_derived_creation(
                 value = int(xgb_columns[index % 3].number_input(
                     labels[field], min_value=0 if field == "prefilter_xgb_seed" else 1,
                     value=int(original), step=1,
-                    key=f"prefilter-derive-{run_id}-{field}",
+                    key=f"prefilter-derive-{run_id}-{field}", disabled=updated.prefilter_algorithm!='xgboost',
                 ))
             else:
                 bounds = {"min_value": 0.0}
@@ -4511,11 +4581,11 @@ def _render_prefilter_derived_creation(
                     bounds["max_value"] = 1.0
                 value = float(xgb_columns[index % 3].number_input(
                     labels[field], value=float(original), format="%.4f",
-                    key=f"prefilter-derive-{run_id}-{field}", **bounds,
+                    key=f"prefilter-derive-{run_id}-{field}", disabled=updated.prefilter_algorithm!='xgboost', **bounds,
                 ))
             if value != original:
                 changes[field] = value
-        for field, value in _prefilter_round_selection_inputs(source.config, f"prefilter-derive-{run_id}-").items():
+        for field, value in _prefilter_round_selection_inputs(source.config, f"prefilter-derive-{run_id}-", disabled=updated.prefilter_algorithm!='xgboost').items():
             if value != getattr(source.config, field):
                 changes[field] = value
         submitted = st.button(
@@ -4595,13 +4665,18 @@ def _render_walk_forward_derived_creation(
 
     def field_input(field: str, widget: object) -> None:
         original = getattr(source.config, field)
-        if field.startswith("xgb_") and changes.get("predictive_model_type", source.config.predictive_model_type) == "constant_probability":
+        if field.startswith("xgb_") and (changes.get("predictive_model_type", source.config.predictive_model_type) == "constant_probability" or changes.get("predictive_algorithm", source.config.predictive_algorithm) != "xgboost"):
             widget.caption(f"{field} : non applicable")
             return
         label = labels.get(field, field.removeprefix("xgb_").removeprefix("model_selection_"))
         widget_key = f"wf-derive-{run_id}-{field}"
         if field == "predictive_model_type":
-            value = _predictive_model_input(original, widget_key, widget)
+            from rstock.application.predictive_model_ui import predictive_configuration_input
+            updated = predictive_configuration_input(source.config, f"wf-derive-{run_id}-model", widget)
+            for name in ("predictive_algorithm", "predictive_model_type", "logistic_l2_penalty", "logistic_max_iterations", "logistic_gradient_tolerance", "logistic_objective_tolerance"):
+                if getattr(updated, name) != getattr(source.config, name):
+                    changes[name] = getattr(updated, name)
+            value = updated.predictive_model_type
         elif field == "target_volatility_enabled":
             value = widget.checkbox("Ajouter la volatilité du titre cible", value=original, key=widget_key)
         elif field == "target_volatility_sessions":
@@ -4656,7 +4731,7 @@ def _render_walk_forward_derived_creation(
         st.subheader("Géométrie Walk-forward")
         for field in WF_GEOMETRY_FIELDS:
             field_input(field, st)
-        st.subheader("XGBoost")
+        st.subheader("Paramètres XGBoost")
         for field in ROUND_SELECTION_FIELDS:
             field_input(field, st)
         columns = st.columns(3)
@@ -5313,8 +5388,6 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
     error = (detail.get("status") or {}).get("error")
     if error:
         st.error(error)
-    st.subheader("Logs du parent")
-    _render_run_logs(detail)
     st.subheader("Métadonnées et provenance")
     st.json(detail.get("metadata", {}))
     pipeline = _read_light_json(run_root / "orchestration" / "pipeline.json")
@@ -5345,8 +5418,6 @@ def _render_pipeline_technical(run_id: str, detail: dict[str, object]) -> None:
                     if values is not None:
                         st.caption(path.name)
                         st.json(values)
-    st.subheader("Artifacts du parent")
-    st.write(detail.get("files") or "Aucun résultat publié")
 
 
 def _render_end_to_end_tabs(
@@ -5371,7 +5442,6 @@ def _render_end_to_end_tabs(
               ) is not None),
         {
             "summary": lambda: _render_pipeline_summary(run_id, detail, service),
-            "resources": lambda: _render_run_resources(run_id),
             **child_renderers,
             "promotion": lambda: _render_pipeline_promotion(detail),
             "selection_diagnostic": lambda: render_selection_diagnostic(
@@ -5380,7 +5450,8 @@ def _render_end_to_end_tabs(
             "temporal_validation": lambda: _render_temporal_validation(
                 service, run_id, detail
             ),
-            "technical": lambda: _render_pipeline_technical(run_id, detail),
+            "technical": lambda: _render_run_technical_tabs(run_id, detail,
+                render_provenance=lambda: _render_pipeline_technical(run_id, detail)),
         },
         key=f"run-detail-{run_id}",
     )
@@ -5409,9 +5480,9 @@ def _render_forced_candidate_validation_tabs(
                                        "promotion_qualification") is not None),
         {
             "summary": lambda: _render_pipeline_summary(run_id, detail),
-            "resources": lambda: _render_run_resources(run_id),
             **child_renderers,
-            "technical": lambda: _render_pipeline_technical(run_id, detail),
+            "technical": lambda: _render_run_technical_tabs(run_id, detail,
+                render_provenance=lambda: _render_pipeline_technical(run_id, detail)),
         },
         key=f"run-detail-{run_id}",
     )
@@ -5425,7 +5496,12 @@ def _render_qualification_holdout_diagnostic(
     root = st.session_state.lab_config.project_root / "runs" / run_id / "results"
     path = root / "diagnostic_results.csv"
     if not path.is_file():
-        st.info("Les résultats diagnostiques ne sont pas encore disponibles.")
+        def unavailable():
+            st.info("Les résultats diagnostiques ne sont pas encore disponibles.")
+        render_lazy_tabs(st, tabs_for_job(JobType.QUALIFICATION_HOLDOUT_DIAGNOSTIC),
+            {"diagnostic_results": unavailable, "worst_auc_sensitivity": unavailable,
+             "diagnostic_candidate": unavailable, "technical": lambda: _render_run_technical_tabs(run_id, detail)},
+            key=f"run-detail-{run_id}")
         return
     results = pd.read_csv(path)
     summary = detail.get("summary", {})
@@ -5491,6 +5567,7 @@ def _render_qualification_holdout_diagnostic(
             "diagnostic_results": render_results,
             "worst_auc_sensitivity": render_sensitivity,
             "diagnostic_candidate": render_candidate,
+            "technical": lambda: _render_run_technical_tabs(run_id, detail),
         },
         key=f"run-detail-{run_id}",
     )
@@ -5515,7 +5592,7 @@ def _render_job_detail_tabs(
     if job_type is JobType.SCIENTIFIC_ANALYSIS:
         from rstock.application.scientific_analysis_ui import render_analysis_detail
         render_analysis_detail(st, service, run_id, status, detail,
-            render_resources=_render_run_resources, render_technical=_render_run_technical_tabs,
+            render_technical=_render_run_technical_tabs,
             navigate=_history_navigation)
     elif job_type is JobType.END_TO_END:
         _render_end_to_end_tabs(service, run_id, detail)
@@ -5804,6 +5881,12 @@ def _render_end_to_end_comparison(run_ids: list[str]) -> None:
 def _render_prefilter_comparison(run_ids: list[str]) -> None:
     root = st.session_state.lab_config.project_root
     items = [load_prefilter_comparison(root, run_id) for run_id in run_ids]
+    from rstock.application.prefilter_comparison import prefilter_evaluation_comparability
+    comparison = prefilter_evaluation_comparability(items)
+    if comparison['status'] == 'verified':
+        st.caption('Comparaison Up : fenêtres, données train/test, labels et frontières Holdout identiques. Le WF de développement reste exposé au biais de sélection.')
+    else:
+        st.warning(comparison['reason'])
     st.caption(
         "Combinaisons = paires cible/prédicteur distinctes. En stabilité temporelle, "
         "admissible signifie admissible sur au moins une origine; "
@@ -6725,8 +6808,13 @@ def _submit_operational_job(
 ) -> None:
     project_root = st.session_state.lab_config.project_root
     models = ModelService(project_root)
+    operational_config = replace(st.session_state.lab_config, predictive_model_type="external_only", predictive_algorithm="xgboost")
     if model_id:
-        symbols = models.repository.get(model_id).symbols
+        model = models.repository.get(model_id)
+        symbols = model.symbols
+        if job_type is JobType.PRODUCTION_TRAINING:
+            from rstock.modeling import production_training_config
+            operational_config = production_training_config(operational_config, model)
     else:
         symbols = models.tracked_universe().symbols
     if len(symbols) < 2:
@@ -6734,7 +6822,7 @@ def _submit_operational_job(
         return
     spec = ExperimentSpec(
         job_type=job_type,
-        config=replace(st.session_state.lab_config, predictive_model_type="external_only"),
+        config=operational_config,
         symbols=symbols,
         calendar=st.session_state.lab_calendar,
         model_id=model_id,
@@ -8600,6 +8688,7 @@ def _render_model_quality_detail(model_id: str) -> None:
     st.caption("Modèles > Détail du modèle")
     target, predictors = model.target, model.predictors
     source_configuration = model.source_configuration or {}
+    st.caption("Algorithme prédictif : " + ("Régression logistique L2" if model.predictive_algorithm == "logistic_l2" else "XGBoost"))
     source_end_to_end = (
         source_configuration.get("source_end_to_end_run")
         or source_configuration.get("source_experiment_run")
@@ -9050,6 +9139,7 @@ def _history_page() -> None:
             render_dataframe(predictions.tail(200), hide_index=True, width="stretch")
         with st.expander("Historique des signaux de production"):
             render_dataframe(signals.tail(200), hide_index=True, width="stretch")
+    _live_job_panel(_service(), domain=None)
 
 
 def _simulation_currency(value: float) -> str:

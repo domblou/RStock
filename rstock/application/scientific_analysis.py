@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any, Callable
 import hashlib
 import json
-import shutil
 import os
+import time
+from contextlib import contextmanager
 import pandas as pd
 from copy import deepcopy
 
@@ -15,6 +16,35 @@ from rstock.checkpoints import CheckpointManager, _atomic_json
 from rstock.progress import check_cancellation, report_progress, CancellationRequested
 from .domain import ExperimentSpec, JobType
 from .repository import RunRepository
+
+
+RARE_ANALYSIS_PHASES = [("analysis_preparation", 20), ("analysis_reference", 15),
+    ("analysis_scoring", 25), ("analysis_selection", 15), ("analysis_evaluation", 10),
+    ("analysis_export", 5), ("analysis_outputs", 5), ("publishing", 5)]
+
+
+@contextmanager
+def analysis_phase(callback, name):
+    """Use the ordinary reporter lifecycle; failed/cancelled phases stay open."""
+    report_progress(callback, name, details={"phase_event": "started"})
+    yield
+    report_progress(callback, name, details={"phase_event": "completed"})
+
+
+class AnalysisProgress:
+    """Bounded progress writes with exact first/last counts for real work units."""
+    def __init__(self, callback, stage, total, unit, substage=None):
+        self.callback, self.stage, self.total = callback, stage, total
+        self.unit, self.substage = unit, substage
+        self.last = float("-inf")
+        self.update(0)
+
+    def update(self, completed):
+        now = time.monotonic()
+        if completed == self.total or now - self.last >= 1.:
+            report_progress(self.callback, self.stage, substage=self.substage,
+                completed_units=completed, total_units=self.total, details={"unit": self.unit})
+            self.last = now
 
 
 @dataclass(frozen=True)
@@ -58,22 +88,41 @@ class AnalysisDefinition:
     validate_parameters: Callable[[dict], dict]
     preflight: Callable[[AnalysisSource, dict], dict]
     execute: Callable[[AnalysisContext], dict]
+    interpret_results: Callable[[dict | None, dict, dict], dict]
     render_parameters: Callable[[str], dict] | None = None
     result_tabs: tuple = ()
     render_results: Callable[[str, str, dict], None] | None = None
     compatible: Callable[[AnalysisSource], bool] | None = None
     light_preflight: Callable[[AnalysisSource, dict], dict] | None = None
     blocking_reasons: tuple[str, ...] = ()
-    worker_prepare: Callable[[AnalysisSource, dict, Any], dict] | None = None
+    worker_prepare: Callable[[AnalysisSource, dict, Any, Any], dict] | None = None
 
 
 _REGISTERED: dict[str, AnalysisDefinition] = {}
 
 
 def register_analysis(definition: AnalysisDefinition) -> None:
+    if not callable(definition.interpret_results):
+        raise ValueError("analysis_scientific_interpretation_required")
     if definition.id in _REGISTERED and _REGISTERED[definition.id] != definition:
         raise ValueError("analysis_definition_already_registered")
     _REGISTERED[definition.id] = definition
+
+
+def interpretation_inputs_hash(result, manifest, status):
+    payload = {"result": {k: v for k, v in (result or {}).items() if k != "result_files"},
+               "manifest": {k: manifest.get(k) for k in ("analysis_id", "definition_version", "parameters", "source_run_id", "source_sha256")},
+               "status": status.get("status")}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+def validate_interpretation(value):
+    if not isinstance(value, dict) or not isinstance(value.get("version"), str) or not isinstance(value.get("verdict"), str) or not value["verdict"]:
+        raise ValueError("analysis_interpretation_invalid")
+    for key in ("understanding", "findings", "limits"):
+        if not isinstance(value.get(key), list) or not value[key] or not all(isinstance(text, str) and text for text in value[key]):
+            raise ValueError("analysis_interpretation_invalid: " + key)
+    return value
 
 
 def analysis_catalogue() -> tuple[AnalysisDefinition, ...]:
@@ -132,16 +181,18 @@ def _artifact(source: AnalysisSource, relative: str) -> Path:
     return path
 
 
-def digest(path: Path, cancellation_check=None) -> str:
+def digest(path: Path, cancellation_check=None, *, on_bytes=None) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
             check_cancellation(cancellation_check)
             h.update(block)
+            if on_bytes is not None:
+                on_bytes(len(block))
     return h.hexdigest()
 
 
-def worker_preflight(repository: RunRepository, source_run_id: str, analysis_id: str, parameters: dict, cancellation_check=None) -> dict:
+def worker_preflight(repository: RunRepository, source_run_id: str, analysis_id: str, parameters: dict, cancellation_check=None, progress_callback=None) -> dict:
     """Validate inputs and resolve metadata; never score predictions or fit models."""
     item = get_analysis(analysis_id)
     source = resolve_analysis_source(repository, source_run_id)
@@ -154,7 +205,7 @@ def worker_preflight(repository: RunRepository, source_run_id: str, analysis_id:
         return {"ready": False, "technical_compatible": True, "technical_ready": False,
                 "scientific_ready": False, "reasons": ["Artefacts manquants : " + ", ".join(missing)], "parameters": parameters}
     check_cancellation(cancellation_check)
-    result = dict(item.worker_prepare(source, parameters, cancellation_check) if item.worker_prepare else item.preflight(source, parameters))
+    result = dict(item.worker_prepare(source, parameters, cancellation_check, progress_callback) if item.worker_prepare else item.preflight(source, parameters))
     result.update(technical_compatible=True, technical_ready=True, scientific_ready=bool(result.get("ready")))
     result["parameters"] = item.validate_parameters(result.pop("resolved_parameters", parameters))
     return result
@@ -229,7 +280,17 @@ def prepare_analysis(repository: RunRepository, source_run_id: str, analysis_id:
         run_description=item.label)
 
 
-def _worker_contract(repository, spec, checkpoint, cancellation_check=None):
+def _hash_files(files, cancellation_check, callback, stage):
+    progress = AnalysisProgress(callback, stage, sum(path.stat().st_size for path in files.values()), "octets", "Empreintes source")
+    completed = 0
+    def update(size):
+        nonlocal completed
+        completed += size
+        progress.update(completed)
+    return {name: digest(path, cancellation_check, on_bytes=update) for name, path in files.items()}
+
+
+def _worker_contract(repository, spec, checkpoint, cancellation_check=None, progress_callback=None):
     request = spec.scientific_analysis
     if request.get("schema_version", 1) == 1:
         return deepcopy(request)
@@ -246,8 +307,8 @@ def _worker_contract(repository, spec, checkpoint, cancellation_check=None):
     for name, expected in identities.items():
         if _file_identity(_artifact(source, name)) != expected:
             raise ValueError("analysis_source_identity_changed: " + name)
-    hashes = {name: digest(_artifact(source, name), cancellation_check) for name in identities}
-    preflight = worker_preflight(repository, source.owner_run_id, item.id, request["parameters"], cancellation_check)
+    hashes = _hash_files({name: _artifact(source, name) for name in identities}, cancellation_check, progress_callback, "analysis_preparation")
+    preflight = worker_preflight(repository, source.owner_run_id, item.id, request["parameters"], cancellation_check, progress_callback)
     check_cancellation(cancellation_check)
     if not preflight.get("ready"):
         raise ValueError("; ".join(preflight.get("reasons", ["analysis_not_ready"])))
@@ -276,7 +337,7 @@ def _worker_contract(repository, spec, checkpoint, cancellation_check=None):
     return contract
 
 
-def validate_analysis_spec(repository: RunRepository, spec: ExperimentSpec, cancellation_check=None) -> tuple[AnalysisDefinition, AnalysisSource]:
+def validate_analysis_spec(repository: RunRepository, spec: ExperimentSpec, cancellation_check=None, progress_callback=None, progress_stage="analysis_preparation") -> tuple[AnalysisDefinition, AnalysisSource]:
     manifest = deepcopy(spec.scientific_analysis)
     if not isinstance(manifest, dict):
         raise ValueError("analysis_manifest_missing")
@@ -298,8 +359,9 @@ def validate_analysis_spec(repository: RunRepository, spec: ExperimentSpec, canc
     required = set(("config.json", "status.json", *item.required_artifacts))
     if set(manifest["source_sha256"]) != required:
         raise ValueError("analysis_source_contract_incomplete")
+    actual_hashes = _hash_files({name: _artifact(source, name) for name in manifest["source_sha256"]}, cancellation_check, progress_callback, progress_stage)
     for name, expected in manifest["source_sha256"].items():
-        if digest(_artifact(source, name), cancellation_check) != expected:
+        if actual_hashes[name] != expected:
             raise ValueError(f"analysis_source_digest_changed: {name}")
     if manifest.get("source_stage") != "walk_forward" or spec.source_walk_forward_run != source.run_id or spec.source_experiment_run != source.owner_run_id:
         raise ValueError("analysis_source_reference_inconsistent")
@@ -313,16 +375,23 @@ def _output_path(directory, relative):
     return path
 
 
-def _copy_output(path, destination):
+def _copy_output(path, destination, cancellation_check=None, on_bytes=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".tmp")
-    shutil.copyfile(path, temporary)
+    with path.open("rb") as source, temporary.open("wb") as target:
+        for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
+            check_cancellation(cancellation_check)
+            target.write(block)
+            if on_bytes is not None:
+                on_bytes(len(block))
     os.replace(temporary, destination)
 
 
 def _prepare_display_outputs(context, result):
     """Worker-only bounded previews; the UI never scans exported CSVs."""
     previews = []
+    csv_files = [relative for relative in result.get("result_files", []) if Path(relative).suffix == ".csv"]
+    progress = AnalysisProgress(context.progress_callback, "analysis_outputs", len(csv_files), "fichiers", "Aperçus bornés")
     for relative in list(result.get("result_files", [])):
         if Path(relative).suffix != ".csv":
             continue
@@ -336,6 +405,7 @@ def _prepare_display_outputs(context, result):
         payload["row_limit"] = 500
         _atomic_json(context.output / preview, payload)
         previews.append(preview)
+        progress.update(len(previews))
     result["result_files"] = [*result.get("result_files", []), *previews]
 
 
@@ -343,27 +413,41 @@ def _freeze_outputs(context, result):
     paths = result.get("result_files", [])
     store = context.checkpoint.root / "analysis_outputs"
     manifest = {}
+    progress = AnalysisProgress(context.progress_callback, "analysis_outputs",
+        2 * sum(_output_path(context.output, relative).stat().st_size for relative in paths), "octets", "Gel des sorties")
+    completed = 0
+    def update(size):
+        nonlocal completed
+        completed += size
+        progress.update(completed)
     for relative in paths:
         source = _output_path(context.output, relative)
         destination = store / relative
         if not destination.resolve().is_relative_to(store.resolve()):
             raise ValueError("analysis_output_outside_checkpoint")
-        _copy_output(source, destination)
-        manifest[relative] = digest(destination, context.cancellation_check)
+        _copy_output(source, destination, context.cancellation_check, update)
+        manifest[relative] = digest(destination, context.cancellation_check, on_bytes=update)
     context.checkpoint.commit_artifact("analysis_outputs", manifest)
 
 
 def _restore_outputs(context):
     manifest = context.checkpoint.load_artifact("analysis_outputs")
     store = context.checkpoint.root / "analysis_outputs"
+    progress = AnalysisProgress(context.progress_callback, "analysis_restore",
+        2 * sum(_output_path(store, relative).stat().st_size for relative in manifest), "octets", "Restauration des sorties figées")
+    completed = 0
+    def update(size):
+        nonlocal completed
+        completed += size
+        progress.update(completed)
     for relative, expected in manifest.items():
         source = _output_path(store, relative)
-        if digest(source, context.cancellation_check) != expected:
+        if digest(source, context.cancellation_check, on_bytes=update) != expected:
             raise ValueError("analysis_checkpoint_output_digest_changed")
         destination = context.output / relative
         if not destination.resolve().is_relative_to(context.output.resolve()):
             raise ValueError("analysis_output_outside_run")
-        _copy_output(source, destination)
+        _copy_output(source, destination, context.cancellation_check, update)
 
 
 def validate_analysis_publication(run: Path):
@@ -402,32 +486,48 @@ def execute_analysis(spec, output, progress_callback, cancellation_check):
         raise ValueError("analysis_manifest_changed")
     _atomic_json(manifest_path, manifest)
     try:
-        report_progress(progress_callback, "scientific_analysis", completed_units=0, total_units=3)
-        contract = _worker_contract(repository, spec, checkpoint, cancellation_check)
-        resolved_spec = replace(spec, scientific_analysis=contract)
-        item, source = validate_analysis_spec(repository, resolved_spec, cancellation_check)
-        _atomic_json(output / "analysis_preparation.json", contract)
-        context = AnalysisContext(resolved_spec, source, deepcopy(contract["parameters"]), output, checkpoint, progress_callback, cancellation_check)
-        report_progress(progress_callback, "scientific_analysis", completed_units=1, total_units=3)
+        restored = checkpoint.phase_is_completed("analysis")
+        phases = ([("analysis_preparation", 20), ("analysis_restore", 70), ("analysis_outputs", 5), ("publishing", 5)] if restored else
+                  RARE_ANALYSIS_PHASES if manifest["analysis_id"] == "rare_relations_persistence" else
+                  [("analysis_preparation", 20), ("scientific_analysis", 70), ("analysis_outputs", 5), ("publishing", 5)])
+        if hasattr(progress_callback, "configure_phases"):
+            progress_callback.configure_phases(phases)
+        with analysis_phase(progress_callback, "analysis_preparation"):
+            contract = _worker_contract(repository, spec, checkpoint, cancellation_check, progress_callback)
+            resolved_spec = replace(spec, scientific_analysis=contract)
+            item, source = validate_analysis_spec(repository, resolved_spec, cancellation_check, progress_callback)
+            _atomic_json(output / "analysis_preparation.json", contract)
+            context = AnalysisContext(resolved_spec, source, deepcopy(contract["parameters"]), output, checkpoint, progress_callback, cancellation_check)
         if checkpoint.phase_is_completed("analysis"):
-            result = checkpoint.load_artifact("analysis_result")
-            _restore_outputs(context)
+            with analysis_phase(progress_callback, "analysis_restore"):
+                result = checkpoint.load_artifact("analysis_result")
+                _restore_outputs(context)
+            with analysis_phase(progress_callback, "analysis_outputs"):
+                _atomic_json(output / "analysis_result.json", result)
         else:
             checkpoint.phase_started("analysis")
-            result = item.execute(context)
+            if item.id == "rare_relations_persistence":
+                result = item.execute(context)
+            else:
+                with analysis_phase(progress_callback, "scientific_analysis"):
+                    result = item.execute(context)
             check_cancellation(cancellation_check)
             if resolved_spec.scientific_analysis != contract:
                 raise ValueError("analysis_frozen_parameters_mutated")
-            validate_analysis_spec(repository, resolved_spec, cancellation_check)
-            result["result_files"] = [*result.get("result_files", []), "analysis_preparation.json"]
-            _prepare_display_outputs(context, result)
-            _freeze_outputs(context, result)
-            checkpoint.commit_artifact("analysis_result", result)
-            checkpoint.phase_completed("analysis")
-        _atomic_json(output / "analysis_result.json", result)
+            with analysis_phase(progress_callback, "analysis_outputs"):
+                validate_analysis_spec(repository, resolved_spec, cancellation_check, progress_callback, "analysis_outputs")
+                result["result_files"] = [*result.get("result_files", []), "analysis_preparation.json"]
+                interpretation = validate_interpretation(item.interpret_results(result, contract, {"status": "completed"}))
+                _atomic_json(output / "scientific_interpretation.json", {
+                    **interpretation, "input_sha256": interpretation_inputs_hash(result, contract, {"status": "completed"})})
+                result["result_files"].append("scientific_interpretation.json")
+                _prepare_display_outputs(context, result)
+                _freeze_outputs(context, result)
+                checkpoint.commit_artifact("analysis_result", result)
+                checkpoint.phase_completed("analysis")
+                _atomic_json(output / "analysis_result.json", result)
     except Exception as error:
         checkpoint.finish_attempt("cancelled" if isinstance(error, CancellationRequested) else "failed", str(error))
         raise
     checkpoint.finish_attempt("completed")
-    report_progress(progress_callback, "scientific_analysis", completed_units=3, total_units=3)
     return result

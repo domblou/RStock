@@ -23,7 +23,7 @@ from rstock.features import (
 )
 from rstock.modeling import (fit_booster, predict_probabilities, selected_xgboost_parameters,
                             booster_training_record, round_selection_snapshot)
-from rstock.persistence import load_booster
+from rstock.persistence import load_booster, model_artifact_filename, validate_logistic_artifacts
 from rstock.target_volatility import contract as volatility_contract
 from rstock.progress import CancellationCheck, ProgressCallback, check_cancellation, report_progress
 from rstock.traceability import prepared_dataset_hash
@@ -116,12 +116,33 @@ def validate_forward_snapshot(
         if not isinstance(model, dict) or not model.get("source_model_id"):
             raise ValueError("forward_snapshot_model_invalid")
         directory = path.parent / SNAPSHOT_DIRECTORY / str(model["source_model_id"])
-        if not all((directory / name).is_file() for name in ("up.ubj", "down.ubj", "metadata.json")):
+        names = [model_artifact_filename(label, model.get("predictive_algorithm", "xgboost")) for label in ("up", "down")]
+        if not all((directory / name).is_file() for name in (*names, "metadata.json")):
             raise ValueError("forward_snapshot_model_artifact_missing")
+        validate_logistic_artifacts(directory, model)
     return snapshot
 
 
 def _validate_round_selection_contract(snapshot: dict[str, Any], spec: ExperimentSpec) -> None:
+    algorithm = spec.config.predictive_algorithm
+    if snapshot.get("predictive_algorithm", "xgboost") != algorithm:
+        raise ValueError("forward_snapshot_algorithm_mismatch")
+    if algorithm == "logistic_l2":
+        from rstock.logistic import logistic_contract
+        expected = logistic_contract(spec.config)
+        if snapshot.get("logistic_contract") != expected:
+            raise ValueError("forward_snapshot_logistic_contract_mismatch")
+        for model in snapshot.get("models", []):
+            records = model.get("round_selection_records", {})
+            if model.get("predictive_algorithm") != algorithm or model.get("logistic_contract") != expected or any(
+                records.get(direction, {}).get("Algorithm") != algorithm
+                or records[direction].get("Contract") != expected
+                or not records[direction].get("Converged")
+                or not records[direction].get("TrainingIdentity")
+                for direction in ("up", "down")
+            ):
+                raise ValueError("forward_snapshot_logistic_training_record_mismatch")
+        return
     if spec.config.xgb_round_selection_mode != "chronological":
         return
     expected = round_selection_snapshot(spec.config)
@@ -185,7 +206,7 @@ def _read_checkpoint_rows(path: Path, columns: tuple[str, ...]) -> list[dict[str
     if not path.is_file():
         return []
     try:
-        frame = pd.read_csv(path)
+        frame = pd.read_csv(path, float_precision="round_trip")
     except Exception as error:
         raise ValueError("forward_checkpoint_invalid") from error
     if not set(columns).issubset(frame.columns):
@@ -320,7 +341,7 @@ def _validate_derived_model_files(
             raise ValueError("Derived Forward model identity differs")
         directory = result_dir / SNAPSHOT_DIRECTORY / model_id
         for label in ("up", "down"):
-            path = directory / f"{label}.ubj"
+            path = directory / model_artifact_filename(label, model.get("predictive_algorithm", "xgboost"))
             if not path.is_file() or _sha256(path) != model.get(f"{label}_booster_sha256"):
                 raise ValueError("Derived Forward model artifact has changed")
         if not (directory / "metadata.json").is_file() or _read_json(
@@ -333,6 +354,7 @@ def build_forward_model_snapshot(
     repository: RunRepository, root_run_id: str, spec: ExperimentSpec,
     *, result_directory: Path | None = None,
     cancellation_check: CancellationCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Persist boosters fitted once on discovery data ending at the cutoff."""
 
@@ -363,8 +385,10 @@ def build_forward_model_snapshot(
         if all(
             (result_dir / SNAPSHOT_DIRECTORY / str(model.get("source_model_id")) / name).is_file()
             for model in snapshot.get("models", [])
-            for name in ("up.ubj", "down.ubj", "metadata.json")
+            for name in (*[model_artifact_filename(label, model.get("predictive_algorithm", "xgboost")) for label in ("up", "down")], "metadata.json")
         ):
+            for model in snapshot.get("models", []):
+                validate_logistic_artifacts(result_dir / SNAPSHOT_DIRECTORY / model["source_model_id"], model)
             snapshot["snapshot_sha256"] = _sha256(manifest_path)
             return snapshot
         raise ValueError("Incomplete forward model snapshot")
@@ -386,7 +410,7 @@ def build_forward_model_snapshot(
     else:
         guidance = _promotion_guidance(threshold_results, selected_thresholds, source_config)
     candidates = guidance[guidance.get("Statut promotion", pd.Series(dtype=str)).eq("Candidat")]
-    selected_xgb = selected_xgboost_parameters(
+    selected_xgb = {"Up": {}, "Down": {}} if spec.config.predictive_algorithm == "logistic_l2" else selected_xgboost_parameters(
         _read_json(repository.run_directory(xgb_id) / "results" / "selected_configurations.json"),
         config=spec.config,
     )
@@ -406,7 +430,8 @@ def build_forward_model_snapshot(
     model_root = result_dir / SNAPSHOT_DIRECTORY
     model_root.mkdir(parents=True, exist_ok=True)
     models: list[dict[str, Any]] = []
-    for _, candidate in candidates.iterrows():
+    candidates = candidates[candidates.get("Direction", pd.Series(index=candidates.index, dtype=str)).eq("Up")]
+    for candidate_index, (_, candidate) in enumerate(candidates.iterrows(), start=1):
         check_cancellation(cancellation_check)
         set_name = str(candidate["Combinaison"])
         direction = str(candidate["Direction"])
@@ -425,14 +450,40 @@ def build_forward_model_snapshot(
         model_id = hashlib.sha256(identity.encode()).hexdigest()[:20]
         directory = model_root / model_id
         directory.mkdir(exist_ok=True)
+        resume_contract = None
+        if spec.config.predictive_algorithm == "logistic_l2":
+            from rstock.logistic import logistic_contract
+            resume_contract = {
+                "training_input_sha256": prepared_dataset_hash(training),
+                "source_model_id": model_id, "feature_names": list(names),
+                "training_cutoff": cutoff.date().isoformat(),
+                "logistic_contract": logistic_contract(spec.config),
+                "target_volatility": volatility_contract(spec.config),
+                "target_thresholds": [spec.config.intraday_target_threshold, spec.config.intraday_down_threshold],
+                "selected_thresholds": selected_thresholds.get(set_name, {}),
+            }
+            metadata_path = directory / "metadata.json"
+            if metadata_path.is_file():
+                entry = _read_json(metadata_path)
+                if entry.get("resume_contract") != resume_contract:
+                    raise ValueError("Forward snapshot training inputs changed on resume")
+                validate_logistic_artifacts(directory, entry)
+                models.append(entry)
+                report_progress(progress_callback, "forward_snapshot", substage="reused",
+                    completed_units=candidate_index, total_units=len(candidates), details={"model_id": model_id})
+                continue
+        report_progress(progress_callback, "forward_snapshot", substage="training",
+            completed_units=candidate_index-1, total_units=len(candidates), details={"model_id": model_id})
         training_records = {}
         for label, outcome, parameters in (
             ("up", up_name, selected_xgb["Up"]), ("down", down_name, selected_xgb["Down"]),
         ):
             from rstock.modeling import XGBoostParameters
-            booster = fit_booster(training, names, outcome, spec.config, parameters=XGBoostParameters(**parameters))
+            booster = fit_booster(training, names, outcome, spec.config,
+                parameters=None if spec.config.predictive_algorithm == "logistic_l2" else XGBoostParameters(**parameters),
+                cancellation_check=cancellation_check)
             training_records[label] = booster_training_record(booster)
-            booster.save_model(directory / f"{label}.ubj")
+            booster.save_model(directory / model_artifact_filename(label, spec.config.predictive_algorithm))
         thresholds = selected_thresholds.get(set_name, {})
         up_threshold = thresholds.get("Up", {}).get("threshold")
         down_threshold = thresholds.get("Down", {}).get("threshold")
@@ -453,11 +504,18 @@ def build_forward_model_snapshot(
             "train_end": training.index.max().date().isoformat(),
             "training_observations": len(training),
             "training_cutoff": cutoff.date().isoformat(),
-            "up_booster_sha256": _sha256(directory / "up.ubj"),
-            "down_booster_sha256": _sha256(directory / "down.ubj"),
+            "up_booster_sha256": _sha256(directory / model_artifact_filename("up", spec.config.predictive_algorithm)),
+            "down_booster_sha256": _sha256(directory / model_artifact_filename("down", spec.config.predictive_algorithm)),
         }
-        (directory / "metadata.json").write_text(json.dumps(entry, indent=2) + "\n", encoding="utf-8")
+        if spec.config.predictive_algorithm == "logistic_l2":
+            from rstock.logistic import logistic_contract
+            entry.update(predictive_algorithm="logistic_l2", logistic_contract=logistic_contract(spec.config),
+                         round_selection_policy={"mode": "not_applicable"}, resume_contract=resume_contract)
+        _write_json_atomic(entry, directory / "metadata.json")
         models.append(entry)
+        report_progress(progress_callback, "forward_snapshot", substage="trained",
+            completed_units=candidate_index, total_units=len(candidates), details={"model_id": model_id})
+    check_cancellation(cancellation_check)
     snapshot = {
         "schema_version": 1, "source_end_to_end_run_id": root_run_id,
         "round_selection_contract_version": 2,
@@ -474,6 +532,10 @@ def build_forward_model_snapshot(
         "prepared_dataset_sha256": prepared_dataset_hash(prepared),
         "candidate_count": len(models), "models": models,
     }
+    if spec.config.predictive_algorithm == "logistic_l2":
+        from rstock.logistic import logistic_contract
+        snapshot.update(predictive_algorithm="logistic_l2", logistic_contract=logistic_contract(spec.config),
+                        round_selection_policy={"mode": "not_applicable"})
     _validate_round_selection_contract(snapshot, spec)
     if result_dir == root / "results":
         repository.write_json(root_run_id, f"results/{SNAPSHOT_FILENAME}", snapshot)
@@ -582,7 +644,8 @@ def run_forward_simulation(
         row_start = len(rows)
         names = list(model["feature_names"])
         directory = root / "results" / SNAPSHOT_DIRECTORY / str(model["source_model_id"])
-        up, down = load_booster(directory / "up.ubj"), load_booster(directory / "down.ubj")
+        algorithm = model.get("predictive_algorithm", "xgboost")
+        up, down = (load_booster(directory / model_artifact_filename(label, algorithm)) for label in ("up", "down"))
         target = str(model["target"])
         for session in sessions:
             check_cancellation(cancellation_check)

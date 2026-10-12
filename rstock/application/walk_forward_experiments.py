@@ -45,7 +45,8 @@ WF_SELECTION_FIELDS = (
     "model_selection_sample_adequacy_weight",
 )
 WF_DERIVATION_CONFIG_FIELDS = frozenset(
-    ("predictive_model_type", "target_volatility_enabled", "target_volatility_sessions", *WF_GEOMETRY_FIELDS, *WF_XGBOOST_FIELDS,
+    ("predictive_model_type", "predictive_algorithm", "logistic_l2_penalty", "logistic_max_iterations",
+     "logistic_gradient_tolerance", "logistic_objective_tolerance", "target_volatility_enabled", "target_volatility_sessions", *WF_GEOMETRY_FIELDS, *WF_XGBOOST_FIELDS,
      *WF_QUALIFICATION_FIELDS, *WF_SELECTION_FIELDS)
 )
 WF_DERIVATION_FIELDS = WF_DERIVATION_CONFIG_FIELDS | {"evaluate_final_holdout"}
@@ -184,7 +185,7 @@ def _validate_changes(source: ExperimentSpec, changes: Mapping[str, Any]) -> dic
         field: value for field, value in effective.items()
         if field in WF_DERIVATION_CONFIG_FIELDS
     })
-    if config.predictive_model_type != "constant_probability" and config.xgb_round_selection_mode == "chronological" and "predictive_model_type" not in effective:
+    if config.predictive_model_type != "constant_probability" and config.predictive_algorithm == "xgboost" and config.xgb_round_selection_mode == "chronological" and "predictive_model_type" not in effective:
         if any(name not in ROUND_SELECTION_FIELDS and name != "evaluate_final_holdout" for name in effective):
             raise ValueError("Chronological comparison must preserve reference geometry, qualification and XGBoost parameters including xgb_rounds")
     historical_xgboost_parameters(config)
@@ -280,6 +281,9 @@ def build_derived_walk_forward_spec(
     volatility_source = derivation_source(prepared, targets, next_config, source.calendar, anchor, volatility_source)
     return replace(
         source, config=next_config, target_volatility_source=volatility_source,
+        frozen_xgboost_parameters=None if next_config.predictive_algorithm != "xgboost" else source.frozen_xgboost_parameters,
+        frozen_xgboost_parameters_sha256=None if next_config.predictive_algorithm != "xgboost" else source.frozen_xgboost_parameters_sha256,
+        source_xgboost_calibration_run=None if next_config.predictive_algorithm != "xgboost" else source.source_xgboost_calibration_run,
         evaluate_final_holdout=effective.get("evaluate_final_holdout", source.evaluate_final_holdout),
         source_experiment_run=source_run_id, source_walk_forward_run=source_run_id,
         source_end_to_end_run=None, historical_data_cutoff=anchor,
