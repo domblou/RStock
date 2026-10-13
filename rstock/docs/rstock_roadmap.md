@@ -18,6 +18,13 @@ uniquement; aucune analyse scientifique réelle lancée et aucun seuil validé e
 
 ## A. État actuel de RStock
 
+Paramètres : choix **Type de modèles** et réglages L2 déplacés dans **Walk-forward**;
+**Type de variables** conservé dans **Modèles et combinaisons**. Encadrés L2 et
+XGBoost toujours visibles dans WF et Préfiltre, champs inactifs désactivés avec
+valeurs conservées. La sélection des tours est un encadré enfant de XGBoost.
+Réorganisation terminée, tests ciblés et vérification visuelle sur page isolée,
+sans modification des contrats scientifiques ni lancement de run.
+
 Régression logistique L2 — phases 1 et 2 terminées le 12 octobre 2026 :
 moteur à standardisation train uniquement, configuration figée, artefacts JSON
 versionnés, WF ordinaire/streaming/lots et Holdout final. Les jobs WF utilisent

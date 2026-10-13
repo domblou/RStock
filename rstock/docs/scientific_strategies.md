@@ -93,6 +93,12 @@ segments principaux. Aucun apport démontré pour les retards overnight étudié
 pas de rejet universel de l'information overnight. Cette comparaison est close,
 sans adoption de variables ni changement de cible/horizon ou de priorité.
 
+Complément [EXP-018](scientific_experiments.md#exp-018), comparaison logistique
+Up 1 % / 0,5 % sur les mêmes 20 titres : les deux définitions restent derrière
+leur constante train propre sur les 174 séances principales et les trois segments.
+Pas d'avantage moyen établi des retards externes avec la cible plus fréquente;
+statut **En évaluation** conservé, sans rejet universel ni adoption de seuil.
+
 <a id="str-007"></a>
 
 ## STR-007 — Probabilité constante alignée

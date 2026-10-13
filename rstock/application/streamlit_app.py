@@ -1492,7 +1492,7 @@ def _prefilter_xgboost_settings(config: RStockConfig, *, disabled: bool = False)
     """Edit dedicated prefilter values independently from the final model."""
     from rstock.application.predictive_model_ui import prefilter_configuration_input
     from rstock.prefilter_audit import PREFILTER_MODEL_FIELDS
-    config = prefilter_configuration_input(config, 'settings-prefilter-model', st)
+    config = prefilter_configuration_input(config, 'settings-prefilter-model', st, boxed_logistic=True, disabled=disabled)
     model_values = {name:getattr(config,name) for name in PREFILTER_MODEL_FIELDS}
     disabled = disabled or config.prefilter_algorithm != 'xgboost'
     values: dict[str, object] = {}
@@ -1524,7 +1524,9 @@ def _prefilter_xgboost_settings(config: RStockConfig, *, disabled: bool = False)
                     key=f"settings-{field}", **bounds,
                  disabled=disabled))
             values[field] = value
-        values.update(_prefilter_round_selection_inputs(config, "settings-", horizontal=True, disabled=disabled))
+        with st.container(border=True):
+            st.markdown("#### Sélection fixe ou chronologique des tours")
+            values.update(_prefilter_round_selection_inputs(config, "settings-", horizontal=True, disabled=disabled))
     values.update(model_values)
     return values
 
@@ -1593,10 +1595,15 @@ def _settings() -> None:
         c2, c3 = st.columns(2)
         permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
         max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
-        st.subheader('Types de modèles')
-        from rstock.application.predictive_model_ui import predictive_configuration_input
-        predictive_config = predictive_configuration_input(current, "settings-predictive-model", st)
-        predictive_model_type = predictive_config.predictive_model_type
+        st.subheader('Type de variables')
+        from rstock.application.predictive_model_ui import VARIABLE_LABELS, predictive_configuration_input
+        selected_algorithm = st.session_state.get("settings-predictive-model-algorithm",
+            "constant_probability" if current.predictive_model_type == "constant_probability" else current.predictive_algorithm)
+        variables = current.predictive_model_type if current.predictive_model_type in VARIABLE_LABELS else "external_only"
+        selected_variables = st.selectbox("Type de variables", tuple(VARIABLE_LABELS),
+            index=tuple(VARIABLE_LABELS).index(variables), format_func=VARIABLE_LABELS.get,
+            disabled=selected_algorithm == "constant_probability", key="settings-predictive-model-variables")
+        predictive_model_type = "constant_probability" if selected_algorithm == "constant_probability" else selected_variables
         if predictive_model_type != "external_only":
             st.caption("Ces variables sont disponibles en WF et en End-to-end. Le préfiltre porte sur les externes; les limites de Forward/Production restent applicables.")
         st.subheader("Volatilité passée du titre cible")
@@ -1685,28 +1692,34 @@ def _settings() -> None:
                 "0 = données les plus récentes."
             ),
         )
-        st.subheader("XGBoost")
-        x1, x2, x3 = st.columns(3)
-        max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f", disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        st.subheader('Sélection fixe ou chronologique des tours')
-        round_modes = ("fixed", "chronological")
-        round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
-            index=round_modes.index(current.xgb_round_selection_mode),
-            format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique", disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
-        round_controls = st.columns(4)
-        round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
-        round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+        predictive_config = predictive_configuration_input(
+            replace(current, predictive_model_type=selected_variables), "settings-predictive-model", st,
+            show_variables=False, boxed_logistic=True, algorithm_label="Type de modèles")
+        predictive_model_type = predictive_config.predictive_model_type
+        with st.container(border=True):
+            st.subheader("XGBoost")
+            x1, x2, x3 = st.columns(3)
+            max_depth = x1.number_input("max_depth", min_value=1, value=current.xgb_max_depth, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            eta = x2.number_input("eta", min_value=0.0001, value=current.xgb_eta, format="%.4f", disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            rounds = x3.number_input("num_boost_round", min_value=1, value=current.xgb_rounds, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            child = x1.number_input("min_child_weight", min_value=0.0, value=current.xgb_min_child_weight, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            subsample = x2.number_input("subsample", min_value=0.01, max_value=1.0, value=current.xgb_subsample, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            colsample = x3.number_input("colsample_bytree", min_value=0.01, max_value=1.0, value=current.xgb_colsample_bytree, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            gamma = x1.number_input("gamma", min_value=0.0, value=current.xgb_gamma, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            alpha = x2.number_input("reg_alpha", min_value=0.0, value=current.xgb_reg_alpha, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            reg_lambda = x3.number_input("reg_lambda", min_value=0.0, value=current.xgb_reg_lambda, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+            with st.container(border=True):
+                st.markdown("#### Sélection fixe ou chronologique des tours")
+                round_modes = ("fixed", "chronological")
+                round_mode = st.selectbox("Sélection des tours XGBoost (Walk-forward)", round_modes,
+                    index=round_modes.index(current.xgb_round_selection_mode),
+                    format_func=lambda value: "Fixe" if value == "fixed" else "Early stopping chronologique", disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+                st.caption("Chronologique : sélection interne au WF et aux réentraînements aval ; préfiltre inchangé. Holdout E2E réservé à son étape dédiée. Repli = num_boost_round configuré. Minimum par défaut : 315 observations utilisables (252 + 63).")
+                round_controls = st.columns(4)
+                round_max = round_controls[0].number_input("Tours maximum", min_value=1, value=current.xgb_early_stopping_max_rounds, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+                round_validation = round_controls[1].number_input("Validation interne (séances utilisables)", min_value=1, value=current.xgb_early_stopping_validation_sessions, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+                round_patience = round_controls[2].number_input("Patience (log loss)", min_value=1, value=current.xgb_early_stopping_patience, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
+                round_min_train = round_controls[3].number_input("Apprentissage interne minimum", min_value=1, value=current.xgb_early_stopping_min_train_observations, disabled=predictive_model_type == "constant_probability" or predictive_config.predictive_algorithm != "xgboost")
         st.subheader("Qualification")
         q1, q2, q3 = st.columns(3)
         min_windows = q1.number_input(

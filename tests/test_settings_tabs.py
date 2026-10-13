@@ -62,14 +62,20 @@ def test_tabs_preserve_all_existing_controls_and_defaults(tmp_path):
                      ("number_input", "text_input", "selectbox", "checkbox", "button")
                      for item in getattr(app, kind))
     # Frozen inventory from the settings page before its reorganisation.
-    assert actual == Counter([*EXPECTED_CONTROLS, ("selectbox", "Type de modèle prédictif"),
+    assert actual == Counter([*EXPECTED_CONTROLS, ("selectbox", "Type de modèles"),
+                              ("selectbox", "Type de variables"), ("selectbox", "Algorithme du préfiltre"),
+                              *(("number_input", label) for label in (
+                                  "Pénalité L2", "Maximum d’itérations", "Tolérance du gradient", "Tolérance de l’objectif",
+                                  "Pénalité L2 du préfiltre", "Maximum d’itérations du préfiltre",
+                                  "Tolérance du gradient du préfiltre", "Tolérance de l’objectif du préfiltre")),
                               ("checkbox", "Ajouter la volatilité du titre cible"), ("number_input", "Nombre de séances")])
     before = replace(DEFAULT_CONFIG, project_root=tmp_path)
     assert app.session_state["lab_config"] == before
     assert not user_settings_path(tmp_path).exists()
     assert not app.tabs[6].number_input and not app.tabs[6].selectbox
-    assert "Types de modèles" in [item.value for item in app.tabs[1].subheader]
-    assert widget(app, "selectbox", "Type de modèle prédictif").value == "external_only"
+    assert "Type de variables" in [item.value for item in app.tabs[1].subheader]
+    assert widget(app.tabs[1], "selectbox", "Type de variables").value == "external_only"
+    assert widget(app.tabs[3], "selectbox", "Type de modèles").value == "xgboost"
     widget(app, "button", "Enregistrer les paramètres").click().run()
     assert not app.exception
     assert app.session_state["lab_config"] == before
@@ -300,7 +306,7 @@ EXPECTED_CONTROLS = (
 
 def test_constant_type_disables_prefilter_and_xgboost_and_persists(tmp_path):
     app = settings_app(tmp_path)
-    widget(app, "selectbox", "Type de modèle prédictif").select("constant_probability").run()
+    widget(app, "selectbox", "Type de modèles").select("constant_probability").run()
     assert not app.exception
     assert widget(app, "checkbox", "Activer le pré-filtrage").disabled
     assert widget(app, "number_input", "Top N prédicteurs").disabled
@@ -311,3 +317,27 @@ def test_constant_type_disables_prefilter_and_xgboost_and_persists(tmp_path):
     assert not app.exception
     assert app.session_state["lab_config"].predictive_model_type == "constant_probability"
     assert app.session_state["lab_config"].predictor_prefilter_enabled is False
+
+
+def test_algorithm_panels_remain_visible_and_preserve_independent_values(tmp_path):
+    app = settings_app(tmp_path)
+    assert widget(app.tabs[3], "number_input", "Pénalité L2").disabled
+    assert widget(app.tabs[2], "number_input", "Pénalité L2 du préfiltre").disabled
+    widget(app, "selectbox", "Type de modèles").select("logistic_l2").run()
+    assert not app.exception
+    assert not widget(app.tabs[3], "number_input", "Pénalité L2").disabled
+    assert widget(app.tabs[3], "number_input", "max_depth").disabled
+    assert widget(app, "selectbox", "Sélection des tours XGBoost (Walk-forward)").disabled
+    widget(app, "number_input", "Pénalité L2").set_value(.08).run()
+    widget(app, "selectbox", "Algorithme du préfiltre").select("logistic_l2").run()
+    assert not widget(app.tabs[2], "number_input", "Pénalité L2 du préfiltre").disabled
+    assert widget(app.tabs[2], "number_input", "max_depth").disabled
+    widget(app, "number_input", "Pénalité L2 du préfiltre").set_value(.12).run()
+    widget(app, "selectbox", "Type de modèles").select("xgboost").run()
+    assert widget(app, "number_input", "Pénalité L2").value == .08
+    assert widget(app, "number_input", "Pénalité L2").disabled
+    widget(app, "button", "Enregistrer les paramètres").click().run()
+    assert not app.exception
+    saved = app.session_state["lab_config"]
+    assert saved.logistic_l2_penalty == .08 and saved.prefilter_logistic_l2_penalty == .12
+    assert saved.predictive_algorithm == "xgboost" and saved.prefilter_algorithm == "logistic_l2"

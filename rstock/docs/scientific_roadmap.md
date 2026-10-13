@@ -96,6 +96,15 @@ Temporal Stability contre Single Origin reste historiquement non concluant.
 Variantes complémentaires [EXP-018](scientific_experiments.md#exp-018) conservées : seuils
 d’événement 1 % / 0,75 % / 0,5 %, volatilité dans le préfiltre, richesse des
 combinaisons. Les types expérimentaux restent en l’état.
+La comparaison logistique Up 1 % / 0,5 % est désormais exécutée et analysée :
+`20261012T225925_80a439ee64` / `20261012T220820_1ca10163f4`, mêmes données et
+population. Sur les 174 séances principales, les deux modèles restent derrière
+leur propre constante train dans les trois segments; gain relatif −0,543 % / −0,475 %.
+Cette comparaison est terminée négativement; ne pas la proposer comme un test
+jamais exécuté. 0,75 % et les autres variantes ne sont pas exécutés par cette analyse.
+Le directeur recommande de ne pas adopter 0,5 % et de conserver 1 % comme référence
+provisoire, sans optimum prouvé; aucune nouvelle intervention suffisamment justifiée.
+Ces recommandations sont distinctes d'une décision adoptée de changement des paramètres.
 [Régimes](scientific_strategies.md#str-014) reportés ; diagnostics existants conservés.
 
 Les protocoles futurs de profondeurs 1/2/3, redécouverte PIT et mesure du biais

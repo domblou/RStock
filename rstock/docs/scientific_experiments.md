@@ -63,7 +63,7 @@ EXP-020 est la comparaison exploratoire overnight autorisée à la suite de cett
 | [EXP-015](#exp-015) | Les fenêtres SPY décrivent-elles convenablement les épisodes connus ? | [STR-014](scientific_strategies.md#str-014) | Réalisée — preuves incomplètes |
 | [EXP-016](#exp-016) | Combien de temps l’avantage des modèles figés persiste-t-il ? | [STR-010](scientific_strategies.md#str-010), [STR-012](scientific_strategies.md#str-012), [STR-013](scientific_strategies.md#str-013) | Réalisée — preuves incomplètes |
 | [EXP-017](#exp-017) | Le réentraînement prolonge-t-il la valeur des mêmes modèles ? | [STR-012](scientific_strategies.md#str-012) | Réalisée — preuves incomplètes |
-| [EXP-018](#exp-018) | Les variantes de définition d’événement et de préfiltre apportent-elles un gain ? | [STR-005](scientific_strategies.md#str-005), [STR-006](scientific_strategies.md#str-006), [STR-015](scientific_strategies.md#str-015) | Planifiée |
+| [EXP-018](#exp-018) | Les variantes de définition d’événement et de préfiltre apportent-elles un gain ? | [STR-005](scientific_strategies.md#str-005), [STR-006](scientific_strategies.md#str-006), [STR-015](scientific_strategies.md#str-015) | Réalisée — non concluante (seuils Up 1 % / 0,5 %; autres variantes non exécutées ici) |
 
 ## Découverte, préfiltre et sélection
 
@@ -78,7 +78,44 @@ EXP-020 est la comparaison exploratoire overnight autorisée à la suite de cett
 | <a id="exp-008"></a>EXP-008 — Paramètres XGBoost et régularisation | WF septembre : profondeur arbres 4/6, eta 1/0,50/0,25 et 4/8/16 tours ; calibrations conservées. Octobre : configurations 4/0,20/20 et 2/0,05/80. | Réalisée mais non concluante comme optimum stable : changements de population/préfiltre et sélections multiples. Réutiliser les calibrations et snapshots ; ne pas relancer une grille équivalente sans hypothèse nouvelle. |
 | <a id="exp-013"></a>EXP-013 — Richesse des combinaisons/univers | `20260916T040549_c16bf64fd1` : profondeur 3, 65 symboles, 14 431 combinaisons, 1 895 admissibles. `20261011T133446_bab008d129` : profondeur 1, 150 symboles, sans préfiltre, 22 350 combinaisons, 674 admissibles, 342 confirmées. | Réalisée, non concluante sur l'intérêt de profondeur 3 : univers et réglages différents, absence d'une comparaison contrôlée profondeur 1/2/3 et d'un Forward correspondant vérifié ici. Ne pas confondre ces profondeurs avec celle des arbres. |
 | <a id="exp-014"></a>EXP-014 — Biais de sélection du préfiltre | [Protocole XGBoost](CHRONOLOGICAL_XGBOOST.md), [diagnostic de sélection](selection_diagnostic.md), code de sélection avant WF. | Constat méthodologique confirmé : des périodes sélectionnant les prédicteurs chevauchent les tests WF. Son ampleur n'est pas quantifiée ici. Consensus ou héritage figé ne prouvent pas son élimination. |
-| <a id="exp-018"></a>EXP-018 — Autres variantes retenues | Seuils d'événement 1 %, 0,75 %, 0,5 % ; préfiltre enrichi de volatilité ; roadmap antérieure. | À faire ou preuve d'exécution à retrouver pour ces comparaisons précises. Ne pas confondre volatilité du modèle final et volatilité dans le préfiltre. |
+| <a id="exp-018"></a>EXP-018 — Autres variantes retenues | Seuils d'événement 1 %, 0,75 %, 0,5 % ; préfiltre enrichi de volatilité ; roadmap antérieure. | Up 1 % / 0,5 % exécutés et comparés le 12 octobre 2026 : résultat négatif face à chaque constante train. 0,75 % et les autres variantes restent sans exécution attestée ici. Ne pas confondre volatilité du modèle final et volatilité dans le préfiltre. |
+
+### EXP-018 — Comparaison logistique Up 1 % / 0,5 % du 12 octobre 2026
+
+Runs exécutés par l'utilisateur : `20261012T225925_80a439ee64` (1 %) et
+`20261012T220820_1ca10163f4` (0,5 %), tous deux terminés. Analyse demandée ensuite
+au directeur : [rapport et artefacts](../../reports/adhoc/up_threshold_comparison_20261012/README.md).
+20 cibles, 3 800 combinaisons externes, sept fenêtres, 433 séances avant
+qualification; logistique L2 pénalité 0,05, cutoff 2026-07-06. Le seuil Down a
+également changé (1 % / 0,5 %), écart au plan Up seul : modèles Up/Down séparés,
+données hors labels et disponibilité identiques, mêmes géométries/masques vérifiés.
+Le bilan probabiliste Up reste comparable; aucun nouveau run correctif nécessaire.
+
+Période principale 2025-07-25→2026-04-02, 174 séances; 259 précédentes descriptives.
+Chaque cible est comparée à sa propre prévalence train exacte, à poids égaux entre
+candidats d'une cible, cibles et dates. Ce bilan n'est ni un ensemble ni un sélecteur.
+
+| Seuil Up | Log loss modèle | Log loss constante propre | Gain relatif |
+|---|---:|---:|---:|
+| 1 % | 0,551720 | 0,548740 | −0,543 % |
+| 0,5 % | 0,658791 | 0,655674 | −0,475 % |
+
+Les trois segments sont négatifs contre la constante pour chaque cible d'événement;
+Brier également défavorable. HAC L/2L unilatéral d'amélioration, p ajustées Holm
+sur les deux tests = 1; ce n'est pas un test interseuils ni un test bilatéral de
+dégradation. Supports minimaux par cible : 23 positifs / 105 négatifs à 1 %,
+47 / 90 à 0,5 %. Les critères de poursuite discutés ne sont pas atteints.
+Les 26 600 fits Up et 26 600 Down sont convergés par run, maximum Up 10 itérations.
+Chaque perte fenêtre concorde avec l'archive à 1e-12, agrégats complets concordants;
+empreintes des sources vérifiées avant/après. Analyse 133,4 secondes, aucun fit,
+aucun lancement métier. Calendrier rétrospectif déjà consulté et candidats
+dépendants : aucune preuve indépendante Holdout/Forward, ni de rentabilité.
+
+Avis final du directeur : terminer cette comparaison, ne pas adopter 0,5 %,
+conserver 1 % comme référence provisoire sans optimum démontré; aucun nouveau
+test suffisamment justifié. Le déficit relatif un peu moindre à 0,5 % ne prouve
+pas une supériorité entre cibles différentes. Ces recommandations ne modifient
+pas les paramètres globaux ni les priorités adoptées de l'utilisateur.
 
 ### Complément historique EXP-001–EXP-005 et EXP-013
 

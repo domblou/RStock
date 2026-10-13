@@ -1937,8 +1937,15 @@ comparaisons alignées sont dans [Types de modèles prédictifs](predictive_mode
 Choisir **Algorithme prédictif** : XGBoost, Régression logistique L2 ou Probabilité
 constante; puis **Type de variables** : externes seulement, cible seule ou cible +
 externes. La constante désactive les variables. Cette séparation apparaît dans les
-paramètres, lancements et dérivations. Les réglages logistiques sont affichés pour
-L2; les réglages XGBoost sont alors désactivés ou indiqués sans objet.
+paramètres, lancements et dérivations. Dans **Paramètres**, **Type de variables**
+reste dans **Modèles et combinaisons**. Le choix de l'algorithme, nommé **Type de
+modèles**, se trouve dans **Walk-forward**, avec deux encadrés : **Régression
+logistique L2** et **XGBoost**. La sélection fixe ou chronologique des tours est
+un encadré enfant de XGBoost. Les deux groupes restent affichés; les champs de
+l'algorithme non sélectionné sont désactivés et leurs valeurs conservées.
+Dans **Préfiltre**, le sélecteur d'algorithme précède également les encadrés L2
+et XGBoost, avec la même visibilité et la sélection des tours imbriquée dans
+XGBoost. Les algorithmes du préfiltre et du WF restent indépendants.
 La logistique est disponible en WF et E2E, calibration des seuils et Holdout inclus.
 La calibration XGBoost est sans objet, sans optimisation L2. Avec **Externes
 seulement**, la logistique est également disponible en Forward et Production,
