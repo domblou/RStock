@@ -12,6 +12,45 @@ Les quatre références de pilotage sont regroupées ici :
 [stratégies](scientific_strategies.md) et [expériences](scientific_experiments.md).
 Le registre conserve les 18 investigations et les preuves de l’audit du 11 octobre 2026.
 
+## Convention scientifique permanente — Préfiltre et Walk-forward
+
+**Décision utilisateur du 13 octobre 2026.** Le préfiltre et le Walk-forward
+constituent deux étapes complémentaires d'un même processus de découverte,
+sélection et qualification : le préfiltre réduit l'espace des combinaisons
+candidates; le WF approfondit leur qualification. Le chevauchement de leurs
+périodes d'évaluation est intentionnel et accepté dans cette architecture.
+Les résultats WF après préfiltrage sont des métriques de qualification, pas
+une validation indépendante du processus complet de sélection.
+
+Le Holdout et le Forward servent à évaluer la généralisation sur des périodes
+distinctes de la sélection, selon ce que chaque évaluation est censée mesurer.
+La convention reste valide tant que :
+
+1. Le préfiltre ne dépasse jamais le cutoff autorisé du WF.
+2. Les données Holdout et Forward ne participent pas à la sélection ou à la
+   calibration qu'elles sont censées évaluer.
+3. Les performances WF sont interprétées comme une qualification, sans preuve
+   indépendante de généralisation.
+4. Toute réutilisation des résultats Holdout ou Forward pour modifier les règles
+   est documentée et prise en compte dans le statut scientifique des évaluations.
+
+**Instruction permanente pour les prochaines analyses, y compris celles du
+directeur scientifique :** ne plus qualifier ce chevauchement d'anomalie ou de
+défaut architectural dans cet usage. Il n'est pas nécessaire de déplacer le
+préfiltre vers des données plus anciennes simplement pour rendre ses tests
+indépendants de ceux du WF; la fraîcheur des données de découverte demeure
+importante. Ne rouvrir cette question qu'en présence d'un élément nouveau
+démontrant une fuite temporelle réelle, une utilisation incorrecte des résultats
+ou un problème de généralisation attribuable au protocole.
+
+Cette décision remplace les recommandations antérieures visant à supprimer
+ce chevauchement par principe, notamment la proposition STR-011 du
+[rapport L2 élargi](../../reports/adhoc/logistic_expanded_20261013/README.md).
+Elle ne démontre aucun avantage prédictif, ne change aucun pipeline et
+n'autorise aucun test, entraînement ou lancement.
+
+## Résultats et constats conservés
+
 - [EXP-007](scientific_experiments.md#exp-007) : quatre résultats Forward distincts, tous à
   rendement brut négatif sur les 63 séances étudiées ; le MVP n’est pas atteint.
 - [EXP-009](scientific_experiments.md#exp-009) : fixe favorisé descriptivement en Up ; gain
@@ -20,8 +59,9 @@ Le registre conserve les 18 investigations et les preuves de l’audit du 11 oct
   seule derrière constante alignée ; aucun gain Up indépendant de volatilité N=21 démontré.
 - [EXP-006](scientific_experiments.md#exp-006) : gates historiques parfois positifs sans
   identités candidates communes ; ni maintien des mêmes modèles ni garantie PIT prouvés.
-- [EXP-014](scientific_experiments.md#exp-014) : risque de sélection sur les périodes test
-  identifié, ampleur non quantifiée. Les autres résultats et limites restent dans le registre.
+- [EXP-014](scientific_experiments.md#exp-014) : chevauchement préfiltre/WF identifié,
+  désormais accepté pour la qualification selon la convention ci-dessus; ampleur
+  de l'optimisme de sélection non quantifiée. Les autres résultats et limites restent dans le registre.
 
 - [EXP-003](scientific_experiments.md#exp-003) : analyse J→J+1 historiquement réalisée ;
   changement du train prépondérant pour deux relations, contrôle plus stable.
@@ -86,8 +126,10 @@ Temporal Stability contre Single Origin reste historiquement non concluant.
    référence, seuils, durée et période indépendante avant une nouvelle validation
    du parcours [STR-010](scientific_strategies.md#str-010), déjà disponible.
 3. **Évaluer le préfiltre après stabilisation WF.** [EXP-001/EXP-002](scientific_experiments.md#exp-001)
-   et [EXP-014](scientific_experiments.md#exp-014) : compromis coût/qualité et mesure du biais,
-   en distinguant population figée et redécouverte.
+   et [EXP-014](scientific_experiments.md#exp-014) : compromis coût/qualité,
+   en distinguant population figée et redécouverte. Le chevauchement de
+   qualification accepté n'est pas une anomalie à corriger; toute réouverture
+   de cette question respecte la convention permanente ci-dessus.
 4. **Redécouverte, durée de vie et renouvellement.** Prolonger les questions
    [EXP-006](scientific_experiments.md#exp-006), [EXP-016](scientific_experiments.md#exp-016) et
    [EXP-017](scientific_experiments.md#exp-017) après les fondamentaux, avec populations et
@@ -107,13 +149,27 @@ provisoire, sans optimum prouvé; aucune nouvelle intervention suffisamment just
 Ces recommandations sont distinctes d'une décision adoptée de changement des paramètres.
 [Régimes](scientific_strategies.md#str-014) reportés ; diagnostics existants conservés.
 
-Les protocoles futurs de profondeurs 1/2/3, redécouverte PIT et mesure du biais
+Les protocoles futurs de profondeurs 1/2/3, redécouverte PIT et le plan historique de mesure du biais
 sont rattachés aux expériences existantes. Le protocole jumelé figé/réentraîné et
 les cinq intervalles de vieillissement restent sous
 [STR-012](scientific_strategies.md#str-012), sans annonce d’exécution contrôlée.
 Les [paramètres historiques et effectifs](scientific_experiments.md#parametres-correspondance)
 restent distincts ; la constante alignée est un contrôle méthodologique, pas une
 stratégie de trading à faire gagner.
+
+## Initiative R&D à long terme — après le MVP
+
+**Envisagé — expérimentation éventuelle d'un deuxième domaine, comme WEATHER.**
+Vérifier la réutilisabilité des algorithmes, des métriques, de la validation
+temporelle, du Forward et de la qualification des modèles au-delà de STOCK,
+en distinguant les mécanismes communs des adaptations nécessaires au domaine
+et à l'objectif prédictif. Cette initiative accompagne l'orientation
+[multi-domaines de la roadmap applicative](rstock_roadmap.md#c-prochaines-évolutions).
+
+La réutilisabilité reste à démontrer; les règles et critères actuels ne sont pas
+présumés directement applicables à un autre domaine. Initiative de R&D à long
+terme, après le MVP, sans modification des priorités actuelles, développement
+immédiat ni autorisation de lancement d'expérience.
 
 ## Étude variables–cible–horizon du 12 octobre 2026
 
@@ -137,6 +193,51 @@ avenues n'est présentée comme une décision adoptée de l'utilisateur.
 Les autres priorités restent inchangées jusqu'à décision de l'utilisateur.
 
 ## Décisions ouvertes et non-répétition
+
+La variante [EXP-023](scientific_experiments.md#exp-023), SPY 21 séances au lieu
+de 5 à la demande de l'utilisateur, est terminée sur les mêmes supports et
+contrôles qu'EXP-022. Gains relatifs enrichi contre constante / marché / externes
++0,909 % / +0,634 % / +0,216 %. Gain additionnel p Holm 0,023 et stabilité
+principale satisfaite, mais aucun contraste n'atteint 1 %. Sur l'historique
+antérieur et complet, l'ajout reste derrière les externes, davantage qu'à 5.
+Terminer cette comparaison; ne pas adopter SPY 21 et ne pas déclarer un horizon
+optimal. Aucun autre test automatique.
+[Rapport et réutilisation vérifiée](../../reports/adhoc/spy_context_21_20261013/README.md).
+
+L'ajout de contexte quotidien [EXP-022](scientific_experiments.md#exp-022),
+autorisé le 13 octobre 2026 sur les 2 517 combinaisons du WF logistique récent,
+est terminé. Tendance SPY 5 séances et volatilité 21 jusqu'à J−1, supports
+communs, population figée de 148 cibles représentées. Sur 174 séances, gains
+relatifs enrichi contre constante / marché seul / externes : +0,884 % / +0,590 % /
++0,192 %, positifs dans les trois segments. Aucun n'atteint 1 %; gain additionnel
+p Holm 0,053. L'ajout dégrade les externes sur les 196 séances antérieures et
+les 370 évaluables complètes. Ne pas adopter cet enrichissement; investigation
+terminée, aucune variante supplémentaire justifiée par ces résultats, sans
+rejet universel du contexte ou validation Forward.
+[Rapport et contrôles](../../reports/adhoc/spy_context_5_20261013/README.md).
+L'exploration de modèles distincts par régime reste reportée.
+
+La piste [STR-017 — Momentum intraday](scientific_strategies.md#str-017) est
+ajoutée au registre le 13 octobre 2026 à la demande de l'utilisateur, au statut
+À évaluer. Elle propose d'utiliser le mouvement du matin pour prévoir la fin
+de la même séance. Les snapshots quotidiens actuels ne suffisent pas; première
+intervention proposée : vérifier données horodatées, historique, exécution et
+coût, puis préciser un protocole minimal. Les résultats historiques publiés sur
+SPY ne valident ni leur maintien aujourd'hui ni une relation entre titres.
+Cet ajout n'autorise aucune étude exécutée, acquisition, expérience ou intégration
+et ne remplace pas les priorités existantes par une priorité adoptée.
+
+Le diagnostic unique [EXP-021](scientific_experiments.md#exp-021), autorisé le
+13 octobre 2026, est terminé : ridge sur rendement continu, ensemble uniforme
+des 190 prévisions par cible, règle long/comptant et paramètres figés avant
+calcul. Sur 20 cibles et 174 séances principales, gain relatif MSE −0,461826 %
+contre moyenne train, négatif dans les trois segments. Rendement brut positif
+mais avantage économique non significatif (p Holm 0,785513) et négatif après
+retrait du meilleur tiers. [Rapport](../../reports/adhoc/ridge_returns_20261013/README.md).
+Terminer cette investigation; ne pas retenir la configuration de STR-016,
+sans rejet universel de la prévision du rendement continu. Aucune intégration,
+variation de pénalité ou campagne supplémentaire justifiée par ce résultat.
+Les dates déjà consultées ne constituent pas une confirmation indépendante.
 
 Restent ouverts : preuves comparatives historiques EXP-002/EXP-003/EXP-004, critères chiffrés
 de stabilisation, indépendance des périodes déjà consultées, garanties fournisseur

@@ -6,7 +6,7 @@ import logging
 import json
 from copy import deepcopy
 from dataclasses import asdict, fields, replace
-from math import comb
+from rstock.combinations import count_target_symbol_sets
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -281,9 +281,8 @@ def duplication_combination_count(
         return target_count
     if predictor_count < 2 or depth < 1 or depth >= predictor_count:
         raise ValueError("Invalid frozen population or permutation depth")
-    return target_count * sum(
-        comb(predictor_count - 1, predictor_depth)
-        for predictor_depth in range(1, depth + 1)
+    return target_count * count_target_symbol_sets(
+        predictor_count - 1, depth, config.combination_generation_mode
     )
 
 

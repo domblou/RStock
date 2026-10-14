@@ -9,7 +9,17 @@ from math import comb
 
 import pandas as pd
 
-def count_target_symbol_sets(predictor_count: int, permutation_depth: int) -> int:
+COMBINATION_GENERATION_MODES = ("complete", "exact")
+
+
+def combination_depths(depth: int, mode: str = "complete") -> range:
+    """Sizes to generate; Exact never falls back to a smaller size."""
+    if mode not in COMBINATION_GENERATION_MODES:
+        raise ValueError("Unsupported combination_generation_mode")
+    return range(depth, depth + 1) if mode == "exact" else range(1, depth + 1)
+
+
+def count_target_symbol_sets(predictor_count: int, permutation_depth: int, combination_generation_mode: str = "complete") -> int:
     """Count one target's unordered feature sets without materialising them."""
 
     if predictor_count < 0:
@@ -18,15 +28,16 @@ def count_target_symbol_sets(predictor_count: int, permutation_depth: int) -> in
         raise ValueError("permutation_depth must be at least 1")
     return sum(
         comb(predictor_count, feature_count)
-        for feature_count in range(1, min(permutation_depth, predictor_count) + 1)
+        for feature_count in combination_depths(permutation_depth, combination_generation_mode)
+        if feature_count <= predictor_count
     )
 
 
-def count_symbol_sets(symbol_count: int, permutation_depth: int) -> int:
+def count_symbol_sets(symbol_count: int, permutation_depth: int, combination_generation_mode: str = "complete") -> int:
     if symbol_count < 0 or permutation_depth < 1 or permutation_depth >= symbol_count:
         raise ValueError("permutation_depth must be between 1 and symbol_count - 1")
     return symbol_count * count_target_symbol_sets(
-        symbol_count - 1, permutation_depth
+        symbol_count - 1, permutation_depth, combination_generation_mode
     )
 
 
@@ -37,9 +48,11 @@ def generate_symbol_sets(
     target_symbols: list[str] | None = None,
     max_sets: int = 100_000,
     predictive_model_type: str = "external_only",
+    combination_generation_mode: str = "complete",
 ) -> pd.DataFrame:
     """Generate target/feature sets after checking their combinatorial size."""
 
+    combination_depths(permutation_depth, combination_generation_mode)
     symbols = list(symbols)
     if predictive_model_type in {"constant_probability", "target_only"}:
         targets = list(symbols if target_symbols is None else target_symbols)
@@ -62,7 +75,7 @@ def generate_symbol_sets(
     if not set(targets) <= set(symbols):
         raise ValueError("target_symbols must be included in symbols")
     expected = len(targets) * count_target_symbol_sets(
-        len(symbols) - 1, permutation_depth
+        len(symbols) - 1, permutation_depth, combination_generation_mode
     )
     if expected > max_sets:
         raise ValueError(
@@ -72,12 +85,7 @@ def generate_symbol_sets(
     width = permutation_depth + 1
     rows: list[list[str | None]] = []
 
-    for observation in targets:
-        for feature in symbols:
-            if feature != observation:
-                rows.append([observation, feature, *([None] * (width - 2))])
-
-    for feature_count in range(2, permutation_depth + 1):
+    for feature_count in combination_depths(permutation_depth, combination_generation_mode):
         for observation in targets:
             candidates = [symbol for symbol in symbols if symbol != observation]
             for features in combinations(candidates, feature_count):
@@ -93,13 +101,14 @@ def generate_target_symbol_sets(
     permutation_depth: int,
     *,
     max_sets: int = 100_000,
+    combination_generation_mode: str = "complete",
 ) -> pd.DataFrame:
     """Generate sets from an independently filtered predictor pool per target."""
 
     if permutation_depth < 1:
         raise ValueError("permutation_depth must be at least 1")
     expected = sum(
-        count_target_symbol_sets(len(predictors), permutation_depth)
+        count_target_symbol_sets(len(predictors), permutation_depth, combination_generation_mode)
         for predictors in predictors_by_target.values()
     )
     if expected > max_sets:
@@ -108,7 +117,7 @@ def generate_target_symbol_sets(
         )
     width = permutation_depth + 1
     rows: list[list[str | None]] = []
-    for depth in range(1, permutation_depth + 1):
+    for depth in combination_depths(permutation_depth, combination_generation_mode):
         for target, predictors in predictors_by_target.items():
             unique = tuple(dict.fromkeys(predictors))
             if target in unique:

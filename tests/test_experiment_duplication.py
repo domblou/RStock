@@ -1024,3 +1024,36 @@ def test_duplicate_keeps_top_ten_context_and_1900_combinations_after_universe_ch
     assert duplicated.predictor_symbols == (*targets, *market_context[:10])
     assert duplication_combination_count(draft, duplicated.config) == 1900
     assert len(generated) == 1900
+
+
+@pytest.mark.parametrize("mode,count", [("complete", 14), ("exact", 4)])
+def test_combination_mode_survives_snapshot_duplication_and_count(tmp_path, mode, count):
+    from rstock.application.experiment_duplication import config_from_historical_snapshot
+    spec = ExperimentSpec(job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=3, combination_generation_mode=mode),
+        symbols=tuple("ABCDE"), target_symbols=("A",), context_symbols=tuple("BCDE"))
+    restored = ExperimentSpec.from_dict(spec.to_dict())
+    assert restored.config.combination_generation_mode == mode
+    assert restored.fingerprint == spec.fingerprint
+    historical = spec.to_dict()["rstock_config"]
+    assert config_from_historical_snapshot(historical, current_project_root=tmp_path).combination_generation_mode == mode
+    assert duplication_combination_count(spec.to_dict(), restored.config) == count
+    historical.pop("combination_generation_mode")
+    assert config_from_historical_snapshot(historical, current_project_root=tmp_path).combination_generation_mode == "complete"
+    old = spec.to_dict()
+    old["rstock_config"].pop("combination_generation_mode")
+    assert ExperimentSpec.from_dict(old).config.combination_generation_mode == "complete"
+    assert replace(spec.config, combination_generation_mode="exact" if mode == "complete" else "complete") != spec.config
+    changed = replace(spec, config=replace(spec.config,
+        combination_generation_mode="exact" if mode == "complete" else "complete"))
+    assert changed.fingerprint != spec.fingerprint
+
+
+def test_complete_mode_preserves_legacy_configuration_fingerprint(tmp_path):
+    import hashlib
+    spec = ExperimentSpec(job_type=JobType.WALK_FORWARD,
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path), symbols=("A", "B"))
+    legacy = spec.to_dict()
+    assert legacy["rstock_config"].pop("combination_generation_mode") == "complete"
+    expected = hashlib.sha256(json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert spec.fingerprint == ExperimentSpec.from_dict(legacy).fingerprint == expected

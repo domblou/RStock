@@ -543,7 +543,7 @@ _SCIENTIFIC_PREFIXES = (
     "temporal_", "model_selection_", "xgb_", "logistic_",
 )
 _SCIENTIFIC_FIELDS = {
-    "intraday_target_threshold", "intraday_down_threshold", "lag_depth", "permutation_depth",
+    "intraday_target_threshold", "intraday_down_threshold", "lag_depth", "permutation_depth", "combination_generation_mode",
     "keep_predictor_under", "max_generated_sets", "train_fraction", "prediction_threshold",
     "walk_forward_window_mode", "walk_forward_min_train_size", "walk_forward_train_size",
     "walk_forward_test_size", "walk_forward_step_size", "walk_forward_max_symbols",
@@ -560,6 +560,7 @@ _TECHNICAL_FIELDS = {
 def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool | None) -> dict[str, object]:
     settings = config.get("rstock_config")
     settings = settings if isinstance(settings, dict) else {}
+    settings = {"combination_generation_mode": "complete", **settings}
     scientific = {name: value for name, value in settings.items()
                   if (name in _SCIENTIFIC_FIELDS or name.startswith(_SCIENTIFIC_PREFIXES))
                   and name not in _TECHNICAL_FIELDS}
@@ -574,7 +575,7 @@ def _scientific_profile(config: Mapping[str, Any], final_holdout_evaluated: bool
         "WF scientifique": {key: value for key, value in scientific.items()
                             if key.startswith(("walk_forward_", "predictor_prefilter_", "qualification_", "model_selection_"))
                             or key in {"final_holdout_size", "final_confirmation_min_auc", "train_fraction", "prediction_threshold",
-                                       "intraday_target_threshold", "intraday_down_threshold", "lag_depth", "permutation_depth",
+                                       "intraday_target_threshold", "intraday_down_threshold", "lag_depth", "permutation_depth", "combination_generation_mode",
                                        "keep_predictor_under", "max_generated_sets"}},
         "Qualification": {key: value for key, value in scientific.items()
                           if key.startswith(("promotion_", "temporal_"))},

@@ -30,10 +30,10 @@ class _Backend:
         return 4321
 
 
-def _parent(tmp_path, *, planned=True):
+def _parent(tmp_path, *, planned=True, mode="complete"):
     repository = RunRepository(tmp_path / "runs")
     config = replace(
-        DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=1,
+        DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=1, combination_generation_mode=mode,
         predictor_prefilter_enabled=True, xgb_eta=0.5, xgb_reg_lambda=1.0,
         walk_forward_max_combinations_per_batch=100 if planned else None,
     )
@@ -73,9 +73,9 @@ def _parent(tmp_path, *, planned=True):
     if planned:
         raw = build_combination_plan(
             target_symbols=["AAA"], predictor_symbols=["AAA", "BBB", "CCC"],
-            permutation_depth=1,
+            permutation_depth=1, combination_generation_mode=mode,
         )
-        effective = CombinationPlan.from_target_predictors({"AAA": ["BBB"]}, 1)
+        effective = CombinationPlan.from_target_predictors({"AAA": ["BBB"]}, 1, combination_generation_mode=mode)
         checkpoint.commit_artifact("raw_combination_plan", raw.to_dict())
         checkpoint.commit_artifact("effective_combination_plan", effective.to_dict())
         expected = effective.slice(0, effective.count())
@@ -94,8 +94,9 @@ def _parent(tmp_path, *, planned=True):
 
 
 @pytest.mark.parametrize("planned", [True, False])
-def test_derived_walk_forward_reuses_snapshot_candidates_and_recalculates(tmp_path, monkeypatch, planned):
-    repository, parent, expected, digest = _parent(tmp_path, planned=planned)
+@pytest.mark.parametrize("mode", ["complete", "exact"])
+def test_derived_walk_forward_reuses_snapshot_candidates_and_recalculates(tmp_path, monkeypatch, planned, mode):
+    repository, parent, expected, digest = _parent(tmp_path, planned=planned, mode=mode)
     source = repository.load_spec(parent)
     source_results = repository.run_directory(parent) / "results"
     source_results.mkdir(exist_ok=True)
@@ -123,6 +124,7 @@ def test_derived_walk_forward_reuses_snapshot_candidates_and_recalculates(tmp_pa
     assert spec.source_walk_forward_run == spec.source_experiment_run == parent
     assert spec.requested_historical_cutoff == source.requested_historical_cutoff
     assert spec.resolved_market_session_cutoff == source.resolved_market_session_cutoff
+    assert spec.config.combination_generation_mode == mode
     assert spec.historical_data_cutoff == "2026-07-07"
     assert spec.source_prepared_dataset_sha256 == digest
     assert spec.prepared_snapshot_required and spec.prepared_dataset_digest_required

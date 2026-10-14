@@ -154,7 +154,7 @@ def plan(repository: RunRepository, spec: ExperimentSpec) -> CombinationPlan:
         not set(items).issubset(spec.predictor_symbols) for items in mapping.values()
     ):
         raise ValueError("Prefilter universe differs from Walk-forward")
-    result = CombinationPlan.from_target_predictors(mapping, spec.config.permutation_depth)
+    result = CombinationPlan.from_target_predictors(mapping, spec.config.permutation_depth, combination_generation_mode=spec.config.combination_generation_mode)
     if result.count() == 0:
         raise ValueError("Prefilter retained no testable combinations; Walk-forward cannot start")
     return result

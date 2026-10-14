@@ -37,10 +37,21 @@ ne confirme l'exécution de cette comparaison. EXP-003 est désormais identifié
 historique fourni ; ses artefacts primaires restent à retrouver.
 EXP-014 planifie la quantification du biais ; le constat méthodologique déjà vérifié
 est conservé et n’est pas transformé en expérience quantitative exécutée.
+Ce plan est historique : la décision utilisateur du 13 octobre 2026 accepte le
+chevauchement préfiltre/WF pour la qualification selon la
+[convention permanente](scientific_roadmap.md#convention-scientifique-permanente--préfiltre-et-walk-forward).
+Il ne constitue pas une intervention à lancer ni un défaut architectural à
+corriger; sa réouverture exige l'élément nouveau défini par cette convention.
 EXP-018 reste un ensemble de variantes, sans multiplier artificiellement les IDs.
 EXP-019 ajoute l'étude de formulation autorisée et terminée le 12 octobre 2026,
 après l'audit historique; aucune nouvelle performance prédictive n'y est calculée.
 EXP-020 est la comparaison exploratoire overnight autorisée à la suite de cette étude.
+EXP-021 ajoute le diagnostic unique de rendement continu ridge autorisé le
+13 octobre 2026, avec protocole figé avant calcul; aucun changement applicatif.
+EXP-022 évalue l'ajout du contexte SPY 5 séances / volatilité 21 séances,
+autorisé le même jour sur la population figée du dernier WF logistique.
+EXP-023 reprend le même diagnostic avec tendance SPY 21 séances à la demande
+de l'utilisateur, sans changer la volatilité, les supports ou les critères.
 
 | Expérience | Objectif / hypothèse à tester | Stratégies | Statut |
 |---|---|---|---|
@@ -56,6 +67,11 @@ EXP-020 est la comparaison exploratoire overnight autorisée à la suite de cett
 | [EXP-010](#exp-010) | Quelle famille de variables apporte une valeur additionnelle ? | [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
 | [EXP-019](#exp-019) | Les informations préouverture correspondent-elles à la cible et à l'horizon prédits ? | [STR-006](scientific_strategies.md#str-006) | Réalisée — preuves incomplètes |
 | [EXP-020](#exp-020) | Les rendements overnight passés ajoutent-ils un gain probabiliste aux retards intrajournaliers ? | [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
+| [EXP-021](#exp-021) | Prévoir directement le rendement intrajournalier permet-il de battre sa moyenne train et d'apporter un gain économique ? | [STR-016](scientific_strategies.md#str-016), [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
+| [EXP-022](#exp-022) | Un contexte SPY récent améliore-t-il les externes au-delà du marché seul et de la constante ? | [STR-014](scientific_strategies.md#str-014), [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
+| [EXP-023](#exp-023) | Le même ajout avec une tendance SPY de 21 séances apporte-t-il le gain recherché ? | [STR-014](scientific_strategies.md#str-014), [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
+| [EXP-024](#exp-024) | Les retards J?1 ? J?5 am?liorent-ils le diagnostic SPY 21 face ? J?1 ? J?3 ? | [STR-006](scientific_strategies.md#str-006), [STR-014](scientific_strategies.md#str-014), [STR-007](scientific_strategies.md#str-007) | R?alis?e ? non concluante |
+| [EXP-025](#exp-025) | Retirer J?3 et conserver seulement J?1/J?2 avec SPY 21 am?liore-t-il la configuration ? | [STR-006](scientific_strategies.md#str-006), [STR-014](scientific_strategies.md#str-014), [STR-007](scientific_strategies.md#str-007) | R?alis?e ? non concluante |
 | [EXP-011](#exp-011) | Le classement cible/constante survit-il à l’alignement du train ? | [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
 | [EXP-012](#exp-012) | La volatilité passée ajoute-t-elle une valeur prédictive ? | [STR-008](scientific_strategies.md#str-008), [STR-006](scientific_strategies.md#str-006) | Réalisée — non concluante |
 | [EXP-013](#exp-013) | Enrichir les combinaisons et l’univers améliore-t-il la généralisation ? | [STR-006](scientific_strategies.md#str-006) | Réalisée — non concluante |
@@ -77,7 +93,7 @@ EXP-020 est la comparaison exploratoire overnight autorisée à la suite de cett
 | <a id="exp-006"></a>EXP-006 — Univers et redécouverte à dates décalées | Comparaisons persistées sous `runs/<ID>/results/temporal_validation_comparison.json`, tableau ci-dessous ; univers de 15, 165 et 12 symboles déclarés. | Partiellement réalisée : gates positifs et négatifs, parfois aucune identité commune. Ni indépendance prospective ni garanties fournisseur PIT démontrées. |
 | <a id="exp-008"></a>EXP-008 — Paramètres XGBoost et régularisation | WF septembre : profondeur arbres 4/6, eta 1/0,50/0,25 et 4/8/16 tours ; calibrations conservées. Octobre : configurations 4/0,20/20 et 2/0,05/80. | Réalisée mais non concluante comme optimum stable : changements de population/préfiltre et sélections multiples. Réutiliser les calibrations et snapshots ; ne pas relancer une grille équivalente sans hypothèse nouvelle. |
 | <a id="exp-013"></a>EXP-013 — Richesse des combinaisons/univers | `20260916T040549_c16bf64fd1` : profondeur 3, 65 symboles, 14 431 combinaisons, 1 895 admissibles. `20261011T133446_bab008d129` : profondeur 1, 150 symboles, sans préfiltre, 22 350 combinaisons, 674 admissibles, 342 confirmées. | Réalisée, non concluante sur l'intérêt de profondeur 3 : univers et réglages différents, absence d'une comparaison contrôlée profondeur 1/2/3 et d'un Forward correspondant vérifié ici. Ne pas confondre ces profondeurs avec celle des arbres. |
-| <a id="exp-014"></a>EXP-014 — Biais de sélection du préfiltre | [Protocole XGBoost](CHRONOLOGICAL_XGBOOST.md), [diagnostic de sélection](selection_diagnostic.md), code de sélection avant WF. | Constat méthodologique confirmé : des périodes sélectionnant les prédicteurs chevauchent les tests WF. Son ampleur n'est pas quantifiée ici. Consensus ou héritage figé ne prouvent pas son élimination. |
+| <a id="exp-014"></a>EXP-014 — Biais de sélection du préfiltre | [Protocole XGBoost](CHRONOLOGICAL_XGBOOST.md), [diagnostic de sélection](selection_diagnostic.md), code de sélection avant WF. | Constat conservé : les périodes sélectionnant les prédicteurs chevauchent les tests WF; ampleur de l'optimisme non quantifiée. Décision du 13 octobre 2026 : chevauchement intentionnel accepté pour la qualification, sans validation indépendante du processus complet par ces scores WF; appliquer la convention permanente. |
 | <a id="exp-018"></a>EXP-018 — Autres variantes retenues | Seuils d'événement 1 %, 0,75 %, 0,5 % ; préfiltre enrichi de volatilité ; roadmap antérieure. | Up 1 % / 0,5 % exécutés et comparés le 12 octobre 2026 : résultat négatif face à chaque constante train. 0,75 % et les autres variantes restent sans exécution attestée ici. Ne pas confondre volatilité du modèle final et volatilité dans le préfiltre. |
 
 ### EXP-018 — Comparaison logistique Up 1 % / 0,5 % du 12 octobre 2026
@@ -248,10 +264,13 @@ répéter les comparaisons non concluantes sans hypothèse ou preuve supplément
   externes ; la profondeur des arbres XGBoost est un autre paramètre. Un supplément
   de candidats admissibles n’est pas un gain prédictif. Comparaison contrôlée
   future, distincte des runs de profondeurs/univers différents déjà conservés.
-- **EXP-014 — Biais :** risque identifié, ampleur non quantifiée, problème non
-  réputé corrigé. Consensus n’est pas une correction automatique. Distinguer
-  population figée et nouvelle découverte ; toute future mesure préserve une
-  séparation temporelle rigoureuse de sélection et tests.
+- **EXP-014 — Plan historique de mesure du biais :** ampleur non quantifiée;
+  aucun calcul exécuté par la décision documentaire du 13 octobre 2026.
+  Le chevauchement préfiltre/WF est accepté dans le processus de qualification,
+  sans nécessité de le supprimer. Distinguer population figée et nouvelle
+  découverte; protéger les périodes Holdout/Forward de la sélection et de la
+  calibration qu'elles sont censées évaluer. Ne rouvrir cette question que
+  selon la convention permanente, sans investigation automatique.
 - **EXP-006 — Redécouverte PIT :** cutoffs indépendants des décisions de sélection/
   optimisation autant que possible ; configurations et snapshots figés, même
   découverte/qualification, Forward comparable. Mesurer recouvrement, nouveaux
@@ -493,6 +512,252 @@ intervention suffisamment justifiée. La suspension d'autres avenues est une
 recommandation, pas une décision utilisateur adoptée. Le remplacement intraday
 par clôture→clôture n'est pas testé ici. Les p unilatérales d'amélioration ne
 constituent pas un test bilatéral de dégradation.
+
+<a id="exp-021"></a>
+
+### EXP-021 — Rendement continu ridge et décision long/comptant
+
+Diagnostic unique autorisé le 13 octobre 2026 et terminé le même jour, avec
+résultat négatif selon les critères de poursuite; généralisation non validée.
+Source réutilisée : `20261011T032201_17ece38f7b`, snapshot vérifié, 20 cibles,
+3 800 combinaisons externes, 26 600 fenêtres. Rendements continus présents dans
+le snapshot; masques des variables et des deux labels, supports et frontières
+train/test hérités. Aucun préfiltre ni sélection sur la qualification source.
+
+Ridge : moyenne de l'erreur quadratique + 0,05 × somme des coefficients au carré,
+intercept non pénalisé, standardisation train seulement. Une configuration sans
+balayage; moyenne uniforme des 190 prévisions par cible/date, décidée avant calcul.
+Référence : moyenne des rendements des trains exacts correspondants. Position Up
+si prévision > 0, sinon comptant; même règle pour la référence. Notionnel fixe par
+cible/date, rendement nul au comptant, poids égaux entre les 20 cibles et les dates;
+publier exposition et résultat par occasion, sans les confondre avec un portefeuille
+à capital limité ou une performance après coûts.
+
+Période principale : 174 séances, 2025-07-25→2026-04-02. Les 259 séances antérieures
+sont descriptives. Critères figés : gains prédictif (erreur quadratique) et économique
+strictement positifs, HAC unilatéral aux retards 6/12 (plus grande p), Holm 5 % pour
+les deux contrastes globaux, gains positifs dans au moins deux tiers et après retrait
+du meilleur tiers, rendement brut de la stratégie positif. Ce sont des conventions
+adoptées pour ce diagnostic, pas des optima validés; aucune généralisation indépendante
+sur ces dates déjà consultées. Aucun Holdout ou Forward nouveau.
+
+Mode : script ad hoc; fichiers et progression dans
+`reports/adhoc/ridge_returns_20261013/`. Effort estimé 3 points, calcul estimé
+5–15 minutes, valeur scientifique attendue moyenne, confiance moyenne;
+référence de coût : diagnostic L2 comparable de 225,8 secondes.
+Le [manifeste](../../reports/adhoc/ridge_returns_20261013/manifest.json) conserve
+sources, empreintes, versions, règle économique et conditions d'arrêt avant les fits.
+L'autorisation ne couvre aucune intégration applicative ou campagne supplémentaire.
+
+Résultats principaux : MSE ridge **0,000356274594** contre moyenne train
+**0,000354636790**, gain relatif **−0,461826 %**, négatif dans les trois segments.
+Rendement brut par cible/date, comptant compris : **+0,0369475 %** contre
+**+0,0310983 %**, soit +0,00584923 point de pourcentage; 2 102 positions contre
+2 499 sur 3 480 occasions (exposition 60,40 % / 71,81 %). Gain économique non
+significatif : p Holm **0,785513**; négatif après retrait du meilleur tiers.
+La p Holm du gain MSE vaut 0,898679; aucun test inverse de dégradation n'est ajouté.
+Les 259 séances antérieures et les 433 complètes restent également derrière
+la moyenne train en MSE. Ce test ne classe pas causalement la ridge et le
+pipeline L2 élargi, aux populations et règles différentes.
+
+26 600 fits, 1 645 400 lignes source vérifiées, contrôles numériques et
+agrégations/inférence indépendantes passés; empreintes source inchangées.
+Durée observée : **436,8 secondes** traitement/publication, pic mémoire
+**196,0 Mio**. Erreur de sérialisation JSON corrigée par publication séparée
+depuis les artefacts calculés, sans nouveaux fits ni changement de protocole.
+[Rapport](../../reports/adhoc/ridge_returns_20261013/README.md), manifeste,
+summary et validation conservent la provenance et les résultats détaillés.
+Avis du Directeur : terminer EXP-021, ne pas retenir la configuration évaluée
+de STR-016; aucune intégration ou nouvelle intervention justifiée par ces
+résultats, sans rejet universel de la prévision du rendement continu.
+
+<a id="exp-022"></a>
+
+### EXP-022 — Contexte SPY 5 séances sur le WF logistique récent
+
+Diagnostic unique autorisé et terminé le 13 octobre 2026. Source : WF
+`20261013T000704_e4e3de3a0c` du E2E `20261013T000659_510f8395e2`.
+150 cibles demandées + 15 symboles de contexte; 148 cibles effectivement
+représentées dans les 2 517 combinaisons figées (GEV et SNDK sans combinaison).
+Préfiltre conservé, aucune qualification source utilisée comme sous-sélection.
+
+Logistique L2 Up ≥ 1 %, paramètres source conservés. Contexte : rendement
+cumulé SPY sur 5 séances et volatilité des log-rendements clôture→clôture sur
+21 séances (`ddof=1`, annualisation √252), toujours jusqu'à J−1. La demande de
+5 séances remplace la tendance de 63 proposée; la volatilité reste sur 21.
+Source physique : rendements SPY figés du snapshot, pas le contrat de prix
+ajustés du contexte descriptif. Aucun téléchargement ni source mutable substituée.
+
+Comparateurs : constante train exacte, marché seul, externes seuls, externes +
+contexte. Mêmes masques et frontières archivées; 2 433 premières fenêtres
+exclues des quatre comparateurs car le démarrage du contexte laisse seulement
+233 observations train, sous le minimum 252. 14 934 fenêtres conservées sur les
+17 367 originales; les 2 517 combinaisons restent présentes. Les contrôles
+externes sont réentraînés sur les supports communs; aucun minimum assoupli.
+
+Période principale : 174 séances, 2025-07-25→2026-04-02, contrôle de couverture
+complète avant verdict. Poids égaux entre candidats d'une cible/date, entre
+cibles représentées et entre dates; moyenne des pertes, pas ensemble de prévisions.
+Critères figés avant fits : gain relatif de log loss ≥ 1 % contre chacun des
+trois comparateurs, HAC unilatéral conservateur 6/12, Holm 5 % sur les trois
+contrastes globaux, gain positif dans deux tiers et sans meilleur tiers.
+Conventions non validées empiriquement. Signaux Up au seuil 0,5 et rendements
+descriptifs uniquement : aucun veto Down, calibrage ou verdict MVP nouveau.
+
+Mode ad hoc dans `reports/adhoc/spy_context_5_20261013/`, manifeste figé avant
+les fits, coefficients et checkpoints par cible. Pas d'intégration applicative,
+modèle par régime, nouveau préfiltre, Holdout ou Forward. Estimation préalable :
+3 points, 10–25 minutes machine pour la population présélectionnée, valeur
+attendue moyenne, confiance moyenne; aucune nouvelle découverte exhaustive.
+
+Résultats principaux, 174 séances complètes : log loss constante **0,544856867**,
+marché **0,543241996**, externes **0,541075678**, enrichi **0,540038598**.
+Gains relatifs enrichi contre constante / marché / externes : **+0,884318 % /
++0,589682 % / +0,191670 %**. Positifs dans les trois segments et sans le meilleur;
+aucun n'atteint 1 %. P Holm respectives 0,000028234 / 0,000814027 / **0,052972547**;
+le gain additionnel ne satisfait pas non plus le critère statistique de 5 %.
+Sur les 196 séances antérieures et les 370 évaluables complètes, l'enrichi reste
+derrière les externes seuls. Aucune contribution durable démontrée.
+
+Signaux descriptifs Up 0,5 : externes **931**, précision **42,96 %**, rendement
+par signal **+0,622 %**; enrichi **916**, **43,45 %**, **+0,637 %**. Aucune
+calibration, validation économique indépendante ou inférence portefeuille.
+Constante et marché sans signaux : précision/rendement par signal indisponibles.
+
+**30 816 fits convergés**, 1 074 573 lignes source et 21 084 prédictions de contrôle
+à train inchangé vérifiées; validation indépendante des pertes/HAC/Holm/supports/
+signaux passée, sources inchangées. Durée **154,2 secondes**, pic mémoire
+**227,7 Mio**. [Rapport](../../reports/adhoc/spy_context_5_20261013/README.md),
+manifest, summary et validation conservent les détails et les limites.
+Avis du Directeur : terminer EXP-022, ne pas adopter cet enrichissement ni
+recommander automatiquement une variante; pas de rejet universel du contexte.
+
+<a id="exp-023"></a>
+
+### EXP-023 — Contexte SPY 21 séances, variante demandée d'EXP-022
+
+Autorisé et terminé le 13 octobre 2026. Seule variable modifiée : tendance SPY
+de 5 à 21 séances; volatilité conservée à 21 séances. Mêmes sources physiques,
+2 517 combinaisons, 148 cibles représentées, 14 934 fenêtres admissibles et
+2 433 exclusions communes que [EXP-022](#exp-022); préflight contrôlé identique.
+La demande explicite de variante remplace l'absence de variante automatique
+recommandée après EXP-022, sans modifier ses conclusions ou critères.
+
+Protocole figé avant fits dans `reports/adhoc/spy_context_21_20261013/manifest.json`.
+Logistique L2 Up 1 %, paramètres et frontières identiques. Réutiliser les
+14 934 contrôles externes d'EXP-022 après vérification des sources, paramètres,
+empreintes, dates et supports; recalculer marché seul et externes + contexte.
+Constantes train exactes identiques vérifiées. Pas de préfiltre refait, autre
+qualification, calibration, acquisition, changement applicatif, Holdout/Forward.
+
+Même période principale de 174 séances, mêmes pondérations et critères : gain
+relatif log loss ≥ 1 % contre constante/marché/externes, HAC conservateur 6/12,
+Holm 5 % sur les trois contrastes, stabilité dans deux tiers et sans meilleur.
+Rendements Up 0,5 descriptifs seulement. Le choix de 21 après consultation de
+5 reste exploratoire; les résultats ne deviennent pas une preuve indépendante
+de généralisation ou une validation de l'horizon optimal.
+
+Résultats : log loss enrichi **0,539905184**, contre **0,544856867** constante,
+**0,543348378** marché et **0,541075678** externes identiques à EXP-022.
+Gains relatifs +0,908804 % / +0,633699 % / +0,216327 %, positifs dans les trois
+segments et sans meilleur. P Holm 0,000014116 / 0,000491294 / **0,023039235**;
+statistique et stabilité satisfaites, mais aucun gain n'atteint le minimum 1 %.
+Sur les 196 séances antérieures et les 370 évaluables complètes, l'enrichi reste
+derrière les externes, davantage qu'à 5. Aucun test de supériorité entre horizons.
+
+Signaux descriptifs enrichis : **1 132**, précision **44,26 %**, rendement moyen
+**+0,543 %**, contre 916 / 43,45 % / +0,637 % à 5 séances; populations différentes,
+aucune validation de portefeuille ou Forward. **15 882 nouveaux fits convergés**
+et 14 934 contrôles réutilisés; validation indépendante passée, sources et
+contrôles inchangés. Durée **96,0 secondes**, pic **174,2 Mio**.
+[Rapport](../../reports/adhoc/spy_context_21_20261013/README.md).
+Avis du Directeur : terminer EXP-023 et ne pas adopter SPY 21; aucune autre
+fenêtre automatique, sans rejet universel du contexte.
+
+<a id="exp-024"></a>
+
+### EXP-024 ? Retards J?1 ? J?5 avec SPY 21
+
+Autoris? et termin? le 13 octobre 2026, ? la suite de l'estimation 3 points,
+3?6 minutes machine, valeur scientifique moyenne et confiance moyenne.
+Source WF `20261013T000704_e4e3de3a0c`, parent `20261013T000659_510f8395e2`;
+variante d'EXP-023 : profondeur externe 3?5 seulement, tendance et volatilit?
+SPY conserv?es ? 21. Population pr?filtr?e fig?e : 2 517 combinaisons,
+148 cibles repr?sent?es sur 150 demand?es et 15 symboles de contexte.
+Calcul ad hoc, aucune modification applicative ni pr?filtre refait.
+
+Retards J?4/J?5 construits depuis les observations intraday r?elles strictement
+ant?rieures. Fronti?res archiv?es conserv?es; supports communs aux comparateurs.
+14 850 fen?tres admissibles, 2 517 exclusions dont 84 suppl?mentaires; minimum
+train 252 respect?. Couverture compl?te sur les 174 s?ances principales.
+Contr?le J?3 + SPY r?utilis? pour 14 598 fen?tres et r?ajust? pour 252 supports
+modifi?s; aucune comparaison silencieuse avec l'ancien contr?le non align?.
+M?me protocole : gains ? 1 % contre constante/march?/externes, HAC 6/12,
+Holm 5 % sur ces trois contrastes et stabilit? chronologique. Comparaison
+J?5/J?3 descriptive seulement. Dates d?j? consult?es, diagnostic exploratoire
+WF de qualification; convention Pr?filtre/WF conserv?e, aucun Holdout/Forward.
+
+Log loss principale J?5 + SPY **0,541521612**, contre J?3 + SPY align?
+**0,539906986** : d?gradation descriptive **0,299056 %**. J?5 ?galement moins
+bon sur les 196 s?ances ant?rieures et les 370 s?ances compl?tes.
+Gains contre constante/march?/externes J?5 : **+0,610966 % / +0,335084 % /
++0,211192 %**, tous inf?rieurs ? 1 %; p Holm **0,010229 / 0,054319 / 0,048805**.
+Le contexte reste l?g?rement utile r?cemment face aux externes J?5, ce qui
+ne d?montre aucun apport des nouveaux retards. Signaux descriptifs J?3/J?5 :
+1 131/1 493, rendement brut moyen +0,549191 %/+0,491192 %; populations de signaux
+diff?rentes, aucune validation ?conomique ind?pendante.
+
+30 885 nouveaux fits converg?s et 14 598 contr?les r?utilis?s. Validation
+ind?pendante pass?e : empreintes, pertes, HAC/Holm/stabilit?, signaux, supports,
+standardisation et 37 296 pr?dictions ?chantillonn?es reconstruites depuis
+coefficients. Dur?e calcul/publication **148,8 secondes**, validation **7,5 secondes**,
+pic m?moire **177,5 Mio**. Journal avec total h?rit? 14 934, r?concili? ? 14 850
+sans alt?ration du script fig? ni nouveau fit.
+[Rapport et artefacts](../../reports/adhoc/spy_context_j5_20261013/README.md).
+Avis r?el du Directeur : terminer cette variante, ne pas adopter J?5; aucune
+poursuite automatique vers J?10. Ni optimum J?3 ni rejet universel des m?moires
+plus longues d?montr?s. Aucun changement de priorit? ou nouveau lancement.
+
+<a id="exp-025"></a>
+
+### EXP-025 ? Seulement J?1 et J?2 avec SPY 21
+
+Autoris? et termin? le 13 octobre 2026, ? la demande explicite de l'utilisateur.
+Variante d'EXP-023 : profondeur externe 3?2 seulement, contexte SPY tendance et
+volatilit? 21 conserv?. Source WF `20261013T000704_e4e3de3a0c`, E2E parent
+`20261013T000659_510f8395e2`; 2 517 combinaisons, 148 cibles repr?sent?es sur
+150 demand?es et 15 contextuels. Population pr?filtr?e fig?e, aucun pr?filtre refait.
+Protocole et empreintes fig?s avant fits dans le dossier ad hoc.
+
+J?3 est absent des pr?dicteurs de la variante; masque historique J?1 ? J?3,
+labels et contexte conserv? pour tous les comparateurs afin d'isoler son retrait.
+14 934 fen?tres admissibles, 2 433 exclusions comme EXP-023, train minimum 252,
+174 s?ances principales compl?tement couvertes. Les 14 934 contr?les J?3 + SPY
+sont r?utilis?s apr?s v?rification des supports, param?tres et empreintes.
+M?me crit?res contre constante/march?/externes J?2 : gain relatif ? 1 %, HAC 6/12,
+Holm 5 % sur trois contrastes, stabilit? chronologique. Comparaison directe J?2/J?3
+descriptive seulement. Dates d?j? consult?es, WF de qualification selon la
+convention permanente; aucun Holdout/Forward ni changement applicatif.
+
+Log loss principale J?2 + SPY **0,541504666**, contre J?3 + SPY **0,539905184** :
+d?gradation descriptive **0,296252 %**. J?2 ?galement moins bon sur les 196 s?ances
+ant?rieures et les 370 s?ances compl?tes. Gains contre constante/march?/externes :
+**+0,615244 % / +0,339324 % / +0,253640 %**, tous inf?rieurs ? 1 %;
+p Holm **0,000138 / 0,016299 / 0,016299**. Statistique et stabilit? internes
+satisfaites, crit?re d'amplitude non atteint. Aucun test inverse de d?gradation.
+Signaux descriptifs J?3/J?2 : **1 132/895**, pr?cision **44,258 %/41,229 %**,
+rendement brut moyen **+0,543491 %/+0,395191 %**; populations diff?rentes,
+aucun avantage ?conomique ind?pendant ?tabli.
+
+30 816 nouveaux fits converg?s et 14 934 contr?les r?utilis?s. Validation
+ind?pendante pass?e : sources/checkpoints, pertes/Brier, HAC/Holm/stabilit?,
+signaux/supports et 37 296 pr?dictions ?chantillonn?es reconstruites depuis
+standardisation et coefficients. Calcul/publication **116,4 secondes** et
+validation **5,9 secondes**, environ **2 min 2 s**, pic m?moire **174,7 Mio**.
+[Rapport et artefacts](../../reports/adhoc/spy_context_j2_20261013/README.md).
+Avis r?el du Directeur : terminer cette variante et ne pas adopter J?2; crit?res
+de poursuite non satisfaits. Aucun optimum J?3
+ni rejet universel des autres m?moires d?montr?; aucune suite automatique.
 
 EXP-007, EXP-009, EXP-011, EXP-012 et les grilles exploratoires EXP-001/EXP-008 ont déjà des résultats
 négatifs ou non concluants. Toute répétition exige une hypothèse nouvelle,

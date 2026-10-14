@@ -424,6 +424,7 @@ def _prepared_experiment(
         target_symbols=target_symbols,
         max_sets=spec.config.max_generated_sets,
         predictive_model_type=spec.config.predictive_model_type,
+        combination_generation_mode=spec.config.combination_generation_mode,
     )
     _phase(progress_callback, "combination_generation", "completed", combinations=len(generated))
     return prepared, generated, calendars
@@ -697,6 +698,7 @@ def _walk_forward(
             prefilter.predictors_by_target,
             spec.config.permutation_depth,
             max_sets=spec.config.max_generated_sets,
+            combination_generation_mode=spec.config.combination_generation_mode,
         )
         if generated.empty:
             raise ValueError("Predictor prefilter retained no testable combinations")
@@ -1307,6 +1309,7 @@ def _resumable_walk_forward(
                 prefilter.predictors_by_target,
                 spec.config.permutation_depth,
                 max_sets=spec.config.max_generated_sets,
+                combination_generation_mode=spec.config.combination_generation_mode,
             )
             if generated.empty:
                 raise ValueError("Predictor prefilter retained no testable combinations")
@@ -1332,6 +1335,7 @@ def _resumable_walk_forward(
                 target_symbols=target_symbols,
                 max_sets=spec.config.max_generated_sets,
                 predictive_model_type=spec.config.predictive_model_type,
+                combination_generation_mode=spec.config.combination_generation_mode,
             )
             checkpoint.commit_artifact("generated_sets", generated)
             checkpoint.phase_completed("combination_generation")
@@ -2487,6 +2491,7 @@ def _planned_effective_plan(
         predictor_symbols=predictor_symbols,
         permutation_depth=spec.config.permutation_depth,
         predictive_model_type=spec.config.predictive_model_type,
+        combination_generation_mode=spec.config.combination_generation_mode,
     )
     if checkpoint.artifact_exists("raw_combination_plan"):
         persisted_raw = CombinationPlan.from_dict(
@@ -2578,7 +2583,8 @@ def _planned_effective_plan(
                 ),
             )
         effective_plan = CombinationPlan.from_target_predictors(
-            prefilter.predictors_by_target, spec.config.permutation_depth
+            prefilter.predictors_by_target, spec.config.permutation_depth,
+            combination_generation_mode=spec.config.combination_generation_mode,
         )
         digest = prefilter_digest(prefilter.predictors_by_target)
     else:

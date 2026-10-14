@@ -316,3 +316,75 @@ def test_preview_upper_bound_contains_a_small_real_prefiltered_population():
 
     assert len(actual) == 4
     assert preview.max_combinations_after_prefilter >= len(actual)
+
+
+@pytest.mark.parametrize("mode,expected", [("complete", 14), ("exact", 4)])
+def test_generation_mode_matches_lazy_plan_counts_and_batches(mode, expected):
+    symbols = list("ABCDE")
+    plan = CombinationPlan(symbols, 3, target_symbols=["A"], combination_generation_mode=mode)
+    frame = generate_symbol_sets(symbols, 3, target_symbols=["A"], combination_generation_mode=mode)
+    assert len(frame) == plan.count() == expected
+    pd.testing.assert_frame_equal(plan.slice(0, expected), frame)
+    pd.testing.assert_frame_equal(pd.concat([plan.slice(0, 2), plan.slice(2, expected)], ignore_index=True), frame)
+    if mode == "exact":
+        assert frame.notna().sum(axis=1).eq(4).all()
+    restored = CombinationPlan.from_dict(plan.to_dict())
+    assert restored.plan_sha256 == plan.plan_sha256
+    assert restored.combination_generation_mode == mode
+
+
+def test_exact_prefilter_population_has_no_smaller_fallback():
+    mapping = {"A": ("B", "C"), "D": ("A", "B", "C", "E")}
+    exact = CombinationPlan.from_target_predictors(mapping, 3, combination_generation_mode="exact")
+    generated = generate_target_symbol_sets(mapping, 3, combination_generation_mode="exact")
+    pd.testing.assert_frame_equal(exact.slice(0, len(exact)), generated)
+    assert exact.count() == 4 and generated.V0.eq("D").all()
+    assert count_target_symbol_sets(2, 3, "exact") == 0
+    raw = CombinationPlan(list("ABCDE"), 3, target_symbols=["A", "D"], combination_generation_mode="exact")
+    preview = build_combination_preview(raw, max_combinations_per_batch=3, prefilter_enabled=True,
+        prefilter_top_n=2)
+    assert preview.raw_combination_count == 8
+    assert preview.max_combinations_after_prefilter == 0
+    assert preview.effective_combination_count is None
+    effective_preview = build_combination_preview(raw, max_combinations_per_batch=3, prefilter_enabled=True,
+        prefilter_top_n=4, effective_plan=exact)
+    assert effective_preview.effective_combination_count == 4
+    assert effective_preview.effective_batch_count == 2
+
+
+def test_legacy_plan_retains_fingerprint_and_default_complete():
+    import hashlib
+    import json
+    plan = CombinationPlan(list("ABCD"), 3)
+    payload = {"combination_plan_version": 2, "ordering_policy": "depth_target_lexicographic_v1",
+        "population_kind": "raw", "permutation_depth": 3,
+        "population": {"predictor_symbols": list("ABCD"), "target_symbols": list("ABCD")}}
+    legacy_sha = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert plan.plan_sha256 == legacy_sha
+    historical = plan.to_dict()
+    historical.pop("combination_generation_mode")
+    assert CombinationPlan.from_dict(historical).combination_generation_mode == "complete"
+    exact = CombinationPlan(list("ABCD"), 3, combination_generation_mode="exact")
+    assert exact.plan_sha256 != plan.plan_sha256
+    tampered = exact.to_dict()
+    tampered["combination_generation_mode"] = "complete"
+    with pytest.raises(ValueError, match="fingerprint"):
+        CombinationPlan.from_dict(tampered)
+
+
+def test_generation_mode_rejects_invalid_values_and_exact_counts_limit():
+    with pytest.raises(ValueError, match="combination_generation_mode"):
+        CombinationPlan(list("ABCD"), 3, combination_generation_mode="unknown")
+    with pytest.raises(ValueError, match="exceeds"):
+        generate_symbol_sets(list("ABCDE"), 3, target_symbols=["A"], max_sets=3, combination_generation_mode="exact")
+    assert len(generate_symbol_sets(list("ABCDE"), 3, target_symbols=["A"], max_sets=4, combination_generation_mode="exact")) == 4
+
+
+@pytest.mark.parametrize("model_type", ["constant_probability", "target_only"])
+def test_exact_mode_leaves_non_external_model_populations_unchanged(model_type):
+    plan = build_combination_plan(target_symbols=["A"], predictor_symbols=list("ABCD"),
+        permutation_depth=3, predictive_model_type=model_type, combination_generation_mode="exact")
+    frame = generate_symbol_sets(list("ABCD"), 3, target_symbols=["A"],
+        predictive_model_type=model_type, combination_generation_mode="exact")
+    pd.testing.assert_frame_equal(plan.slice(0, len(plan)), frame)
+    assert frame.to_dict("list") == {"V0": ["A"]}

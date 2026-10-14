@@ -67,6 +67,7 @@ class RStockConfig:
     target_volatility_sessions: int = 21
     lag_depth: int = 3
     permutation_depth: int = 3
+    combination_generation_mode: str = "complete"
     date_feature_regex: str = ""
 
     xgb_max_depth: int = 6
@@ -198,6 +199,8 @@ class RStockConfig:
 
     def __post_init__(self) -> None:
         import math
+        if self.combination_generation_mode not in {"complete", "exact"}:
+            raise ValueError("Unsupported combination_generation_mode")
         if self.prefilter_algorithm not in {"xgboost", "logistic_l2"}:
             raise ValueError("Unsupported prefilter_algorithm")
         if self.predictive_algorithm not in {"xgboost", "logistic_l2", "constant_probability"}:
@@ -446,6 +449,7 @@ def historical_prefilter_config_values(snapshot: Mapping[str, object]) -> dict[s
 # Fields absent from old immutable run snapshots must retain the behavior those
 # runs were created with, rather than inheriting today's defaults.
 HISTORICAL_MISSING_CONFIG_DEFAULTS: dict[str, object] = {
+    "combination_generation_mode": "complete",
     "prefilter_algorithm": "xgboost",
     "prefilter_logistic_l2_penalty": 0.05,
     "prefilter_logistic_max_iterations": 1000,

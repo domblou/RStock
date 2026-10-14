@@ -11,7 +11,7 @@ from typing import Iterator, Mapping, Sequence
 
 import pandas as pd
 
-from .combinations import count_target_symbol_sets
+from .combinations import combination_depths, count_target_symbol_sets
 
 
 COMBINATION_PLAN_VERSION = 2
@@ -39,6 +39,7 @@ class CombinationPlan:
 
     __slots__ = (
         "permutation_depth",
+        "combination_generation_mode",
         "population_kind",
         "predictor_symbols",
         "target_symbols",
@@ -55,6 +56,7 @@ class CombinationPlan:
         permutation_depth: int,
         *,
         target_symbols: Sequence[str] | None = None,
+        combination_generation_mode: str = "complete",
     ) -> None:
         predictors = _unique_symbols(predictor_symbols, "predictor_symbols")
         targets = _unique_symbols(
@@ -79,6 +81,7 @@ class CombinationPlan:
             predictors_by_target=candidates,
             permutation_depth=permutation_depth,
             population_kind=RAW_POPULATION,
+            combination_generation_mode=combination_generation_mode,
         )
 
     @classmethod
@@ -97,6 +100,7 @@ class CombinationPlan:
         cls,
         predictors_by_target: Mapping[str, Sequence[str]],
         permutation_depth: int,
+        combination_generation_mode: str = "complete",
     ) -> "CombinationPlan":
         """Build the effective post-prefilter population in historical order."""
 
@@ -125,6 +129,7 @@ class CombinationPlan:
             predictors_by_target=tuple(normalized),
             permutation_depth=permutation_depth,
             population_kind=PREFILTERED_POPULATION,
+            combination_generation_mode=combination_generation_mode,
         )
         return plan
 
@@ -136,15 +141,18 @@ class CombinationPlan:
         predictors_by_target: tuple[tuple[str, tuple[str, ...]], ...],
         permutation_depth: int,
         population_kind: str,
+        combination_generation_mode: str = "complete",
     ) -> None:
         object.__setattr__(self, "predictor_symbols", predictor_symbols)
         object.__setattr__(self, "target_symbols", target_symbols)
         object.__setattr__(self, "permutation_depth", int(permutation_depth))
+        combination_depths(permutation_depth, combination_generation_mode)
+        object.__setattr__(self, "combination_generation_mode", combination_generation_mode)
         object.__setattr__(self, "population_kind", population_kind)
         object.__setattr__(self, "_predictors_by_target", predictors_by_target)
         segments: list[_Segment] = []
         offset = 0
-        for feature_count in range(0 if permutation_depth == 0 else 1, permutation_depth + 1):
+        for feature_count in ((0,) if permutation_depth == 0 else combination_depths(permutation_depth, combination_generation_mode)):
             for target, predictors in predictors_by_target:
                 segment_count = (
                     comb(len(predictors), feature_count)
@@ -192,6 +200,7 @@ class CombinationPlan:
             "combination_plan_sha256": self.plan_sha256,
             "population_kind": self.population_kind,
             "permutation_depth": self.permutation_depth,
+            "combination_generation_mode": self.combination_generation_mode,
             "predictor_symbols": list(self.predictor_symbols),
             "target_symbols": list(self.target_symbols),
             "predictors_by_target": {
@@ -209,12 +218,15 @@ class CombinationPlan:
             raise ValueError("Unsupported combination plan version")
         kind = str(values.get("population_kind", ""))
         depth = int(values["permutation_depth"])
+        mode = str(values.get("combination_generation_mode", "complete"))
+        combination_depths(depth, mode)
         if kind == RAW_POPULATION and depth == 0:
             plan = cls.for_targets(tuple(str(value) for value in values["target_symbols"]))
         elif kind == RAW_POPULATION:
             plan = cls(
                 tuple(str(value) for value in values["predictor_symbols"]),
                 depth,
+                combination_generation_mode=mode,
                 target_symbols=tuple(
                     str(value) for value in values["target_symbols"]
                 ),
@@ -229,6 +241,7 @@ class CombinationPlan:
                     for target, predictors in raw_mapping.items()
                 },
                 depth,
+                combination_generation_mode=mode,
             )
         else:
             raise ValueError("Unsupported combination plan population")
@@ -331,6 +344,9 @@ class CombinationPlan:
             "permutation_depth": self.permutation_depth,
             "population": population,
         }
+        # Preserve version-2 Complete fingerprints for historical checkpoints.
+        if self.combination_generation_mode != "complete":
+            payload["combination_generation_mode"] = self.combination_generation_mode
         canonical = json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -381,6 +397,7 @@ def build_combination_plan(
     predictor_symbols: Sequence[str],
     permutation_depth: int,
     predictive_model_type: str = "external_only",
+    combination_generation_mode: str = "complete",
 ) -> CombinationPlan:
     """Shared raw-plan factory for execution and pre-submission preview."""
 
@@ -390,6 +407,7 @@ def build_combination_plan(
         predictor_symbols,
         permutation_depth,
         target_symbols=target_symbols,
+        combination_generation_mode=combination_generation_mode,
     )
 
 
@@ -427,6 +445,7 @@ def build_combination_preview(
             count_target_symbol_sets(
                 min(len(predictors), int(predictor_bound)),
                 raw_plan.permutation_depth,
+                raw_plan.combination_generation_mode,
             )
             for predictors in raw_plan.predictors_by_target.values()
         )
@@ -434,6 +453,8 @@ def build_combination_preview(
     if effective_plan is not None:
         if effective_plan.population_kind != PREFILTERED_POPULATION:
             raise ValueError("effective_plan must describe a prefiltered population")
+        if effective_plan.combination_generation_mode != raw_plan.combination_generation_mode:
+            raise ValueError("raw and effective plans must use the same generation mode")
         if effective_plan.permutation_depth != raw_plan.permutation_depth:
             raise ValueError("raw and effective plans must use the same depth")
         if not set(effective_plan.target_symbols) <= set(raw_plan.target_symbols):

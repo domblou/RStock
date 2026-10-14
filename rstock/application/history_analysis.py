@@ -1341,7 +1341,7 @@ def configuration_differences(
         "predictor_prefilter_min_median_auc", "predictor_prefilter_min_pct_above_random",
         "predictor_prefilter_min_worst_auc", "predictor_prefilter_max_auc_std",
         "predictor_prefilter_correlation_threshold", "max_generated_sets",
-        "permutation_depth", "lag_depth", "model_history_days",
+        "permutation_depth", "combination_generation_mode", "lag_depth", "model_history_days",
         "xgb_max_depth", "xgb_eta", "xgb_rounds", "xgb_min_child_weight",
         "xgb_subsample", "xgb_colsample_bytree", "xgb_gamma", "xgb_reg_alpha",
         "xgb_reg_lambda", "qualification_min_windows", "qualification_min_median_auc",
@@ -1360,7 +1360,9 @@ def configuration_differences(
         if len({str(value) for value in field_values}) > 1:
             values[field] = field_values
     for field in fields:
-        field_values = [config.get("rstock_config", {}).get(field, "—") for config in configurations]
+        field_values = [config.get("rstock_config", {}).get(
+            field, "complete" if field == "combination_generation_mode" else "—"
+        ) for config in configurations]
         if len({str(value) for value in field_values}) > 1:
             values[field] = field_values
     symbol_values = [", ".join(str(item) for item in config.get("symbols", ())) for config in configurations]

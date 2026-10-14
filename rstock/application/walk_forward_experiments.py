@@ -167,7 +167,7 @@ def load_frozen_walk_forward_candidates(
                          and spec.config.predictive_model_type in {"external_only", "target_and_external"})
         if not both_external:
             plan = build_combination_plan(target_symbols=targets, predictor_symbols=predictors,
-                permutation_depth=spec.config.permutation_depth, predictive_model_type=spec.config.predictive_model_type)
+                permutation_depth=spec.config.permutation_depth, predictive_model_type=spec.config.predictive_model_type, combination_generation_mode=spec.config.combination_generation_mode)
             return plan if name == "effective_combination_plan" else plan.slice(0, plan.count())
     return CombinationPlan.from_dict(payload) if name == "effective_combination_plan" else payload
 

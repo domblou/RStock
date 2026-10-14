@@ -6,7 +6,10 @@ restent dans le [registre des expériences](scientific_experiments.md) ; les pri
 sont dans la [roadmap scientifique](scientific_roadmap.md).
 
 Ce registre réutilise l’audit des 350 runs et ses 18 investigations, sans nouvel audit.
-15 approches sont identifiées. Statuts autorisés : **À évaluer**, **En évaluation**,
+15 approches proviennent de l'audit initial; STR-016 ajoute la prévision du
+rendement continu, autorisée pour un diagnostic le 13 octobre 2026; STR-017
+consigne la piste de momentum intraday à la demande de l'utilisateur.
+Statuts autorisés : **À évaluer**, **En évaluation**,
 **Retenue provisoirement**, **Validée**, **Rejetée**, **Remplacée**. Aucune n’est
 ici déclarée Validée, Rejetée ou Remplacée sans preuve/décision correspondante.
 Les variantes de réglage restent regroupées. En évaluation inclut une interprétation
@@ -101,6 +104,18 @@ statut **En évaluation** conservé, sans rejet universel ni adoption de seuil.
 
 <a id="str-007"></a>
 
+Compl?ment [EXP-024](scientific_experiments.md#exp-024) termin? : ?tendre les
+retards externes de J?3 ? J?5 avec SPY 21 d?grade la log loss face au contr?le
+J?3 align? sur les p?riodes principale, ant?rieure et compl?te. Ne pas adopter
+cette configuration; aucune extension automatique. Ni optimum J?3 ni rejet
+universel d'une m?moire plus longue d?montr?s.
+
+
+Compl?ment [EXP-025](scientific_experiments.md#exp-025) termin? : retirer J?3 et
+conserver J?1/J?2 avec SPY 21 d?grade ?galement la log loss face ? J?1 ? J?3 sur
+les m?mes supports. Crit?res d'amplitude non atteints; cette variante n'est pas
+retenue. Les deux diagnostics de profondeur ne valident pas un optimum J?3.
+
 ## STR-007 — Probabilité constante alignée
 
 **Statut : Retenue provisoirement.** Référence méthodologique, pas stratégie de trading à faire gagner : prévalence des labels du train commun, figée pendant le test ; mêmes observations et calendriers que les modèles évalués.
@@ -147,12 +162,19 @@ Expériences : [EXP-005](scientific_experiments.md#exp-005), [EXP-007](scientifi
 
 ## STR-011 — Séparation causale de la sélection et des tests
 
-**Statut : À évaluer.** Réduire le biais en séparant données de découverte/sélection et évaluation.
+**Statut : À évaluer.** Séparer le processus de découverte/sélection/qualification
+des évaluations de généralisation; ce statut n'autorise aucune exécution.
 
-Expériences : [EXP-014](scientific_experiments.md#exp-014). Chevauchement identifié ; réduction du biais et impact non quantifiés.
+Expériences : [EXP-014](scientific_experiments.md#exp-014). Chevauchement
+préfiltre/WF identifié; impact quantitatif non mesuré.
 
-**Décision et justification :** Poursuivre la définition méthodologique, sans prétendre qu’une correction est déjà prouvée.
-**Nouvelle évaluation :** Protocole autorisé qui mesure le biais et préserve une évaluation indépendante.
+**Décision utilisateur du 13 octobre 2026 :** le préfiltre et le WF font partie
+du même processus de qualification; leur chevauchement est intentionnel et
+accepté. La [convention permanente](scientific_roadmap.md#convention-scientifique-permanente--préfiltre-et-walk-forward)
+définit les quatre conditions, la place du Holdout/Forward et les seuls motifs
+de réouverture. Déplacer le préfiltre vers des données plus anciennes pour
+supprimer ce chevauchement n'est pas nécessaire. Les recommandations antérieures
+en ce sens sont remplacées; aucun protocole nouveau n'est autorisé.
 
 <a id="str-012"></a>
 
@@ -203,12 +225,31 @@ prédictivité et rentabilité restent trois questions distinctes.
 
 ## STR-014 — Contexte et régimes de marché
 
-**Statut : À évaluer.** Interpréter les performances selon contexte SPY et éventuellement adapter les modèles.
+**Statut : À évaluer.** Interpréter les performances selon contexte SPY et
+évaluer son ajout comme variables continues communes; aucun modèle par régime
+n'est adopté.
 
-Expériences : [EXP-015](scientific_experiments.md#exp-015). Diagnostic descriptif partiel ; aucune prédictivité par régime validée.
+Expériences : [EXP-015](scientific_experiments.md#exp-015), diagnostic descriptif,
+et [EXP-022](scientific_experiments.md#exp-022) / [EXP-023](scientific_experiments.md#exp-023),
+ajout prédictif SPY 5 puis 21 séances / volatilité 21 séances sur la population figée du WF récent, autorisé le
+13 octobre 2026. Aucune prédictivité par régime validée.
 
-**Décision et justification :** Poursuivre ultérieurement, exploration de modèles par régime reportée.
-**Nouvelle évaluation :** Fondamentaux stabilisés et hypothèse nouvelle ; diagnostics seuls insuffisants.
+**Décision et justification :** EXP-022/EXP-023 terminés : petits gains récents, mais
+critères de poursuite non atteints et ajout derrière les externes seuls sur
+l'historique complet. Ne pas adopter les configurations SPY 5 ou 21 / volatilité 21;
+aucune variante supplémentaire justifiée par ce résultat, sans rejet universel
+du contexte. [Rapport](../../reports/adhoc/spy_context_5_20261013/README.md).
+À 21, le gain additionnel satisfait le critère statistique interne (p Holm 0,023),
+mais reste sous 1 % et non maintenu sur la période antérieure;
+[rapport EXP-023](../../reports/adhoc/spy_context_21_20261013/README.md).
+La variante [EXP-024](scientific_experiments.md#exp-024) J?1 ? J?5 avec le m?me
+SPY 21 ne satisfait pas davantage les crit?res; ajout des retards J?4/J?5 non retenu.
+[EXP-025](scientific_experiments.md#exp-025), seulement J?1/J?2 + SPY 21, reste
+aussi derri?re J?1 ? J?3 sur les m?mes supports; aucun gain d'amplitude suffisant.
+L'exploration de modèles distincts par régime reste reportée. Les rendements
+SPY clôture→clôture figés utilisés ici ne sont pas assimilés aux prix ajustés
+du diagnostic descriptif existant. Comparer externes + contexte aux externes,
+au contexte seul et à la constante sur les mêmes supports.
 
 <a id="str-015"></a>
 
@@ -220,6 +261,72 @@ Expériences : [EXP-005](scientific_experiments.md#exp-005), [EXP-006](scientifi
 
 **Décision et justification :** Retenir le contrat actuel ; conserver les choix historiques comme tels sans les appliquer rétroactivement ni les déclarer optimaux.
 **Nouvelle évaluation :** Analyse contrôlée ou changement de cible autorisé, sans optimisation Holdout.
+
+<a id="str-016"></a>
+
+## STR-016 — Rendement intrajournalier attendu par régression ridge
+
+**Statut : Rejetée.** Décision limitée à la configuration ridge/ensemble uniforme
+évaluée en EXP-021, pas à toute prévision du rendement continu. Prévoir directement le rendement ouverture→clôture
+avec les retards intrajournaliers externes; combiner uniformément les prévisions
+par cible et appliquer une règle long/comptant figée.
+
+Expérience : [EXP-021](scientific_experiments.md#exp-021). Diagnostic unique
+autorisé le 13 octobre 2026; modèle, règle économique et critères figés dans le
+[manifeste](../../reports/adhoc/ridge_returns_20261013/manifest.json) avant les fits.
+La probabilité Up ≥ 1 % ne décrit pas l'amplitude des gains et pertes; tester
+une moyenne conditionnelle est une hypothèse distincte, sans nouvelle information
+ajoutée aux variables et sans efficacité présumée.
+
+**Périmètre :** calcul ad hoc sur archives, aucun ajout au pipeline ou au catalogue
+de modèles. La combinaison uniforme est fixée avant le calcul; elle ne sélectionne
+pas les meilleures relations après observation. Les périodes déjà consultées
+permettent un diagnostic historique, sans confirmation indépendante Forward.
+
+**Résultat et décision :** diagnostic terminé; erreur quadratique derrière la
+moyenne train dans les trois segments, avantage économique non significatif et
+négatif après retrait du meilleur segment. Ne pas retenir cette configuration,
+ne pas l'intégrer et ne pas poursuivre des variantes sans élément nouveau.
+[Rapport et contrôles](../../reports/adhoc/ridge_returns_20261013/README.md).
+
+<a id="str-017"></a>
+
+## STR-017 — Momentum intraday
+
+**Statut : À évaluer.** Hypothèse : le mouvement de SPY entre la clôture de J−1
+et 10 h de J renseigne sur son rendement de 15 h 30 à la clôture de J, lors des
+séances normales. Un ajustement tardif ou un rééquilibrage des investisseurs
+pourrait relier ces mouvements; ce mécanisme n'est pas validé dans RStock.
+Cette information de la séance en cours est absente des snapshots quotidiens
+et distincte des retards overnight passés déjà étudiés négativement en EXP-020.
+
+**Source scientifique :** Gao, Han, Li et Zhou, *Market intraday momentum*,
+Journal of Financial Economics (2018), DOI `10.1016/j.jfineco.2018.05.009`.
+[Article primaire](https://www.sciencedirect.com/science/article/pii/S0304405X18301351).
+Les résultats historiques sur ETF, y compris hors échantillon, ne prouvent ni
+le maintien de l'effet aujourd'hui ni une transmission de SPY vers les autres
+cibles. Un test SPY seul vérifierait le mécanisme; il ne démontrerait pas une
+relation entre symboles, objectif de RStock.
+
+**Première intervention proposée :** étude ciblée des données horodatées,
+historique accessible, fournisseur, prix d'entrée utilisables, calendriers
+(notamment séances écourtées) et coût, puis protocole minimal avec comparateurs
+moyenne train et exposition systématique sur la même période. Aucun test ne
+peut utiliser le prix d'ouverture comme entrée après avoir observé un mouvement
+qui n'est connu qu'à 10 h. Le chargement actuel normalise les prix par jour;
+les snapshots disponibles ne permettent pas cette évaluation intraday.
+
+| Effort de préparation | Calcul machine | Valeur scientifique attendue | Confiance |
+|---|---|---|---|
+| 2 points | Aucun entraînement ni calcul scientifique | Moyenne | Moyenne |
+
+**Gouvernance :** ajout documentaire autorisé le 13 octobre 2026. Approche à
+évaluer, sans priorité d'exécution adoptée, acquisition, entraînement ou
+développement autorisé; aucune nouvelle expérience ou run créé. L'effort
+chiffre seulement l'étude, pas une intégration ou une acquisition dont le coût
+reste inconnu. Ne pas passer au test si les données, leur coût ou les prix
+d'exécution ne permettent pas une évaluation crédible. Le choix d'une extension
+inter-symboles n'est pas adopté automatiquement.
 
 ## Préférence historique pour le consensus
 

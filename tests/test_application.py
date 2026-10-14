@@ -272,6 +272,7 @@ def test_experiment_snapshot_uses_explicit_historical_defaults_and_raw_fingerpri
         "promotion_max_opposite_movement_frequency",
     ):
         values["rstock_config"].pop(name)
+    values["rstock_config"].pop("combination_generation_mode")
     canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
 
     restored = ExperimentSpec.from_dict(values)
@@ -390,8 +391,9 @@ def test_legacy_experiment_config_defaults_missing_batch_sizes(tmp_path):
     assert restored.config.final_holdout_batch_size == 25
 
 
+@pytest.mark.parametrize("mode,count", [("complete", 6), ("exact", 2)])
 def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, mode, count
 ):
     index = pd.bdate_range("2026-01-05", periods=4)
     prices = pd.DataFrame(index=index)
@@ -413,7 +415,7 @@ def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
     monkeypatch.setattr("rstock.application.workflows.MarketDataService.load", fake_load)
     spec = ExperimentSpec(
         job_type=JobType.WALK_FORWARD,
-        config=replace(DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=1),
+        config=replace(DEFAULT_CONFIG, project_root=tmp_path, permutation_depth=2, combination_generation_mode=mode),
         symbols=("AAA", "BBB", "CONTEXT"),
         target_symbols=("AAA", "BBB"),
         context_symbols=("CONTEXT",),
@@ -424,7 +426,10 @@ def test_walk_forward_preparation_fetches_predictor_union_but_limits_targets(
     assert captured_symbols == [("AAA", "BBB", "CONTEXT")]
     assert "CONTEXT_intraday_J-1" in prepared
     assert set(generated["V0"]) == {"AAA", "BBB"}
-    assert "CONTEXT" in set(generated["V1"])
+    assert "CONTEXT" in set(generated.filter(regex=r"^V[1-9]").stack())
+    assert len(generated) == count
+    if mode == "exact":
+        assert generated.notna().sum(axis=1).eq(3).all()
 
 
 def test_walk_forward_persists_prepared_traceability(monkeypatch, tmp_path):

@@ -93,3 +93,16 @@ def test_new_capacity_limits_explicitly_support_unbounded_historical_values(tmp_
 
     assert loaded == config
     assert warning is None
+
+
+@pytest.mark.parametrize("mode", ["complete", "exact"])
+def test_combination_generation_mode_settings_round_trip(tmp_path, mode):
+    config = replace(DEFAULT_CONFIG, project_root=tmp_path, combination_generation_mode=mode)
+    save_user_settings(config, UI_SETTINGS_DEFAULTS)
+    loaded, _, _ = load_user_settings(replace(DEFAULT_CONFIG, project_root=tmp_path))
+    assert loaded.combination_generation_mode == mode
+
+
+def test_invalid_combination_generation_mode_is_rejected():
+    with pytest.raises(ValueError, match="combination_generation_mode"):
+        replace(DEFAULT_CONFIG, combination_generation_mode="invalid")

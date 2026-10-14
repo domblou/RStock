@@ -186,6 +186,22 @@ paresseuse, déterministe et versionnée (`count`, `slice`, `iter_range`, `plan_
 Il préserve l'ordre canonique, les sets et les identités sans matérialiser toute
 la population. La prévisualisation UI utilise ce même plan.
 
+`RStockConfig.combination_generation_mode` vaut `complete` (défaut historique)
+ou `exact`. Complet parcourt les tailles 1 à `permutation_depth`; Exact seulement
+`permutation_depth`. Les générateurs directs, plans bruts/effectifs, compteurs et
+prévisualisations partagent cette règle. Les paires d'évaluation du préfiltre et
+les populations imposées ou héritées ne sont pas redécouvertes par ce paramètre.
+Un pool filtré trop petit donne zéro combinaison en Exact, sans repli.
+
+Le champ est sérialisé dans les snapshots de configuration et les plans v2.
+Son absence historique signifie explicitement Complet. Les empreintes des plans
+Complet restent identiques à la version historique; Exact inclut le mode dans
+son empreinte. Pour les fingerprints de configuration, Complet est normalisé
+à son ancienne absence, sans retirer le champ des snapshots physiques. Exact
+reste dans le fingerprint. Les empreintes persistées des archives restent
+autoritaires. Le mode est ainsi transmis aux enfants WF et aux dérivations,
+avec les mécanismes ordinaires de gel, de validation et de reprise.
+
 La prévisualisation compte les combinaisons **brutes** ; le préfiltre global ou
 hérité détermine ensuite le plan **effectif**, figé avant partitionnement.
 Pour une capacité C, les nombres de lots sont respectivement `ceil(brut / C)`

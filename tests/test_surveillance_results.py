@@ -199,6 +199,7 @@ def test_operational_surveillance_tables_use_exact_sessions_and_quality_values()
     ])
     quality = pd.DataFrame([{
         "model_id": "model_complete_identifier",
+        "signal_count_63": 42,
         "mean_return_63": 0.0125,
         "win_rate_63": 0.625,
         "last_signal_date": "2026-09-25T14:00:00+00:00",
@@ -215,13 +216,17 @@ def test_operational_surveillance_tables_use_exact_sessions_and_quality_values()
     latest_view = latest_session_results_view(evaluated, quality)
 
     assert next_view.table["Date"].tolist() == ["2026-09-28"]
+    assert next_view.table["P(Down)"].tolist() == ["18,00 %"]
+    assert next_view.table["Signaux"].tolist() == [42]
     assert next_view.table["Rendement moyen historique (63 séances)"].tolist() == ["1,25 %"]
     assert next_view.table["Trades gagnants"].tolist() == ["62,50 %"]
     assert tuple(next_view.table.columns) == (
-        "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
-        "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
+        "Date", "Cible", "Prédicteurs", "P(Up)", "P(Down)", "Catégorie",
+        "Signaux", "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
     )
     assert latest_view.table["Date"].tolist() == ["2026-09-25"]
+    assert latest_view.table["P(Down)"].tolist() == ["18,00 %"]
+    assert latest_view.table.columns.get_loc("P(Down)") == latest_view.table.columns.get_loc("P(Up)") + 1
     assert latest_view.table["Rendement de la séance (Open→Close)"].tolist() == ["-2,00 %"]
     assert latest_view.table["P&L séance (10 000 $)"].tolist() == ["-200,00 $"]
     assert surveillance_kpi_values(next_view, latest_view) == {
@@ -232,6 +237,12 @@ def test_operational_surveillance_tables_use_exact_sessions_and_quality_values()
         "winning_signal_count": 0,
         "latest_session_pnl": -200.0,
     }
+    for count in (0, None):
+        quality["signal_count_63"] = count
+        value = next_session_signals_view(
+            signal_view, quality, pd.Timestamp("2026-09-28")
+        ).table["Signaux"].iloc[0]
+        assert pd.isna(value) if count is None else value == 0
 
 
 def test_zero_results_and_zero_pending_predictions():

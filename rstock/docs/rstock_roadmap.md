@@ -1,5 +1,20 @@
 # RStock — Roadmap applicatif
 
+Implémentation du 14 octobre 2026 : **Mode de génération** Complet/Exact dans
+Paramètres → Modèles et combinaisons. Le générateur direct, le plan paresseux,
+les comptages et les workflows appliquent le mode, y compris après préfiltrage.
+Configuration et plans figés; anciens runs Complet et empreintes conservés.
+Tests ciblés de génération, snapshots, duplication, dérivation et reprise sur
+fixtures techniques; aucun E2E scientifique lancé ni critère scientifique modifié.
+
+Ajout du 13 octobre 2026 : colonne **P(Down)** immédiatement après **P(Up)**
+dans les quatre grilles de Surveillance (signaux haussiers et dernière séance,
+en production et en observation), utilisant la probabilité de baisse persistée.
+
+Ajout du 13 octobre 2026 : colonne **Signaux** avant le rendement dans les grilles
+**Signaux haussiers** de Surveillance (production et observation), à partir du
+nombre de signaux évalués sur 63 séances déjà persisté dans les métriques de qualité.
+
 Révision du 11 octobre 2026, fondée sur une inspection ciblée du code et des tests
 existants, sans exécution métier. Les capacités ci-dessous sont implémentées ;
 leur présence ne démontre pas leur efficacité prédictive ni une validation complète en usage.
@@ -140,6 +155,16 @@ limite scientifique ouverte, pas un problème réputé résolu par le consensus.
 - **Évolutions opérationnelles ultérieures** : automatisation quotidienne planifiée,
   positions ouvertes et profits non réalisés, portefeuille et éventuel courtage.
   Le suivi manuel et les simulations actuels ne couvrent pas ces fonctions complètes.
+- **Long terme — après le MVP : plateforme prédictive multi-domaines.** Faire
+  évoluer progressivement RStock pour accueillir STOCK, WEATHER et éventuellement
+  d'autres domaines, en distinguant domaine métier, objectif prédictif, stratégie,
+  algorithme et expérience scientifique. Réutiliser les infrastructures existantes
+  de données, d'exécution, de validation et de traçabilité, avec des adaptations
+  ciblées selon les besoins concrets, sans refonte ni complexité prématurée.
+  Cette orientation guide les décisions futures; elle ne modifie pas les priorités
+  actuelles et ne déclenche aucun développement immédiat. La vérification de cette
+  réutilisabilité dans un deuxième domaine relève de l'initiative à long terme de
+  la [roadmap scientifique](scientific_roadmap.md#initiative-rd-à-long-terme--après-le-mvp).
 
 Les décisions historiques et les valeurs effectives sont distinguées dans le
 [tableau des paramètres scientifiques](scientific_experiments.md#parametres-correspondance).

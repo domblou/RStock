@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from math import comb
+from .combinations import count_target_symbol_sets
 
 import numpy as np
 import pandas as pd
@@ -83,10 +83,8 @@ def filter_correlated_predictors(
     return retained, removed
 
 
-def _combination_count(candidate_count: int, depth: int) -> int:
-    return sum(comb(candidate_count, size) for size in range(1, min(
-        candidate_count, depth
-    ) + 1))
+def _combination_count(candidate_count: int, depth: int, mode: str = "complete") -> int:
+    return count_target_symbol_sets(candidate_count, depth, mode)
 
 
 def _threshold_rejection_counts(
@@ -192,7 +190,7 @@ def select_predictors(
                 "after_redundancy": 0,
                 "retained_predictors": [],
                 "combinations_before_filtering": _combination_count(
-                    len(initial), config.permutation_depth
+                    len(initial), config.permutation_depth, config.combination_generation_mode
                 ),
                 "combinations_tested": 0,
             })
@@ -228,10 +226,10 @@ def select_predictors(
             "after_redundancy": len(retained),
             "retained_predictors": retained,
             "combinations_before_filtering": _combination_count(
-                len(initial), config.permutation_depth
+                len(initial), config.permutation_depth, config.combination_generation_mode
             ),
             "combinations_tested": _combination_count(
-                len(retained), config.permutation_depth
+                len(retained), config.permutation_depth, config.combination_generation_mode
             ),
         })
 

@@ -9,6 +9,13 @@ Ils peuvent ajouter des détails pour préciser la demande et la rendre exécuta
 sans en modifier l'intention, la portée ou le résultat attendu. Cette règle
 s'applique aussi aux demandes et aux suivis transmis au directeur scientifique.
 
+Ne jamais changer le sens des demandes de l'utilisateur en les reformulant ou
+en les transmettant à un agent. Préserver notamment la distinction entre une
+exigence de rapidité d'exécution et une exigence de concision : « rapidement »
+ne signifie pas « brièvement ». Ne pas remplacer l'une par l'autre ni imposer
+une limite de longueur qui n'a pas été demandée. L'utilisateur dirige les
+travaux; Codex et le directeur scientifique ne prennent pas sa place.
+
 ## Objectif et références
 
 RStock vise à découvrir des relations prédictives entre symboles, exploitables

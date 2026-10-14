@@ -211,6 +211,15 @@ def _optional_int(value: object) -> int | None:
     return None if value is None else int(value)
 
 
+def _configuration_fingerprint_payload(values: dict[str, Any]) -> dict[str, Any]:
+    """Complete is the historical implicit mode; keep its identity unchanged."""
+    settings = values.get("rstock_config")
+    if isinstance(settings, dict) and settings.get("combination_generation_mode") == "complete":
+        values = {**values, "rstock_config": dict(settings)}
+        values["rstock_config"].pop("combination_generation_mode")
+    return values
+
+
 def _config_to_dict(config: RStockConfig) -> dict[str, Any]:
     values = asdict(config)
     values["project_root"] = str(config.project_root)
@@ -942,7 +951,7 @@ class ExperimentSpec:
             prefilter_rerun=values.get("prefilter_rerun"),
             promotion_enabled=values.get("promotion_enabled"),
         )
-        canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(_configuration_fingerprint_payload(values), sort_keys=True, separators=(",", ":"))
         object.__setattr__(
             spec,
             "_snapshot_fingerprint",
@@ -954,5 +963,5 @@ class ExperimentSpec:
     def fingerprint(self) -> str:
         if self._snapshot_fingerprint is not None:
             return self._snapshot_fingerprint
-        canonical = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(_configuration_fingerprint_payload(self.to_dict()), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()

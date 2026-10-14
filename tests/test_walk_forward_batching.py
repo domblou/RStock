@@ -354,3 +354,35 @@ def test_batched_parent_runs_children_and_publishes_canonical_results(
         (batch["range_start"], batch["range_stop"])
         for batch in manifest["batches"]
     ] == [(0, 1), (1, 2)]
+
+
+
+def test_exact_batch_plan_survives_interrupted_child_materialization(tmp_path, monkeypatch):
+    import pytest
+    repository = RunRepository(tmp_path / "runs")
+    parent_spec = replace(_spec(tmp_path), config=replace(_spec(tmp_path).config,
+        permutation_depth=2, combination_generation_mode="exact"))
+    parent = repository.create(parent_spec)
+    plan = CombinationPlan(parent_spec.symbols, 2, combination_generation_mode="exact")
+    assert plan.count() == 3
+    proposed, reservations = build_manifest(repository, parent_run_id=parent, parent_spec=parent_spec,
+        raw_plan=plan, effective_plan=plan, max_combinations_per_batch=2,
+        prefilter_policy_version="disabled_v1", prefilter_sha256=prefilter_digest(plan.predictors_by_target))
+    manifest = persist_or_validate_manifest(repository, parent, proposed)
+    create = repository.create
+    calls = []
+    def interrupt(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("interrupted")
+        return create(*args, **kwargs)
+    monkeypatch.setattr(repository, "create", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        materialize_reservations(repository, manifest=manifest, reservations=reservations)
+    monkeypatch.setattr(repository, "create", create)
+    assert persist_or_validate_manifest(repository, parent, proposed) == manifest
+    materialize_reservations(repository, manifest=manifest, reservations=reservations)
+    assert len(repository.list_children(parent)) == 2
+    for child in repository.list_children(parent):
+        assert repository.load_spec(child).config.combination_generation_mode == "exact"
+    assert sum(b["range_stop"] - b["range_start"] for b in manifest["batches"]) == 3

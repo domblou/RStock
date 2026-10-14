@@ -50,11 +50,11 @@ SIGNAL_MAIN_COLUMNS = (
     "Date", "Cible", "Predictors", "P(Up)", "P(Down)", "Catégorie",
 )
 NEXT_SESSION_SIGNAL_COLUMNS = (
-    "Date", "Cible", "Prédicteurs", "P(Up)", "Catégorie",
-    "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
+    "Date", "Cible", "Prédicteurs", "P(Up)", "P(Down)", "Catégorie",
+    "Signaux", "Rendement moyen historique (63 séances)", "Trades gagnants", "Dernier signal",
 )
 LAST_SESSION_RESULT_COLUMNS = (
-    "Date", "Cible", "Prédicteurs", "P(Up)",
+    "Date", "Cible", "Prédicteurs", "P(Up)", "P(Down)",
     "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)",
     "Dernier signal",
 )
@@ -306,6 +306,10 @@ def next_session_signals_view(
     ).dt.tz_convert(None).dt.normalize()
     technical = technical.loc[dates.eq(expected)].reset_index(drop=True)
     lookup = _quality_by_model(quality)
+    technical["quality_signal_count"] = pd.to_numeric(pd.Series([
+        _quality_value(lookup, model_id, "signal_count_63")
+        for model_id in _column(technical, "model_id")
+    ], index=technical.index), errors="coerce").astype("Int64")
     technical["quality_mean_return"] = [
         _quality_value(lookup, model_id, "mean_return_63")
         for model_id in _column(technical, "model_id")
@@ -323,9 +327,11 @@ def next_session_signals_view(
         "Cible": _column(technical, "target"),
         "Prédicteurs": _column(technical, "predictors").map(_predictors),
         "P(Up)": _column(technical, "up_probability").map(_display_percentage),
+        "P(Down)": _column(technical, "down_probability").map(_display_percentage),
         "Catégorie": _column(technical, "category").map(
             lambda value: SIGNAL_LABELS.get(str(value), str(value))
         ),
+        "Signaux": technical["quality_signal_count"],
         "Rendement moyen historique (63 séances)": technical["quality_mean_return"].map(_display_percentage),
         "Trades gagnants": technical["quality_win_rate"].map(_display_percentage),
         "Dernier signal": technical["quality_last_signal"].map(_short_date),
@@ -370,6 +376,7 @@ def latest_session_results_view(
         "Cible": _column(technical, "target"),
         "Prédicteurs": _column(technical, "predictors").map(_predictors),
         "P(Up)": _column(technical, "up_probability").map(_display_percentage),
+        "P(Down)": _column(technical, "down_probability").map(_display_percentage),
         "Rendement de la séance (Open→Close)": returns.map(_display_percentage),
         "P&L séance (10 000 $)": technical["display_pnl"].map(_display_currency),
         "Dernier signal": technical["quality_last_signal"].map(_short_date),

@@ -1747,6 +1747,14 @@ Les nouvelles observations prennent le statut `Watching` ; les événements et l
 P&L des périodes `Active` gardent leur statut historique. La vue **Surveillance**
 donne accès à l’historique complet des modèles suivis, tandis que ses KPI de
 production concernent les modèles actuellement actifs.
+Les grilles **Signaux haussiers**, en production et en observation, affichent
+**Signaux** immédiatement avant le rendement : nombre de signaux historiques
+évalués du modèle sur les mêmes 63 séances. Une valeur absente reste indisponible,
+distincte d'un nombre de signaux égal à zéro.
+Les quatre grilles de Surveillance (signaux haussiers et dernière séance,
+en production et en observation) affichent **P(Down)** immédiatement après
+**P(Up)**, à partir de la probabilité de baisse enregistrée dans la prédiction.
+Les deux colonnes de probabilité utilisent le même code de couleur.
 L’activation directe depuis `Trained` reste possible. La promotion automatique
 crée toujours un `Candidate` : le suivi commence seulement après une action
 explicite. Le réentraînement d’un modèle en observation est refusé; il faut
@@ -1807,6 +1815,21 @@ indique qu’elle est indisponible, sans recalcul à l’ouverture de l’Histor
 
 
 ### Préfiltre autonome dans End-to-End (pipeline version 4)
+
+Le Préfiltre réduit l'espace des combinaisons candidates et le Walk-forward
+approfondit leur qualification : ils constituent un même processus de
+découverte, sélection et qualification. Le chevauchement temporel de leurs
+évaluations est intentionnel et accepté; les métriques WF après préfiltrage
+ne valident pas indépendamment le processus complet. Il n'est pas nécessaire
+de vieillir les données du Préfiltre pour supprimer ce chevauchement.
+
+Le Préfiltre doit rester dans le cutoff autorisé du WF. Le Holdout et le
+Forward évaluent la généralisation sur des périodes distinctes de la sélection;
+leurs données ne participent pas à la sélection/calibration qu'ils sont censés
+évaluer. Toute réutilisation de leurs résultats pour modifier les règles est
+documentée et change le statut scientifique des évaluations concernées.
+La [convention permanente](scientific_roadmap.md#convention-scientifique-permanente--préfiltre-et-walk-forward)
+précise les conditions et les motifs limités de réouverture de cette question.
 
 Lorsque le préfiltrage est activé, les nouveaux End-to-End exécutent un job
 `Prefilter` puis un job `Walk-forward`. Le Préfiltre possède le snapshot préparé
@@ -1928,6 +1951,19 @@ La navigation comprend **Surveillance**, **Rendement**, **Modèles**, **Historiq
 **Expériences**, **Univers**, **Paramètres**, **Simulation** et **Documentation**.
 La page Documentation affiche les sections de ce guide ; les documents techniques
 liés ci-dessous sont consultables dans le dépôt.
+
+Dans **Paramètres → Modèles et combinaisons → Génération des combinaisons**,
+**Mode de génération** propose **Complet** (défaut : tailles 1 à la profondeur)
+et **Exact** (seulement la taille égale à la profondeur). À profondeur 3,
+Exact produit uniquement des triplets de prédicteurs. Le nombre de combinaisons
+et les estimations de lots utilisent ce même mode, avant et après préfiltrage.
+Si le préfiltre retient moins de prédicteurs que la profondeur, Exact ne produit
+aucune combinaison pour cette cible; il ne revient pas à une taille inférieure.
+Le préfiltre évalue toujours ses paires individuelles. Les types constante et
+cible seule, sans combinaisons externes, ne sont pas affectés.
+Le mode est sauvegardé dans les paramètres et figé dans les nouveaux runs.
+Les anciens runs sans ce champ gardent Complet. Les dérivations conservent leur
+population et leur mode sources; modifier les paramètres globaux ne les change pas.
 
 Dans **Expériences**, chaque run fige son type : externes, probabilité constante,
 cible seule ou cible + externes. L'option **Ajouter la volatilité du titre cible**

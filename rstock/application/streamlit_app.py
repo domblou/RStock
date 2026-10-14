@@ -724,13 +724,14 @@ def _combination_plan_preview(job_type: JobType, *, config=None, selection_mode=
         targets, predictors, contexts = source_spec.target_symbols, source_spec.predictor_symbols, source_spec.context_symbols
         from rstock.application.prefilter_contract import CONTRACT
         contract = json.loads((repository.run_directory(source_prefilter_run) / CONTRACT).read_text(encoding="utf-8"))
-        effective = CombinationPlan.from_target_predictors(dict(contract["ordered_predictors_by_target"]), config.permutation_depth)
+        effective = CombinationPlan.from_target_predictors(dict(contract["ordered_predictors_by_target"]), config.permutation_depth, combination_generation_mode=config.combination_generation_mode)
     try:
         plan = build_combination_plan(
             target_symbols=targets,
             predictor_symbols=predictors,
             permutation_depth=config.permutation_depth,
             predictive_model_type=config.predictive_model_type,
+            combination_generation_mode=config.combination_generation_mode,
         )
         preview = build_combination_preview(
             plan,
@@ -1592,9 +1593,16 @@ def _settings() -> None:
         up_threshold = c2.number_input("Seuil intraday hausse", min_value=0.0, value=current.intraday_target_threshold, format="%.4f")
         down_threshold = c3.number_input("Seuil intraday baisse", min_value=0.0, value=current.intraday_down_threshold, format="%.4f")
         st.subheader('Génération des combinaisons')
-        c2, c3 = st.columns(2)
+        c2, c3, c4 = st.columns(3)
         permutation = c2.number_input("Permutation depth", min_value=1, value=current.permutation_depth)
         max_sets = c3.number_input("Max generated sets", min_value=1, value=current.max_generated_sets)
+        generation_modes = {"complete": "Complet", "exact": "Exact"}
+        combination_mode = c4.selectbox(
+            "Mode de génération", tuple(generation_modes),
+            index=tuple(generation_modes).index(current.combination_generation_mode),
+            format_func=generation_modes.get,
+            help="Complet : toutes les tailles jusqu'à la profondeur. Exact : uniquement la taille égale à la profondeur.",
+        )
         st.subheader('Type de variables')
         from rstock.application.predictive_model_ui import VARIABLE_LABELS, predictive_configuration_input
         selected_algorithm = st.session_state.get("settings-predictive-model-algorithm",
@@ -2090,6 +2098,7 @@ def _settings() -> None:
             market_context_terciles=context_terciles,
             model_history_days=int(history),
             permutation_depth=int(permutation),
+            combination_generation_mode=combination_mode,
             max_generated_sets=int(max_sets),
             predictive_model_type=predictive_model_type,
             predictive_algorithm=predictive_config.predictive_algorithm,
@@ -7180,7 +7189,9 @@ _SURVEILLANCE_COLUMN_HELP = {
     "Cible": "Titre dont le mouvement est prédit par le modèle. Aucune cible de performance.",
     "Prédicteurs": "Titres utilisés par le modèle pour prédire la cible. Plus de prédicteurs n'est pas nécessairement meilleur.",
     "P(Up)": "Probabilité de hausse estimée par le modèle. La force du signal se juge par rapport au seuil sélectionné du modèle, pas à 50 % en absolu.",
+    "P(Down)": "Probabilité de baisse estimée par le modèle pour cette séance; elle est distincte de P(Up) et ne correspond pas à 1 − P(Up).",
     "Catégorie": "Classification du signal selon le seuil de décision du modèle; elle aide à interpréter le signal.",
+    "Signaux": "Nombre de signaux historiques évalués du modèle sur les 63 séances utilisées pour le rendement moyen historique.",
     "Rendement moyen historique (63 séances)": "Moyenne des rendements intrajournaliers des signaux historiques du modèle sur la fenêtre de 63 séances. Ce n’est pas le rendement réalisé du signal affiché.",
     "Rendement de la séance (Open→Close)": "Rendement réalisé de la cible pendant la séance évaluée : Close / Open − 1.",
     "Trades gagnants": "Proportion des signaux évalués avec un rendement positif. Cible : > 50 %; intéressant ≥ 55 %; solide ≥ 60 % avec un échantillon suffisant.",
@@ -7385,7 +7396,9 @@ _THRESHOLD_CHOICE_COLUMN_HELP = {
 
 def _surveillance_column_config(columns: pd.Index) -> dict[str, object]:
     return {
-        name: _text_column_with_help(
+        name: st.column_config.NumberColumn(
+            name, width="small", format="%d", help=_SURVEILLANCE_COLUMN_HELP[name]
+        ) if name == "Signaux" else _text_column_with_help(
             name, width="small", descriptions=_SURVEILLANCE_COLUMN_HELP
         )
         for name in columns
@@ -7439,7 +7452,7 @@ def _render_next_session_signals(
         else:
             render_dataframe(
                 _styled_surveillance_table(
-                    table, ("P(Up)", "Rendement moyen historique (63 séances)", "Trades gagnants")
+                    table, ("P(Up)", "P(Down)", "Rendement moyen historique (63 séances)", "Trades gagnants")
                 ),
                 hide_index=True,
                 width="stretch",
@@ -7456,7 +7469,7 @@ def _render_latest_session_results(view: OperationalTableView) -> None:
         else:
             render_dataframe(
                 _styled_surveillance_table(
-                    view.table, ("P(Up)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
+                    view.table, ("P(Up)", "P(Down)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
                 ),
                 hide_index=True,
                 width="stretch",
@@ -7999,7 +8012,7 @@ def _render_watching_surveillance_section(
         else:
             render_dataframe(
                 _styled_surveillance_table(
-                    upcoming.table, ("P(Up)", "Rendement moyen historique (63 séances)", "Trades gagnants")
+                    upcoming.table, ("P(Up)", "P(Down)", "Rendement moyen historique (63 séances)", "Trades gagnants")
                 ),
                 hide_index=True, width="stretch",
                 column_config=_surveillance_column_config(upcoming.table.columns),
@@ -8011,7 +8024,7 @@ def _render_watching_surveillance_section(
         else:
             render_dataframe(
                 _styled_surveillance_table(
-                    latest.table, ("P(Up)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
+                    latest.table, ("P(Up)", "P(Down)", "Rendement de la séance (Open→Close)", "P&L séance (10 000 $)")
                 ),
                 hide_index=True, width="stretch",
                 column_config=_surveillance_column_config(latest.table.columns),
