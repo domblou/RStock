@@ -1700,6 +1700,9 @@ silencieusement en observation live.
 
 ## Contrats des métriques
 
+Dans le détail d’un modèle, l’onglet **Signaux** applique aux colonnes **Prob. Up**
+et **Prob. Down** le même code de couleur que les probabilités de Surveillance.
+
 - les fenêtres 20, 63 et 126 sont des séances de marché XNYS;
 - un trade est gagnant uniquement si `IntradayReturn > 0`;
 - le P&L théorique utilise 10 000 $ par signal et par modèle;

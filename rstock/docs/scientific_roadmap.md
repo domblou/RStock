@@ -76,6 +76,16 @@ n'autorise aucun test, entraînement ou lancement.
 
 ## Stratégies actuellement retenues ou en évaluation
 
+Suivi du 14 octobre 2026, [EXP-026](scientific_experiments.md#exp-026) terminé :
+ajout systématique des trois retards intraday SPY J−1/J−2/J−3, sans moyenne
+5/21 ni volatilité, aux 2 517 combinaisons du WF `20261013T000704_e4e3de3a0c`.
+Sur 174 séances, log loss externes **0,541222**, enrichi **0,541870** : apport
+relatif **−0,120 %**, négatif dans les trois tiers. Aucun des trois contrastes
+n'atteint le minimum de 1 %. Avis du Directeur : clore cette variante et ne pas
+l'adopter; aucune nouvelle analyse ni modification applicative déclenchée.
+Les contrôles, masques, causalité et convergence ont été vérifiés.
+[Rapport](../../reports/adhoc/spy_lags3_20261014/README.md).
+
 Retenues provisoirement : [expanding](scientific_strategies.md#str-004),
 [constante alignée](scientific_strategies.md#str-007),
 [Holdout → Forward figé](scientific_strategies.md#str-010) et
@@ -120,11 +130,29 @@ Temporal Stability contre Single Origin reste historiquement non concluant.
    persistance non évaluée sur les 174 séances réservées. Ne pas proposer de
    refaire ce diagnostic comme une validation jamais exécutée. Les archives
    déjà examinées ne constituent pas une confirmation indépendante ni une preuve Forward.
+   Suivi autorisé du 14 octobre, analyse `20261014T202859_284f76180d` sur le WF
+   `20261014T122426_43f5d94809` (trois prédicteurs exacts) : **1 506 relations,
+   1 348 admissibles, zéro sélection**. Les 174 séances réservées ne sont pas
+   évaluées; aucun taux de survie établi. Aucun des sept candidats Holdout ne
+   satisfait la sélection antérieure; les boosters WF précèdent toutefois la
+   calibration et le réajustement final. Diagnostic terminé, aucune adoption
+   d'un nouveau filtre obligatoire ni modification de priorité.
+   [Résultats et limites](../../reports/adhoc/persistence_exact3_20261014/README.md).
+
    La gestion applicative de protocoles est reportée et retirée du code ; aucun
    résultat scientifique nouveau n'est établi par cette correction technique.
 2. **Démontrer la généralisation.** Expliquer l’écart WF/Holdout/Forward ; définir
    référence, seuils, durée et période indépendante avant une nouvelle validation
    du parcours [STR-010](scientific_strategies.md#str-010), déjà disponible.
+   Contrôle EXP-017 du 14 octobre terminé sur l'E2E `20261014T122421_09e82c5bbf` :
+   les boosters Holdout reconstruits et vérifiés ne rétablissent pas l'avantage
+   Forward face aux boosters réentraînés (log loss 0,63835 contre 0,63413,
+   constante commune 0,58252); aucun des trois contrastes HAC/Holm ne passe.
+   Aucune cause réparable suffisante établie par ce contrôle. Le Directeur
+   recommande de clore cette investigation et de suspendre les variantes de la
+   formulation quotidienne actuelle; une éventuelle faisabilité STR-017 reste
+   une proposition séparée, sans changement de priorité adopté ni lancement.
+   [Rapport et limites](../../reports/adhoc/refit_control_exact3_20261014/README.md).
 3. **Évaluer le préfiltre après stabilisation WF.** [EXP-001/EXP-002](scientific_experiments.md#exp-001)
    et [EXP-014](scientific_experiments.md#exp-014) : compromis coût/qualité,
    en distinguant population figée et redécouverte. Le chevauchement de

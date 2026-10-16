@@ -55,6 +55,7 @@ de l'utilisateur, sans changer la volatilité, les supports ou les critères.
 
 | Expérience | Objectif / hypothèse à tester | Stratégies | Statut |
 |---|---|---|---|
+| [EXP-026](#exp-026) | Ajouter systématiquement les trois retards intraday SPY améliore-t-il les combinaisons ? | [STR-014](scientific_strategies.md#str-014), [STR-006](scientific_strategies.md#str-006), [STR-007](scientific_strategies.md#str-007) | Réalisée — non concluante |
 | [EXP-001](#exp-001) | Les seuils de préfiltre améliorent-ils la sélection ? | [STR-005](scientific_strategies.md#str-005), [STR-009](scientific_strategies.md#str-009) | Réalisée — non concluante |
 | [EXP-002](#exp-002) | Quelle méthode temporelle sélectionne les candidats les plus robustes ? | [STR-001](scientific_strategies.md#str-001), [STR-002](scientific_strategies.md#str-002), [STR-003](scientific_strategies.md#str-003) | Réalisée — preuves incomplètes |
 | [EXP-003](#exp-003) | Une séance et le changement de train expliquent-ils l’instabilité ? | [STR-001](scientific_strategies.md#str-001), [STR-002](scientific_strategies.md#str-002), [STR-003](scientific_strategies.md#str-003), [STR-004](scientific_strategies.md#str-004) | Réalisée — preuves incomplètes |
@@ -374,6 +375,23 @@ sur 259 séances (2024-07-12→2025-07-24), aucune persistance évaluée sur les
 incomplètes. Zéro sélection ne démontre pas l'absence universelle de signal;
 statut non concluant pour la généralisation conservé.
 
+Suivi autorisé du 14 octobre 2026, **combinaison 3 exacte** : analyse
+`20261014T202859_284f76180d` terminée en **88,2 s**, source E2E
+`20261014T122421_09e82c5bbf` / WF `20261014T122426_43f5d94809`.
+Définition 3 et découpage 259/174 conservés, sans entraînement.
+**1 506 relations**, **1 348 admissibles**, 158 exclusions couverture/support
+et inférence indisponible; 545 admissibles gagnent ≥ 1 %, 81 ont p brute ≤ 5 %,
+**aucune ne passe Holm** (minimum ajusté 0,1798). Zéro sélection : persistance
+sur les 174 séances suivantes **non évaluée**. Les sept candidats Holdout ne
+passent pas cette sélection; HPE est non admissible (77/259 séances).
+Boosters WF source avant calibration/réajustement final : aucune attribution
+causale de la chute Forward ni validation indépendante des boosters finaux.
+Contrôles sources, Holm et pertes des sept effectivement passés.
+Avis réel du Directeur : terminer ce diagnostic, ne pas imposer automatiquement
+ce filtre ni assouplir ses règles; efficacité de sélection des survivants non
+démontrée. Statut non concluant pour la généralisation conservé.
+[Rapport](../../reports/adhoc/persistence_exact3_20261014/README.md).
+
 Diagnostic logistique également déjà réalisé :
 [rapport](../../reports/adhoc/simple_regularized_20261011/README.md), même source
 externe EXP-010 `20261011T032201_17ece38f7b`, 3 800 candidats, 26 600 fits Up.
@@ -419,6 +437,26 @@ Forward indépendant de cette variante retrouvé.
 | <a id="exp-015"></a>EXP-015 — Fenêtres de contexte SPY | [Validation descriptive](market_context_protocol.md), `diagnostics/context_protocol_validation/validation_manifest.json` : 12 variantes 42/63/84 × 126/252 × 21/42, snapshot 2023-01-03 → 2026-10-07. Février–avril 2025 : drawdown max 18,76 %, volatilité max 52,40 %. | Partiellement réalisée : 2018/2020/2022 absents, warmup 2023 incomplet. Décrit le marché, ne valide pas la prédictivité par régime ; modèles par régime reportés. |
 | <a id="exp-016"></a>EXP-016 — Durée de vie | Les Forward EXP-007 ont 63 séances et des diagnostics temporels sauvegardés. | Partiellement réalisée : comportement négatif sur l'horizon agrégé, sans estimation validée de durée de vie ni preuve de renouvellement à 126 séances. Les outils de jalons ne prouvent pas des observations à chaque horizon. |
 | <a id="exp-017"></a>EXP-017 — Figé contre réentraîné / simulations | `simulations/20260924T161827_1e6ea729a6/simulation.json` : Historique, 2026-03-24 → 09-21, 1 117 trades, +42 896,66 $. `20260924T164308_aac8071489` : frozen_at_start, mêmes dates, 1 137 trades, +37 560,73 $. Autres simulations : `20260918T164229_4364fbe664`, `20260923T122131_3d1956d693`. | Exécutions rétrospectives réalisées, comparaison scientifique partielle : nombre de signaux différent, population active choisie après coup, appariement des modèles et provenance du mode Historique ancien à contrôler avant attribution au réentraînement. Rendements bruts à notionnel par signal, sans preuve indépendante ni capital limité. |
+
+Suivi contrôlé d'**EXP-017**, autorisé et terminé le 14 octobre 2026 :
+E2E `20261014T122421_09e82c5bbf`, Holdout `20261014T122426_66888d7346`,
+Forward `20261014T184054_82746da7b1`. Reconstruction de **14 boosters** jusqu'au
+2 avril; reproduction des 882 probabilités Holdout et des décisions avant
+évaluation sur les mêmes 441 observations Forward que les boosters réentraînés
+au 6 juillet. Candidats, variables, paramètres et seuils identiques.
+Log loss anciens/réentraînés/constante commune train qualification :
+**0,638350 / 0,634129 / 0,582521**; AUC médiane **0,44583 / 0,48559**.
+57/68 signaux, rendements bruts par signal **+0,1703 % / +0,1418 %**.
+Trois contrastes préétablis (anciens meilleurs que réentraînés, meilleurs que
+constante, rendement positif), HAC 4/8 sur 63 moyennes journalières puis Holm :
+**p ajustées 1 / 1 / 0,9281**, aucun rétablissement démontré; pas preuve d'équivalence.
+Contrôles indépendants passés sans fit supplémentaire. Calcul 2,12 s, contrôle 0,35 s.
+Résultat négatif pour le rétablissement de l'avantage, non concluant sur la cause
+complète de l'échec; le réentraînement ne suffit pas à l'expliquer. Ce contrôle
+unique ne remplace pas la comparaison future de cadences de réentraînement.
+Avis réel du Directeur : clore ce contrôle, recommander de suspendre les nouvelles
+variantes quotidiennes; aucune décision utilisateur de réorientation ou activation.
+[Rapport et protocole figé](../../reports/adhoc/refit_control_exact3_20261014/README.md).
 
 <a id="exp-019"></a>
 
@@ -765,3 +803,40 @@ un changement méthodologique justifié ou une preuve supplémentaire attendue.
 Pour EXP-002/EXP-003/EXP-004, chercher d'abord les anciens rapports ou paires de runs ;
 un manque documentaire ne signifie pas que le test n'a jamais eu lieu.
 Les expériences futures retenues et leur ordre restent dans la roadmap.
+
+
+<a id="exp-026"></a>
+
+### EXP-026 ? Trois retards intraday SPY syst?matiques
+
+**Statut : R?alis?e ? non concluante.** Analyse autoris?e et termin?e le
+14 octobre 2026; r?sultat n?gatif pour l'apport ?tudi?, sans preuve ind?pendante.
+WF `20261013T000704_e4e3de3a0c`, E2E `20261013T000659_510f8395e2` :
+2 517 combinaisons/148 cibles avant qualification, 17 367 fen?tres conserv?es,
+aucun masque train/test modifi?. Les trois rendements SPY J?1/J?2/J?3 sont
+ajout?s s?par?ment, sans moyenne 5/21 ni volatilit?. Six combinaisons contiennent
+d?j? SPY et restent identiques par d?duplication.
+
+Logistique L2 source, p?nalit? 0,05 et standardisation train seulement;
+contr?les constante train exacte, SPY seul trois retards, externes seuls.
+P?riode principale 174 s?ances 2025-07-25?2026-04-02, crit?res inchang?s
+(gain relatif ? 1 % contre les trois contr?les, HAC 6/12, Holm 5 %, stabilit?).
+Poids ?gaux candidats?cibles?dates; pas d'ensemble ou de s?lection de gagnants.
+
+Log loss principale constante/SPY/externe/enrichi : **0,545047 / 0,544575 /
+0,541222 / 0,541870**. Gains relatifs enrichis **+0,583 % / +0,497 % /
+?0,120 %**, p Holm **0,024362 / 0,000057534 / 0,877222**. Aucun gain n'atteint
+1 %; ajout d?favorable descriptivement dans les trois tiers et sur l'ant?rieur
+et le complet. Aucun test inverse de d?gradation ajout?. 949/1 123 signaux
+externes/enrichis, rendements bruts moyens **+0,681 % / +0,737 %** sur des
+populations de signaux diff?rentes, sans validation ?conomique ind?pendante.
+
+17 325 fits enrichis et 1 096 march? converg?s; 17 367 contr?les et 42 fen?tres
+enrichies identiques r?utilis?s. Validation ind?pendante pass?e : sources,
+contr?les, pertes, HAC/Holm, causalit?, supports, coefficients et 18 648 pr?dictions
+reconstruites. Calcul **120,8 s**, v?rification environ **4,9 s**, pic m?moire
+237,5 Mio. P?riodes d?j? consult?es, pr?filtre/WF de qualification accept?,
+aucun nouveau Holdout/Forward ni modification de l'application.
+Avis r?el du Directeur : terminer EXP-026 et ne pas adopter cet ajout;
+aucune nouvelle analyse justifi?e par ce r?sultat. Aucun rejet universel de SPY.
+[Rapport, protocole et validation](../../reports/adhoc/spy_lags3_20261014/README.md).

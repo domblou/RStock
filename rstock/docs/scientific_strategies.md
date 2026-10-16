@@ -197,6 +197,15 @@ précision, AUC, rendement, P&L, drawdown et stabilité. Isoler le réentraînem
 la redécouverte : aucune substitution de candidats entre variantes. Les simulations
 rétrospectives EXP-017 ne constituent pas encore ce protocole.
 
+Contrôle ciblé EXP-017 du 14 octobre 2026 terminé : anciens boosters Holdout
+reconstruits et réentraînés au cutoff comparés sur 441 observations identiques,
+avec reproduction préalable des prédictions archivées. Aucun avantage rétabli :
+log loss **0,63835 / 0,63413**, constante commune **0,58252**; les trois contrastes
+HAC/Holm échouent. Ce n'est ni une preuve d'équivalence ni un test des cadences
+de réentraînement. Avis du Directeur : clore le contrôle et recommander la
+suspension des variantes quotidiennes; aucun changement de stratégie adopté.
+[Rapport](../../reports/adhoc/refit_control_exact3_20261014/README.md).
+
 La durée de vie (EXP-016) étudie la dégradation et la persistance de l’avantage
 sur **1–21, 22–42, 43–63, 64–84 et 85–126 séances**, ainsi que les conditions de
 remplacement. Ces intervalles ne se confondent ni avec les cumuls aux jalons,
@@ -224,6 +233,13 @@ prédictivité et rentabilité restent trois questions distinctes.
 <a id="str-014"></a>
 
 ## STR-014 — Contexte et régimes de marché
+
+Complément [EXP-026](scientific_experiments.md#exp-026), autorisé et terminé le
+14 octobre 2026 : trois retards intraday SPY séparés ajoutés systématiquement,
+sans tendance ni volatilité. Aucun gain additionnel aux combinaisons originales
+(gain relatif principal **−0,120 %**, trois tiers défavorables). Avis réel du
+Directeur : terminer la variante et ne pas adopter cet ajout; aucun rejet universel
+de SPY ni changement de statut global. [Rapport](../../reports/adhoc/spy_lags3_20261014/README.md).
 
 **Statut : À évaluer.** Interpréter les performances selon contexte SPY et
 évaluer son ajout comme variables continues communes; aucun modèle par régime
@@ -261,6 +277,15 @@ Expériences : [EXP-005](scientific_experiments.md#exp-005), [EXP-006](scientifi
 
 **Décision et justification :** Retenir le contrat actuel ; conserver les choix historiques comme tels sans les appliquer rétroactivement ni les déclarer optimaux.
 **Nouvelle évaluation :** Analyse contrôlée ou changement de cible autorisé, sans optimisation Holdout.
+
+Suivi d'EXP-010 le 14 octobre 2026 : la persistance v3 sur la population à trois
+prédicteurs exacts (`20261014T202859_284f76180d`) ne sélectionne aucune des 1 506
+relations, dont les sept candidats Holdout; persistance non évaluée.
+Ce résultat ne valide pas le remplacement automatique de la qualification :
+aucun survivant n'est sélectionné, et les boosters WF analysés précèdent les
+boosters calibrés/réajustés finaux. Avis du Directeur : terminer ce diagnostic,
+statut provisoire et contrat existant conservés, sans efficacité de survie démontrée.
+[Rapport](../../reports/adhoc/persistence_exact3_20261014/README.md).
 
 <a id="str-016"></a>
 

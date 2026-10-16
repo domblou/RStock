@@ -8917,7 +8917,7 @@ def _render_model_quality_detail(model_id: str) -> None:
             render_dataframe(
                 style_directional_columns(
                     signal_table[["Date", "Période", "Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE", "Verdict"]],
-                    ("Rendement", "P&L", "MFE", "MAE"),
+                    ("Prob. Up", "Prob. Down", "Rendement", "P&L", "MFE", "MAE"),
                 ),
                 hide_index=True, width="stretch",
                 column_config=_model_detail_column_config(_MODEL_DETAIL_SIGNALS_HELP),
